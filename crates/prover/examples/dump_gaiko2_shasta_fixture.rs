@@ -3,7 +3,7 @@
 use std::{env, fs, path::PathBuf};
 
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_prover::gaiko2::adapter::build_shasta_packet;
+use raiko2_prover::remote_prover::adapter::build_shasta_packet;
 
 fn main() {
     let positional = env::args().skip(1).collect::<Vec<_>>();

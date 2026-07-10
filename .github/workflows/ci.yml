@@ -44,6 +44,10 @@ jobs:
               - 'guests/**'
               - 'xtask/**'
               - 'config/**'
+              # Guest toolchain Dockerfiles are hashed into the provenance
+              # source fingerprint; without this filter a docker-only change
+              # would skip `all --check` and merge stale provenance.
+              - 'docker/**'
               - 'test.json'
               - 'justfile'
             guest_artifacts:
@@ -262,6 +266,9 @@ jobs:
 
       - name: test xtask build guest
         run: cargo test -p xtask-build-guest --features digests
+
+      - name: verify guest artifact provenance
+        run: cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check
 
       - name: test xtask register image
         run: cargo test -p xtask register_image

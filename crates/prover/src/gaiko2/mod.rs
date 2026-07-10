@@ -28,9 +28,6 @@ use crate::remote_prover::{
     },
 };
 
-pub mod adapter;
-pub mod protocol;
-
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
 const SGX_LABEL: &str = "sgx";

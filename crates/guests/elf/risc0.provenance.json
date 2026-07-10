@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "backend": "risc0",
+  "bench": false,
+  "source_fingerprint": "721c26e28900c5722f05b86b7e3701768a4f5bf20550886674f8b3c12a7d8753",
+  "artifacts": {
+    "crates/guests/elf/risc0_shasta_aggregation.elf": "db71492376986f145dc6d2f3fdeff493062fb36cb27a8e4a526801c37e2302a0",
+    "crates/guests/elf/risc0_shasta_proposal.elf": "29170af23df8082757074c59fc01594de7f814c5d8a7969bc4b405d88be69037"
+  }
+}

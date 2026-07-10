@@ -134,6 +134,7 @@ fn build_local_provider_entry(
             repository: DEFAULT_LOCAL_REPOSITORY.to_string(),
             tag: tag.to_string(),
             digest,
+            sgx_edmm: None,
         },
         attestation,
     })
@@ -174,6 +175,7 @@ fn build_external_provider_entry(
             repository: provider.repository.clone(),
             tag: tag.to_string(),
             digest,
+            sgx_edmm: None,
         },
         attestation,
     })

@@ -81,11 +81,47 @@ impl BiddingSession {
         self.attempt = self.attempt.max(submission.attempt).saturating_add(1);
     }
 
-    pub(super) fn no_lock_timeout(&self, rebid_timeout_ms: u64) -> NoLockTimeout {
-        no_lock_timeout_for_attempt(self.attempt, rebid_timeout_ms, self.max_attempts)
+    pub(super) fn no_lock_timeout(
+        &self,
+        rebid_timeout_ms: u64,
+        price_pinned_at_ceiling: bool,
+    ) -> NoLockTimeout {
+        let mut timeout =
+            no_lock_timeout_for_attempt(self.attempt, rebid_timeout_ms, self.max_attempts);
+        if price_pinned_at_ceiling {
+            // A ceiling-pinned bid cannot be raised by any later rung: the previous-max floor
+            // keeps rebid prices at or above this bid and the ceiling clamps them back to exactly
+            // it. Rebidding would resubmit the identical price while restarting the offer's ramp
+            // (temporarily offering the market less than the live request already does) and, on
+            // the onchain path, pay gas per rung. Treat the rung as final instead: wait out the
+            // payable window, then give up.
+            timeout.action = NoLockTimeoutAction::Abort;
+        }
+        timeout
     }
 }
 
+/// Whether `max_price_wei` already sits at the configured absolute ceiling, meaning no later
+/// rung can bid higher. Zero (a legacy resume record whose exact bid is unknown) is never
+/// pinned, and a flat ladder (`step_bps == 0`) is excluded: identical-price rebids are its
+/// explicit, opted-into design.
+pub(super) fn price_pinned_at_ceiling(
+    max_price_wei: U256,
+    ceiling_wei: Option<U256>,
+    step_bps: u32,
+) -> bool {
+    step_bps > 0
+        && !max_price_wei.is_zero()
+        && ceiling_wei.is_some_and(|ceiling| max_price_wei >= ceiling)
+}
+
+/// Retry directive for a failure the market has NOT confirmed (poll timeout, read error, RPC
+/// failure). Always reuses the request id: the market pays at most once per id, so reuse keeps
+/// double-pay impossible even when the request's true state is unknown. The clock and expiry are
+/// accepted — and deliberately ignored — to document that this decision must never regress to a
+/// local-time heuristic: only a successful market read proving `MarketExpired`/`LockExpired`
+/// rotates, and local `now >= expires_at` is exactly the read-lag shortcut that used to reopen
+/// the double-pay window.
 pub(super) const fn retry_directive_for_unconfirmed_failure(
     _now_secs: u64,
     _expires_at: u64,
@@ -303,5 +339,54 @@ mod tests {
     fn exhausted_session_rejects_another_submission() {
         let session = BiddingSession::at_attempt(2, 0);
         assert!(session.ensure_submission_budget().is_err());
+    }
+
+    #[test]
+    fn pinned_price_requires_ceiling_and_escalating_ladder() {
+        use super::price_pinned_at_ceiling;
+
+        assert!(!price_pinned_at_ceiling(U256::from(100), None, 5_000));
+        // A legacy resume record stores zero for "exact bid unknown"; never pinned.
+        assert!(!price_pinned_at_ceiling(
+            U256::ZERO,
+            Some(U256::from(100)),
+            5_000
+        ));
+        assert!(!price_pinned_at_ceiling(
+            U256::from(99),
+            Some(U256::from(100)),
+            5_000
+        ));
+        // Flat ladders rebid the same price by design.
+        assert!(!price_pinned_at_ceiling(
+            U256::from(100),
+            Some(U256::from(100)),
+            0
+        ));
+        assert!(price_pinned_at_ceiling(
+            U256::from(100),
+            Some(U256::from(100)),
+            5_000
+        ));
+        assert!(price_pinned_at_ceiling(
+            U256::from(101),
+            Some(U256::from(100)),
+            5_000
+        ));
+    }
+
+    #[test]
+    fn pinned_price_forces_final_attempt_semantics() {
+        use super::NoLockTimeoutAction;
+
+        let session = BiddingSession::at_attempt(2, 4);
+        assert_eq!(
+            session.no_lock_timeout(300_000, false).action,
+            NoLockTimeoutAction::Rebid
+        );
+        assert_eq!(
+            session.no_lock_timeout(300_000, true).action,
+            NoLockTimeoutAction::Abort
+        );
     }
 }

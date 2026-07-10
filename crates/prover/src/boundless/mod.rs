@@ -52,7 +52,7 @@ use crate::{
 };
 use bidding::{
     BiddingSession, NoLockTimeout, NoLockTimeoutAction, RetryDirective, effective_price_multiplier,
-    escalated_price, escalation_rungs, no_lock_deadline, resume_attempt,
+    escalated_price, escalation_rungs, no_lock_deadline, price_pinned_at_ceiling, resume_attempt,
     retry_directive_for_unconfirmed_failure,
 };
 
@@ -2137,6 +2137,14 @@ impl BoundlessProver {
             parse_shasta_aggregation_input_hash(&journal)?
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
+        // Absolute per-proof price ceiling (market cap / manual ceiling) at this quote size, used
+        // to detect rungs whose bid is already pinned at it. Such a rung is final: the
+        // previous-max floor plus the ceiling make every later rung bid the identical price, so
+        // rebidding only restarts the offer ramp and, onchain, burns gas. Pure config-derived
+        // computation; `build_request` re-derives the same cap per attempt for the actual offer.
+        let price_ceiling_wei = validate_offer_params(offer_spec, quoted_mcycles_count)?
+            .max_price_cap
+            .map(|cap| cap.value);
         // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.
         let image_ref = alloy_primitives::hex::encode_prefixed(seed_program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
@@ -2217,7 +2225,21 @@ impl BoundlessProver {
                 max_price_multiplier = submission.max_price_multiplier,
                 "Using Boundless market submission"
             );
-            let no_lock_timeout = bidding.no_lock_timeout(self.config.rebid_timeout_ms);
+            let price_pinned = price_pinned_at_ceiling(
+                submission.max_price_wei,
+                price_ceiling_wei,
+                self.config.rebid_price_step_bps,
+            );
+            if price_pinned {
+                tracing::info!(
+                    provider_request_id = %submission.provider_request_id,
+                    max_price_wei = %submission.max_price_wei,
+                    "Boundless bid is pinned at the configured price ceiling; \
+                     treating this rung as final instead of rebidding the same price"
+                );
+            }
+            let no_lock_timeout =
+                bidding.no_lock_timeout(self.config.rebid_timeout_ms, price_pinned);
 
             match self
                 .poll_until_fulfilled(

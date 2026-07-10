@@ -240,7 +240,9 @@ impl Default for Risc0Config {
 }
 
 const fn default_risc0_execution_po2() -> u32 {
-    20
+    // Single-sourced from the prover crate: setup injects this value into the boundless config
+    // (`with_execution_po2`), so two independent defaults would silently diverge.
+    raiko2_prover::boundless_config::DEFAULT_RISC0_EXECUTION_PO2
 }
 
 #[cfg(test)]

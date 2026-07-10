@@ -9,7 +9,10 @@ use raiko2_primitives::{RaikoError, RaikoResult};
 use serde::{Deserialize, Serialize};
 
 const STAKE_TOKEN_DECIMALS: u8 = 18;
-const DEFAULT_RISC0_EXECUTION_PO2: u32 = 20;
+/// Default RISC0 execution segment po2. The server injects the real value from
+/// `prover.risc0.execution_po2` at setup (`with_execution_po2`), whose serde default must stay in
+/// sync with this placeholder — the bin references this constant for that.
+pub const DEFAULT_RISC0_EXECUTION_PO2: u32 = 20;
 pub const DEFAULT_REBID_TIMEOUT_MS: u64 = 300_000;
 /// Minimum accepted rebid timeout. Config validation rejects anything lower, and the runtime clamps
 /// the effective no-lock delay to this floor, so this is the single source of truth for both.

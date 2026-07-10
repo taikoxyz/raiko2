@@ -44,6 +44,10 @@ jobs:
               - 'guests/**'
               - 'xtask/**'
               - 'config/**'
+              # Guest toolchain Dockerfiles are hashed into the provenance
+              # source fingerprint; without this filter a docker-only change
+              # would skip `all --check` and merge stale provenance.
+              - 'docker/**'
               - 'test.json'
               - 'justfile'
             guest_artifacts:

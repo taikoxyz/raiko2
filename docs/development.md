@@ -159,6 +159,14 @@ Check mode exits nonzero when a source input, artifact, or provenance manifest i
 Refresh locally with `just build-guest <backend>`, or dispatch the manual `sync-guest-elf` workflow
 when the required guest toolchain is not available locally.
 
+Check mode is a drift detector, not a reproducibility attestation: the manifest is recorded by the
+same build tooling from local state, so it catches accidental staleness rather than substituted
+artifacts. Trust in released artifacts still comes from the release process and on-chain image-id
+registration. The source closure covers each local crate's manifest, `src/` tree, and `build.rs`;
+compile-time assets included from outside `src/` (for example via `include_str!`) are not tracked.
+No such asset currently reaches guest binaries — the chain-spec JSON embedded by
+`raiko2-primitives` is behind the `chain-spec-json` feature, which guest builds disable.
+
 The host loads those files from that fixed path at process startup; they are not embedded into
 the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
 differs from the source tree. `build-guest` does not register verifier trust-list entries or

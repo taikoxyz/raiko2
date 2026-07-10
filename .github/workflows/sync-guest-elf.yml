@@ -212,9 +212,9 @@ jobs:
           mkdir -p crates/guests/elf
           shopt -s nullglob
           case "${BACKEND}" in
-            risc0) entries=(crates/guests/elf/risc0_*.elf) ;;
-            sp1)   entries=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin) ;;
-            all)   entries=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin) ;;
+            risc0) entries=(crates/guests/elf/risc0_*.elf crates/guests/elf/risc0.provenance.json) ;;
+            sp1)   entries=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin crates/guests/elf/sp1.provenance.json) ;;
+            all)   entries=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin crates/guests/elf/*.provenance.json) ;;
           esac
           if [ "${#entries[@]}" -gt 0 ]; then
             rm -rf -- "${entries[@]}"
@@ -228,7 +228,7 @@ jobs:
           set -euo pipefail
           just build-guest "${BACKEND}"
 
-      - name: verify build produced expected elfs
+      - name: verify build produced expected elfs and provenance
         shell: bash
         env:
           BACKEND: ${{ steps.backend.outputs.value }}
@@ -248,7 +248,21 @@ jobs:
             echo "::error title=Empty build::no ELFs produced for backend=${BACKEND}"
             exit 1
           fi
-          echo "Build produced ${#produced[@]} ELF(s) for backend=${BACKEND}"
+          # The provenance manifest must round-trip with the artifacts it
+          # describes; committing rebuilt ELFs against a stale manifest
+          # would immediately fail CI's `all --check` gate.
+          case "${BACKEND}" in
+            risc0) manifests=(crates/guests/elf/risc0.provenance.json) ;;
+            sp1)   manifests=(crates/guests/elf/sp1.provenance.json) ;;
+            all)   manifests=(crates/guests/elf/risc0.provenance.json crates/guests/elf/sp1.provenance.json) ;;
+          esac
+          for manifest in "${manifests[@]}"; do
+            if [ ! -f "${manifest}" ]; then
+              echo "::error title=Missing provenance::${manifest} was not produced for backend=${BACKEND}"
+              exit 1
+            fi
+          done
+          echo "Build produced ${#produced[@]} ELF(s) and ${#manifests[@]} provenance manifest(s) for backend=${BACKEND}"
 
       - name: upload guest elf outputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -257,6 +271,7 @@ jobs:
           path: |
             crates/guests/elf/*.elf
             crates/guests/elf/*.vk.bin
+            crates/guests/elf/*.provenance.json
           if-no-files-found: error
           retention-days: 7
 
@@ -334,9 +349,9 @@ jobs:
           mkdir -p crates/guests/elf
           shopt -s nullglob
           case "${BACKEND}" in
-            risc0) entries=(crates/guests/elf/risc0_*.elf) ;;
-            sp1)   entries=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin) ;;
-            all)   entries=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin) ;;
+            risc0) entries=(crates/guests/elf/risc0_*.elf crates/guests/elf/risc0.provenance.json) ;;
+            sp1)   entries=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin crates/guests/elf/sp1.provenance.json) ;;
+            all)   entries=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin crates/guests/elf/*.provenance.json) ;;
           esac
           if [ "${#entries[@]}" -gt 0 ]; then
             rm -rf -- "${entries[@]}"

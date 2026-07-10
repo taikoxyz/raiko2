@@ -27,6 +27,14 @@ pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
     started_stage_tasks: Arc<Mutex<HashSet<String>>>,
+    /// Serializes every root-record read-modify-write issued through this observer. Root records
+    /// are shared by all tasks of one request (every proposal plus the aggregate), so unserialized
+    /// concurrent callbacks — e.g. two proposals' submission acknowledgements on different queue
+    /// workers — would both read the old metadata blob and the last upsert would silently drop the
+    /// other's write, including a remote request-id snapshot whose acknowledgement already gated a
+    /// paid dispatch. The store is process-local, so an in-process async mutex makes the RMW
+    /// atomic; `Arc` so clones of one observer share it.
+    metadata_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -41,6 +49,7 @@ impl RuntimeObserver {
             runtime,
             network_pair,
             started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
+            metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -91,6 +100,10 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
+        // Hold the write lock across the whole find→mutate→upsert so a concurrent callback for a
+        // sibling task of the same root cannot interleave and clobber this write (see the field
+        // doc on `metadata_write_lock`).
+        let _write_guard = self.metadata_write_lock.lock().await;
         let root_ref = Self::root_task_ref(id);
         let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
         if records.is_empty() {
@@ -1194,6 +1207,102 @@ mod tests {
             .expect_err("runtime database read failure must not become a fresh SP1 request");
 
         assert!(err.to_string().contains("runtime sqlite database"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_submission_acks_on_one_root_record_both_survive() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-concurrent-acks",
+        ))?);
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let pipeline = PipelineKey::ShastaRisc0Network;
+
+        // Two proposals of one request share a single root record; their submission
+        // acknowledgements are read-modify-writes of the same metadata blob. A fresh record per
+        // round keeps every round sensitive to a lost update (once both keys are in the base
+        // metadata, a clobber would no longer be observable).
+        for round in 0..25 {
+            let request_a = proposal_request_with_id(1_000 + round * 2);
+            let request_b = proposal_request_with_id(1_001 + round * 2);
+            let ref_a = proposal_task_ref(pipeline, &request_a);
+            let ref_b = proposal_task_ref(pipeline, &request_b);
+            let record_id = format!("task_concurrent_acks_{round}");
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: record_id.clone(),
+                    pipeline_key: Some(pipeline),
+                    route: "risc0/network"
+                        .parse::<PipelineRoute>()
+                        .expect("parse route"),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(request_a.proposal_id),
+                    proof_ids: vec![ref_a.clone(), ref_b.clone()],
+                    metadata: serde_json::to_value(TaskMetadata {
+                        network_pair: "taiko_dev/ethereum".to_string(),
+                        network: "taiko_dev".to_string(),
+                        l1_network: "ethereum".to_string(),
+                        proof_type: ProofType::Risc0,
+                        requested_proof_type: None,
+                        prover_type: None,
+                        execution_mode: None,
+                        aggregate_requested: false,
+                        proposals: vec![
+                            proposal_metadata_task(pipeline, &request_a),
+                            proposal_metadata_task(pipeline, &request_b),
+                        ],
+                        aggregate_task_id: None,
+                        aggregate_request: None,
+                        aggregate_input_artifacts: Vec::new(),
+                        runtime: RuntimeMetadata::default(),
+                    })?,
+                    request_fingerprint: None,
+                })
+                .await?;
+
+            let id_a = EngineTaskId::new(EngineTaskKey::Proposal {
+                pipeline,
+                request: request_a.clone(),
+            });
+            let id_b = EngineTaskId::new(EngineTaskKey::Proposal {
+                pipeline,
+                request: request_b.clone(),
+            });
+            let task_a = EngineTask::ProveProposal {
+                request: request_a,
+                input_task: id_a.clone(),
+            };
+            let task_b = EngineTask::ProveProposal {
+                request: request_b,
+                input_task: id_b.clone(),
+            };
+
+            let progress_a = boundless_progress();
+            let progress_b = boundless_progress();
+            let (ack_a, ack_b) = tokio::join!(
+                observer.on_task_progress(&id_a, &task_a, &progress_a),
+                observer.on_task_progress(&id_b, &task_b, &progress_b),
+            );
+            ack_a.expect("proposal A acknowledgement");
+            ack_b.expect("proposal B acknowledgement");
+
+            let record = runtime
+                .get_task(&record_id)
+                .await?
+                .expect("runtime task exists");
+            let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
+            for (label, task_ref) in [("A", &ref_a), ("B", &ref_b)] {
+                assert!(
+                    metadata
+                        .runtime
+                        .proposals
+                        .get(task_ref)
+                        .and_then(|runtime| runtime.boundless_submission())
+                        .is_some(),
+                    "round {round}: acknowledged submission {label} was lost by a concurrent write"
+                );
+            }
+        }
         Ok(())
     }
 

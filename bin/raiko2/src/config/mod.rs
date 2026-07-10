@@ -17,7 +17,8 @@ pub use preflight::PreflightConfig;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
-pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
+pub use raiko2_prover::boundless_config::{BoundlessConfig, BoundlessPairConfig};
+pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
 #[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
@@ -137,10 +138,14 @@ impl Config {
 
     /// Validate the entire configuration.
     pub fn validate(&self) -> Result<()> {
+        self.validate_and_resolve_pairs().map(|_| ())
+    }
+
+    /// Validate the entire configuration and return the resolved pairs used by runtime setup.
+    pub fn validate_and_resolve_pairs(&self) -> Result<Vec<ResolvedNetworkPair>> {
         self.server
             .validate()
             .context("Server configuration error")?;
-        self.rpc.validate().context("RPC configuration error")?;
         self.prover
             .validate()
             .context("Prover configuration error")?;
@@ -148,22 +153,32 @@ impl Config {
             .validate()
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
-        let resolved_pairs = self
-            .rpc
-            .resolved_pairs()
-            .context("RPC configuration error")?;
+        let resolved_pairs = self.resolved_pairs()?;
         self.preflight
             .validate(&resolved_pairs)
             .context("Preflight configuration error")?;
-        for pair in resolved_pairs {
-            self.prover
-                .boundless
-                .apply_pair_override(&pair.boundless)
-                .with_context(|| {
-                    format!("Boundless configuration error for rpc pair {}", pair.key)
-                })?;
-        }
-        Ok(())
+        Ok(resolved_pairs)
+    }
+
+    /// Resolve the configured RPC matrix with each pair's validated effective Boundless config.
+    pub fn resolved_pairs(&self) -> Result<Vec<ResolvedNetworkPair>> {
+        let resolved_pairs = self.rpc.resolved_pairs(&self.prover.boundless)?;
+        self.rpc
+            .validate_resolved(&resolved_pairs)
+            .context("RPC configuration error")?;
+        Ok(resolved_pairs)
+    }
+
+    /// Resolve one configured pair by its public L2/L1 network names.
+    pub fn resolve_pair(&self, network: &str, l1_network: &str) -> Result<ResolvedNetworkPair> {
+        self.resolved_pairs()?
+            .into_iter()
+            .find(|pair| pair.network == network && pair.l1_network == l1_network)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported network pair: network={network}, l1_network={l1_network}"
+                )
+            })
     }
 
     /// Applies cross-field defaults that cannot be represented by Serde defaults alone.
@@ -211,6 +226,11 @@ mod tests {
             .join(path)
     }
 
+    fn validate_rpc_config(rpc: RpcConfig) -> Result<()> {
+        let resolved_pairs = rpc.resolved_pairs(&BoundlessConfig::default())?;
+        rpc.validate_resolved(&resolved_pairs)
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<String>,
@@ -251,8 +271,28 @@ mod tests {
     fn test_config_example_validates() {
         let path = workspace_config("config.example.toml");
         let mut config = Config::from_file(&path).expect("parse config.example.toml");
+        let canonical: &raiko2_prover::boundless_config::BoundlessConfig = &config.prover.boundless;
+        assert_eq!(canonical.offer_params.batch.ramp_up_start_sec, 20);
         config.normalize();
         config.validate().expect("validate config.example.toml");
+    }
+
+    #[test]
+    fn test_boundless_toml_rejects_server_owned_execution_po2() {
+        let path = workspace_config("config.example.toml");
+        let content = std::fs::read_to_string(path).expect("read config.example.toml");
+        let content = content.replacen(
+            "[prover.boundless]\n",
+            "[prover.boundless]\nexecution_po2 = 24\n",
+            1,
+        );
+
+        let err =
+            toml::from_str::<Config>(&content).expect_err("execution_po2 is owned by prover.risc0");
+        assert!(
+            err.to_string().contains("execution_po2"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -409,7 +449,7 @@ mod tests {
     #[test]
     fn test_rpc_config_default() {
         let config = RpcConfig::default();
-        assert!(config.validate().is_ok());
+        assert!(validate_rpc_config(config).is_ok());
     }
 
     #[test]
@@ -429,7 +469,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        assert!(validate_rpc_config(config).is_ok());
     }
 
     #[test]
@@ -449,7 +489,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let result = config.validate();
+        let result = validate_rpc_config(config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("l1_rpc"));
     }
@@ -472,7 +512,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = config.validate();
+        let result = validate_rpc_config(config);
         assert!(result.is_err());
         assert!(
             result
@@ -502,7 +542,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(config.validate().is_ok());
+        assert!(validate_rpc_config(config).is_ok());
     }
 
     #[test]
@@ -525,7 +565,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = config.validate();
+        let result = validate_rpc_config(config);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains(
@@ -540,7 +580,7 @@ mod tests {
             pairs: Vec::new(),
             ..Default::default()
         };
-        assert!(config.validate().is_err());
+        assert!(validate_rpc_config(config).is_err());
     }
 
     #[test]
@@ -563,10 +603,71 @@ mod tests {
             });
 
         let err = config.validate().expect_err("invalid pair offer config");
+        assert_eq!(err.to_string(), "RPC configuration error");
         assert!(err.chain().any(|source| {
             source
                 .to_string()
-                .contains("timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle")
+                .contains("taiko_hoodi/hoodi: boundless.offer_params.batch: timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle")
+        }));
+    }
+
+    #[test]
+    fn resolved_pair_carries_validated_effective_boundless_config() {
+        let mut config = Config::default();
+        config.prover.boundless.rebid_timeout_ms = 900_000;
+        config.prover.boundless.rebid_max_attempts = 5;
+        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(450_000);
+        config.rpc.pairs[0].boundless.rebid_max_attempts = Some(2);
+        config.rpc.pairs[0].boundless.offer_params.batch =
+            Some(raiko2_prover::boundless_config::BoundlessOfferParams {
+                ramp_up_start_sec: 42,
+                ..config.prover.boundless.offer_params.batch.clone()
+            });
+
+        let pair = config
+            .resolved_pairs()
+            .expect("resolve effective pair config")
+            .remove(0);
+
+        assert_eq!(pair.boundless.rebid_timeout_ms, 450_000);
+        assert_eq!(pair.boundless.rebid_max_attempts, 2);
+        assert_eq!(pair.boundless.offer_params.batch.ramp_up_start_sec, 42);
+    }
+
+    #[test]
+    fn invalid_pair_override_uses_canonical_resolver_context() {
+        let mut config = Config::default();
+        config.rpc.pairs[0].boundless.poll_interval_ms = Some(0);
+
+        let err = config
+            .resolved_pairs()
+            .expect_err("invalid effective pair config");
+
+        assert_eq!(err.to_string(), "RPC configuration error");
+        assert!(err.chain().any(|source| {
+            source
+                .to_string()
+                .contains("taiko_hoodi/hoodi: boundless.poll_interval_ms must be > 0")
+        }));
+    }
+
+    #[test]
+    fn merged_effective_error_retains_boundless_pair_context() {
+        let mut config = Config::default();
+        config.rpc.pairs[0].boundless.rebid_price_step_bps = Some(2);
+
+        let err = config
+            .resolved_pairs()
+            .expect_err("invalid merged effective config");
+
+        assert_eq!(
+            err.to_string(),
+            "Boundless configuration error for rpc pair taiko_hoodi/hoodi"
+        );
+        assert!(err.chain().any(|source| {
+            source
+                .to_string()
+                .contains("prover.boundless.rebid_price_step_bps")
         }));
     }
 
@@ -797,7 +898,6 @@ maintenance_interval_ms = 200
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9090);
         let pair = config
-            .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
         assert_eq!(pair.l1_chain_id(), 560_048);
@@ -871,7 +971,6 @@ maintenance_interval_ms = 200
 
         let config = Config::load(&cli).expect("config load");
         let pair = config
-            .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
         assert_eq!(pair.l1_rpc, "http://hoodi.example.test:8545");
@@ -912,7 +1011,6 @@ runner = "local"
 
         let config = Config::load(&cli).expect("config load");
         let pair = config
-            .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
         assert_eq!(pair.l2_rpc, "http://localhost:9555");
@@ -1013,7 +1111,6 @@ maintenance_interval_ms = 200
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
         let config = Config::load(&cli).expect("config load");
         let pair = config
-            .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
 
@@ -1049,7 +1146,6 @@ maintenance_interval_ms = 200
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
         let config = Config::load(&cli).expect("config load");
         let pair = config
-            .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
 

@@ -1,18 +1,13 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
-    boundless_config::{
-        DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
-        DeploymentConfig, MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, MIN_REBID_TIMEOUT_MS,
-        OfferParamsConfig, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
-    },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
 
-use super::BoundlessPairConfig;
+use super::BoundlessConfig;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -248,149 +243,11 @@ const fn default_risc0_execution_po2() -> u32 {
     20
 }
 
-/// Boundless configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoundlessConfig {
-    #[serde(default = "default_boundless_offchain")]
-    pub offchain: bool,
-    pub rpc_url: String,
-    pub signer_key: String,
-    #[serde(default)]
-    pub deployment: Option<DeploymentConfig>,
-    #[serde(default)]
-    pub batch_quote: QuoteSizing,
-    #[serde(default)]
-    pub aggregation_quote: QuoteSizing,
-    pub offer_params: OfferParamsConfig,
-    #[serde(default = "default_boundless_poll_interval_ms")]
-    pub poll_interval_ms: u64,
-    #[serde(default = "default_boundless_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default = "default_boundless_rebid_timeout_ms")]
-    pub rebid_timeout_ms: u64,
-    #[serde(default = "default_boundless_rebid_price_step_bps")]
-    pub rebid_price_step_bps: u32,
-    #[serde(default = "default_boundless_rebid_max_attempts")]
-    pub rebid_max_attempts: u32,
-}
-
-impl Default for BoundlessConfig {
-    fn default() -> Self {
-        Self {
-            offchain: raiko2_prover::boundless_config::BoundlessConfig::default().offchain,
-            rpc_url: raiko2_prover::boundless_config::BoundlessConfig::default().rpc_url,
-            signer_key: String::new(),
-            deployment: raiko2_prover::boundless_config::BoundlessConfig::default().deployment,
-            batch_quote: raiko2_prover::boundless_config::BoundlessConfig::default().batch_quote,
-            aggregation_quote: raiko2_prover::boundless_config::BoundlessConfig::default()
-                .aggregation_quote,
-            offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
-            poll_interval_ms: default_boundless_poll_interval_ms(),
-            timeout_ms: default_boundless_timeout_ms(),
-            rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
-            rebid_price_step_bps: default_boundless_rebid_price_step_bps(),
-            rebid_max_attempts: default_boundless_rebid_max_attempts(),
-        }
-    }
-}
-
-impl BoundlessConfig {
-    /// Validate the effective Boundless config.
-    pub fn validate(&self) -> Result<()> {
-        self.batch_quote
-            .validate("prover.boundless.batch_quote")
-            .map_err(anyhow::Error::msg)?;
-        self.aggregation_quote
-            .validate("prover.boundless.aggregation_quote")
-            .map_err(anyhow::Error::msg)?;
-        if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
-            bail!("prover.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
-        }
-        if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
-            bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
-        }
-        if (1..MIN_MEANINGFUL_REBID_PRICE_STEP_BPS).contains(&self.rebid_price_step_bps) {
-            bail!(
-                "prover.boundless.rebid_price_step_bps = {} is below the {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} bps (1%) floor; \
-                 values in 1..{MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} are almost always a basis-points/multiplier confusion \
-                 (e.g. `2` meaning ×2). Use 0 for an explicit flat ladder or >= {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} to escalate.",
-                self.rebid_price_step_bps
-            );
-        }
-        validate_offer_spec(&self.offer_params.batch)
-            .map_err(anyhow::Error::msg)
-            .context("prover.boundless.offer_params.batch")?;
-        validate_offer_spec(&self.offer_params.aggregation)
-            .map_err(anyhow::Error::msg)
-            .context("prover.boundless.offer_params.aggregation")?;
-        Ok(())
-    }
-
-    /// Merge a pair-specific Boundless override into the global default config.
-    pub fn apply_pair_override(&self, pair: &BoundlessPairConfig) -> Result<Self> {
-        let mut merged = self.clone();
-        if let Some(batch_quote) = pair.batch_quote.clone() {
-            merged.batch_quote = batch_quote;
-        }
-        if let Some(aggregation_quote) = pair.aggregation_quote.clone() {
-            merged.aggregation_quote = aggregation_quote;
-        }
-        if let Some(poll_interval_ms) = pair.poll_interval_ms {
-            merged.poll_interval_ms = poll_interval_ms;
-        }
-        if let Some(timeout_ms) = pair.timeout_ms {
-            merged.timeout_ms = timeout_ms;
-        }
-        if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
-            merged.rebid_timeout_ms = rebid_timeout_ms;
-        }
-        if let Some(rebid_price_step_bps) = pair.rebid_price_step_bps {
-            merged.rebid_price_step_bps = rebid_price_step_bps;
-        }
-        if let Some(rebid_max_attempts) = pair.rebid_max_attempts {
-            merged.rebid_max_attempts = rebid_max_attempts;
-        }
-        if let Some(batch) = &pair.offer_params.batch {
-            merged.offer_params.batch = batch.clone();
-        }
-        if let Some(aggregation) = &pair.offer_params.aggregation {
-            merged.offer_params.aggregation = aggregation.clone();
-        }
-        merged.validate()?;
-        Ok(merged)
-    }
-}
-
-const fn default_boundless_offchain() -> bool {
-    false
-}
-
-const fn default_boundless_poll_interval_ms() -> u64 {
-    10_000
-}
-
-const fn default_boundless_timeout_ms() -> u64 {
-    3_600_000
-}
-
-const fn default_boundless_rebid_timeout_ms() -> u64 {
-    DEFAULT_REBID_TIMEOUT_MS
-}
-
-const fn default_boundless_rebid_price_step_bps() -> u32 {
-    DEFAULT_REBID_PRICE_STEP_BPS
-}
-
-const fn default_boundless_rebid_max_attempts() -> u32 {
-    DEFAULT_REBID_MAX_ATTEMPTS
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, REBID_MAX_ATTEMPTS_LIMIT,
-        Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
+    use super::{ProverConfig, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig};
+    use raiko2_prover::boundless_config::{
+        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, REBID_MAX_ATTEMPTS_LIMIT,
     };
 
     #[test]

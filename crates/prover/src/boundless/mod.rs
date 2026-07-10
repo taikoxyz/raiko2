@@ -4,8 +4,9 @@ pub mod aggregation;
 mod bidding;
 
 pub use crate::boundless_config::{
-    BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DeploymentConfig, DeploymentType,
-    MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing, TimeoutPolicy, validate_offer_spec,
+    BoundlessConfig, BoundlessOfferParams, BoundlessOfferParamsOverride, BoundlessPairConfig,
+    BoundlessPricingMode, DeploymentConfig, DeploymentType, MIN_REBID_TIMEOUT_MS,
+    OfferParamsConfig, QuoteSizing, TimeoutPolicy, validate_offer_spec,
 };
 
 use std::borrow::Cow;
@@ -62,8 +63,8 @@ use bidding::{
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
-const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
-const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
+const PROPOSAL_QUOTED_MCYCLES_MIN: u32 = 2_000;
+const PROPOSAL_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const AGGREGATION_QUOTED_MCYCLES_MIN: u32 = 200;
 const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
@@ -748,14 +749,14 @@ fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     u32::try_from(mcycles).unwrap_or(u32::MAX)
 }
 
-const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
+const fn quote_proposal_mcycles(evaluated_mcycles: u32) -> u32 {
     let rounded = if evaluated_mcycles == 0 {
         0
     } else {
-        evaluated_mcycles.div_ceil(BATCH_QUOTED_MCYCLES_STEP) * BATCH_QUOTED_MCYCLES_STEP
+        evaluated_mcycles.div_ceil(PROPOSAL_QUOTED_MCYCLES_STEP) * PROPOSAL_QUOTED_MCYCLES_STEP
     };
-    if rounded < BATCH_QUOTED_MCYCLES_MIN {
-        BATCH_QUOTED_MCYCLES_MIN
+    if rounded < PROPOSAL_QUOTED_MCYCLES_MIN {
+        PROPOSAL_QUOTED_MCYCLES_MIN
     } else {
         rounded
     }
@@ -816,28 +817,28 @@ fn taiko_deployment() -> Deployment {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ElfType {
-    Batch,
+    Proposal,
     Aggregation,
 }
 
 impl ElfType {
     const fn stage_name(self) -> &'static str {
         match self {
-            Self::Batch => "batch",
+            Self::Proposal => "proposal",
             Self::Aggregation => "aggregation",
         }
     }
 
-    /// Journal/seal/metadata discriminator: `ElfType::Batch` proves a "proposal", `Aggregation` an "aggregation".
+    /// Journal/seal/metadata discriminator for proposal and aggregation proofs.
     const fn proof_type_str(self) -> &'static str {
         match self {
-            Self::Batch => "proposal",
+            Self::Proposal => "proposal",
             Self::Aggregation => "aggregation",
         }
     }
 
     const fn is_proposal(self) -> bool {
-        matches!(self, Self::Batch)
+        matches!(self, Self::Proposal)
     }
 }
 
@@ -2183,8 +2184,8 @@ where
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         Box::pin(self.prove_boundless(
-            ElfType::Batch,
-            &self.config.offer_params.batch,
+            ElfType::Proposal,
+            self.offer_params_for(ElfType::Proposal),
             input,
             &elf,
             None,
@@ -2205,8 +2206,8 @@ where
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         Box::pin(self.prove_boundless(
-            ElfType::Batch,
-            &self.config.offer_params.batch,
+            ElfType::Proposal,
+            self.offer_params_for(ElfType::Proposal),
             input,
             &elf,
             None,
@@ -2230,7 +2231,7 @@ where
         let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
-            &self.config.offer_params.aggregation,
+            self.offer_params_for(ElfType::Aggregation),
             Bytes::from(aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
@@ -2255,7 +2256,7 @@ where
         let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
-            &self.config.offer_params.aggregation,
+            self.offer_params_for(ElfType::Aggregation),
             Bytes::from(aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
@@ -2267,15 +2268,22 @@ where
 }
 
 impl BoundlessProver {
+    const fn offer_params_for(&self, elf_type: ElfType) -> &BoundlessOfferParams {
+        match elf_type {
+            ElfType::Proposal => &self.config.offer_params.batch,
+            ElfType::Aggregation => &self.config.offer_params.aggregation,
+        }
+    }
+
     // Keep boundless order pricing aligned with the legacy raiko-agent strategy.
     const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
         let quote = match elf_type {
-            ElfType::Batch => &self.config.batch_quote,
+            ElfType::Proposal => &self.config.batch_quote,
             ElfType::Aggregation => &self.config.aggregation_quote,
         };
         match quote {
             QuoteSizing::RaikoAgent => match elf_type {
-                ElfType::Batch => quote_batch_mcycles(evaluated_mcycles_count),
+                ElfType::Proposal => quote_proposal_mcycles(evaluated_mcycles_count),
                 ElfType::Aggregation => quote_aggregation_mcycles(evaluated_mcycles_count),
             },
             QuoteSizing::Evaluated => evaluated_mcycles_count,
@@ -2587,7 +2595,7 @@ mod tests {
         boundless_poll_error_statuses, classify_boundless_status, defer_poll_timeout_while_payable,
         escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
         no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
-        quote_batch_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        quote_proposal_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
         user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
@@ -2693,18 +2701,30 @@ mod tests {
 
     #[test]
     fn elf_type_maps_to_proof_type_and_stage() {
-        assert_eq!(ElfType::Batch.proof_type_str(), "proposal");
+        assert_eq!(ElfType::Proposal.proof_type_str(), "proposal");
         assert_eq!(ElfType::Aggregation.proof_type_str(), "aggregation");
-        assert_eq!(ElfType::Batch.stage_name(), "batch");
+        assert_eq!(ElfType::Proposal.stage_name(), "proposal");
         assert_eq!(ElfType::Aggregation.stage_name(), "aggregation");
-        assert!(ElfType::Batch.is_proposal());
+        assert!(ElfType::Proposal.is_proposal());
         assert!(!ElfType::Aggregation.is_proposal());
+    }
+
+    #[test]
+    fn proposal_stage_uses_compatible_batch_offer_config() {
+        let mut config = BoundlessConfig::default();
+        config.offer_params.batch.ramp_up_start_sec = 42;
+        let prover = BoundlessProver::new(config);
+
+        assert_eq!(
+            prover.offer_params_for(ElfType::Proposal).ramp_up_start_sec,
+            42
+        );
     }
 
     #[test]
     fn quoted_mcycles_count_matches_raiko_agent_strategy() {
         let prover = BoundlessProver::new(BoundlessConfig::default());
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Proposal, 1_491), 2_000);
     }
 
     #[test]
@@ -2719,9 +2739,9 @@ mod tests {
     #[test]
     fn quoted_mcycles_count_dispatches_on_quote_sizing() {
         use super::QuoteSizing;
-        // RaikoAgent rounds (batch floor 2000, step 1000).
+        // RaikoAgent rounds proposals to a 2000 floor in 1000-cycle steps.
         let prover = BoundlessProver::new(BoundlessConfig::default());
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Proposal, 1_491), 2_000);
 
         // Evaluated passes through.
         let cfg = BoundlessConfig {
@@ -2729,7 +2749,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Proposal, 1_188),
             1_188
         );
 
@@ -2739,7 +2759,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Proposal, 1_188),
             1_500
         );
 
@@ -3105,11 +3125,11 @@ mod tests {
     }
 
     #[test]
-    fn quote_batch_mcycles_rounds_up_like_old_agent() {
-        assert_eq!(quote_batch_mcycles(0), 2_000);
-        assert_eq!(quote_batch_mcycles(1_491), 2_000);
-        assert_eq!(quote_batch_mcycles(2_000), 2_000);
-        assert_eq!(quote_batch_mcycles(2_001), 3_000);
+    fn quote_proposal_mcycles_rounds_up_like_old_agent() {
+        assert_eq!(quote_proposal_mcycles(0), 2_000);
+        assert_eq!(quote_proposal_mcycles(1_491), 2_000);
+        assert_eq!(quote_proposal_mcycles(2_000), 2_000);
+        assert_eq!(quote_proposal_mcycles(2_001), 3_000);
     }
 
     #[test]

@@ -112,13 +112,12 @@ impl AppState {
     /// Create new application state.
     pub async fn new(mut config: Config) -> Result<Self> {
         config.normalize();
-        config.validate()?;
+        let resolved_pairs = config.validate_and_resolve_pairs()?;
         let runtime = Arc::new(RuntimeManager::new(config.runtime.root.clone())?);
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
-        let resolved_pairs = config.rpc.resolved_pairs()?;
         #[cfg(feature = "local-provers")]
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
         #[cfg(all(feature = "host", not(feature = "local-provers")))]

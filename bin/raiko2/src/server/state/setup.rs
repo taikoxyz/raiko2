@@ -147,26 +147,9 @@ pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,
 ) -> raiko2_prover::boundless::BoundlessConfig {
-    let boundless = config
-        .prover
-        .boundless
-        .apply_pair_override(&pair.boundless)
-        .expect("validated boundless config must merge cleanly");
-    raiko2_prover::boundless::BoundlessConfig {
-        execution_po2: config.prover.risc0.execution_po2,
-        offchain: boundless.offchain,
-        rpc_url: boundless.rpc_url,
-        signer_key: boundless.signer_key,
-        deployment: boundless.deployment,
-        batch_quote: boundless.batch_quote,
-        aggregation_quote: boundless.aggregation_quote,
-        offer_params: boundless.offer_params,
-        poll_interval_ms: boundless.poll_interval_ms,
-        timeout_ms: boundless.timeout_ms,
-        rebid_timeout_ms: boundless.rebid_timeout_ms,
-        rebid_price_step_bps: boundless.rebid_price_step_bps,
-        rebid_max_attempts: boundless.rebid_max_attempts,
-    }
+    pair.boundless
+        .clone()
+        .with_execution_po2(config.prover.risc0.execution_po2)
 }
 
 pub(crate) const fn remote_sgx_prover_config(
@@ -195,7 +178,7 @@ mod tests {
     use super::{
         boundless_prover_config, boundless_scheduler_config, build_context, scheduler_config,
     };
-    use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
+    use crate::config::{BoundlessConfig, Config, ResolvedNetworkPair};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
     use raiko2_queue::RetryPolicy;
@@ -222,7 +205,7 @@ mod tests {
             l2_witness_rpc: l2_spec.rpc.clone(),
             sp1_verifier_rpc_url: None,
             sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
+            boundless: BoundlessConfig::default(),
             l1_spec,
             l2_spec,
         }
@@ -309,7 +292,6 @@ mod tests {
         let mut config = Config::default();
         config.prover.risc0.execution_po2 = 24;
         let pair = config
-            .rpc
             .resolved_pairs()
             .expect("resolved rpc pairs")
             .pop()
@@ -354,11 +336,12 @@ mod tests {
                 ..config.prover.boundless.offer_params.aggregation.clone()
             });
         let pair = config
-            .rpc
             .resolved_pairs()
             .expect("resolved rpc pairs")
             .pop()
             .expect("default pair");
+        let expected_rpc_url = pair.boundless.rpc_url.clone();
+        config.prover.boundless.rpc_url = "https://must-not-be-reread.example".to_string();
 
         let boundless = boundless_prover_config(&config, &pair);
 
@@ -391,6 +374,7 @@ mod tests {
         assert_eq!(boundless.rebid_timeout_ms, 450_000);
         assert_eq!(boundless.rebid_price_step_bps, 4000);
         assert_eq!(boundless.rebid_max_attempts, 2);
+        assert_eq!(boundless.rpc_url, expected_rpc_url);
     }
 
     #[test]

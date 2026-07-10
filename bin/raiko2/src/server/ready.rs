@@ -119,7 +119,7 @@ pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
 
 async fn check_rpc_pairs(config: &Config) -> Result<()> {
     let client_config = config.rpc.provider_client_config();
-    for pair in config.rpc.resolved_pairs()? {
+    for pair in config.resolved_pairs()? {
         check_rpc_chain_id(
             "l1",
             &pair.key,
@@ -238,7 +238,7 @@ fn check_sp1_prover(config: &Config) -> Result<()> {
 
     if sp1.prover == Sp1ProverMode::Network {
         if matches!(sp1.mode, Sp1ExecutionMode::Prove) && sp1.verify {
-            for pair in config.rpc.resolved_pairs()? {
+            for pair in config.resolved_pairs()? {
                 if sp1_effective_pair_config(sp1, &pair)
                     .remote_verify
                     .is_none()
@@ -334,7 +334,6 @@ mod tests {
             verifier_address: "0x0000000000000000000000000000000000000001".to_string(),
         });
         let pair = config
-            .rpc
             .resolved_pairs()
             .expect("resolve default pair")
             .remove(0);
@@ -358,7 +357,6 @@ mod tests {
             verifier_address: "0x0000000000000000000000000000000000000001".to_string(),
         });
         let mut pair = config
-            .rpc
             .resolved_pairs()
             .expect("resolve default pair")
             .remove(0);

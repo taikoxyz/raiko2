@@ -4,6 +4,7 @@ use alloy_primitives::{
     U256,
     utils::{parse_ether, parse_units},
 };
+use anyhow::{Context, bail};
 use raiko2_primitives::{RaikoError, RaikoResult};
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +108,28 @@ pub struct OfferParamsConfig {
     pub aggregation: BoundlessOfferParams,
 }
 
+/// Pair-specific Boundless overrides for RISC0 network routes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BoundlessPairConfig {
+    pub batch_quote: Option<QuoteSizing>,
+    pub aggregation_quote: Option<QuoteSizing>,
+    pub poll_interval_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
+    pub rebid_timeout_ms: Option<u64>,
+    pub rebid_price_step_bps: Option<u32>,
+    pub rebid_max_attempts: Option<u32>,
+    pub offer_params: BoundlessOfferParamsOverride,
+}
+
+/// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BoundlessOfferParamsOverride {
+    pub batch: Option<BoundlessOfferParams>,
+    pub aggregation: Option<BoundlessOfferParams>,
+}
+
 // Fail closed on stale/typo'd keys inside `[prover.boundless.deployment]`. Without this, a typo
 // such as `deployment_typ` deserializes with `deployment_type = None`, and `get_deployment_type()`
 // silently falls back to `Base` — booting the wrong market for a Taiko/Sepolia deployment. The
@@ -145,8 +168,9 @@ impl QuoteSizing {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoundlessConfig {
-    #[serde(default = "default_execution_po2")]
+    #[serde(skip, default = "default_execution_po2")]
     pub execution_po2: u32,
     #[serde(default)]
     pub offchain: bool,
@@ -266,6 +290,93 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
 }
 
 impl BoundlessConfig {
+    /// Validate the effective Boundless config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when quote sizing, rebid policy, or offer parameters are invalid.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.batch_quote
+            .validate("prover.boundless.batch_quote")
+            .map_err(anyhow::Error::msg)?;
+        self.aggregation_quote
+            .validate("prover.boundless.aggregation_quote")
+            .map_err(anyhow::Error::msg)?;
+        if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
+            bail!("prover.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
+        }
+        if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
+            bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
+        }
+        if (1..MIN_MEANINGFUL_REBID_PRICE_STEP_BPS).contains(&self.rebid_price_step_bps) {
+            bail!(
+                "prover.boundless.rebid_price_step_bps = {} is below the {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} bps (1%) floor; \
+                 values in 1..{MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} are almost always a basis-points/multiplier confusion \
+                 (e.g. `2` meaning ×2). Use 0 for an explicit flat ladder or >= {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} to escalate.",
+                self.rebid_price_step_bps
+            );
+        }
+        validate_offer_spec(&self.offer_params.batch)
+            .map_err(anyhow::Error::msg)
+            .context("prover.boundless.offer_params.batch")?;
+        validate_offer_spec(&self.offer_params.aggregation)
+            .map_err(anyhow::Error::msg)
+            .context("prover.boundless.offer_params.aggregation")?;
+        Ok(())
+    }
+
+    /// Resolve a pair-specific override into a validated effective config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resolved config is invalid.
+    pub fn apply_pair_override(
+        &self,
+        pair_key: &str,
+        pair: &BoundlessPairConfig,
+    ) -> anyhow::Result<Self> {
+        validate_pair_override(pair, pair_key).context("RPC configuration error")?;
+        let mut merged = self.clone();
+        if let Some(batch_quote) = pair.batch_quote.clone() {
+            merged.batch_quote = batch_quote;
+        }
+        if let Some(aggregation_quote) = pair.aggregation_quote.clone() {
+            merged.aggregation_quote = aggregation_quote;
+        }
+        if let Some(poll_interval_ms) = pair.poll_interval_ms {
+            merged.poll_interval_ms = poll_interval_ms;
+        }
+        if let Some(timeout_ms) = pair.timeout_ms {
+            merged.timeout_ms = timeout_ms;
+        }
+        if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
+            merged.rebid_timeout_ms = rebid_timeout_ms;
+        }
+        if let Some(rebid_price_step_bps) = pair.rebid_price_step_bps {
+            merged.rebid_price_step_bps = rebid_price_step_bps;
+        }
+        if let Some(rebid_max_attempts) = pair.rebid_max_attempts {
+            merged.rebid_max_attempts = rebid_max_attempts;
+        }
+        if let Some(batch) = &pair.offer_params.batch {
+            merged.offer_params.batch = batch.clone();
+        }
+        if let Some(aggregation) = &pair.offer_params.aggregation {
+            merged.offer_params.aggregation = aggregation.clone();
+        }
+        merged
+            .validate()
+            .with_context(|| format!("Boundless configuration error for rpc pair {pair_key}"))?;
+        Ok(merged)
+    }
+
+    /// Inject the server-owned RISC0 execution setting without changing operator config fields.
+    #[must_use]
+    pub const fn with_execution_po2(mut self, execution_po2: u32) -> Self {
+        self.execution_po2 = execution_po2;
+        self
+    }
+
     #[must_use]
     pub fn get_deployment_type(&self) -> DeploymentType {
         self.deployment
@@ -273,6 +384,44 @@ impl BoundlessConfig {
             .and_then(|deployment| deployment.deployment_type.clone())
             .unwrap_or(DeploymentType::Base)
     }
+}
+
+fn validate_pair_override(pair: &BoundlessPairConfig, pair_key: &str) -> anyhow::Result<()> {
+    if let Some(q) = &pair.batch_quote {
+        q.validate(&format!("{pair_key}: boundless.batch_quote"))
+            .map_err(anyhow::Error::msg)?;
+    }
+    if let Some(q) = &pair.aggregation_quote {
+        q.validate(&format!("{pair_key}: boundless.aggregation_quote"))
+            .map_err(anyhow::Error::msg)?;
+    }
+    if matches!(pair.poll_interval_ms, Some(0)) {
+        bail!("{pair_key}: boundless.poll_interval_ms must be > 0");
+    }
+    if matches!(pair.timeout_ms, Some(0)) {
+        bail!("{pair_key}: boundless.timeout_ms must be > 0");
+    }
+    if matches!(pair.rebid_timeout_ms, Some(value) if value < MIN_REBID_TIMEOUT_MS) {
+        bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
+    }
+    if let Some(rebid_max_attempts) = pair.rebid_max_attempts
+        && rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT
+    {
+        bail!("{pair_key}: boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
+    }
+    if let Some(batch) = &pair.offer_params.batch {
+        validate_offer_spec(batch)
+            .map_err(anyhow::Error::msg)
+            .map_err(|err| anyhow::anyhow!("{pair_key}: boundless.offer_params.batch: {err}"))?;
+    }
+    if let Some(aggregation) = &pair.offer_params.aggregation {
+        validate_offer_spec(aggregation)
+            .map_err(anyhow::Error::msg)
+            .map_err(|err| {
+                anyhow::anyhow!("{pair_key}: boundless.offer_params.aggregation: {err}")
+            })?;
+    }
+    Ok(())
 }
 
 fn parse_staking_token(value: &str) -> RaikoResult<U256> {
@@ -399,10 +548,78 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DEFAULT_REBID_MAX_ATTEMPTS,
-        DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType,
-        TimeoutPolicy, validate_offer_spec,
+        BoundlessConfig, BoundlessOfferParams, BoundlessOfferParamsOverride, BoundlessPairConfig,
+        BoundlessPricingMode, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS,
+        DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType, QuoteSizing, TimeoutPolicy,
+        validate_offer_spec,
     };
+
+    #[test]
+    fn global_and_pair_override_resolve_into_canonical_config() {
+        let global = BoundlessConfig {
+            rebid_timeout_ms: 900_000,
+            rebid_price_step_bps: 3_000,
+            rebid_max_attempts: 5,
+            ..Default::default()
+        };
+
+        let pair_batch_offer = BoundlessOfferParams {
+            ramp_up_start_sec: 42,
+            ..global.offer_params.batch.clone()
+        };
+        let pair = BoundlessPairConfig {
+            batch_quote: Some(QuoteSizing::Fixed { mcycles: 5_000 }),
+            rebid_timeout_ms: Some(450_000),
+            rebid_price_step_bps: Some(4_000),
+            rebid_max_attempts: Some(2),
+            offer_params: BoundlessOfferParamsOverride {
+                batch: Some(pair_batch_offer.clone()),
+                aggregation: None,
+            },
+            ..Default::default()
+        };
+
+        let effective = global
+            .apply_pair_override("taiko_hoodi/hoodi", &pair)
+            .expect("global and pair config should resolve");
+
+        assert_eq!(effective.batch_quote, QuoteSizing::Fixed { mcycles: 5_000 });
+        assert_eq!(effective.rebid_timeout_ms, 450_000);
+        assert_eq!(effective.rebid_price_step_bps, 4_000);
+        assert_eq!(effective.rebid_max_attempts, 2);
+        assert_eq!(effective.offer_params.batch, pair_batch_offer);
+        assert_eq!(global.rebid_timeout_ms, 900_000);
+        assert_eq!(global.offer_params.batch.ramp_up_start_sec, 20);
+    }
+
+    #[test]
+    fn with_execution_po2_only_injects_internal_execution_setting() {
+        let original = BoundlessConfig::default();
+        let configured = original.clone().with_execution_po2(24);
+
+        assert_eq!(configured.execution_po2, 24);
+        assert_eq!(original.execution_po2, 20);
+        assert_eq!(
+            serde_json::to_value(configured).expect("serialize configured config"),
+            serde_json::to_value(original).expect("serialize original config")
+        );
+    }
+
+    #[test]
+    fn canonical_config_rejects_unknown_and_internal_only_fields() {
+        for field in ["unexpected", "execution_po2"] {
+            let mut value =
+                serde_json::to_value(BoundlessConfig::default()).expect("serialize default config");
+            value
+                .as_object_mut()
+                .expect("config serializes as object")
+                .insert(field.to_string(), serde_json::json!(24));
+
+            let err = serde_json::from_value::<BoundlessConfig>(value)
+                .expect_err("unknown canonical config field should be rejected");
+            assert!(err.to_string().contains(field), "unexpected error: {err}");
+        }
+    }
 
     #[test]
     fn default_config_uses_base_deployment() {
@@ -412,6 +629,19 @@ mod tests {
         assert_eq!(config.rebid_timeout_ms, DEFAULT_REBID_TIMEOUT_MS);
         assert_eq!(config.rebid_price_step_bps, DEFAULT_REBID_PRICE_STEP_BPS);
         assert_eq!(config.rebid_max_attempts, DEFAULT_REBID_MAX_ATTEMPTS);
+    }
+
+    #[test]
+    fn global_zero_poll_and_timeout_remain_accepted() {
+        let config = BoundlessConfig {
+            poll_interval_ms: 0,
+            timeout_ms: 0,
+            ..Default::default()
+        };
+
+        config
+            .validate()
+            .expect("historically accepted global zero timeouts");
     }
 
     #[test]

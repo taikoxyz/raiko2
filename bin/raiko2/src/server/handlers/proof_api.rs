@@ -2561,7 +2561,6 @@ fn resolved_pair(
         (Some(network), Some(l1_network)) => {
             return state
                 .config
-                .rpc
                 .resolve_pair(network, l1_network)
                 .map_err(|err| ApiError::bad_request(err.to_string()));
         }
@@ -2575,7 +2574,6 @@ fn resolved_pair(
 
     let resolved_pairs = state
         .config
-        .rpc
         .resolved_pairs()
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
     resolved_pairs
@@ -3044,7 +3042,7 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
+    use crate::config::{BoundlessConfig, Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
     use axum::{
@@ -3332,7 +3330,7 @@ mod tests {
             l2_witness_rpc: "http://l2w.example".to_string(),
             sp1_verifier_rpc_url: None,
             sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
+            boundless: BoundlessConfig::default(),
             l1_spec: specs
                 .get_chain_spec("ethereum")
                 .expect("ethereum chain spec"),

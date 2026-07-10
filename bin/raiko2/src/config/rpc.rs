@@ -1,10 +1,6 @@
 use alloy_primitives::Address;
 use anyhow::{Context, Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_prover::boundless_config::{
-    BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT,
-    validate_offer_spec,
-};
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,
@@ -34,7 +30,7 @@ const fn default_rpc_retry_cu_per_second() -> u64 {
     1_000
 }
 
-use super::validation;
+use super::{BoundlessConfig, BoundlessPairConfig, validation};
 
 fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
     vec![NetworkPairConfig {
@@ -102,74 +98,9 @@ pub struct ResolvedNetworkPair {
     pub l2_witness_rpc: String,
     pub sp1_verifier_rpc_url: Option<String>,
     pub sp1_verifier_address: Option<String>,
-    pub boundless: BoundlessPairConfig,
+    pub boundless: BoundlessConfig,
     pub l1_spec: ChainSpec,
     pub l2_spec: ChainSpec,
-}
-
-/// Pair-specific Boundless overrides for RISC0 network routes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct BoundlessPairConfig {
-    pub batch_quote: Option<QuoteSizing>,
-    pub aggregation_quote: Option<QuoteSizing>,
-    pub poll_interval_ms: Option<u64>,
-    pub timeout_ms: Option<u64>,
-    pub rebid_timeout_ms: Option<u64>,
-    pub rebid_price_step_bps: Option<u32>,
-    pub rebid_max_attempts: Option<u32>,
-    pub offer_params: BoundlessOfferParamsOverride,
-}
-
-impl BoundlessPairConfig {
-    /// Validate the optional pair-specific Boundless overrides.
-    pub fn validate(&self, pair_key: &str) -> Result<()> {
-        if let Some(q) = &self.batch_quote {
-            q.validate(&format!("{pair_key}: boundless.batch_quote"))
-                .map_err(anyhow::Error::msg)?;
-        }
-        if let Some(q) = &self.aggregation_quote {
-            q.validate(&format!("{pair_key}: boundless.aggregation_quote"))
-                .map_err(anyhow::Error::msg)?;
-        }
-        if matches!(self.poll_interval_ms, Some(0)) {
-            bail!("{pair_key}: boundless.poll_interval_ms must be > 0");
-        }
-        if matches!(self.timeout_ms, Some(0)) {
-            bail!("{pair_key}: boundless.timeout_ms must be > 0");
-        }
-        if matches!(self.rebid_timeout_ms, Some(value) if value < MIN_REBID_TIMEOUT_MS) {
-            bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
-        }
-        if let Some(rebid_max_attempts) = self.rebid_max_attempts
-            && rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT
-        {
-            bail!("{pair_key}: boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
-        }
-        if let Some(batch) = &self.offer_params.batch {
-            validate_offer_spec(batch)
-                .map_err(anyhow::Error::msg)
-                .map_err(|err| {
-                    anyhow::anyhow!("{pair_key}: boundless.offer_params.batch: {err}")
-                })?;
-        }
-        if let Some(aggregation) = &self.offer_params.aggregation {
-            validate_offer_spec(aggregation)
-                .map_err(anyhow::Error::msg)
-                .map_err(|err| {
-                    anyhow::anyhow!("{pair_key}: boundless.offer_params.aggregation: {err}")
-                })?;
-        }
-        Ok(())
-    }
-}
-
-/// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct BoundlessOfferParamsOverride {
-    pub batch: Option<BoundlessOfferParams>,
-    pub aggregation: Option<BoundlessOfferParams>,
 }
 
 impl ResolvedNetworkPair {
@@ -248,8 +179,8 @@ impl Default for RpcRetryConfig {
 }
 
 impl RpcConfig {
-    /// Validate RPC configuration.
-    pub fn validate(&self) -> Result<()> {
+    /// Validate RPC configuration against its resolved network pairs.
+    pub(super) fn validate_resolved(&self, resolved_pairs: &[ResolvedNetworkPair]) -> Result<()> {
         if self.client.timeout_ms == 0 {
             bail!("rpc client timeout_ms must be > 0");
         }
@@ -266,11 +197,10 @@ impl RpcConfig {
         }
 
         let mut seen = HashSet::new();
-        for pair in self.resolved_pairs()? {
+        for pair in resolved_pairs {
             if !seen.insert(pair.key.clone()) {
                 bail!("duplicate rpc pair configuration: {}", pair.key);
             }
-            pair.boundless.validate(&pair.key)?;
             if !is_valid_url(&pair.l1_rpc) {
                 bail!(
                     "{}: l1_rpc = '{}'",
@@ -345,7 +275,10 @@ impl RpcConfig {
     }
 
     /// Resolve the configured RPC matrix into explicit network pairs.
-    pub fn resolved_pairs(&self) -> Result<Vec<ResolvedNetworkPair>> {
+    pub(super) fn resolved_pairs(
+        &self,
+        global_boundless: &BoundlessConfig,
+    ) -> Result<Vec<ResolvedNetworkPair>> {
         if self.pairs.is_empty() {
             bail!("rpc.pairs must contain at least one network pair");
         }
@@ -355,20 +288,8 @@ impl RpcConfig {
             .context("default chain spec sanity check failed")?;
         self.pairs
             .iter()
-            .map(|pair| resolve_pair(&known_specs, pair))
+            .map(|pair| resolve_pair(&known_specs, pair, global_boundless))
             .collect()
-    }
-
-    /// Resolve a single allowed pair by public network names.
-    pub fn resolve_pair(&self, network: &str, l1_network: &str) -> Result<ResolvedNetworkPair> {
-        self.resolved_pairs()?
-            .into_iter()
-            .find(|pair| pair.network == network && pair.l1_network == l1_network)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unsupported network pair: network={network}, l1_network={l1_network}"
-                )
-            })
     }
 
     #[must_use]
@@ -388,6 +309,7 @@ impl RpcConfig {
 fn resolve_pair(
     known_specs: &SupportedChainSpecs,
     pair: &NetworkPairConfig,
+    global_boundless: &BoundlessConfig,
 ) -> Result<ResolvedNetworkPair> {
     let l2_spec = known_specs
         .get_chain_spec(&pair.network)
@@ -399,9 +321,11 @@ fn resolve_pair(
         l1_spec.beacon_rpc = Some(beacon_rpc.clone());
     }
     let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
+    let key = pair.key();
+    let boundless = global_boundless.apply_pair_override(&key, &pair.boundless)?;
 
     Ok(ResolvedNetworkPair {
-        key: pair.key(),
+        key,
         network: pair.network.clone(),
         l1_network: pair.l1_network.clone(),
         l1_rpc: pair.l1_rpc.clone().unwrap_or_else(|| l1_spec.rpc.clone()),
@@ -410,7 +334,7 @@ fn resolve_pair(
         l2_witness_rpc: pair.l2_witness_rpc.clone().unwrap_or(l2_rpc),
         sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
         sp1_verifier_address: pair.sp1_verifier_address.clone(),
-        boundless: pair.boundless.clone(),
+        boundless,
         l1_spec,
         l2_spec,
     })
@@ -419,6 +343,7 @@ fn resolve_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raiko2_prover::boundless_config::{QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT};
 
     #[test]
     fn rpc_config_default_timeout_matches_provider_default() {
@@ -439,11 +364,11 @@ mod tests {
         };
 
         assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
+            BoundlessConfig::default()
+                .apply_pair_override("taiko_hoodi/hoodi", &config)
                 .expect_err("zero aggregation quote should fail")
-                .to_string()
-                .contains("aggregation_quote")
+                .chain()
+                .any(|source| source.to_string().contains("aggregation_quote"))
         );
     }
 
@@ -455,11 +380,11 @@ mod tests {
         };
 
         assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
+            BoundlessConfig::default()
+                .apply_pair_override("taiko_hoodi/hoodi", &config)
                 .expect_err("zero rebid timeout should fail")
-                .to_string()
-                .contains("rebid_timeout_ms")
+                .chain()
+                .any(|source| source.to_string().contains("rebid_timeout_ms"))
         );
     }
 
@@ -471,11 +396,11 @@ mod tests {
         };
 
         assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
+            BoundlessConfig::default()
+                .apply_pair_override("taiko_hoodi/hoodi", &config)
                 .expect_err("subsecond rebid timeout should fail")
-                .to_string()
-                .contains("rebid_timeout_ms")
+                .chain()
+                .any(|source| source.to_string().contains("rebid_timeout_ms"))
         );
     }
 
@@ -487,8 +412,8 @@ mod tests {
         };
 
         // 0 bps is a valid flat (no-escalation) ladder.
-        config
-            .validate("taiko_hoodi/hoodi")
+        BoundlessConfig::default()
+            .apply_pair_override("taiko_hoodi/hoodi", &config)
             .expect("zero rebid price step bps should be accepted");
     }
 
@@ -500,11 +425,11 @@ mod tests {
         };
 
         assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
+            BoundlessConfig::default()
+                .apply_pair_override("taiko_hoodi/hoodi", &config)
                 .expect_err("excessive rebid attempts should fail")
-                .to_string()
-                .contains("rebid_max_attempts")
+                .chain()
+                .any(|source| source.to_string().contains("rebid_max_attempts"))
         );
     }
 
@@ -528,8 +453,9 @@ mod tests {
         };
 
         let pair = config
-            .resolve_pair("taiko_dev", "taiko_dev_l1")
+            .resolved_pairs(&BoundlessConfig::default())
             .expect("pair should resolve");
+        let pair = pair.first().expect("configured pair");
 
         assert_eq!(
             pair.l1_spec.beacon_rpc.as_deref(),
@@ -555,8 +481,11 @@ mod tests {
             ..Default::default()
         };
 
+        let resolved_pairs = config
+            .resolved_pairs(&BoundlessConfig::default())
+            .expect("resolve pair before rpc validation");
         let err = config
-            .validate()
+            .validate_resolved(&resolved_pairs)
             .expect_err("invalid beacon rpc should fail");
 
         assert!(err.to_string().contains("beacon_rpc"));

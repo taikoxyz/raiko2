@@ -199,9 +199,13 @@ local toolchain images:
   target compilers through `sccache`. Guest Rust compilation is not wrapped because the measured
   clean-target path had Rust cache misses that outweighed the native C/C++ cache hits.
 
-Native C crates in the guest graph (notably RISC0 `blst` for EVM BLS12-381, and any future
-`c-kzg` path) compile through `CC_riscv32im_risc0_zkvm_elf` /
-`CC_riscv64im_succinct_zkvm_elf` and therefore land in the sccache layer above. After changing
+Native C crates that are **actually linked** into a guest ELF compile through
+`CC_riscv32im_risc0_zkvm_elf` / `CC_riscv64im_succinct_zkvm_elf` and therefore land in the
+sccache layer above. Today that means RISC0 **`blst`** (EVM BLS12-381 via
+`revm-precompile` features `blst` + `portable`). `c-kzg` may appear in guest lockfiles as an
+optional or host-side transitive dep (e.g. alloy-consensus, or revm-precompile's optional
+`c-kzg` feature which we do **not** enable — EIP-4844 point evaluation uses kzg-rs instead);
+it is only a guest C-build concern if a feature actually activates it. After changing
 `blst`/`c-kzg` patches, tags, or `portable` features, expect a cold C rebuild on the first
 `just build-guest` (watch `sccache --show-stats` in the log); subsequent forced rebuilds should
 show C/C++ cache hits if the sccache volume is retained. Do not disable

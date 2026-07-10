@@ -1,5 +1,10 @@
 //! Guest-specific crypto hooks for RISC Zero proofs.
+//!
+//! Cycle-sensitive paths use `risc0-crypto-evm` and Cargo-patched crates.
+//! KZG point evaluation is routed through kzg-rs so the BLS12-381 backend can
+//! be accelerated via the official `bls12_381` patch (instead of revm arkworks).
 
+use kzg_rs::{get_kzg_settings, Bytes32, Bytes48, KzgProof};
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
 #[derive(Debug)]
@@ -40,6 +45,40 @@ impl Crypto for Risc0GuestCrypto {
     fn secp256r1_verify_signature(&self, msg: &[u8; 32], sig: &[u8; 64], pk: &[u8; 64]) -> bool {
         risc0_crypto_evm::secp256r1_verify(msg, sig, pk)
     }
+
+    /// Prefer kzg-rs over revm's arkworks fallback for EIP-4844 point evaluation.
+    fn verify_kzg_proof(
+        &self,
+        z: &[u8; 32],
+        y: &[u8; 32],
+        commitment: &[u8; 48],
+        proof: &[u8; 48],
+    ) -> Result<(), PrecompileHalt> {
+        verify_kzg_proof_with_kzg_rs(z, y, commitment, proof)
+    }
+
+    // bn254_pairing_check uses the trait default → patched substrate-bn.
+}
+
+fn verify_kzg_proof_with_kzg_rs(
+    z: &[u8; 32],
+    y: &[u8; 32],
+    commitment: &[u8; 48],
+    proof: &[u8; 48],
+) -> Result<(), PrecompileHalt> {
+    let commitment = Bytes48::from_slice(commitment)
+        .map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
+    let z = Bytes32::from_slice(z).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
+    let y = Bytes32::from_slice(y).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
+    let proof =
+        Bytes48::from_slice(proof).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
+    let settings = get_kzg_settings();
+    let ok = KzgProof::verify_kzg_proof(&commitment, &z, &y, &proof, &settings)
+        .map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
+    if !ok {
+        return Err(PrecompileHalt::BlobVerifyKzgProofFailed);
+    }
+    Ok(())
 }
 
 fn fallback_modexp(base: &[u8], exp: &[u8], modulus: &[u8]) -> Vec<u8> {
@@ -72,6 +111,7 @@ pub fn install_guest_crypto() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::hex;
     use revm_precompile::crypto;
 
     #[test]
@@ -79,6 +119,16 @@ mod tests {
         install_guest_crypto();
 
         assert_eq!(format!("{:?}", crypto()), "Risc0GuestCrypto");
+
+        // Host can exercise kzg-rs routing (no zkVM-only crypto needed).
+        let commitment = hex!("8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7");
+        let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
+        let y = hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");
+        let proof = hex!("a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c");
+        assert!(crypto()
+            .verify_kzg_proof(&z, &y, &commitment, &proof)
+            .is_ok());
+
         if !cfg!(target_os = "zkvm") {
             return;
         }

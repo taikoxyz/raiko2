@@ -34,9 +34,15 @@ sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sh
 k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.0.0" }
 alloy-primitives = { version = "=1.5.7", default-features = false }
 bincode = "=1.3.3"
-num-bigint = { version = "=0.4.6", default-features = false }
 revm = { version = "=38.0.0", default-features = false }
 revm-precompile = { version = "=34.0.0", default-features = false, features = ["bn"] }
+
+# kzg-rs: SP1 guest ELF uses the patched BLS backend; host/unit tests use standard.
+[target.'cfg(target_vendor = "succinct")'.dependencies]
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false, features = ["sp1"] }
+
+[target.'cfg(not(target_vendor = "succinct"))'.dependencies]
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false, features = ["standard"] }
 
 [features]
 default = []
@@ -50,5 +56,8 @@ crypto-bigint = { git = "https://github.com/sp1-patches/RustCrypto-bigint", tag 
 k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.0.0" }
 p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p256-13.2-sp1-6.0.0" }
 substrate-bn = { git = "https://github.com/sp1-patches/bn", package = "substrate-bn", tag = "patch-0.6.0-sp1-6.0.0-substrate-bn" }
+# Note: do not patch crates-io bls12_381 here — kzg-rs already pulls
+# sp1-patches/bls12_381 as a renamed direct git dep under the `sp1` feature.
+# A crates-io patch collides with that dual naming.
 
 [workspace]

@@ -3528,7 +3528,7 @@ dependencies = [
  "alloy-primitives",
  "bincode",
  "k256",
- "num-bigint 0.4.6",
+ "kzg-rs",
  "raiko2-guest-common",
  "raiko2-primitives",
  "raiko2-primitives-shasta",

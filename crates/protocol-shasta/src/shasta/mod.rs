@@ -12,7 +12,10 @@ pub mod manifest;
 pub mod payload_helpers;
 
 #[cfg(feature = "net")]
-pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
+pub use anchor::{
+    AnchorTransactionValidationError, AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input,
+    validate_anchor_transaction,
+};
 pub use blob_coder::BlobCoder;
 pub use derivation::{
     ParentBlockContext, ProposalMetadata, SourceDerivationError, ValidationContext,
@@ -20,10 +23,7 @@ pub use derivation::{
     prepare_source_manifest_with_max_blocks, validate_source_manifest,
 };
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
-pub use payload_helpers::{
-    PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data, encode_transactions,
-    encode_tx_list, payload_id_to_bytes,
-};
+pub use payload_helpers::{calculate_shasta_difficulty, encode_extra_data, encode_transactions};
 
 /// Byte length of Shasta block header extra data.
 pub const SHASTA_EXTRA_DATA_LEN: usize = 7;

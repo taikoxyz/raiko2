@@ -4,26 +4,20 @@
 #![allow(missing_docs)]
 
 use alloy_primitives::{Bytes, U256, b256};
-use alloy_rpc_types_engine::PayloadId;
 use raiko2_protocol_shasta::shasta::constants::{
     TAIKO_DEVNET_CHAIN_ID, TAIKO_HOODI_CHAIN_ID, TAIKO_MAINNET_CHAIN_ID, TAIKO_MASAYA_CHAIN_ID,
     max_anchor_offset_for_chain, min_base_fee_for_chain, shasta_fork_condition_for_chain,
     shasta_fork_timestamp_for_chain, timestamp_max_offset_for_chain,
 };
 use raiko2_protocol_shasta::shasta::{
-    AnchorV4Input, PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data,
-    encode_tx_list,
+    AnchorV4Input, ShastaForkConfigError, calculate_shasta_difficulty, encode_extra_data,
     manifest::{BlockManifest, DerivationSourceManifest},
-    payload_id_to_bytes,
 };
 
 #[test]
-fn payload_helpers_match_expected_encoding() {
+fn extra_data_encoding_matches_shasta_header_layout() {
     let extra_data = encode_extra_data(7, 0x01_02_03_04_05_06);
     assert_eq!(extra_data, Bytes::from(vec![7, 1, 2, 3, 4, 5, 6]));
-
-    let payload_id = PayloadId::new([PAYLOAD_ID_VERSION_V2, 1, 2, 3, 4, 5, 6, 7]);
-    assert_eq!(payload_id_to_bytes(payload_id), [2, 1, 2, 3, 4, 5, 6, 7]);
 }
 
 #[test]
@@ -79,20 +73,10 @@ fn shasta_chain_constants_are_chain_aware() {
         1_775_135_700
     );
     assert!(shasta_fork_timestamp_for_chain(1).is_err());
-    assert!(shasta_fork_condition_for_chain(1).is_none());
-}
-
-#[test]
-fn encode_tx_list_matches_rlp_list_encoding() {
-    let txs = vec![
-        Bytes::from(vec![0x01, 0x02, 0x03]),
-        Bytes::from(vec![0xAA, 0xBB]),
-    ];
-
-    assert_eq!(
-        encode_tx_list(&txs),
-        Bytes::from(vec![0xc7, 0x83, 0x01, 0x02, 0x03, 0x82, 0xaa, 0xbb])
-    );
+    assert!(matches!(
+        shasta_fork_condition_for_chain(1),
+        Err(ShastaForkConfigError::UnsupportedChainId(1))
+    ));
 }
 
 #[test]

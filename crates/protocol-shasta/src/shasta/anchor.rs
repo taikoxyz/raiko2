@@ -1,5 +1,6 @@
 //! Shasta anchor transaction construction from taiko-client-rs.
 
 pub use taiko_client_protocol::shasta::{
-    AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input,
+    AnchorTransactionValidationError, AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input,
+    validate_anchor_transaction,
 };

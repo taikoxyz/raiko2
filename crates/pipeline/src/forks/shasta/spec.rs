@@ -2289,6 +2289,13 @@ mod tests {
         }
     }
 
+    fn alethia_mainnet_unzen_timestamp() -> u64 {
+        match TAIKO_MAINNET.taiko_fork_activation(AlethiaTaikoHardfork::Unzen) {
+            AlethiaForkCondition::Timestamp(timestamp) => timestamp,
+            condition => panic!("expected mainnet Unzen timestamp fork, got {condition:?}"),
+        }
+    }
+
     fn alethia_hoodi_shasta_timestamp() -> u64 {
         match TAIKO_HOODI.taiko_fork_activation(AlethiaTaikoHardfork::Shasta) {
             AlethiaForkCondition::Timestamp(timestamp) => timestamp,
@@ -2957,7 +2964,14 @@ mod tests {
     #[test]
     fn extract_block_range_rejects_unzen_range_when_environment_has_no_activation() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_000;
+        let mut mainnet = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_mainnet")
+            .expect("mainnet chain spec");
+        mainnet
+            .hard_forks
+            .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Tbd);
+        ctx.request.l2_chain_id = mainnet.chain_id;
+        ctx.preflight.resolved_l2_chain_spec = Some(mainnet);
         let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
@@ -2992,9 +3006,22 @@ mod tests {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
         let mainnet = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let mainnet_unzen_timestamp = alethia_mainnet_unzen_timestamp();
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&mainnet, 1, u64::MAX),
+            super::derivation_source_max_blocks_for_chain_spec_at(
+                &mainnet,
+                1,
+                mainnet_unzen_timestamp - 1,
+            ),
             super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(
+                &mainnet,
+                1,
+                mainnet_unzen_timestamp,
+            ),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_013;
@@ -3045,7 +3072,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_derivation_source_block_limit_rejects_inactive_unzen_environment() {
+    fn validate_derivation_source_block_limit_rejects_before_unzen_activation() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
         let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
@@ -3053,10 +3080,10 @@ mod tests {
         let err = super::validate_derivation_source_block_limit(
             super::DERIVATION_SOURCE_MAX_BLOCKS + 1,
             1,
-            u64::MAX,
+            alethia_mainnet_unzen_timestamp() - 1,
             &chain_spec,
         )
-        .expect_err("inactive unzen environment should reject");
+        .expect_err("pre-Unzen environment should reject");
 
         assert!(err.to_string().contains("contains 193 blocks, max 192"));
     }

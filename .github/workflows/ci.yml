@@ -225,11 +225,14 @@ jobs:
         with:
           shared-key: ci-rust
 
+      # raiko2-remote-poller has no zk-stack dependencies, so it fits this lane; it is the only
+      # CI coverage for the generic remote-polling engine the boundless/SP1 money paths ride on.
       - name: test runtime
         run: >
           cargo test
           -p raiko2-queue
           -p raiko2-runtime
+          -p raiko2-remote-poller
 
   rust-test-xtask:
     needs: changes

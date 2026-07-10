@@ -10,7 +10,7 @@ use raiko2_prover::{
     Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
 };
 use raiko2_queue::decode_task_id;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,11 +173,128 @@ pub(crate) struct RemoteSubmissionView {
     pub(crate) sp1_timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct TaskRuntimeMetadata {
     pub(crate) updated_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_submission: Option<RemoteSubmissionMetadata>,
+}
+
+/// Serialization mirror of [`TaskRuntimeMetadata`]. Alongside the authoritative tagged
+/// `remote_submission`, it re-emits the pre-tagging flat fields exactly as the previous release
+/// wrote them: a rolled-back binary reads only those, and without them it would see "no
+/// submission", start a fresh session, and reopen the double-pay window for an in-flight
+/// request. Current readers ignore the flat copy — [`TaskRuntimeMetadataWire`] prefers the
+/// tagged field — so the two can never diverge (both are derived from the same source here).
+// TODO: stop dual-writing the flat fields once a release carrying the tagged format has shipped
+// and rollbacks across it are no longer supported.
+#[derive(Serialize)]
+struct TaskRuntimeMetadataWireOut<'a> {
+    updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_submission: Option<&'a RemoteSubmissionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_request_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_tx_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_ref: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deployment: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offchain: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lock_expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submitted_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quoted_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evaluated_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_price_multiplier: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_price_wei: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rebid_attempt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_network_mode: Option<Sp1NetworkMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_fulfillment_strategy: Option<Sp1FulfillmentStrategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_skip_simulation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_cycle_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_max_price_per_pgu: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_auction_timeout_secs: Option<u64>,
+}
+
+impl Serialize for TaskRuntimeMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut wire = TaskRuntimeMetadataWireOut {
+            updated_at: self.updated_at,
+            remote_submission: self.remote_submission.as_ref(),
+            provider_request_id: None,
+            remote_tx_hash: None,
+            image_ref: None,
+            deployment: None,
+            offchain: None,
+            expires_at: None,
+            lock_expires_at: None,
+            submitted_at: None,
+            quoted_mcycles_count: None,
+            evaluated_mcycles_count: None,
+            max_price_multiplier: None,
+            max_price_wei: None,
+            rebid_attempt: None,
+            sp1_network_mode: None,
+            sp1_fulfillment_strategy: None,
+            sp1_skip_simulation: None,
+            sp1_cycle_limit: None,
+            sp1_timeout_secs: None,
+            sp1_max_price_per_pgu: None,
+            sp1_auction_timeout_secs: None,
+        };
+        match self.remote_submission.as_ref() {
+            Some(RemoteSubmissionMetadata::Boundless(submission)) => {
+                let snapshot = &submission.snapshot;
+                wire.provider_request_id = (!snapshot.provider_request_id.is_empty())
+                    .then_some(snapshot.provider_request_id.as_str());
+                wire.remote_tx_hash = snapshot.remote_tx_hash.as_deref();
+                wire.image_ref = submission.image_ref.as_deref();
+                wire.deployment = submission.deployment.as_deref();
+                wire.offchain = submission.offchain;
+                wire.expires_at = Some(snapshot.expires_at);
+                wire.lock_expires_at = Some(snapshot.lock_expires_at);
+                wire.submitted_at = Some(snapshot.submitted_at);
+                wire.quoted_mcycles_count = submission.quoted_mcycles_count;
+                wire.evaluated_mcycles_count = submission.evaluated_mcycles_count;
+                wire.max_price_multiplier = snapshot.max_price_multiplier;
+                wire.max_price_wei = snapshot.max_price_wei.as_deref();
+                wire.rebid_attempt = Some(snapshot.rebid_attempt);
+            }
+            Some(RemoteSubmissionMetadata::Sp1(submission)) => {
+                wire.provider_request_id = submission.provider_request_id.as_deref();
+                wire.sp1_network_mode = submission.network_mode;
+                wire.sp1_fulfillment_strategy = submission.fulfillment_strategy;
+                wire.sp1_skip_simulation = submission.skip_simulation;
+                wire.sp1_cycle_limit = submission.cycle_limit;
+                wire.sp1_timeout_secs = submission.timeout_secs;
+                wire.sp1_max_price_per_pgu = submission.max_price_per_pgu;
+                wire.sp1_auction_timeout_secs = submission.auction_timeout_secs;
+            }
+            None => {}
+        }
+        wire.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -935,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn new_runtime_metadata_emits_only_tagged_boundless_submission() {
+    fn new_runtime_metadata_dual_writes_tagged_and_legacy_boundless_fields() {
         let snapshot = raiko2_prover::BoundlessSubmissionSnapshot::new(
             "0x1234".to_string(),
             Some("0xabcd".to_string()),
@@ -963,30 +1080,81 @@ mod tests {
             encoded["remote_submission"]["submission"]["provider_request_id"],
             "0x1234"
         );
-        for legacy_field in [
-            "provider_request_id",
-            "remote_tx_hash",
-            "image_ref",
-            "deployment",
-            "offchain",
-            "expires_at",
-            "lock_expires_at",
-            "submitted_at",
-            "quoted_mcycles_count",
-            "evaluated_mcycles_count",
-            "max_price_multiplier",
-            "max_price_wei",
-            "rebid_attempt",
+        // The legacy flat projection is what a rolled-back (pre-tagged) binary reads to resume
+        // this submission instead of minting a fresh request id.
+        for (legacy_field, expected) in [
+            ("provider_request_id", serde_json::json!("0x1234")),
+            ("remote_tx_hash", serde_json::json!("0xabcd")),
+            ("image_ref", serde_json::json!("0ximage")),
+            ("deployment", serde_json::json!("base")),
+            ("offchain", serde_json::json!(false)),
+            ("expires_at", serde_json::json!(123_456)),
+            ("lock_expires_at", serde_json::json!(123_300)),
+            ("submitted_at", serde_json::json!(123_000)),
+            ("quoted_mcycles_count", serde_json::json!(6_000)),
+            ("evaluated_mcycles_count", serde_json::json!(12_345)),
+            ("max_price_multiplier", serde_json::json!(4)),
+            ("max_price_wei", serde_json::json!("9000000000000")),
+            ("rebid_attempt", serde_json::json!(3)),
         ] {
-            assert!(
-                encoded.get(legacy_field).is_none(),
-                "legacy field {legacy_field} must not be emitted"
+            assert_eq!(
+                encoded.get(legacy_field),
+                Some(&expected),
+                "legacy field {legacy_field} must be dual-written for rollback resume"
             );
         }
+        // No SP1 flat fields leak onto a Boundless record.
+        assert!(encoded.get("sp1_network_mode").is_none());
 
+        // Current readers prefer the tagged form and round-trip it losslessly.
         let decoded: TaskRuntimeMetadata =
-            serde_json::from_value(encoded).expect("deserialize tagged runtime metadata");
+            serde_json::from_value(encoded).expect("deserialize dual-written runtime metadata");
         assert_eq!(decoded.boundless_submission(), Some(&snapshot));
+        assert!(decoded.has_boundless_submission_resume());
+    }
+
+    #[test]
+    fn dual_written_record_resumes_through_the_legacy_flat_reader() {
+        // Simulates a rollback: strip the tagged field the old binary does not know about and
+        // check the flat remainder still reconstructs the same resumable Boundless submission
+        // (the old reader ignores unknown keys, so dropping `remote_submission` is equivalent).
+        let snapshot = raiko2_prover::BoundlessSubmissionSnapshot::new(
+            "0x1234".to_string(),
+            None,
+            123_456,
+            123_300,
+            123_000,
+            4,
+            "9000000000000".to_string(),
+            3,
+        );
+        let progress = BoundlessSubmissionProgress {
+            snapshot: snapshot.clone(),
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: true,
+            quoted_mcycles_count: None,
+            evaluated_mcycles_count: None,
+        };
+        let mut metadata = TaskRuntimeMetadata::default();
+        metadata.apply_boundless_submission(&progress, 123);
+
+        let mut encoded = serde_json::to_value(&metadata).expect("serialize runtime metadata");
+        encoded
+            .as_object_mut()
+            .expect("runtime metadata object")
+            .remove("remote_submission");
+
+        let legacy_view: TaskRuntimeMetadata = serde_json::from_value(encoded)
+            .expect("deserialize the flat projection like a rolled-back binary");
+        let resumed = legacy_view
+            .boundless_submission_for_resume(999)
+            .expect("flat projection must stay resumable after rollback");
+        assert_eq!(resumed.provider_request_id, snapshot.provider_request_id);
+        assert_eq!(resumed.expires_at, snapshot.expires_at);
+        assert_eq!(resumed.lock_expires_at, snapshot.lock_expires_at);
+        assert_eq!(resumed.max_price_wei, snapshot.max_price_wei);
+        assert_eq!(resumed.rebid_attempt, snapshot.rebid_attempt);
     }
 
     #[test]
@@ -1010,7 +1178,18 @@ mod tests {
         assert_eq!(submission["provider_request_id"], "0xsp1");
         assert!(submission.get("expires_at").is_none());
         assert!(submission.get("max_price_wei").is_none());
-        assert!(encoded.get("sp1_network_mode").is_none());
+        // The SP1 legacy flat projection is dual-written for rollback resume; no Boundless flat
+        // fields leak onto it.
+        assert_eq!(encoded["provider_request_id"], "0xsp1");
+        assert_eq!(encoded["sp1_network_mode"], "reserved");
+        assert_eq!(encoded["sp1_fulfillment_strategy"], "hosted");
+        assert_eq!(encoded["sp1_skip_simulation"], true);
+        assert_eq!(encoded["sp1_cycle_limit"], 9_000_000);
+        assert_eq!(encoded["sp1_timeout_secs"], 7_200);
+        assert_eq!(encoded["sp1_max_price_per_pgu"], 42);
+        assert_eq!(encoded["sp1_auction_timeout_secs"], 60);
+        assert!(encoded.get("expires_at").is_none());
+        assert!(encoded.get("max_price_wei").is_none());
     }
 
     #[test]

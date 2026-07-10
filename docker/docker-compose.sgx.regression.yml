@@ -6,6 +6,7 @@ x-raiko2-sgx-common: &raiko2-sgx-common
     dockerfile: Dockerfile.sgx
     args:
       GRAMINE_LOG_LEVEL: ${GRAMINE_LOG_LEVEL:-error}
+      SGX_EDMM_ENABLE: ${SGX_EDMM_ENABLE:-false}
     secrets:
       - source: gramine_enclave_key
         target: gramine_enclave_key

@@ -599,6 +599,8 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST,
         external_provider_docker_build_command, external_source_checkout_dir, file_sha256_hex,
@@ -612,6 +614,25 @@ mod tests {
             local_provider_image_ref("v1.2.3", "us-docker.pkg.dev/evmchain/images/raiko2-sgx"),
             "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3"
         );
+    }
+
+    #[test]
+    fn release_tee_providers_renders_edmm_build_argument() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask crate has a repository parent");
+        let dockerfile = std::fs::read_to_string(repo_root.join("Dockerfile.sgx"))
+            .expect("read repository SGX Dockerfile");
+        let manifest =
+            std::fs::read_to_string(repo_root.join("docker/raiko2-sgx-prover.manifest.template"))
+                .expect("read repository SGX manifest template");
+
+        assert!(dockerfile.contains("ARG SGX_EDMM_ENABLE=false"));
+        assert!(
+            dockerfile.contains(r#"-Dedmm_enable="${SGX_EDMM_ENABLE}""#),
+            "Dockerfile must pass SGX_EDMM_ENABLE to gramine-manifest"
+        );
+        assert!(manifest.contains("sgx.edmm_enable = {{ edmm_enable }}"));
     }
 
     #[test]

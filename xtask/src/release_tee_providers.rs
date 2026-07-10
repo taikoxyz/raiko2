@@ -25,6 +25,23 @@ const ENV_GCP_ENCLAVE_KEY_VERSION: &str = "GCP_ENCLAVE_KEY_VERSION";
 const ENV_GCP_ENCLAVE_KEY_PROJECT: &str = "GCP_ENCLAVE_KEY_PROJECT";
 const ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST: &str = "RAIKO2_SGX_ENCLAVE_KEY_HOST";
 
+#[derive(Debug, Clone, Copy)]
+struct LocalSgxVariant {
+    provider: &'static str,
+    edmm: bool,
+}
+
+const LOCAL_SGX_VARIANTS: [LocalSgxVariant; 2] = [
+    LocalSgxVariant {
+        provider: DEFAULT_LOCAL_PROVIDER,
+        edmm: false,
+    },
+    LocalSgxVariant {
+        provider: "raiko2-sgx-edmm",
+        edmm: true,
+    },
+];
+
 #[derive(Debug)]
 struct GramineSigningKey {
     path: PathBuf,
@@ -89,8 +106,7 @@ fn build_manifest(
     providers: &std::collections::BTreeMap<String, TeeProviderEntry>,
 ) -> Result<TeeAttestationManifest> {
     let generated_at = current_timestamp_rfc3339()?;
-    let local = build_local_provider_entry(root, tag, no_push)?;
-    let mut entries = vec![local];
+    let mut entries = build_local_provider_entries(root, tag, no_push)?;
 
     for (name, provider) in providers {
         entries.push(build_external_provider_entry(
@@ -105,39 +121,78 @@ fn build_manifest(
     })
 }
 
-fn build_local_provider_entry(
+fn build_local_provider_entries(
     root: &Path,
     tag: &str,
     no_push: bool,
-) -> Result<TeeProviderManifestEntry> {
-    let image_ref = local_provider_image_ref(tag, DEFAULT_LOCAL_REPOSITORY);
+) -> Result<Vec<TeeProviderManifestEntry>> {
     let build_context = root;
     let dockerfile = root.join(DEFAULT_LOCAL_DOCKERFILE);
-    docker_build_local_sgx(build_context, &dockerfile, &image_ref)?;
-    let digest = if no_push {
-        format!("{DEFAULT_LOCAL_REPOSITORY}:{tag}")
-    } else {
-        docker_push(&image_ref)?;
-        resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?
-    };
-    let attestation = read_attestation_json(&image_ref, DEFAULT_LOCAL_ATTESTATION_PATH)?;
-    let source = TeeProviderSource {
-        repo: "local".to_string(),
-        commit: source_revision(root)?,
-    };
+    let signing_key = resolve_gramine_enclave_key(root)?;
+    let key_sha256 = file_sha256_hex(signing_key.path())?;
+    let source_commit = source_revision(root)?;
+    let mut entries = Vec::with_capacity(LOCAL_SGX_VARIANTS.len());
 
-    Ok(TeeProviderManifestEntry {
+    for variant in LOCAL_SGX_VARIANTS {
+        let variant_tag = local_sgx_variant_tag(tag, variant.edmm);
+        let image_ref = local_provider_image_ref(&variant_tag, DEFAULT_LOCAL_REPOSITORY);
+        docker_build_local_sgx(
+            build_context,
+            &dockerfile,
+            &image_ref,
+            signing_key.path(),
+            &key_sha256,
+            variant,
+        )?;
+        let digest = if no_push {
+            image_ref.clone()
+        } else {
+            docker_push(&image_ref)?;
+            resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?
+        };
+        let attestation = read_attestation_json(&image_ref, DEFAULT_LOCAL_ATTESTATION_PATH)?;
+        entries.push(local_sgx_manifest_entry(
+            variant,
+            &variant_tag,
+            digest,
+            &source_commit,
+            attestation,
+        ));
+    }
+
+    Ok(entries)
+}
+
+fn local_sgx_variant_tag(release_tag: &str, edmm: bool) -> String {
+    if edmm {
+        format!("{release_tag}-edmm")
+    } else {
+        release_tag.to_string()
+    }
+}
+
+fn local_sgx_manifest_entry(
+    variant: LocalSgxVariant,
+    tag: &str,
+    digest: String,
+    source_commit: &str,
+    attestation: TeeProviderAttestation,
+) -> TeeProviderManifestEntry {
+    TeeProviderManifestEntry {
         lane: DEFAULT_LOCAL_LANE.to_string(),
-        provider: DEFAULT_LOCAL_PROVIDER.to_string(),
-        source,
+        provider: variant.provider.to_string(),
+        source: TeeProviderSource {
+            repo: "local".to_string(),
+            commit: source_commit.to_string(),
+        },
         image: TeeProviderImage {
             repository: DEFAULT_LOCAL_REPOSITORY.to_string(),
             tag: tag.to_string(),
             digest,
-            sgx_edmm: None,
+            sgx_edmm: Some(variant.edmm),
         },
         attestation,
-    })
+    }
 }
 
 fn build_external_provider_entry(
@@ -311,21 +366,46 @@ fn docker_build_command(
     cmd
 }
 
-fn docker_build_local_sgx(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()> {
-    let secret_src = resolve_gramine_enclave_key(context)?;
-    let key_sha256 = file_sha256_hex(secret_src.path())?;
-    let build_args = vec![format!("GRAMINE_ENCLAVE_KEY_SHA256={key_sha256}")];
-    let cmd = docker_build_command(
+fn docker_build_local_sgx(
+    context: &Path,
+    dockerfile: &Path,
+    image_ref: &str,
+    enclave_key_path: &Path,
+    enclave_key_sha256: &str,
+    variant: LocalSgxVariant,
+) -> Result<()> {
+    let cmd = local_sgx_docker_build_command(
         context,
         dockerfile,
         image_ref,
-        &build_args,
-        Some(DockerBuildSecret {
-            id: "gramine_enclave_key",
-            path: secret_src.path(),
-        }),
+        enclave_key_path,
+        enclave_key_sha256,
+        variant,
     );
     util::run(cmd)
+}
+
+fn local_sgx_docker_build_command(
+    context: &Path,
+    dockerfile: &Path,
+    image_ref: &str,
+    enclave_key_path: &Path,
+    enclave_key_sha256: &str,
+    variant: LocalSgxVariant,
+) -> Command {
+    docker_build_command(
+        context,
+        dockerfile,
+        image_ref,
+        &[
+            format!("GRAMINE_ENCLAVE_KEY_SHA256={enclave_key_sha256}"),
+            format!("SGX_EDMM_ENABLE={}", variant.edmm),
+        ],
+        Some(DockerBuildSecret {
+            id: "gramine_enclave_key",
+            path: enclave_key_path,
+        }),
+    )
 }
 
 fn docker_build_external_tee_provider(
@@ -600,13 +680,23 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::process::Command;
 
     use super::{
-        ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST,
+        ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST, LOCAL_SGX_VARIANTS,
         external_provider_docker_build_command, external_source_checkout_dir, file_sha256_hex,
         gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
+        local_sgx_docker_build_command, local_sgx_manifest_entry, local_sgx_variant_tag,
         parse_attestation_json, resolve_gramine_enclave_key_from_values, validate_attestation_path,
     };
+    use crate::release_tee_manifest::TeeProviderAttestation;
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
 
     #[test]
     fn release_tee_providers_builds_local_image_ref() {
@@ -614,6 +704,73 @@ mod tests {
             local_provider_image_ref("v1.2.3", "us-docker.pkg.dev/evmchain/images/raiko2-sgx"),
             "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3"
         );
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_uses_unsuffixed_and_edmm_tags() {
+        assert_eq!(local_sgx_variant_tag("v1.2.3", false), "v1.2.3");
+        assert_eq!(local_sgx_variant_tag("v1.2.3", true), "v1.2.3-edmm");
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_build_commands_share_key_and_select_edmm() {
+        let temp = tempfile::tempdir().expect("temp build paths");
+        let context = temp.path().join("context");
+        let dockerfile = context.join("Dockerfile.sgx");
+        let enclave_key = temp.path().join("enclave-key.pem");
+        let key_sha256 = "shared-key-sha256";
+
+        let commands = LOCAL_SGX_VARIANTS.map(|variant| {
+            let tag = local_sgx_variant_tag("v1.2.3", variant.edmm);
+            local_sgx_docker_build_command(
+                &context,
+                &dockerfile,
+                &local_provider_image_ref(&tag, "us-docker.pkg.dev/evmchain/images/raiko2-sgx"),
+                &enclave_key,
+                key_sha256,
+                variant,
+            )
+        });
+        let non_edmm_args = command_args(&commands[0]);
+        let edmm_args = command_args(&commands[1]);
+        let expected_secret = format!("id=gramine_enclave_key,src={}", enclave_key.display());
+        let expected_key_hash = format!("GRAMINE_ENCLAVE_KEY_SHA256={key_sha256}");
+
+        assert!(non_edmm_args.contains(&"SGX_EDMM_ENABLE=false".to_string()));
+        assert!(edmm_args.contains(&"SGX_EDMM_ENABLE=true".to_string()));
+        for args in [&non_edmm_args, &edmm_args] {
+            assert!(args.contains(&expected_key_hash));
+            assert!(args.contains(&expected_secret));
+        }
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_manifest_entries_are_ordered_and_explicit() {
+        let entries = LOCAL_SGX_VARIANTS.map(|variant| {
+            let tag = local_sgx_variant_tag("v1.2.3", variant.edmm);
+            local_sgx_manifest_entry(
+                variant,
+                &tag,
+                format!("example.invalid/raiko2-sgx@sha256:{tag}"),
+                "source-commit",
+                TeeProviderAttestation {
+                    mr_enclave: format!("mr-enclave-{tag}"),
+                    mr_signer: "shared-mr-signer".to_string(),
+                    isv_prod_id: Some(0),
+                    isv_svn: Some(0),
+                    debug_enclave: Some(false),
+                },
+            )
+        });
+
+        assert_eq!(entries[0].provider, "raiko2-sgx");
+        assert_eq!(entries[1].provider, "raiko2-sgx-edmm");
+        assert_eq!(entries[0].lane, "sgx");
+        assert_eq!(entries[1].lane, "sgx");
+        assert_eq!(entries[0].image.tag, "v1.2.3");
+        assert_eq!(entries[1].image.tag, "v1.2.3-edmm");
+        assert_eq!(entries[0].image.sgx_edmm, Some(false));
+        assert_eq!(entries[1].image.sgx_edmm, Some(true));
     }
 
     #[test]

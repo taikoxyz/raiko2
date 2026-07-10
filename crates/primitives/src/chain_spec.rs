@@ -1145,6 +1145,9 @@ mod tests {
     use alloy_primitives::address;
 
     #[cfg(feature = "chain-spec-json")]
+    const MAINNET_UNZEN_TIMESTAMP: u64 = 1_786_021_200;
+
+    #[cfg(feature = "chain-spec-json")]
     const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
 
     #[cfg(feature = "chain-spec-json")]
@@ -1421,8 +1424,12 @@ mod tests {
         );
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
-            Some(&ForkCondition::Tbd)
+            Some(&ForkCondition::Timestamp(MAINNET_UNZEN_TIMESTAMP))
         );
+        let taiko = spec.to_taiko_chain_spec()?;
+        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+        assert!(unzen.active_at_timestamp(MAINNET_UNZEN_TIMESTAMP));
+        assert!(!unzen.active_at_timestamp(MAINNET_UNZEN_TIMESTAMP - 1));
         assert_eq!(spec.l1_contract.len(), 1);
         let err = spec
             .get_fork_l1_contract_address_at(5_412_478, mainnet_shasta_timestamp() - 1)
@@ -1430,7 +1437,7 @@ mod tests {
         assert!(err.to_string().contains("fork l1 contract is not active"));
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, mainnet_shasta_timestamp(), ProofType::Sgx)?,
-            address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
+            address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8")
         );
         assert_eq!(
             spec.get_fork_verifier_address(
@@ -1449,17 +1456,113 @@ mod tests {
 
     #[cfg(feature = "chain-spec-json")]
     #[test]
-    fn taiko_mainnet_raw_spec_keeps_sgx_geth_shasta_verifier() -> Result<()> {
-        let list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+    fn taiko_mainnet_unzen_uses_configured_verifier_addresses() -> Result<()> {
+        // Address *resolution* only — not a claim that every backend can produce a verifiable
+        // Unzen proof. Backend readiness (e.g. gaiko2 Osaka / max-blocks) is tracked separately.
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
-            .iter()
-            .find(|spec| spec["name"] == "taiko_mainnet")
+            .into_iter()
+            .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
+        // Post-Pacaya mainnet height; Unzen is timestamp-gated, but pairing a realistic block
+        // number avoids reading as a pre-fork synthetic lookup.
+        const POST_PACAYA_BLOCK: u64 = 5_412_478;
+
+        // Mainnet reuses the current Shasta verifier set for Unzen, but the addresses must be
+        // configured under the UNZEN fork key (same shape as Hoodi) so the post-activation path
+        // does not depend on SHASTA fallback alone.
+        let unzen_verifiers = spec
+            .verifier_address_forks
+            .get(&ForkId::Taiko(TaikoFork::Unzen))
+            .ok_or_else(|| anyhow!("taiko_mainnet missing UNZEN verifier_address_forks"))?;
         assert_eq!(
-            spec["verifier_address_forks"]["SHASTA"]["SGXGETH"].as_str(),
-            Some("0x08568Df252ecf37D6C3eFD24f6ca3688118697F1")
+            unzen_verifiers.get(&ProofType::Sgx).copied().flatten(),
+            Some(address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8"))
         );
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::SgxGeth).copied().flatten(),
+            Some(address!("41e79EB4F03aBB5DF8716B759528dc5d8f6a84Ee"))
+        );
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::Risc0).copied().flatten(),
+            Some(address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b"))
+        );
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::Sp1).copied().flatten(),
+            Some(address!("73A0Db393ef87ce781ac7957bE10D6628432100F"))
+        );
+
+        // Pre-Unzen still resolves SHASTA; at/after activation resolves the UNZEN map.
+        assert_eq!(
+            spec.get_fork_verifier_address(
+                POST_PACAYA_BLOCK,
+                MAINNET_UNZEN_TIMESTAMP - 1,
+                ProofType::Risc0
+            )?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(
+                POST_PACAYA_BLOCK,
+                MAINNET_UNZEN_TIMESTAMP,
+                ProofType::Sgx
+            )?,
+            address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(
+                POST_PACAYA_BLOCK,
+                MAINNET_UNZEN_TIMESTAMP,
+                ProofType::SgxGeth
+            )?,
+            address!("41e79EB4F03aBB5DF8716B759528dc5d8f6a84Ee")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(
+                POST_PACAYA_BLOCK,
+                MAINNET_UNZEN_TIMESTAMP,
+                ProofType::Risc0
+            )?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(
+                POST_PACAYA_BLOCK,
+                MAINNET_UNZEN_TIMESTAMP,
+                ProofType::Sp1
+            )?,
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn taiko_mainnet_unzen_execution_semantics_match_builtin_schedule() -> Result<()> {
+        // Companion to address-resolution tests: config must also flip execution semantics
+        // (SpecId / hardfork activation) at the Unzen timestamp. This still does not prove that
+        // every prover backend has implemented those semantics.
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+        const POST_PACAYA_BLOCK: u64 = 5_412_478;
+
+        assert_eq!(
+            spec.spec_id(POST_PACAYA_BLOCK, MAINNET_UNZEN_TIMESTAMP - 1),
+            Some(SpecId::SHANGHAI)
+        );
+        assert_eq!(
+            spec.spec_id(POST_PACAYA_BLOCK, MAINNET_UNZEN_TIMESTAMP),
+            Some(SpecId::OSAKA)
+        );
+
+        let taiko = spec.to_taiko_chain_spec()?;
+        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+        assert!(!unzen.active_at_timestamp(MAINNET_UNZEN_TIMESTAMP - 1));
+        assert!(unzen.active_at_timestamp(MAINNET_UNZEN_TIMESTAMP));
         Ok(())
     }
 
@@ -1562,7 +1665,7 @@ mod tests {
 
     #[cfg(feature = "chain-spec-json")]
     #[test]
-    fn taiko_shasta_helper_maps_to_shanghai_until_unzen() -> Result<()> {
+    fn taiko_mainnet_uses_shanghai_until_unzen_then_osaka() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
@@ -1570,8 +1673,12 @@ mod tests {
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
         assert_eq!(
-            spec.spec_id(5_412_478, mainnet_shasta_timestamp()),
+            spec.spec_id(5_412_478, MAINNET_UNZEN_TIMESTAMP - 1),
             Some(SpecId::SHANGHAI)
+        );
+        assert_eq!(
+            spec.spec_id(5_412_478, MAINNET_UNZEN_TIMESTAMP),
+            Some(SpecId::OSAKA)
         );
         Ok(())
     }

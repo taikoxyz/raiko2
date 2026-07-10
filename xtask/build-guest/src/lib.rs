@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
@@ -1264,6 +1264,7 @@ fn read_manifest(path: &Path) -> Result<CargoManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
     use clap::Parser;
     use std::time::{SystemTime, UNIX_EPOCH};
 

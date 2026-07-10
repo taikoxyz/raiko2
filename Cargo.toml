@@ -220,4 +220,4 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "portable",
     "std",
 ] }
-kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false }
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "b61ef3e78f0fdc252229cec119b7abb46a57bb0f", default-features = false }

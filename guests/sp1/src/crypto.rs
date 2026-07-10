@@ -5,7 +5,7 @@
 //! bypasses precompiles and inflates prove cost.
 
 use alloy_primitives::keccak256;
-use kzg_rs::{get_kzg_settings, Bytes32, Bytes48, KzgProof};
+use raiko2_primitives::blob::verify_kzg_point_evaluation_proof;
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
 #[derive(Debug)]
@@ -44,8 +44,8 @@ impl Crypto for Sp1GuestCrypto {
         Ok(*hash)
     }
 
-    /// Route EIP-4844 point evaluation through kzg-rs so SP1's patched
-    /// `bls12_381` backend is used instead of revm's arkworks fallback.
+    /// Route EIP-4844 point evaluation through shared kzg-rs helper so SP1's
+    /// patched `bls12_381` backend is used instead of revm's arkworks fallback.
     fn verify_kzg_proof(
         &self,
         z: &[u8; 32],
@@ -53,33 +53,16 @@ impl Crypto for Sp1GuestCrypto {
         commitment: &[u8; 48],
         proof: &[u8; 48],
     ) -> Result<(), PrecompileHalt> {
-        verify_kzg_proof_with_kzg_rs(z, y, commitment, proof)
+        if verify_kzg_point_evaluation_proof(z, y, commitment, proof) {
+            Ok(())
+        } else {
+            Err(PrecompileHalt::BlobVerifyKzgProofFailed)
+        }
     }
 
     // bn254_g1_add / bn254_g1_mul / bn254_pairing_check intentionally use the
     // trait defaults → revm substrate-bn backend, which is Cargo-patched to
     // sp1-patches/bn and hits SP1 BN254 syscalls.
-}
-
-fn verify_kzg_proof_with_kzg_rs(
-    z: &[u8; 32],
-    y: &[u8; 32],
-    commitment: &[u8; 48],
-    proof: &[u8; 48],
-) -> Result<(), PrecompileHalt> {
-    let commitment = Bytes48::from_slice(commitment)
-        .map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let z = Bytes32::from_slice(z).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let y = Bytes32::from_slice(y).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let proof =
-        Bytes48::from_slice(proof).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let settings = get_kzg_settings();
-    let ok = KzgProof::verify_kzg_proof(&commitment, &z, &y, &proof, &settings)
-        .map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    if !ok {
-        return Err(PrecompileHalt::BlobVerifyKzgProofFailed);
-    }
-    Ok(())
 }
 
 pub fn install_guest_crypto() {

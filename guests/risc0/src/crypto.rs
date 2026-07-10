@@ -7,7 +7,7 @@
 //!   (no Crypto overrides needed; trait defaults call the blst crypto_backend).
 //! - EIP-4844 point evaluation: kzg-rs + patched `bls12_381` (not c-kzg).
 
-use kzg_rs::{get_kzg_settings, Bytes32, Bytes48, KzgProof};
+use raiko2_primitives::blob::verify_kzg_point_evaluation_proof;
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
 #[derive(Debug)]
@@ -49,7 +49,7 @@ impl Crypto for Risc0GuestCrypto {
         risc0_crypto_evm::secp256r1_verify(msg, sig, pk)
     }
 
-    /// Prefer kzg-rs over revm's arkworks fallback for EIP-4844 point evaluation.
+    /// Prefer shared kzg-rs helper over revm's arkworks fallback for EIP-4844.
     fn verify_kzg_proof(
         &self,
         z: &[u8; 32],
@@ -57,31 +57,14 @@ impl Crypto for Risc0GuestCrypto {
         commitment: &[u8; 48],
         proof: &[u8; 48],
     ) -> Result<(), PrecompileHalt> {
-        verify_kzg_proof_with_kzg_rs(z, y, commitment, proof)
+        if verify_kzg_point_evaluation_proof(z, y, commitment, proof) {
+            Ok(())
+        } else {
+            Err(PrecompileHalt::BlobVerifyKzgProofFailed)
+        }
     }
 
     // bn254_pairing_check uses the trait default → patched substrate-bn.
-}
-
-fn verify_kzg_proof_with_kzg_rs(
-    z: &[u8; 32],
-    y: &[u8; 32],
-    commitment: &[u8; 48],
-    proof: &[u8; 48],
-) -> Result<(), PrecompileHalt> {
-    let commitment = Bytes48::from_slice(commitment)
-        .map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let z = Bytes32::from_slice(z).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let y = Bytes32::from_slice(y).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let proof =
-        Bytes48::from_slice(proof).map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    let settings = get_kzg_settings();
-    let ok = KzgProof::verify_kzg_proof(&commitment, &z, &y, &proof, &settings)
-        .map_err(|_| PrecompileHalt::BlobVerifyKzgProofFailed)?;
-    if !ok {
-        return Err(PrecompileHalt::BlobVerifyKzgProofFailed);
-    }
-    Ok(())
 }
 
 fn fallback_modexp(base: &[u8], exp: &[u8], modulus: &[u8]) -> Vec<u8> {

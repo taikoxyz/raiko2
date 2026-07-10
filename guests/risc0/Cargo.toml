@@ -37,9 +37,6 @@ revm-precompile = { version = "=34.0.0", default-features = false, features = [
 risc0-crypto-evm = "=0.1.0-rc.1"
 k256 = { git = "https://github.com/risc0/RustCrypto-elliptic-curves", tag = "k256/v0.13.4-risczero.1" }
 sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8-risczero.0" }
-# kzg-rs standard backend; accelerate via the bls12_381 crates-io patch below.
-# (EVM 0x0a still routes through Crypto::verify_kzg_proof → kzg-rs, not c-kzg.)
-kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false, features = ["standard"] }
 
 [features]
 default = []

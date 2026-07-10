@@ -1220,7 +1220,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-serde 1.8.3",
  "alloy-sol-types",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -1241,7 +1241,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-serde 2.0.4",
  "alloy-sol-types",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -1478,7 +1478,7 @@ checksum = "e8597d36d546e1dab822345ad563243ec3920e199322cb554ce56c8ef1a1e2e7"
 dependencies = [
  "alloy-json-rpc 1.8.3",
  "alloy-transport 1.8.3",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "reqwest 0.13.2",
  "serde_json",
  "tower 0.5.3",
@@ -1494,7 +1494,7 @@ checksum = "2035f3c4d6bee20624da2dcf765d469b292398e48d766ffade61b0fcf8b4d45d"
 dependencies = [
  "alloy-json-rpc 2.0.1",
  "alloy-transport 2.0.1",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "reqwest 0.13.2",
  "serde_json",
  "tower 0.5.3",
@@ -6408,7 +6408,7 @@ dependencies = [
 [[package]]
 name = "kzg-rs"
 version = "0.2.8"
-source = "git+https://github.com/taikoxyz/kzg-rs?branch=feat%2Fraiko2#b61ef3e78f0fdc252229cec119b7abb46a57bb0f"
+source = "git+https://github.com/taikoxyz/kzg-rs?rev=b61ef3e78f0fdc252229cec119b7abb46a57bb0f#b61ef3e78f0fdc252229cec119b7abb46a57bb0f"
 dependencies = [
  "bls12_381 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bls12_381 0.8.0 (git+https://github.com/sp1-patches/bls12_381?tag=patch-0.8.0-sp1-6.0.0)",

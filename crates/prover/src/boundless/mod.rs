@@ -132,7 +132,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-type BoundlessStatusRegistry = Arc<Mutex<HashMap<RemoteSubmissionId, BoundlessSubmissionState>>>;
+type BoundlessStatusRegistry = Arc<Mutex<HashMap<RemoteSubmissionId, BoundlessSubmissionMetadata>>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BoundlessSubmissionMetadata {
@@ -148,12 +148,6 @@ struct BoundlessSubmissionMetadata {
 enum BoundlessTimeoutAction {
     Rebid,
     Abort,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct BoundlessSubmissionState {
-    metadata: BoundlessSubmissionMetadata,
-    terminal_outcome: Option<BoundlessTerminalOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,7 +188,7 @@ impl BoundlessStatusSource {
     async fn poll_batch(
         &self,
         submissions: Vec<RemoteSubmission>,
-    ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
+    ) -> Result<Vec<RemoteSubmissionStatus<BoundlessTerminalOutcome>>, RemotePollError> {
         let mut invalid_statuses = Vec::new();
         let mut pollable_submissions = Vec::new();
         for submission in submissions.iter().cloned() {
@@ -328,7 +322,7 @@ impl BoundlessStatusSource {
         poll_submission: &BoundlessPollSubmission,
         block_timestamp: u64,
         by_id: &mut HashMap<u64, JsonRpcResponse>,
-    ) -> Result<RemoteSubmissionStatus, RemotePollError> {
+    ) -> Result<RemoteSubmissionStatus<BoundlessTerminalOutcome>, RemotePollError> {
         let submission = &poll_submission.submission;
         let Some(metadata) = boundless_submission_metadata(&self.registry, submission.id)? else {
             return Ok(unrecoverable_boundless_status(
@@ -351,7 +345,7 @@ impl BoundlessStatusSource {
             0
         };
 
-        let (status, terminal_outcome) = classify_boundless_status(
+        Ok(classify_boundless_status(
             submission.id,
             &submission.provider_request_id,
             poll_submission.request_id,
@@ -360,11 +354,7 @@ impl BoundlessStatusSource {
             is_locked,
             request_deadline,
             block_timestamp,
-        );
-        if let Some(outcome) = terminal_outcome {
-            record_boundless_terminal_outcome(&self.registry, submission.id, outcome)?;
-        }
-        Ok(status)
+        ))
     }
 }
 
@@ -375,12 +365,12 @@ struct BoundlessPollSubmission {
 }
 
 #[async_trait::async_trait]
-impl RemoteStatusSource for BoundlessStatusSource {
+impl RemoteStatusSource<BoundlessTerminalOutcome> for BoundlessStatusSource {
     async fn poll(
         &self,
         _proof_type: ProofType,
         submissions: Vec<RemoteSubmission>,
-    ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
+    ) -> Result<Vec<RemoteSubmissionStatus<BoundlessTerminalOutcome>>, RemotePollError> {
         self.poll_batch(submissions).await
     }
 }
@@ -527,7 +517,7 @@ fn classify_boundless_status(
     is_locked: bool,
     request_deadline: u64,
     block_timestamp: u64,
-) -> (RemoteSubmissionStatus, Option<BoundlessTerminalOutcome>) {
+) -> RemoteSubmissionStatus<BoundlessTerminalOutcome> {
     let local_now = now_secs();
     let (status, reason, terminal_outcome) = if is_fulfilled {
         (RemoteStatus::Fulfilled, None, None)
@@ -582,15 +572,13 @@ fn classify_boundless_status(
     };
 
     let _ = (request_id, is_fulfilled, is_locked, request_deadline);
-    (
-        RemoteSubmissionStatus {
-            submission_id,
-            status,
-            reason,
-            observed_unix_secs: block_timestamp,
-        },
-        terminal_outcome,
-    )
+    RemoteSubmissionStatus {
+        submission_id,
+        status,
+        reason,
+        observed_unix_secs: block_timestamp,
+        context: terminal_outcome,
+    }
 }
 
 const fn should_defer_boundless_poll_timeout(
@@ -607,12 +595,13 @@ const fn should_defer_boundless_poll_timeout(
 fn unrecoverable_boundless_status(
     submission_id: RemoteSubmissionId,
     reason: impl Into<String>,
-) -> RemoteSubmissionStatus {
+) -> RemoteSubmissionStatus<BoundlessTerminalOutcome> {
     RemoteSubmissionStatus {
         submission_id,
         status: RemoteStatus::Unrecoverable,
         reason: Some(RemoteStatusReason::new(reason)),
         observed_unix_secs: now_secs(),
+        context: None,
     }
 }
 
@@ -620,7 +609,7 @@ fn boundless_poll_error_statuses(
     submissions: Vec<RemoteSubmission>,
     error: String,
     registry: &BoundlessStatusRegistry,
-) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
+) -> Result<Vec<RemoteSubmissionStatus<BoundlessTerminalOutcome>>, RemotePollError> {
     let mut has_terminal_status = false;
     let statuses = submissions
         .into_iter()
@@ -651,7 +640,7 @@ fn boundless_single_poll_error_status(
     submission: &RemoteSubmission,
     error: &str,
     registry: &BoundlessStatusRegistry,
-) -> RemoteSubmissionStatus {
+) -> RemoteSubmissionStatus<BoundlessTerminalOutcome> {
     let local_now = now_secs();
     let metadata = match boundless_submission_metadata(registry, submission.id) {
         Ok(Some(metadata)) => metadata,
@@ -670,11 +659,6 @@ fn boundless_single_poll_error_status(
         && !should_defer_boundless_poll_timeout(&metadata, local_now)
     {
         let retry = retry_directive_for_unconfirmed_failure(local_now, metadata.expires_at);
-        let _ = record_boundless_terminal_outcome(
-            registry,
-            submission.id,
-            BoundlessTerminalOutcome::PollTimeout { retry },
-        );
         return RemoteSubmissionStatus {
             submission_id: submission.id,
             status: RemoteStatus::Failed,
@@ -683,6 +667,7 @@ fn boundless_single_poll_error_status(
                 submission.provider_request_id
             ))),
             observed_unix_secs: local_now,
+            context: Some(BoundlessTerminalOutcome::PollTimeout { retry }),
         };
     }
     RemoteSubmissionStatus {
@@ -690,22 +675,27 @@ fn boundless_single_poll_error_status(
         status: RemoteStatus::Pending,
         reason: None,
         observed_unix_secs: local_now,
+        context: None,
     }
 }
 
-fn err_status(submission_id: RemoteSubmissionId, err: &RemotePollError) -> RemoteSubmissionStatus {
+fn err_status(
+    submission_id: RemoteSubmissionId,
+    err: &RemotePollError,
+) -> RemoteSubmissionStatus<BoundlessTerminalOutcome> {
     RemoteSubmissionStatus {
         submission_id,
         status: RemoteStatus::Unrecoverable,
         reason: Some(RemoteStatusReason::new(err.to_string())),
         observed_unix_secs: now_secs(),
+        context: None,
     }
 }
 
 fn lock_boundless_registry(
     registry: &BoundlessStatusRegistry,
 ) -> Result<
-    std::sync::MutexGuard<'_, HashMap<RemoteSubmissionId, BoundlessSubmissionState>>,
+    std::sync::MutexGuard<'_, HashMap<RemoteSubmissionId, BoundlessSubmissionMetadata>>,
     RemotePollError,
 > {
     registry.lock().map_err(|err| {
@@ -721,49 +711,18 @@ fn boundless_submission_metadata(
 ) -> Result<Option<BoundlessSubmissionMetadata>, RemotePollError> {
     Ok(lock_boundless_registry(registry)?
         .get(&submission_id)
-        .map(|state| state.metadata.clone()))
-}
-
-fn record_boundless_terminal_outcome(
-    registry: &BoundlessStatusRegistry,
-    submission_id: RemoteSubmissionId,
-    outcome: BoundlessTerminalOutcome,
-) -> Result<(), RemotePollError> {
-    if let Some(state) = lock_boundless_registry(registry)?.get_mut(&submission_id) {
-        state.terminal_outcome = Some(outcome);
-    }
-    Ok(())
-}
-
-fn boundless_terminal_outcome(
-    registry: &BoundlessStatusRegistry,
-    submission_id: RemoteSubmissionId,
-) -> Result<Option<BoundlessTerminalOutcome>, BoundlessAttemptError> {
-    registry
-        .lock()
-        .map_err(|err| {
-            BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
-                "Boundless status registry lock poisoned: {err}"
-            )))
-        })?
-        .get(&submission_id)
-        .map(|state| state.terminal_outcome)
-        .ok_or_else(|| {
-            BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
-                "Boundless status registry missing submission {submission_id}"
-            )))
-        })
+        .cloned())
 }
 
 struct BoundlessSubmissionGuard {
-    tracker: RemoteStatusTracker,
+    tracker: RemoteStatusTracker<BoundlessTerminalOutcome>,
     registry: BoundlessStatusRegistry,
     submission_id: RemoteSubmissionId,
 }
 
 impl BoundlessSubmissionGuard {
     const fn new(
-        tracker: RemoteStatusTracker,
+        tracker: RemoteStatusTracker<BoundlessTerminalOutcome>,
         registry: BoundlessStatusRegistry,
         submission_id: RemoteSubmissionId,
     ) -> Self {
@@ -1218,7 +1177,7 @@ pub struct BoundlessProver {
     /// pre-deposit balance. Shared across every pair's prover (they fund one account); see
     /// [`BoundlessBalanceGate`].
     balance_gate: BoundlessBalanceGate,
-    status_tracker: OnceLock<RemoteStatusTracker>,
+    status_tracker: OnceLock<RemoteStatusTracker<BoundlessTerminalOutcome>>,
     status_registry: BoundlessStatusRegistry,
 }
 
@@ -1288,7 +1247,7 @@ impl BoundlessProver {
             })
     }
 
-    fn status_tracker(&self) -> &RemoteStatusTracker {
+    fn status_tracker(&self) -> &RemoteStatusTracker<BoundlessTerminalOutcome> {
         self.status_tracker.get_or_init(|| {
             let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(1));
             let source = Arc::new(BoundlessStatusSource::new(
@@ -1297,7 +1256,10 @@ impl BoundlessProver {
                 Arc::clone(&self.status_registry),
                 poll_interval,
             ));
-            let mut sources: HashMap<ProofType, Arc<dyn RemoteStatusSource>> = HashMap::new();
+            let mut sources: HashMap<
+                ProofType,
+                Arc<dyn RemoteStatusSource<BoundlessTerminalOutcome>>,
+            > = HashMap::new();
             sources.insert(ProofType::Risc0, source);
             RemoteStatusTracker::spawn(RemotePollerConfig::new(poll_interval), sources)
         })
@@ -1743,23 +1705,20 @@ impl BoundlessProver {
             })?
             .insert(
                 submission_id,
-                BoundlessSubmissionState {
-                    metadata: BoundlessSubmissionMetadata {
-                        expires_at: submission.expires_at,
-                        lock_expires_at: submission.lock_expires_at,
-                        submitted_at: submission.submitted_at,
-                        no_lock_deadline: no_lock_deadline(
-                            submission.submitted_at,
-                            submission.lock_expires_at,
-                            no_lock_timeout,
-                        ),
-                        no_lock_timeout_action: match no_lock_timeout.action {
-                            NoLockTimeoutAction::Rebid => BoundlessTimeoutAction::Rebid,
-                            NoLockTimeoutAction::Abort => BoundlessTimeoutAction::Abort,
-                        },
-                        poll_timeout_at,
+                BoundlessSubmissionMetadata {
+                    expires_at: submission.expires_at,
+                    lock_expires_at: submission.lock_expires_at,
+                    submitted_at: submission.submitted_at,
+                    no_lock_deadline: no_lock_deadline(
+                        submission.submitted_at,
+                        submission.lock_expires_at,
+                        no_lock_timeout,
+                    ),
+                    no_lock_timeout_action: match no_lock_timeout.action {
+                        NoLockTimeoutAction::Rebid => BoundlessTimeoutAction::Rebid,
+                        NoLockTimeoutAction::Abort => BoundlessTimeoutAction::Abort,
                     },
-                    terminal_outcome: None,
+                    poll_timeout_at,
                 },
             );
         let status_tracker = self.status_tracker().clone();
@@ -1805,17 +1764,12 @@ impl BoundlessProver {
                 )
                 .await
             }
-            RemoteTerminalResult::Expired { reason, .. }
-            | RemoteTerminalResult::Failed { reason, .. } => {
-                let terminal_outcome =
-                    boundless_terminal_outcome(&self.status_registry, submission_id)?;
-                Self::boundless_failed_terminal(
-                    submission,
-                    no_lock_timeout,
-                    reason,
-                    terminal_outcome,
-                )
+            RemoteTerminalResult::Expired {
+                reason, context, ..
             }
+            | RemoteTerminalResult::Failed {
+                reason, context, ..
+            } => Self::boundless_failed_terminal(submission, no_lock_timeout, reason, context),
             RemoteTerminalResult::TimedOut { reason, .. } => {
                 Err(BoundlessAttemptError::Retryable {
                     reason: reason.message,
@@ -2619,15 +2573,14 @@ fn validate_offer_params(
 mod tests {
     use super::{
         BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
-        BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessSubmissionState,
-        BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
-        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        RetryDirective, TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
-        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
-        exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
-        parse_bool_result, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
-        validate_offer_params,
+        BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessTerminalOutcome,
+        BoundlessTimeoutAction, DeploymentConfig, DeploymentType, ElfType, JsonRpcError,
+        JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction, RetryDirective, TimeoutPolicy,
+        boundless_poll_error_statuses, classify_boundless_status, defer_poll_timeout_while_payable,
+        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
+        quote_batch_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2804,16 +2757,13 @@ mod tests {
         };
         let registry = Arc::new(Mutex::new(HashMap::from([(
             submission.id,
-            BoundlessSubmissionState {
-                metadata: BoundlessSubmissionMetadata {
-                    expires_at: now.saturating_sub(1),
-                    lock_expires_at: now.saturating_add(300),
-                    submitted_at: now.saturating_sub(30),
-                    no_lock_deadline: now.saturating_add(60),
-                    no_lock_timeout_action: BoundlessTimeoutAction::Rebid,
-                    poll_timeout_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
-                },
-                terminal_outcome: None,
+            BoundlessSubmissionMetadata {
+                expires_at: now.saturating_sub(1),
+                lock_expires_at: now.saturating_add(300),
+                submitted_at: now.saturating_sub(30),
+                no_lock_deadline: now.saturating_add(60),
+                no_lock_timeout_action: BoundlessTimeoutAction::Rebid,
+                poll_timeout_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
             },
         )])));
 
@@ -2827,12 +2777,7 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].status, RemoteStatus::Failed);
         assert!(matches!(
-            registry
-                .lock()
-                .expect("registry")
-                .values()
-                .next()
-                .and_then(|state| state.terminal_outcome),
+            statuses[0].context,
             Some(BoundlessTerminalOutcome::PollTimeout {
                 retry: RetryDirective::ReuseRequestId
             })
@@ -2856,16 +2801,13 @@ mod tests {
         };
         let registry = Arc::new(Mutex::new(HashMap::from([(
             valid.id,
-            BoundlessSubmissionState {
-                metadata: BoundlessSubmissionMetadata {
-                    expires_at: now.saturating_add(300),
-                    lock_expires_at: now.saturating_add(300),
-                    submitted_at: now.saturating_sub(30),
-                    no_lock_deadline: now.saturating_add(60),
-                    no_lock_timeout_action: BoundlessTimeoutAction::Rebid,
-                    poll_timeout_at: Instant::now() + Duration::from_secs(60),
-                },
-                terminal_outcome: None,
+            BoundlessSubmissionMetadata {
+                expires_at: now.saturating_add(300),
+                lock_expires_at: now.saturating_add(300),
+                submitted_at: now.saturating_sub(30),
+                no_lock_deadline: now.saturating_add(60),
+                no_lock_timeout_action: BoundlessTimeoutAction::Rebid,
+                poll_timeout_at: Instant::now() + Duration::from_secs(60),
             },
         )])));
 
@@ -2918,26 +2860,23 @@ mod tests {
         }
     }
 
-    fn boundless_submission_state(
+    fn boundless_submission_metadata(
         now: u64,
         no_lock_timeout_action: BoundlessTimeoutAction,
         no_lock_deadline_delta: i64,
         poll_timeout_at: Instant,
-    ) -> BoundlessSubmissionState {
-        BoundlessSubmissionState {
-            metadata: BoundlessSubmissionMetadata {
-                expires_at: now.saturating_add(300),
-                lock_expires_at: now.saturating_add(120),
-                submitted_at: now.saturating_sub(30),
-                no_lock_deadline: if no_lock_deadline_delta.is_negative() {
-                    now.saturating_sub(no_lock_deadline_delta.unsigned_abs())
-                } else {
-                    now.saturating_add(no_lock_deadline_delta.unsigned_abs())
-                },
-                no_lock_timeout_action,
-                poll_timeout_at,
+    ) -> BoundlessSubmissionMetadata {
+        BoundlessSubmissionMetadata {
+            expires_at: now.saturating_add(300),
+            lock_expires_at: now.saturating_add(120),
+            submitted_at: now.saturating_sub(30),
+            no_lock_deadline: if no_lock_deadline_delta.is_negative() {
+                now.saturating_sub(no_lock_deadline_delta.unsigned_abs())
+            } else {
+                now.saturating_add(no_lock_deadline_delta.unsigned_abs())
             },
-            terminal_outcome: None,
+            no_lock_timeout_action,
+            poll_timeout_at,
         }
     }
 
@@ -2959,7 +2898,7 @@ mod tests {
         let registry = Arc::new(Mutex::new(HashMap::from([
             (
                 unlocked.id,
-                boundless_submission_state(
+                boundless_submission_metadata(
                     now,
                     BoundlessTimeoutAction::Rebid,
                     60,
@@ -2968,7 +2907,7 @@ mod tests {
             ),
             (
                 fulfilled.id,
-                boundless_submission_state(
+                boundless_submission_metadata(
                     now,
                     BoundlessTimeoutAction::Rebid,
                     60,
@@ -3023,77 +2962,83 @@ mod tests {
         let now = now_secs();
         let submission_id = RemoteSubmissionId::new();
         let request_id = U256::from(1);
-        let rebid_state = boundless_submission_state(
+        let rebid_metadata = boundless_submission_metadata(
             now,
             BoundlessTimeoutAction::Rebid,
             -1,
             Instant::now() + Duration::from_secs(60),
         );
-        let abort_state = boundless_submission_state(
+        let abort_metadata = boundless_submission_metadata(
             now,
             BoundlessTimeoutAction::Abort,
             -1,
             Instant::now() + Duration::from_secs(60),
         );
 
-        let (status, outcome) = classify_boundless_status(
+        let status = classify_boundless_status(
             submission_id,
             "0x1",
             request_id,
-            &rebid_state.metadata,
+            &rebid_metadata,
             false,
             false,
             0,
             now,
         );
         assert_eq!(status.status, RemoteStatus::Failed);
-        assert_eq!(outcome, Some(BoundlessTerminalOutcome::NoLockRebidTimeout));
+        assert_eq!(
+            status.context,
+            Some(BoundlessTerminalOutcome::NoLockRebidTimeout)
+        );
 
-        let (status, outcome) = classify_boundless_status(
+        let status = classify_boundless_status(
             submission_id,
             "0x1",
             request_id,
-            &abort_state.metadata,
+            &abort_metadata,
             false,
             false,
             0,
             now,
         );
         assert_eq!(status.status, RemoteStatus::Failed);
-        assert_eq!(outcome, Some(BoundlessTerminalOutcome::NoLockAbortTimeout));
+        assert_eq!(
+            status.context,
+            Some(BoundlessTerminalOutcome::NoLockAbortTimeout)
+        );
 
-        let mut locked_state = boundless_submission_state(
+        let mut locked_metadata = boundless_submission_metadata(
             now,
             BoundlessTimeoutAction::Rebid,
             60,
             Instant::now() + Duration::from_secs(60),
         );
-        locked_state.metadata.expires_at = now.saturating_add(300);
-        let (status, outcome) = classify_boundless_status(
+        locked_metadata.expires_at = now.saturating_add(300);
+        let status = classify_boundless_status(
             submission_id,
             "0x1",
             request_id,
-            &locked_state.metadata,
+            &locked_metadata,
             false,
             true,
             now.saturating_sub(1),
             now,
         );
         assert_eq!(status.status, RemoteStatus::Expired);
-        assert_eq!(outcome, Some(BoundlessTerminalOutcome::LockExpired));
+        assert_eq!(status.context, Some(BoundlessTerminalOutcome::LockExpired));
 
-        let mut poll_timeout_state = boundless_submission_state(
+        let mut poll_timeout_metadata = boundless_submission_metadata(
             now,
             BoundlessTimeoutAction::Rebid,
             60,
             Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         );
-        poll_timeout_state.metadata.expires_at = now.saturating_sub(1);
-        let (status, outcome) = classify_boundless_status(
+        poll_timeout_metadata.expires_at = now.saturating_sub(1);
+        let status = classify_boundless_status(
             submission_id,
             "0x1",
             request_id,
-            &poll_timeout_state.metadata,
+            &poll_timeout_metadata,
             false,
             false,
             0,
@@ -3101,7 +3046,7 @@ mod tests {
         );
         assert_eq!(status.status, RemoteStatus::Failed);
         assert_eq!(
-            outcome,
+            status.context,
             Some(BoundlessTerminalOutcome::PollTimeout {
                 retry: RetryDirective::ReuseRequestId
             })

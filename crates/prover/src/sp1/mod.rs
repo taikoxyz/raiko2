@@ -240,6 +240,7 @@ impl Sp1StatusSource {
             status: remote_status,
             reason,
             observed_unix_secs: now,
+            context: None,
         })
     }
 }
@@ -263,6 +264,7 @@ fn sp1_status(
         status,
         reason,
         observed_unix_secs: sp1_now_secs(),
+        context: None,
     }
 }
 
@@ -275,6 +277,7 @@ fn unrecoverable_sp1_status(
         status: RemoteStatus::Unrecoverable,
         reason: Some(RemoteStatusReason::new(reason)),
         observed_unix_secs: sp1_now_secs(),
+        context: None,
     }
 }
 
@@ -293,6 +296,7 @@ fn sp1_transient_poll_status(
         status: RemoteStatus::Pending,
         reason: None,
         observed_unix_secs: sp1_now_secs(),
+        context: None,
     }
 }
 

@@ -22,16 +22,23 @@ use uuid::Uuid;
 
 const MIN_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
-pub struct RemoteStatusTracker {
-    command_tx: mpsc::UnboundedSender<TrackerCommand>,
+pub struct RemoteStatusTracker<T = ()> {
+    command_tx: mpsc::UnboundedSender<TrackerCommand<T>>,
 }
 
-impl RemoteStatusTracker {
+impl<T> Clone for RemoteStatusTracker<T> {
+    fn clone(&self) -> Self {
+        Self {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+}
+
+impl<T: Send + 'static> RemoteStatusTracker<T> {
     #[must_use]
     pub fn spawn(
         config: RemotePollerConfig,
-        sources: HashMap<ProofType, Arc<dyn RemoteStatusSource>>,
+        sources: HashMap<ProofType, Arc<dyn RemoteStatusSource<T>>>,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let actor = TrackerActor::new(config, sources, command_rx);
@@ -42,7 +49,7 @@ impl RemoteStatusTracker {
     pub fn register(
         &self,
         submission: RemoteSubmission,
-        terminal_tx: oneshot::Sender<RemoteTerminalResult>,
+        terminal_tx: oneshot::Sender<RemoteTerminalResult<T>>,
     ) -> Result<(), RegisterError> {
         self.command_tx
             .send(TrackerCommand::Register {
@@ -76,12 +83,12 @@ impl RemotePollerConfig {
 }
 
 #[async_trait::async_trait]
-pub trait RemoteStatusSource: Send + Sync + 'static {
+pub trait RemoteStatusSource<T: Send + 'static = ()>: Send + Sync + 'static {
     async fn poll(
         &self,
         proof_type: ProofType,
         submissions: Vec<RemoteSubmission>,
-    ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError>;
+    ) -> Result<Vec<RemoteSubmissionStatus<T>>, RemotePollError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,11 +100,12 @@ pub struct RemoteSubmission {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteSubmissionStatus {
+pub struct RemoteSubmissionStatus<T = ()> {
     pub submission_id: RemoteSubmissionId,
     pub status: RemoteStatus,
     pub reason: Option<RemoteStatusReason>,
     pub observed_unix_secs: u64,
+    pub context: Option<T>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -143,28 +151,33 @@ impl RemoteStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RemoteTerminalResult {
+pub enum RemoteTerminalResult<T = ()> {
     Fulfilled {
         submission_id: RemoteSubmissionId,
         observed_unix_secs: u64,
+        context: Option<T>,
     },
     Failed {
         submission_id: RemoteSubmissionId,
         reason: RemoteStatusReason,
         observed_unix_secs: u64,
+        context: Option<T>,
     },
     Expired {
         submission_id: RemoteSubmissionId,
         reason: RemoteStatusReason,
         observed_unix_secs: u64,
+        context: Option<T>,
     },
     TimedOut {
         submission_id: RemoteSubmissionId,
         reason: RemoteStatusReason,
+        context: Option<T>,
     },
     Unrecoverable {
         submission_id: RemoteSubmissionId,
         reason: RemoteStatusReason,
+        context: Option<T>,
     },
 }
 
@@ -196,44 +209,44 @@ pub enum RegisterError {
     Closed,
 }
 
-type PollFuture = Pin<Box<dyn Future<Output = PollCompletion> + Send>>;
+type PollFuture<T> = Pin<Box<dyn Future<Output = PollCompletion<T>> + Send>>;
 
-enum TrackerCommand {
+enum TrackerCommand<T> {
     Register {
         submission: RemoteSubmission,
-        terminal_tx: oneshot::Sender<RemoteTerminalResult>,
+        terminal_tx: oneshot::Sender<RemoteTerminalResult<T>>,
     },
     Untrack {
         submission_id: RemoteSubmissionId,
     },
 }
 
-struct TrackedSubmission {
+struct TrackedSubmission<T> {
     submission: RemoteSubmission,
-    terminal_tx: oneshot::Sender<RemoteTerminalResult>,
+    terminal_tx: oneshot::Sender<RemoteTerminalResult<T>>,
 }
 
-struct PollCompletion {
+struct PollCompletion<T> {
     proof_type: ProofType,
     selected_ids: BTreeSet<RemoteSubmissionId>,
-    result: Result<Vec<RemoteSubmissionStatus>, RemotePollError>,
+    result: Result<Vec<RemoteSubmissionStatus<T>>, RemotePollError>,
 }
 
-struct TrackerActor {
+struct TrackerActor<T> {
     config: RemotePollerConfig,
-    sources: HashMap<ProofType, Arc<dyn RemoteStatusSource>>,
-    command_rx: mpsc::UnboundedReceiver<TrackerCommand>,
-    active: BTreeMap<RemoteSubmissionId, TrackedSubmission>,
+    sources: HashMap<ProofType, Arc<dyn RemoteStatusSource<T>>>,
+    command_rx: mpsc::UnboundedReceiver<TrackerCommand<T>>,
+    active: BTreeMap<RemoteSubmissionId, TrackedSubmission<T>>,
     buckets: HashMap<ProofType, BTreeSet<RemoteSubmissionId>>,
     in_flight_proof_types: BTreeSet<ProofType>,
-    in_flight: FuturesUnordered<PollFuture>,
+    in_flight: FuturesUnordered<PollFuture<T>>,
 }
 
-impl TrackerActor {
+impl<T: Send + 'static> TrackerActor<T> {
     fn new(
         config: RemotePollerConfig,
-        sources: HashMap<ProofType, Arc<dyn RemoteStatusSource>>,
-        command_rx: mpsc::UnboundedReceiver<TrackerCommand>,
+        sources: HashMap<ProofType, Arc<dyn RemoteStatusSource<T>>>,
+        command_rx: mpsc::UnboundedReceiver<TrackerCommand<T>>,
     ) -> Self {
         Self {
             config,
@@ -274,7 +287,7 @@ impl TrackerActor {
         }
     }
 
-    fn handle_command(&mut self, command: TrackerCommand) {
+    fn handle_command(&mut self, command: TrackerCommand<T>) {
         match command {
             TrackerCommand::Register {
                 submission,
@@ -287,12 +300,13 @@ impl TrackerActor {
     fn register(
         &mut self,
         submission: RemoteSubmission,
-        terminal_tx: oneshot::Sender<RemoteTerminalResult>,
+        terminal_tx: oneshot::Sender<RemoteTerminalResult<T>>,
     ) {
         if self.active.contains_key(&submission.id) {
             let _ = terminal_tx.send(RemoteTerminalResult::Unrecoverable {
                 submission_id: submission.id,
                 reason: RemoteStatusReason::new("duplicate remote submission id"),
+                context: None,
             });
             return;
         }
@@ -304,6 +318,7 @@ impl TrackerActor {
                     "no remote status source registered for proof type {}",
                     submission.proof_type
                 )),
+                context: None,
             });
             return;
         }
@@ -411,6 +426,7 @@ impl TrackerActor {
                 let terminal = RemoteTerminalResult::TimedOut {
                     submission_id,
                     reason: RemoteStatusReason::new("remote submission timed out"),
+                    context: None,
                 };
                 self.send_terminal(submission_id, terminal);
                 continue;
@@ -440,13 +456,14 @@ impl TrackerActor {
                 let terminal = RemoteTerminalResult::TimedOut {
                     submission_id,
                     reason: RemoteStatusReason::new("remote submission timed out"),
+                    context: None,
                 };
                 self.send_terminal(submission_id, terminal);
             }
         }
     }
 
-    fn handle_poll_completion(&mut self, completion: PollCompletion) {
+    fn handle_poll_completion(&mut self, completion: PollCompletion<T>) {
         self.in_flight_proof_types.remove(&completion.proof_type);
         match completion.result {
             Ok(statuses) => {
@@ -474,7 +491,7 @@ impl TrackerActor {
         &mut self,
         proof_type: ProofType,
         selected_ids: &BTreeSet<RemoteSubmissionId>,
-        statuses: Vec<RemoteSubmissionStatus>,
+        statuses: Vec<RemoteSubmissionStatus<T>>,
     ) {
         if !valid_status_set(selected_ids, &statuses) {
             tracing::error!(
@@ -509,7 +526,11 @@ impl TrackerActor {
         );
     }
 
-    fn send_terminal(&mut self, submission_id: RemoteSubmissionId, terminal: RemoteTerminalResult) {
+    fn send_terminal(
+        &mut self,
+        submission_id: RemoteSubmissionId,
+        terminal: RemoteTerminalResult<T>,
+    ) {
         if let Some(tracked) = self.active.remove(&submission_id) {
             self.remove_from_bucket(tracked.submission.proof_type, submission_id);
             let _ = tracked.terminal_tx.send(terminal);
@@ -528,6 +549,7 @@ impl TrackerActor {
                 RemoteTerminalResult::Unrecoverable {
                     submission_id,
                     reason: RemoteStatusReason::new(reason.clone()),
+                    context: None,
                 },
             );
         }
@@ -549,7 +571,7 @@ impl TrackerActor {
     }
 }
 
-impl RemoteTerminalResult {
+impl<T> RemoteTerminalResult<T> {
     #[must_use]
     pub const fn submission_id(&self) -> RemoteSubmissionId {
         match self {
@@ -562,39 +584,45 @@ impl RemoteTerminalResult {
     }
 }
 
-fn terminal_result(status: RemoteSubmissionStatus) -> Option<RemoteTerminalResult> {
-    match status.status {
+fn terminal_result<T>(status: RemoteSubmissionStatus<T>) -> Option<RemoteTerminalResult<T>> {
+    let RemoteSubmissionStatus {
+        submission_id,
+        status,
+        reason,
+        observed_unix_secs,
+        context,
+    } = status;
+    match status {
         RemoteStatus::Pending | RemoteStatus::Locked => None,
         RemoteStatus::Fulfilled => Some(RemoteTerminalResult::Fulfilled {
-            submission_id: status.submission_id,
-            observed_unix_secs: status.observed_unix_secs,
+            submission_id,
+            observed_unix_secs,
+            context,
         }),
         RemoteStatus::Failed => Some(RemoteTerminalResult::Failed {
-            submission_id: status.submission_id,
-            reason: status
-                .reason
-                .unwrap_or_else(|| RemoteStatusReason::new("remote submission failed")),
-            observed_unix_secs: status.observed_unix_secs,
+            submission_id,
+            reason: reason.unwrap_or_else(|| RemoteStatusReason::new("remote submission failed")),
+            observed_unix_secs,
+            context,
         }),
         RemoteStatus::Expired => Some(RemoteTerminalResult::Expired {
-            submission_id: status.submission_id,
-            reason: status
-                .reason
-                .unwrap_or_else(|| RemoteStatusReason::new("remote submission expired")),
-            observed_unix_secs: status.observed_unix_secs,
+            submission_id,
+            reason: reason.unwrap_or_else(|| RemoteStatusReason::new("remote submission expired")),
+            observed_unix_secs,
+            context,
         }),
         RemoteStatus::Unrecoverable => Some(RemoteTerminalResult::Unrecoverable {
-            submission_id: status.submission_id,
-            reason: status
-                .reason
+            submission_id,
+            reason: reason
                 .unwrap_or_else(|| RemoteStatusReason::new("remote submission is unrecoverable")),
+            context,
         }),
     }
 }
 
-fn valid_status_set(
+fn valid_status_set<T>(
     selected_ids: &BTreeSet<RemoteSubmissionId>,
-    statuses: &[RemoteSubmissionStatus],
+    statuses: &[RemoteSubmissionStatus<T>],
 ) -> bool {
     let returned_ids = statuses
         .iter()
@@ -639,6 +667,42 @@ mod tests {
     use tokio::sync::{Mutex, oneshot};
 
     use super::*;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum TestContext {
+        RetrySameId,
+    }
+
+    struct NonCloneContext;
+
+    struct ContextSource {
+        status: Mutex<Option<RemoteSubmissionStatus<TestContext>>>,
+    }
+
+    impl ContextSource {
+        fn with_status(status: RemoteSubmissionStatus<TestContext>) -> Self {
+            Self {
+                status: Mutex::new(Some(status)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteStatusSource<TestContext> for ContextSource {
+        async fn poll(
+            &self,
+            _proof_type: ProofType,
+            _submissions: Vec<RemoteSubmission>,
+        ) -> Result<Vec<RemoteSubmissionStatus<TestContext>>, RemotePollError> {
+            Ok(vec![
+                self.status
+                    .lock()
+                    .await
+                    .take()
+                    .expect("context source polled once"),
+            ])
+        }
+    }
 
     #[derive(Default)]
     struct FakeSource {
@@ -732,6 +796,7 @@ mod tests {
             status: RemoteStatus::Pending,
             reason: None,
             observed_unix_secs: 1,
+            context: None,
         }
     }
 
@@ -741,6 +806,7 @@ mod tests {
             status: RemoteStatus::Fulfilled,
             reason: None,
             observed_unix_secs: 1,
+            context: None,
         }
     }
 
@@ -795,6 +861,54 @@ mod tests {
             RemoteTerminalResult::Fulfilled { .. }
         ));
         assert_eq!(source.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_result_preserves_source_context() {
+        let submission = submission(ProofType::Sp1);
+        let source = Arc::new(ContextSource::with_status(RemoteSubmissionStatus {
+            submission_id: submission.id,
+            status: RemoteStatus::Failed,
+            reason: Some(RemoteStatusReason::new("retry")),
+            observed_unix_secs: 1,
+            context: Some(TestContext::RetrySameId),
+        }));
+        let mut sources: HashMap<ProofType, Arc<dyn RemoteStatusSource<TestContext>>> =
+            HashMap::new();
+        sources.insert(ProofType::Sp1, source);
+        let tracker = RemoteStatusTracker::<TestContext>::spawn(
+            RemotePollerConfig::new(Duration::from_millis(10)),
+            sources,
+        );
+        let (tx, rx) = oneshot::channel();
+
+        tracker.register(submission, tx).expect("register");
+
+        let terminal = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("terminal")
+            .expect("sender");
+        assert!(matches!(
+            terminal,
+            RemoteTerminalResult::Failed {
+                context: Some(TestContext::RetrySameId),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn tracker_clone_does_not_require_context_clone() {
+        let sources: HashMap<ProofType, Arc<dyn RemoteStatusSource<NonCloneContext>>> =
+            HashMap::new();
+        let tracker = RemoteStatusTracker::<NonCloneContext>::spawn(
+            RemotePollerConfig::new(Duration::from_millis(10)),
+            sources,
+        );
+
+        let cloned = tracker.clone();
+
+        drop(cloned);
     }
 
     #[tokio::test]

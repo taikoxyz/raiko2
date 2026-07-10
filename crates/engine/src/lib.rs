@@ -96,8 +96,8 @@ pub trait EngineObserver: Send + Sync {
         &self,
         _id: &EngineTaskId,
         _task: &EngineTask,
-    ) -> Option<String> {
-        None
+    ) -> RaikoResult<Option<String>> {
+        Ok(None)
     }
 
     async fn load_boundless_submission(
@@ -161,7 +161,7 @@ impl ProverProgressObserver for EngineProgressObserver {
             .await
     }
 
-    async fn load_sp1_network_request_id(&self) -> Option<String> {
+    async fn load_sp1_network_request_id(&self) -> RaikoResult<Option<String>> {
         self.observer
             .load_sp1_network_request_id(&self.task_id, &self.task)
             .await

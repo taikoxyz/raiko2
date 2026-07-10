@@ -794,22 +794,27 @@ impl EngineObserver for RuntimeObserver {
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
-    ) -> Option<String> {
+    ) -> RaikoResult<Option<String>> {
+        // Like the Boundless twin below, read and parse failures propagate instead of degrading
+        // to `Ok(None)`: `None` makes the SP1 prover mint a fresh network request, so a transient
+        // storage error must not discard a live accepted id.
         let record = match task {
-            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, task)
-                .await
-                .ok()
-                .flatten(),
+            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => {
+                self.load_root_record_for_resume(id, task).await?
+            }
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => None,
-        }?;
+            | EngineTask::Proposal { .. } => return Ok(None),
+        };
+        let Some(record) = record else {
+            return Ok(None);
+        };
 
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
+        let metadata: TaskMetadata =
+            serde_json::from_value(record.metadata).context("failed to parse task metadata")?;
         let task_id = Self::root_task_ref(id);
-        match task {
+        Ok(match task {
             EngineTask::ProveProposal { .. } => metadata
                 .proposal_runtime(&task_id)
                 .and_then(TaskRuntimeMetadata::sp1_network_request_id),
@@ -823,7 +828,7 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-        }
+        })
     }
 
     async fn load_boundless_submission(
@@ -1169,6 +1174,66 @@ mod tests {
             .await?;
 
         assert!(submission.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sp1_resume_runtime_read_errors_propagate() -> Result<()> {
+        let root = unique_runtime_root("runtime-observer-sp1-read-error");
+        let runtime = Arc::new(RuntimeManager::new(root.clone())?);
+        std::fs::create_dir(root.join("state/runtime.sqlite"))?;
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaSp1,
+            request: proposal_request(),
+        });
+
+        let err = observer
+            .load_sp1_network_request_id(&id, &proposal_prove_task(&id))
+            .await
+            .expect_err("runtime database read failure must not become a fresh SP1 request");
+
+        assert!(err.to_string().contains("runtime sqlite database"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sp1_resume_metadata_decode_errors_propagate() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-sp1-metadata-error",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_sp1_metadata_error",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaNative,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let mut record = runtime
+            .get_task("task_sp1_metadata_error")
+            .await?
+            .expect("runtime task");
+        record.metadata = serde_json::json!({"network_pair": "taiko_dev/ethereum"});
+        runtime.upsert_task(&record).await?;
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request,
+        });
+
+        let err = observer
+            .load_sp1_network_request_id(&id, &proposal_prove_task(&id))
+            .await
+            .expect_err("metadata decode failure must not become a fresh SP1 request");
+
+        assert!(
+            err.to_string()
+                .contains("failed to parse runtime task metadata"),
+            "{err}"
+        );
         Ok(())
     }
 
@@ -1839,7 +1904,7 @@ mod tests {
                         input_task: proposal_task_id.clone(),
                     },
                 )
-                .await
+                .await?
                 .as_deref(),
             Some("0xsp1")
         );
@@ -1942,7 +2007,7 @@ mod tests {
                         input_task: proposal_task_id.clone(),
                     },
                 )
-                .await
+                .await?
                 .as_deref(),
             Some("0xsp1-proposal")
         );
@@ -1955,7 +2020,7 @@ mod tests {
                         input_task: other_task_id.clone(),
                     },
                 )
-                .await,
+                .await?,
             None
         );
         Ok(())
@@ -2021,7 +2086,7 @@ mod tests {
                         source: raiko2_engine::AggregationSource::Inputs(vec![]),
                     },
                 )
-                .await,
+                .await?,
             None
         );
 
@@ -2054,7 +2119,7 @@ mod tests {
                         source: raiko2_engine::AggregationSource::Inputs(vec![]),
                     },
                 )
-                .await
+                .await?
                 .as_deref(),
             Some("0xsp1-aggregate")
         );

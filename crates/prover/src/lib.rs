@@ -72,6 +72,13 @@ pub trait GuestInputCodec<I>: Send + Sync {
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
 }
 
+/// Schema version stamped on every persisted [`BoundlessSubmissionSnapshot`].
+///
+/// The prover-side [`TryFrom`] conversion hard-rejects any other version (fail closed: an
+/// unreadable snapshot must block resume, never turn into a fresh — double-paying — session).
+/// That also means a binary at version N cannot read version N+1 records, so bumping this is a
+/// rollback barrier: before bumping, add read compatibility for the previous version here (or
+/// migrate records server-side) rather than relying on the hard reject.
 pub const BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION: u32 = 1;
 
 const fn missing_boundless_submission_snapshot_version() -> u32 {
@@ -168,8 +175,12 @@ pub enum ProverProgress {
 pub trait ProverProgressObserver: Send + Sync {
     async fn on_progress(&self, progress: &ProverProgress) -> RaikoResult<()>;
 
-    async fn load_sp1_network_request_id(&self) -> Option<String> {
-        None
+    /// Returns the persisted SP1 network request id to resume, `Ok(None)` when none was stored.
+    /// Read or parse failures must surface as errors, never as `Ok(None)`: an accepted SP1
+    /// request commits funds, and treating a failed read as "nothing stored" would mint a second
+    /// request for the same proof.
+    async fn load_sp1_network_request_id(&self) -> RaikoResult<Option<String>> {
+        Ok(None)
     }
 
     async fn load_boundless_submission(&self) -> RaikoResult<Option<BoundlessSubmissionSnapshot>> {

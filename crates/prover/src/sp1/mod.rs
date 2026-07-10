@@ -1639,8 +1639,11 @@ async fn request_network_proof(
     let auction_timeout = (config.network_mode == Sp1NetworkMode::Mainnet)
         .then(|| config.auction_timeout_secs.map(Duration::from_secs))
         .flatten();
+    // A failed read aborts here (fail closed) rather than falling through to `None`: `None`
+    // means "mint a fresh network request", which double-pays if the unreadable record held a
+    // live accepted id.
     let mut stored_request_id = if let Some(observer) = observer.as_ref() {
-        observer.load_sp1_network_request_id().await
+        observer.load_sp1_network_request_id().await?
     } else {
         None
     };

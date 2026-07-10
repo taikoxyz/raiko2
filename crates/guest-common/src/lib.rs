@@ -115,7 +115,8 @@ fn decode_anchor_checkpoint(
         block.header.number
     );
 
-    let decoded = anchorV4Call::abi_decode(input).with_context(|| {
+    // Use validate so non-canonical uint48 ABI padding is rejected (driver parity).
+    let decoded = anchorV4Call::abi_decode_validate(input).with_context(|| {
         format!(
             "failed to decode anchorV4 calldata for block {}",
             block.header.number
@@ -2449,5 +2450,32 @@ mod tests {
         guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource::default()];
         guest_input.taiko.data_sources = Vec::new();
         assert_guest_rejects(guest_input, "data source count");
+    }
+
+    #[test]
+    fn anchor_v4_abi_decode_validate_rejects_non_canonical_uint48_padding() {
+        // Canonical ABI: selector + (uint48 blockNumber, bytes32, bytes32) as three 32-byte words.
+        let call = anchorV4Call {
+            _checkpoint: AnchorV4Checkpoint {
+                blockNumber: 42u64.try_into().expect("fits uint48"),
+                blockHash: B256::from([0x11; 32]),
+                stateRoot: B256::from([0x22; 32]),
+            },
+        };
+        let mut encoded = call.abi_encode();
+        // Dirty a high byte of the uint48 word (outside the low 48 bits). Lenient decode may
+        // still accept this; abi_decode_validate must reject non-canonical padding.
+        let word_start = 4; // after selector
+        assert_eq!(encoded[word_start], 0);
+        encoded[word_start] = 0x01;
+
+        assert!(
+            anchorV4Call::abi_decode(&encoded).is_ok(),
+            "lenient abi_decode is expected to accept dirty high bits of uint48 word"
+        );
+        assert!(
+            anchorV4Call::abi_decode_validate(&encoded).is_err(),
+            "abi_decode_validate must reject non-canonical uint48 ABI padding"
+        );
     }
 }

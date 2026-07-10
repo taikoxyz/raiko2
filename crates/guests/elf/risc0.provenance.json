@@ -2,9 +2,9 @@
   "schema_version": 1,
   "backend": "risc0",
   "bench": false,
-  "source_fingerprint": "4bf1ff10133f9785350a3d9a9ceb143f05eb011cf08f73a59fa9297d67701890",
+  "source_fingerprint": "e537f779b66a741b8fceab2b853efdb3c562d8278ca8b4bfe04429531c71dab0",
   "artifacts": {
-    "crates/guests/elf/risc0_shasta_aggregation.elf": "a57a5c74d385ffa35e9784f1dfcb68ad66d15c80d89d5cd1431e72edf4999426",
-    "crates/guests/elf/risc0_shasta_proposal.elf": "c4d1e484c24c0f5fee209909f932257da99095c842158ab8117103c5ee127172"
+    "crates/guests/elf/risc0_shasta_aggregation.elf": "4892c49a2bb82129c718960b3668f2575b4c63823da23f057ec32024797310c0",
+    "crates/guests/elf/risc0_shasta_proposal.elf": "203480515b606dcb3c754b807dd461311613f80f7741e7b91490dc3be6f95645"
   }
 }

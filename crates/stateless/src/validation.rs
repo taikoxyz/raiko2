@@ -11,7 +11,9 @@ use alethia_reth_chainspec::{hardfork::TaikoHardforks, spec::TaikoChainSpec};
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
-use alloy_consensus::{BlockHeader, Header, TrieAccount, proofs, transaction::Recovered};
+use alloy_consensus::{
+    BlockHeader, Header, TrieAccount, TxReceipt, proofs, transaction::Recovered,
+};
 use alloy_primitives::{Address, B256, U256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
@@ -177,6 +179,25 @@ fn map_block_execution_error(err: &BlockExecutionError) -> StatelessValidationEr
     StatelessValidationError::StatelessExecutionFailed(err.to_string())
 }
 
+/// Reject blocks whose first (anchor) transaction executed but reverted.
+///
+/// Prover-mode execution treats `execute_transaction` Ok as "committed" even when the
+/// EVM result is a revert (receipt status = false). A reverted anchor leaves no valid
+/// checkpoint binding; fail closed here for driver parity and defense-in-depth.
+fn ensure_anchor_receipt_success(receipts: &[Receipt]) -> Result<(), StatelessValidationError> {
+    let receipt = receipts.first().ok_or_else(|| {
+        StatelessValidationError::StatelessExecutionFailed(
+            "missing anchor transaction receipt".to_string(),
+        )
+    })?;
+    if !receipt.status() {
+        return Err(StatelessValidationError::StatelessExecutionFailed(
+            "anchor transaction execution did not succeed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Filtered block execution artifacts returned by txlist-driven reconstruction.
 #[derive(Debug)]
 pub struct FilteredBlockExecutionOutcome {
@@ -265,6 +286,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
     let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
         .map_err(|err| map_block_execution_error(&err))?;
+    ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
     let filtered_block = assemble_filtered_block(
         evm_config,
@@ -323,6 +345,7 @@ where
     let output = executor
         .execute(current_block)
         .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
+    ensure_anchor_receipt_success(&output.receipts)?;
 
     // Post validation checks
     validate_block_post_execution(current_block, chain_spec, &output, None)
@@ -513,8 +536,8 @@ fn compute_ancestor_hashes_for_child(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_derived_block, reconstruct_block_from_transactions_with_witness_resources,
-        validate_block,
+        build_derived_block, ensure_anchor_receipt_success,
+        reconstruct_block_from_transactions_with_witness_resources, validate_block,
     };
     use alethia_reth_block::config::TaikoEvmConfig;
     use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
@@ -986,5 +1009,36 @@ mod tests {
             result,
             Err(StatelessValidationError::MissingAncestorHeader)
         ));
+    }
+
+    #[test]
+    fn ensure_anchor_receipt_success_rejects_missing_and_reverted_receipts() {
+        use reth_ethereum_primitives::Receipt;
+
+        assert!(matches!(
+            ensure_anchor_receipt_success(&[]),
+            Err(StatelessValidationError::StatelessExecutionFailed(msg))
+                if msg.contains("missing anchor transaction receipt")
+        ));
+
+        let reverted = Receipt {
+            tx_type: Default::default(),
+            cumulative_gas_used: 21_000,
+            logs: vec![],
+            success: false,
+        };
+        assert!(matches!(
+            ensure_anchor_receipt_success(&[reverted]),
+            Err(StatelessValidationError::StatelessExecutionFailed(msg))
+                if msg.contains("did not succeed")
+        ));
+
+        let ok = Receipt {
+            tx_type: Default::default(),
+            cumulative_gas_used: 21_000,
+            logs: vec![],
+            success: true,
+        };
+        assert!(ensure_anchor_receipt_success(&[ok]).is_ok());
     }
 }

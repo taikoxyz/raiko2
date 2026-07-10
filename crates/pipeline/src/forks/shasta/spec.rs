@@ -1232,7 +1232,8 @@ fn decode_anchor_checkpoint(
         )));
     }
 
-    let decoded = anchorV4Call::abi_decode(input).map_err(|err| {
+    // Use validate so non-canonical uint48 ABI padding is rejected (driver parity).
+    let decoded = anchorV4Call::abi_decode_validate(input).map_err(|err| {
         RaikoError::Preflight(format!(
             "failed to decode anchorV4 calldata for block {}: {err}",
             block.header.number

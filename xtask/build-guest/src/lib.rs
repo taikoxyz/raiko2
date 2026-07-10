@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, ValueEnum};
 use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
@@ -1379,7 +1379,12 @@ mod tests {
                 .nth(1)
                 .and_then(|rest| rest.split('"').next())
             {
-                revs.insert(repo, rev.to_string());
+                insert_unique_rev(
+                    &mut revs,
+                    repo,
+                    rev.to_string(),
+                    &format!("manifest {}", manifest_path.display()),
+                )?;
             }
         }
         Ok(revs)
@@ -1401,10 +1406,74 @@ mod tests {
                 .nth(1)
                 .and_then(|rest| rest.split(['#', '&']).next().map(str::to_owned))
             {
-                revs.insert(repo, rev);
+                insert_unique_rev(
+                    &mut revs,
+                    repo,
+                    rev,
+                    &format!("lockfile {}", lock_path.display()),
+                )?;
             }
         }
         Ok(revs)
+    }
+
+    fn insert_unique_rev(
+        revs: &mut std::collections::BTreeMap<String, String>,
+        repo: String,
+        rev: String,
+        source: &str,
+    ) -> Result<()> {
+        if let Some(existing) = revs.get(&repo) {
+            ensure!(
+                existing == &rev,
+                "inconsistent git rev pins for {repo} in {source}: {existing} vs {rev}"
+            );
+            return Ok(());
+        }
+        revs.insert(repo, rev);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_git_revs_rejects_conflicting_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let manifest = temp.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            r#"
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+"#,
+        )
+        .unwrap();
+        let err = parse_git_revs(&manifest).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent git rev pins for alethia-reth"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn parse_lock_git_revs_rejects_conflicting_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let lock = temp.join("Cargo.lock");
+        fs::write(
+            &lock,
+            r#"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"#,
+        )
+        .unwrap();
+        let err = parse_lock_git_revs(&lock).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent git rev pins for alethia-reth"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp);
     }
 
     fn git_repo_name_from_line(line: &str) -> Option<String> {

@@ -14,7 +14,7 @@ pub mod payload_helpers;
 #[cfg(feature = "net")]
 pub use anchor::{
     AnchorTransactionValidationError, AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input,
-    validate_anchor_transaction,
+    validate_anchor_transaction_structure,
 };
 pub use blob_coder::BlobCoder;
 pub use derivation::{

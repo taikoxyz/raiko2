@@ -2695,7 +2695,7 @@ fn onchain_delivery_confirmation(
     };
     let decoded = IBoundlessMarket::RequestSubmitted::decode_log_validate(candidate)
         .map_err(|error| format!("failed to decode RequestSubmitted log: {error}"))?;
-    let indexed_request_id: U256 = decoded.data.requestId.into();
+    let indexed_request_id = decoded.data.requestId;
     if indexed_request_id != market_request_id {
         return Err(format!(
             "RequestSubmitted request id mismatch: expected 0x{market_request_id:x}, indexed \
@@ -4488,7 +4488,7 @@ mod tests {
         let mut request = market_request(50, 5);
         request.id = request_id;
         let event = IBoundlessMarket::RequestSubmitted {
-            requestId: request_id.into(),
+            requestId: request_id,
             request,
             clientSignature: Bytes::new(),
         };
@@ -4526,7 +4526,7 @@ mod tests {
     }
 
     #[test]
-    fn onchain_delivery_requires_matching_request_submitted_event() {
+    fn onchain_delivery_requires_success_and_one_configured_market_event() {
         let request_id = U256::from(0x1234);
         let lock_expires_at = 1_000;
         let included_at = 500;
@@ -4568,82 +4568,6 @@ mod tests {
         .expect_err("wrong emitter must not confirm");
         assert!(err.contains("no RequestSubmitted"), "{err}");
 
-        // Candidate logs with the expected indexed id still require a complete ABI body.
-        for malformed_data in [Bytes::new(), Bytes::from_static(&[0x00])] {
-            let malformed = raw_request_submitted_log(
-                TEST_MARKET_ADDRESS,
-                vec![
-                    IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH,
-                    B256::from(request_id.to_be_bytes::<32>()),
-                ],
-                malformed_data,
-            );
-            let err = onchain_delivery_confirmation(
-                true,
-                &[malformed],
-                TEST_MARKET_ADDRESS,
-                request_id,
-                lock_expires_at,
-                included_at,
-            )
-            .expect_err("empty or truncated event data must not confirm");
-            assert!(err.contains("decode"), "{err}");
-        }
-
-        // Right emitter, wrong request id.
-        let err = onchain_delivery_confirmation(
-            true,
-            &[request_submitted_log(
-                TEST_MARKET_ADDRESS,
-                request_id.saturating_add(U256::from(1)),
-            )],
-            TEST_MARKET_ADDRESS,
-            request_id,
-            lock_expires_at,
-            included_at,
-        )
-        .expect_err("mismatched request id must not confirm");
-        assert!(err.contains("request id mismatch"), "{err}");
-
-        // Malformed event: right emitter and signature topic but no indexed request id.
-        let malformed = raw_request_submitted_log(
-            TEST_MARKET_ADDRESS,
-            vec![IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH],
-            Bytes::new(),
-        );
-        let err = onchain_delivery_confirmation(
-            true,
-            &[malformed],
-            TEST_MARKET_ADDRESS,
-            request_id,
-            lock_expires_at,
-            included_at,
-        )
-        .expect_err("malformed event must not confirm");
-        assert!(err.contains("decode"), "{err}");
-
-        // The body must describe the same request as the indexed and expected id.
-        let mut mismatched_request = market_request(50, 5);
-        mismatched_request.id = request_id.saturating_add(U256::from(1));
-        let mismatched_event = IBoundlessMarket::RequestSubmitted {
-            requestId: request_id.into(),
-            request: mismatched_request,
-            clientSignature: Bytes::new(),
-        };
-        let err = onchain_delivery_confirmation(
-            true,
-            &[Log {
-                address: TEST_MARKET_ADDRESS,
-                data: mismatched_event.encode_log_data(),
-            }],
-            TEST_MARKET_ADDRESS,
-            request_id,
-            lock_expires_at,
-            included_at,
-        )
-        .expect_err("mismatched request body id must not confirm");
-        assert!(err.contains("request body id mismatch"), "{err}");
-
         // Multiple matching candidates are ambiguous and must not confirm.
         let duplicate = request_submitted_log(TEST_MARKET_ADDRESS, request_id);
         let err = onchain_delivery_confirmation(
@@ -4667,6 +4591,96 @@ mod tests {
             included_at,
         )
         .expect("matching event inside the payable window confirms delivery");
+    }
+
+    #[test]
+    fn onchain_delivery_requires_strict_event_decoding() {
+        let request_id = U256::from(0x1234);
+        let lock_expires_at = 1_000;
+        let included_at = 500;
+
+        // Candidate logs with the expected indexed id still require a complete ABI body.
+        for malformed_data in [Bytes::new(), Bytes::from_static(&[0x00])] {
+            let malformed = raw_request_submitted_log(
+                TEST_MARKET_ADDRESS,
+                vec![
+                    IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH,
+                    B256::from(request_id.to_be_bytes::<32>()),
+                ],
+                malformed_data,
+            );
+            let err = onchain_delivery_confirmation(
+                true,
+                &[malformed],
+                TEST_MARKET_ADDRESS,
+                request_id,
+                lock_expires_at,
+                included_at,
+            )
+            .expect_err("empty or truncated event data must not confirm");
+            assert!(err.contains("decode"), "{err}");
+        }
+
+        // Malformed event: right emitter and signature topic but no indexed request id.
+        let malformed = raw_request_submitted_log(
+            TEST_MARKET_ADDRESS,
+            vec![IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH],
+            Bytes::new(),
+        );
+        let err = onchain_delivery_confirmation(
+            true,
+            &[malformed],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            included_at,
+        )
+        .expect_err("malformed event must not confirm");
+        assert!(err.contains("decode"), "{err}");
+    }
+
+    #[test]
+    fn onchain_delivery_requires_matching_indexed_and_body_ids() {
+        let request_id = U256::from(0x1234);
+        let lock_expires_at = 1_000;
+        let included_at = 500;
+
+        // Right emitter, wrong request id.
+        let err = onchain_delivery_confirmation(
+            true,
+            &[request_submitted_log(
+                TEST_MARKET_ADDRESS,
+                request_id.saturating_add(U256::from(1)),
+            )],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            included_at,
+        )
+        .expect_err("mismatched request id must not confirm");
+        assert!(err.contains("request id mismatch"), "{err}");
+
+        // The body must describe the same request as the indexed and expected id.
+        let mut mismatched_request = market_request(50, 5);
+        mismatched_request.id = request_id.saturating_add(U256::from(1));
+        let mismatched_event = IBoundlessMarket::RequestSubmitted {
+            requestId: request_id,
+            request: mismatched_request,
+            clientSignature: Bytes::new(),
+        };
+        let err = onchain_delivery_confirmation(
+            true,
+            &[Log {
+                address: TEST_MARKET_ADDRESS,
+                data: mismatched_event.encode_log_data(),
+            }],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            included_at,
+        )
+        .expect_err("mismatched request body id must not confirm");
+        assert!(err.contains("request body id mismatch"), "{err}");
     }
 
     #[test]

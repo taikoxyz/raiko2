@@ -2632,12 +2632,13 @@ fn submission_rung_is_final(
 /// `submitRequest` stores no request state — the `RequestSubmitted` event IS the publication
 /// mechanism, so a successful status alone proves nothing about the order (the SDK's own submit
 /// helpers likewise extract the event and treat its absence as an error). Confirmation therefore
-/// requires a log from the configured market address whose signature topic is
-/// `RequestSubmitted` and whose indexed request id matches ours exactly. And the payable window
-/// must still be open by the same local clock the no-lock machinery uses: a request published
-/// after `lock_expires_at` can no longer be locked for pay, so confirming a late receipt would
-/// only license an immediate `NoLockAbortTimeout` dead-end — left unconfirmed, the rung keeps
-/// its same-id resubmission, which reopens a fresh bidding window.
+/// requires exactly one log from the configured market address whose signature topic is
+/// `RequestSubmitted`. The full event must decode, and both its indexed request id and the id in
+/// its request body must match ours exactly. And the payable window must still be open by the same
+/// local clock the no-lock machinery uses: a request published after `lock_expires_at` can no
+/// longer be locked for pay, so confirming a late receipt would only license an immediate
+/// `NoLockAbortTimeout` dead-end — left unconfirmed, the rung keeps its same-id resubmission,
+/// which reopens a fresh bidding window.
 fn onchain_delivery_confirmation(
     status: bool,
     logs: &[Log],
@@ -2649,16 +2650,43 @@ fn onchain_delivery_confirmation(
     if !status {
         return Err("transaction reverted".to_string());
     }
-    let request_id_topic = B256::from(market_request_id.to_be_bytes::<32>());
-    let published = logs.iter().any(|log| {
-        log.address == market_address
-            && log.topics().first() == Some(&IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH)
-            && log.topics().get(1) == Some(&request_id_topic)
-    });
-    if !published {
+    let candidates = logs
+        .iter()
+        .filter(|log| {
+            log.address == market_address
+                && log.topics().first() == Some(&IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH)
+        })
+        .collect::<Vec<_>>();
+    let candidate = match candidates.as_slice() {
+        [] => {
+            return Err(format!(
+                "receipt succeeded but carries no RequestSubmitted log for request id \
+                 0x{market_request_id:x} from market {market_address}"
+            ));
+        }
+        [candidate] => *candidate,
+        candidates => {
+            return Err(format!(
+                "receipt carries multiple RequestSubmitted logs ({}) from market \
+                 {market_address}; expected exactly one",
+                candidates.len()
+            ));
+        }
+    };
+    let decoded = IBoundlessMarket::RequestSubmitted::decode_log_validate(candidate)
+        .map_err(|error| format!("failed to decode RequestSubmitted log: {error}"))?;
+    let indexed_request_id: U256 = decoded.data.requestId.into();
+    if indexed_request_id != market_request_id {
         return Err(format!(
-            "receipt succeeded but carries no RequestSubmitted log for request id \
-             0x{market_request_id:x} from market {market_address}"
+            "RequestSubmitted request id mismatch: expected 0x{market_request_id:x}, indexed \
+             0x{indexed_request_id:x}"
+        ));
+    }
+    if decoded.data.request.id != market_request_id {
+        return Err(format!(
+            "RequestSubmitted request body id mismatch: expected 0x{market_request_id:x}, body \
+             0x{:x}",
+            decoded.data.request.id
         ));
     }
     if lock_expires_at > 0 && now_secs >= lock_expires_at {
@@ -4421,15 +4449,27 @@ mod tests {
         emitter: alloy_primitives::Address,
         request_id: U256,
     ) -> alloy_primitives::Log {
+        let mut request = market_request(50, 5);
+        request.id = request_id;
+        let event = IBoundlessMarket::RequestSubmitted {
+            requestId: request_id.into(),
+            request,
+            clientSignature: Bytes::new(),
+        };
         Log {
             address: emitter,
-            data: LogData::new_unchecked(
-                vec![
-                    IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH,
-                    B256::from(request_id.to_be_bytes::<32>()),
-                ],
-                Bytes::new(),
-            ),
+            data: event.encode_log_data(),
+        }
+    }
+
+    fn raw_request_submitted_log(
+        emitter: alloy_primitives::Address,
+        topics: Vec<B256>,
+        data: Bytes,
+    ) -> alloy_primitives::Log {
+        Log {
+            address: emitter,
+            data: LogData::new_unchecked(topics, data),
         }
     }
 
@@ -4492,6 +4532,28 @@ mod tests {
         .expect_err("wrong emitter must not confirm");
         assert!(err.contains("no RequestSubmitted"), "{err}");
 
+        // Candidate logs with the expected indexed id still require a complete ABI body.
+        for malformed_data in [Bytes::new(), Bytes::from_static(&[0x00])] {
+            let malformed = raw_request_submitted_log(
+                TEST_MARKET_ADDRESS,
+                vec![
+                    IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH,
+                    B256::from(request_id.to_be_bytes::<32>()),
+                ],
+                malformed_data,
+            );
+            let err = onchain_delivery_confirmation(
+                true,
+                &[malformed],
+                TEST_MARKET_ADDRESS,
+                request_id,
+                lock_expires_at,
+                now,
+            )
+            .expect_err("empty or truncated event data must not confirm");
+            assert!(err.contains("decode"), "{err}");
+        }
+
         // Right emitter, wrong request id.
         let err = onchain_delivery_confirmation(
             true,
@@ -4505,16 +4567,14 @@ mod tests {
             now,
         )
         .expect_err("mismatched request id must not confirm");
-        assert!(err.contains("no RequestSubmitted"), "{err}");
+        assert!(err.contains("request id mismatch"), "{err}");
 
         // Malformed event: right emitter and signature topic but no indexed request id.
-        let malformed = Log {
-            address: TEST_MARKET_ADDRESS,
-            data: LogData::new_unchecked(
-                vec![IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH],
-                Bytes::new(),
-            ),
-        };
+        let malformed = raw_request_submitted_log(
+            TEST_MARKET_ADDRESS,
+            vec![IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH],
+            Bytes::new(),
+        );
         let err = onchain_delivery_confirmation(
             true,
             &[malformed],
@@ -4524,7 +4584,42 @@ mod tests {
             now,
         )
         .expect_err("malformed event must not confirm");
-        assert!(err.contains("no RequestSubmitted"), "{err}");
+        assert!(err.contains("decode"), "{err}");
+
+        // The body must describe the same request as the indexed and expected id.
+        let mut mismatched_request = market_request(50, 5);
+        mismatched_request.id = request_id.saturating_add(U256::from(1));
+        let mismatched_event = IBoundlessMarket::RequestSubmitted {
+            requestId: request_id.into(),
+            request: mismatched_request,
+            clientSignature: Bytes::new(),
+        };
+        let err = onchain_delivery_confirmation(
+            true,
+            &[Log {
+                address: TEST_MARKET_ADDRESS,
+                data: mismatched_event.encode_log_data(),
+            }],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("mismatched request body id must not confirm");
+        assert!(err.contains("request body id mismatch"), "{err}");
+
+        // Multiple matching candidates are ambiguous and must not confirm.
+        let duplicate = request_submitted_log(TEST_MARKET_ADDRESS, request_id);
+        let err = onchain_delivery_confirmation(
+            true,
+            &[duplicate.clone(), duplicate],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("duplicate RequestSubmitted events must not confirm");
+        assert!(err.contains("multiple RequestSubmitted"), "{err}");
 
         // The exact event from the configured market, inside the payable window: confirmed.
         onchain_delivery_confirmation(

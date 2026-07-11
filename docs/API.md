@@ -1159,11 +1159,13 @@ All API errors use the Hoodi-style envelope:
   above it. In `manual` mode it is optional, must be at least `max_price_per_mcycle`, and clamps the
   bps rebid escalation; without it, manual escalation is unbounded by config. In `market` mode it is
   the canonical spelling of the safety cap. Once a bid is pinned at the ceiling and its dispatch was
-  positively acknowledged (order stream echoed the id, or the RPC accepted the transaction), the
-  rung is treated as final: no same-price resubmission follows, and the request instead waits out
-  its lock deadline before the task gives up. When the dispatch outcome is uncertain (or the
-  submission was resumed after a restart), ceiling-pinned rungs still resubmit at the ceiling price
-  so the same-id resubmission doubles as the delivery retry. Explicit flat ladders
+  positively acknowledged (the order stream echoed the id, or the submit transaction produced a
+  successful onchain receipt — broadcast acceptance alone does not count), the rung is treated as
+  final: no same-price resubmission follows, and the request instead waits out its lock deadline
+  before the task gives up. When the dispatch outcome is uncertain — a submit error, a dropped,
+  replaced, or reverted transaction, a missing receipt, or a submission resumed after a restart —
+  ceiling-pinned rungs still resubmit at the ceiling price so the same-id resubmission doubles as
+  the delivery retry. Explicit flat ladders
   (`rebid_price_step_bps = 0`) always keep their same-price rebids. Lowering the configured ceiling
   below the persisted previous bid aborts the proof attempt without submission.
 - `prover.boundless.offer_params.{batch,aggregation}.timeouts` is a tagged table selecting the

@@ -70,6 +70,11 @@ const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+/// Bound on the post-broadcast wait for the `submitRequest` receipt that confirms delivery.
+/// Dozens of blocks on every supported market chain (Base 2s, Taiko 1s). Expiring the wait only
+/// leaves the submission unconfirmed — it keeps its same-id rebid rungs as the delivery retry —
+/// so a slow RPC costs churn, never correctness.
+const ONCHAIN_RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -888,11 +893,13 @@ struct Submission {
     // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
     attempt: u64,
     // Whether an external acknowledgement proved this exact submission reached its dispatch
-    // target (the order stream echoed the finalized id, or the RPC accepted the transaction).
-    // `false` for uncertain dispatch errors and for resumed records — deliberately in-memory
-    // only, so a restart conservatively assumes unconfirmed. An unconfirmed submission must keep
-    // its rebid rungs even when the price is ceiling-pinned: the same-id resubmission is also
-    // the only delivery retry for a request the market may never have seen.
+    // target: the order stream echoed the finalized id, or the submit transaction produced a
+    // successful receipt (broadcast acceptance alone proves nothing — a pending tx can be
+    // dropped, replaced, or mined reverted). `false` for uncertain dispatch errors and for
+    // resumed records — deliberately in-memory only, so a restart conservatively assumes
+    // unconfirmed. An unconfirmed submission must keep its rebid rungs even when the price is
+    // ceiling-pinned: the same-id resubmission is also the only delivery retry for a request the
+    // market may never have seen.
     delivery_confirmed: bool,
 }
 
@@ -1745,10 +1752,8 @@ impl BoundlessProver {
         match send_result {
             Ok(pending_tx) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
-                // The RPC accepted the transaction; a later mempool drop is still possible but
-                // recovers through the bounded MarketExpired → rotate path, unlike the
-                // uncertain-error arm below where the request may never have left this process.
-                submission.delivery_confirmed = true;
+                // Persist the tx hash before waiting on the receipt so a crash during the wait
+                // still leaves the broadcast recorded.
                 publish_boundless_progress(
                     observer,
                     &submission,
@@ -1759,6 +1764,27 @@ impl BoundlessProver {
                     evaluated_mcycles_count,
                 )
                 .await?;
+                // Broadcast acceptance only proves the RPC took the transaction — it can still be
+                // dropped, replaced, or mined reverted, in which case the request never reaches
+                // the market and, because `timeout > lock_timeout` is enforced, a ceiling-pinned
+                // final rung would hit `NoLockAbortTimeout` at the lock deadline before any
+                // `MarketExpired` rotation could recover it. Only a successful receipt for our
+                // own `submitRequest` call (which emits the request on success) confirms
+                // delivery; every other outcome stays unconfirmed and keeps the same-id rebid
+                // rungs as the delivery retry.
+                confirm_onchain_delivery(&mut submission, || async {
+                    match tokio::time::timeout(ONCHAIN_RECEIPT_TIMEOUT, pending_tx.get_receipt())
+                        .await
+                    {
+                        Ok(Ok(receipt)) => Ok(receipt.status()),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_elapsed) => Err(format!(
+                            "no receipt within {}s",
+                            ONCHAIN_RECEIPT_TIMEOUT.as_secs()
+                        )),
+                    }
+                })
+                .await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -2582,6 +2608,38 @@ fn submission_rung_is_final(
         && price_pinned_at_ceiling(submission.max_price_wei, ceiling_wei, step_bps)
 }
 
+/// Resolve the onchain delivery acknowledgement from the receipt wait. Only a successful receipt
+/// confirms delivery; a reverted, dropped, replaced, or not-yet-mined transaction leaves the
+/// submission unconfirmed so ceiling-pinned rungs keep their same-id rebids as the delivery
+/// retry (a never-delivered final rung would otherwise dead-wait to `NoLockAbortTimeout` at the
+/// lock deadline — always before `MarketExpired`, since `timeout > lock_timeout` is enforced).
+async fn confirm_onchain_delivery<F, Fut>(submission: &mut Submission, wait_for_receipt: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    match wait_for_receipt().await {
+        Ok(true) => submission.delivery_confirmed = true,
+        Ok(false) => {
+            tracing::warn!(
+                provider_request_id = %submission.provider_request_id,
+                remote_tx_hash = ?submission.remote_tx_hash,
+                "Boundless submitRequest transaction reverted; leaving delivery unconfirmed and \
+                 keeping same-id rebid rungs"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                provider_request_id = %submission.provider_request_id,
+                remote_tx_hash = ?submission.remote_tx_hash,
+                error = %error,
+                "Boundless submitRequest receipt unavailable; leaving delivery unconfirmed and \
+                 keeping same-id rebid rungs"
+            );
+        }
+    }
+}
+
 /// Shared gate before either offchain or onchain submission. It consumes the live bidding session
 /// directly, finalizes market pricing, and yields the only request type accepted by submit paths.
 fn finalize_request_for_submission(
@@ -2806,12 +2864,13 @@ mod tests {
         BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
         ElfType, FinalizedProofRequest, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS,
         NoLockTimeoutAction, RetryDirective, Submission, TimeoutPolicy,
-        boundless_poll_error_statuses, classify_boundless_status, defer_poll_timeout_while_payable,
-        dispatch_after_boundless_progress_ack, escalate_and_cap_market_prices,
-        exceeds_submission_budget, finalize_request_for_submission, no_lock_deadline_elapsed,
-        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
-        quote_proposal_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        submission_rung_is_final, user_cycles_to_mcycles, validate_offer_params,
+        boundless_poll_error_statuses, classify_boundless_status, confirm_onchain_delivery,
+        defer_poll_timeout_while_payable, dispatch_after_boundless_progress_ack,
+        escalate_and_cap_market_prices, exceeds_submission_budget, finalize_request_for_submission,
+        no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs, parse_bool_result,
+        parse_env_bool, parse_env_url, quote_proposal_mcycles, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, submission_rung_is_final, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use crate::{ProverProgress, ProverProgressObserver};
@@ -4297,6 +4356,64 @@ mod tests {
             "{err}"
         );
         assert!(!dispatched.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn onchain_receipt_success_confirms_delivery() {
+        let mut submission = test_submission(1, 2);
+        submission.max_price_wei = U256::from(100);
+        assert!(!submission.delivery_confirmed);
+
+        confirm_onchain_delivery(&mut submission, || async { Ok(true) }).await;
+
+        assert!(submission.delivery_confirmed);
+        assert!(submission_rung_is_final(
+            &submission,
+            Some(U256::from(100)),
+            TEST_REBID_PRICE_STEP_BPS,
+        ));
+    }
+
+    #[tokio::test]
+    async fn onchain_broadcast_without_successful_receipt_keeps_pinned_rung_rebidding() {
+        // Regression for the dropped/replaced/reverted-transaction case: the broadcast was
+        // accepted (tx hash known) but no successful receipt ever appears. The ceiling-pinned
+        // rung must NOT become final — the same-id rebid is the only delivery retry, and with
+        // `timeout > lock_timeout` enforced, a final rung would dead-wait to NoLockAbortTimeout
+        // at the lock deadline before MarketExpired could ever rotate.
+        for receipt_outcome in [
+            Ok(false),                                // mined but reverted
+            Err("no receipt within 90s".to_string()), // dropped, replaced, or RPC timeout
+        ] {
+            let mut submission = test_submission(1, 2);
+            submission.max_price_wei = U256::from(100);
+            submission.remote_tx_hash = Some("0xbroadcast".to_string());
+
+            confirm_onchain_delivery(&mut submission, || async { receipt_outcome }).await;
+
+            assert!(!submission.delivery_confirmed);
+            assert!(!submission_rung_is_final(
+                &submission,
+                Some(U256::from(100)),
+                TEST_REBID_PRICE_STEP_BPS,
+            ));
+            // The unconfirmed pinned rung keeps Rebid semantics: the redelivery path stays open.
+            let mut bidding = BiddingSession::new(TEST_REBID_MAX_ATTEMPTS);
+            bidding.record_retry(&submission, RetryDirective::ReuseRequestId, "unlocked");
+            assert_eq!(
+                bidding
+                    .no_lock_timeout(
+                        300_000,
+                        submission_rung_is_final(
+                            &submission,
+                            Some(U256::from(100)),
+                            TEST_REBID_PRICE_STEP_BPS,
+                        ),
+                    )
+                    .action,
+                NoLockTimeoutAction::Rebid
+            );
+        }
     }
 
     #[tokio::test]

@@ -715,7 +715,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-serde 1.8.3",
  "alloy-sol-types",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -736,7 +736,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-serde 2.0.4",
  "alloy-sol-types",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1492,14 +1492,13 @@ dependencies = [
 [[package]]
 name = "bls12_381"
 version = "0.8.0"
-source = "git+https://github.com/risc0/zkcrypto-bls12_381?tag=bls12_381%2Fv0.8.0-risczero.1#a3192e1bc58921d42d03d99957abf3be55f9d435"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7bc6d6292be3a19e6379786dac800f551e5865a5bb51ebbe3064ab80433f403"
 dependencies = [
- "bytemuck",
  "ff",
  "group",
  "pairing",
  "rand_core 0.6.4",
- "risc0-bigint2",
  "subtle",
 ]
 
@@ -1520,12 +1519,11 @@ dependencies = [
 [[package]]
 name = "blst"
 version = "0.3.16"
-source = "git+https://github.com/risc0/blst?tag=v0.3.16-risczero.0#7d1fc3e6d8cf0d52a291f52455233bf8d6432ed2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcdb4c7013139a150f9fc55d123186dbfaba0d912817466282c73ac49e71fb45"
 dependencies = [
  "cc",
- "getrandom 0.2.17",
  "glob",
- "risc0-bigint2",
  "threadpool",
  "zeroize",
 ]
@@ -2857,9 +2855,9 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 [[package]]
 name = "kzg-rs"
 version = "0.2.8"
-source = "git+https://github.com/taikoxyz/kzg-rs?rev=b61ef3e78f0fdc252229cec119b7abb46a57bb0f#b61ef3e78f0fdc252229cec119b7abb46a57bb0f"
+source = "git+https://github.com/taikoxyz/kzg-rs?branch=feat%2Fraiko2#b61ef3e78f0fdc252229cec119b7abb46a57bb0f"
 dependencies = [
- "bls12_381 0.8.0 (git+https://github.com/risc0/zkcrypto-bls12_381?tag=bls12_381%2Fv0.8.0-risczero.1)",
+ "bls12_381 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bls12_381 0.8.0 (git+https://github.com/sp1-patches/bls12_381?tag=patch-0.8.0-sp1-6.0.0)",
  "ff",
  "hex",
@@ -4482,8 +4480,6 @@ dependencies = [
  "ark-serialize 0.5.0",
  "arrayref",
  "aurora-engine-modexp",
- "blst",
- "c-kzg",
  "cfg-if",
  "k256",
  "p256",

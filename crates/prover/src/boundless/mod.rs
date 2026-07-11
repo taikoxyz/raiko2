@@ -21,7 +21,9 @@ use alloy_primitives::{Address, B256, Bytes, Log, U256, address, keccak256};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
-    alloy::sol_types::SolEvent,
+    alloy::{
+        consensus::BlockHeader, network::BlockResponse, providers::Provider, sol_types::SolEvent,
+    },
     contracts::{IBoundlessMarket, RequestId},
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
@@ -1781,6 +1783,25 @@ impl BoundlessProver {
                 confirm_onchain_delivery(&mut submission, || async move {
                     match tokio::time::timeout(receipt_wait, pending_tx.get_receipt()).await {
                         Ok(Ok(receipt)) => {
+                            let included_at = receipt_block_timestamp(
+                                receipt.block_hash,
+                                |block_hash| async move {
+                                    let block = client
+                                        .boundless_market
+                                        .instance()
+                                        .provider()
+                                        .get_block_by_hash(block_hash)
+                                        .await
+                                        .map_err(|error| {
+                                            format!(
+                                                "failed to fetch receipt block {block_hash}: \
+                                                 {error}"
+                                            )
+                                        })?;
+                                    Ok(block.map(|block| block.header().timestamp()))
+                                },
+                            )
+                            .await?;
                             let logs = receipt
                                 .inner
                                 .logs()
@@ -1793,7 +1814,7 @@ impl BoundlessProver {
                                 market_addr,
                                 market_request_id,
                                 lock_expires_at,
-                                now_secs(),
+                                included_at,
                             )
                         }
                         Ok(Err(error)) => Err(error.to_string()),
@@ -2634,18 +2655,17 @@ fn submission_rung_is_final(
 /// helpers likewise extract the event and treat its absence as an error). Confirmation therefore
 /// requires exactly one log from the configured market address whose signature topic is
 /// `RequestSubmitted`. The full event must decode, and both its indexed request id and the id in
-/// its request body must match ours exactly. And the payable window must still be open by the same
-/// local clock the no-lock machinery uses: a request published after `lock_expires_at` can no
-/// longer be locked for pay, so confirming a late receipt would only license an immediate
-/// `NoLockAbortTimeout` dead-end — left unconfirmed, the rung keeps its same-id resubmission,
-/// which reopens a fresh bidding window.
+/// its request body must match ours exactly. The receipt block's timestamp must also be strictly
+/// before `lock_expires_at`: a request published at or after that timestamp can no longer be locked
+/// for pay, so confirming it would only license an immediate `NoLockAbortTimeout` dead-end — left
+/// unconfirmed, the rung keeps its same-id resubmission, which reopens a fresh bidding window.
 fn onchain_delivery_confirmation(
     status: bool,
     logs: &[Log],
     market_address: Address,
     market_request_id: U256,
     lock_expires_at: u64,
-    now_secs: u64,
+    included_at: u64,
 ) -> Result<(), String> {
     if !status {
         return Err("transaction reverted".to_string());
@@ -2689,13 +2709,28 @@ fn onchain_delivery_confirmation(
             decoded.data.request.id
         ));
     }
-    if lock_expires_at > 0 && now_secs >= lock_expires_at {
+    if lock_expires_at > 0 && included_at >= lock_expires_at {
         return Err(format!(
             "receipt arrived after the payable window closed (lock_expires_at {lock_expires_at}, \
-             now {now_secs})"
+             receipt block timestamp {included_at})"
         ));
     }
     Ok(())
+}
+
+async fn receipt_block_timestamp<F, Fut>(
+    receipt_block_hash: Option<B256>,
+    fetch_block_timestamp: F,
+) -> Result<u64, String>
+where
+    F: FnOnce(B256) -> Fut,
+    Fut: Future<Output = Result<Option<u64>, String>>,
+{
+    let block_hash =
+        receipt_block_hash.ok_or_else(|| "mined receipt is missing its block hash".to_string())?;
+    fetch_block_timestamp(block_hash)
+        .await?
+        .ok_or_else(|| format!("receipt block {block_hash} not found"))
 }
 
 /// Resolve the onchain delivery acknowledgement from the receipt wait. Only a mined receipt that
@@ -2952,8 +2987,9 @@ mod tests {
         escalate_and_cap_market_prices, exceeds_submission_budget, finalize_request_for_submission,
         no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
         onchain_delivery_confirmation, parse_bool_result, parse_env_bool, parse_env_url,
-        quote_proposal_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        submission_rung_is_final, user_cycles_to_mcycles, validate_offer_params,
+        quote_proposal_mcycles, receipt_block_timestamp, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, submission_rung_is_final, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use crate::{ProverProgress, ProverProgressObserver};
@@ -4493,7 +4529,7 @@ mod tests {
     fn onchain_delivery_requires_matching_request_submitted_event() {
         let request_id = U256::from(0x1234);
         let lock_expires_at = 1_000;
-        let now = 500;
+        let included_at = 500;
 
         // Reverted transaction.
         let err = onchain_delivery_confirmation(
@@ -4502,7 +4538,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("reverted receipt must not confirm");
         assert!(err.contains("reverted"), "{err}");
@@ -4514,7 +4550,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("absent RequestSubmitted must not confirm");
         assert!(err.contains("no RequestSubmitted"), "{err}");
@@ -4527,7 +4563,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("wrong emitter must not confirm");
         assert!(err.contains("no RequestSubmitted"), "{err}");
@@ -4548,7 +4584,7 @@ mod tests {
                 TEST_MARKET_ADDRESS,
                 request_id,
                 lock_expires_at,
-                now,
+                included_at,
             )
             .expect_err("empty or truncated event data must not confirm");
             assert!(err.contains("decode"), "{err}");
@@ -4564,7 +4600,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("mismatched request id must not confirm");
         assert!(err.contains("request id mismatch"), "{err}");
@@ -4581,7 +4617,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("malformed event must not confirm");
         assert!(err.contains("decode"), "{err}");
@@ -4603,7 +4639,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("mismatched request body id must not confirm");
         assert!(err.contains("request body id mismatch"), "{err}");
@@ -4616,7 +4652,7 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect_err("duplicate RequestSubmitted events must not confirm");
         assert!(err.contains("multiple RequestSubmitted"), "{err}");
@@ -4628,28 +4664,75 @@ mod tests {
             TEST_MARKET_ADDRESS,
             request_id,
             lock_expires_at,
-            now,
+            included_at,
         )
         .expect("matching event inside the payable window confirms delivery");
     }
 
     #[test]
-    fn onchain_delivery_rejects_receipts_after_the_payable_window() {
-        // lock_expires_at < receipt observation < expires_at: the order was published too late
-        // for anyone to lock it for pay, so confirming would only license an immediate
-        // NoLockAbortTimeout dead-end. Left unconfirmed, the same-id resubmission reopens a
-        // fresh bidding window.
+    fn onchain_delivery_uses_chain_inclusion_time_for_the_payable_window() {
         let request_id = U256::from(0x1234);
+        let lock_expires_at = 30;
+        let included_at = lock_expires_at - 1;
+
+        onchain_delivery_confirmation(
+            true,
+            &[request_submitted_log(TEST_MARKET_ADDRESS, request_id)],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            included_at,
+        )
+        .expect("receipt included before the lock deadline must confirm");
+
+        let included_at = lock_expires_at;
         let err = onchain_delivery_confirmation(
             true,
             &[request_submitted_log(TEST_MARKET_ADDRESS, request_id)],
             TEST_MARKET_ADDRESS,
             request_id,
-            30, // lock_expires_at
-            60, // now: after the lock deadline, before the 120s request expiry
+            lock_expires_at,
+            included_at,
         )
-        .expect_err("late receipt must not confirm");
+        .expect_err("receipt included at the lock deadline must not confirm");
         assert!(err.contains("payable window"), "{err}");
+        assert!(err.contains("receipt block timestamp 30"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn receipt_block_timestamp_requires_block_hash() {
+        let err = receipt_block_timestamp(None, |_block_hash| async {
+            panic!("block lookup must not run without receipt metadata");
+            #[allow(unreachable_code)]
+            Ok::<Option<u64>, String>(Some(1))
+        })
+        .await
+        .expect_err("receipt without a block hash must stay unconfirmed");
+
+        assert!(err.contains("block hash"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn receipt_block_timestamp_propagates_provider_error() {
+        let err = receipt_block_timestamp(Some(B256::ZERO), |_block_hash| async {
+            Err::<Option<u64>, _>("provider unavailable".to_string())
+        })
+        .await
+        .expect_err("receipt block lookup failure must stay unconfirmed");
+
+        assert!(err.contains("provider unavailable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn receipt_block_timestamp_rejects_missing_block() {
+        let err = receipt_block_timestamp(Some(B256::ZERO), |_block_hash| async {
+            Ok::<_, String>(None)
+        })
+        .await
+        .expect_err("missing receipt block must stay unconfirmed");
+
+        assert!(err.contains("block"), "{err}");
+        assert!(err.contains("not found"), "{err}");
     }
 
     #[tokio::test]

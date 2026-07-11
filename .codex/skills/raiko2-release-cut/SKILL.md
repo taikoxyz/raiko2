@@ -100,6 +100,25 @@ Do not create the GitHub Release before requested release paths complete:
 4. Build one release note from the fresh runtime digest, guest digest summary, and TEE
    attestation manifest. Include both reproduce sections from `docs/operations.md`.
 
+## Artifact Reproducibility Checks
+
+Do not compare generated release JSON files byte-for-byte. `guest-digests-summary.json` includes
+`created_at_unix`, and `tee-attestation-manifest-*.json` includes `generated_at`.
+
+- ZK: `guest-digests` hashes the current ELF/VK artifacts; it does not rebuild guests from source.
+  To prove digests from source, first run `just build-guest all --force` or the relevant backend,
+  then run `guest-digests`. Compare a sorted `.digests` projection, not the whole JSON file.
+- TEE: `release-tee-providers --no-push` is metadata-only and may emit mutable tag refs. With the
+  official signing key, compare a sorted `{lane, provider, source, attestation}` projection. With a
+  disposable local key, do not compare `attestation.mr_signer`; compare `mr_enclave` and stable
+  metadata instead.
+- Registry: verify published immutable image digests separately with `docker buildx imagetools
+  inspect` or equivalent for every released runtime and TEE image tag, then record `@sha256:...`
+  refs.
+
+Use `docs/operations.md` -> `Reproduce ZK Guest Digests` and `Release TEE Provider Metadata` for
+the exact commands.
+
 ## Guardrails
 
 - Start from a clean checkout of `main` or an explicit release commit.

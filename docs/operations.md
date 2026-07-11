@@ -814,15 +814,18 @@ Operator notes:
   `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
   `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
   accepted, but setting both is rejected). Ordinary SDK/autoprice spikes clamp to the ceiling. A
-  bid pinned at the ceiling whose dispatch was positively acknowledged — the order stream echoed
-  the id, or the submit transaction mined a receipt carrying the market's `RequestSubmitted`
-  event for the exact request id while the lock window was still open (broadcast acceptance or a
-  bare successful status does not count) — makes its rung final: no same-price resubmission
-  follows (a rebid could only repeat the price while restarting the offer ramp and, onchain,
-  paying gas), and the request waits out its lock deadline instead. Unconfirmed dispatches —
-  submit errors, dropped/replaced/reverted transactions, missing or mismatched `RequestSubmitted`
-  events, receipts landing after the lock deadline, and resumed submissions — keep rebidding at
-  the ceiling so the same-id resubmission doubles as the delivery retry; explicit flat ladders
+  bid pinned at the ceiling whose dispatch was positively acknowledged makes its rung final: no
+  same-price resubmission follows (a rebid could only repeat the price while restarting the offer
+  ramp and, onchain, paying gas), and the request waits out its lock deadline instead. The order
+  stream echoes the exact id for an offchain acknowledgement. An onchain dispatch is acknowledged
+  only when the receipt status succeeds, the configured market emits exactly one strictly
+  decodable `RequestSubmitted` event, both the indexed id and decoded request-body id equal the
+  expected request id, and the exact receipt block's timestamp is strictly before
+  `lock_expires_at`. Broadcast acceptance or a bare successful status does not count. Malformed or
+  ambiguous events, missing block metadata, block lookup failures, late inclusion, submit errors,
+  dropped/replaced/reverted transactions, and resumed submissions leave the dispatch unconfirmed
+  and retain same-id rebidding at the ceiling so the resubmission doubles as the delivery retry;
+  explicit flat ladders
   (`rebid_price_step_bps = 0`) always keep their same-price rebids. If an operator lowers the ceiling below an in-progress market request's
   previous exact max, the proof attempt aborts before either offchain or onchain submission rather
   than lowering the bid or exceeding the ceiling.

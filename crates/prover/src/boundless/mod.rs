@@ -2607,9 +2607,8 @@ fn escalate_and_cap_market_prices(
     }
 
     let escalated_max = escalated_price(autopriced_max, attempt, step_bps, max_attempts)?;
-    let monotonic_max = previous_max_price_wei.map_or(escalated_max, |previous_max_price_wei| {
-        escalated_max.max(previous_max_price_wei)
-    });
+    let monotonic_max =
+        previous_max_price_wei.map_or(escalated_max, |previous| escalated_max.max(previous));
     let (max_price, clamped_to_cap) = match max_price_cap {
         Some(cap) if monotonic_max > cap.value => (cap.value, true),
         _ => (monotonic_max, false),

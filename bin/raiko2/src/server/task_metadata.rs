@@ -187,7 +187,7 @@ pub(crate) struct TaskRuntimeMetadata {
 /// tagged field — so the two can never diverge (both are derived from the same source here).
 // TODO: stop dual-writing the flat fields once a release carrying the tagged format has shipped
 // and rollbacks across it are no longer supported.
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 struct TaskRuntimeMetadataWireOut<'a> {
     updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,26 +242,7 @@ impl Serialize for TaskRuntimeMetadata {
         let mut wire = TaskRuntimeMetadataWireOut {
             updated_at: self.updated_at,
             remote_submission: self.remote_submission.as_ref(),
-            provider_request_id: None,
-            remote_tx_hash: None,
-            image_ref: None,
-            deployment: None,
-            offchain: None,
-            expires_at: None,
-            lock_expires_at: None,
-            submitted_at: None,
-            quoted_mcycles_count: None,
-            evaluated_mcycles_count: None,
-            max_price_multiplier: None,
-            max_price_wei: None,
-            rebid_attempt: None,
-            sp1_network_mode: None,
-            sp1_fulfillment_strategy: None,
-            sp1_skip_simulation: None,
-            sp1_cycle_limit: None,
-            sp1_timeout_secs: None,
-            sp1_max_price_per_pgu: None,
-            sp1_auction_timeout_secs: None,
+            ..Default::default()
         };
         match self.remote_submission.as_ref() {
             Some(RemoteSubmissionMetadata::Boundless(submission)) => {

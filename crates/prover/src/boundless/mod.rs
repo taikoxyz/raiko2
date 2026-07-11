@@ -548,6 +548,10 @@ fn classify_boundless_status(
         )
     } else if let Some(terminal_outcome) = boundless_poll_timeout_outcome(metadata, local_now) {
         let message = match terminal_outcome {
+            BoundlessTerminalOutcome::NoLockAbortTimeout if is_locked => format!(
+                "Locked Boundless request {provider_request_id} remained unfulfilled after the \
+                 local payable-window deadline"
+            ),
             BoundlessTerminalOutcome::NoLockAbortTimeout => format!(
                 "Boundless request {provider_request_id} was not locked before payable window closed"
             ),
@@ -3564,6 +3568,38 @@ mod tests {
             Some(BoundlessTerminalOutcome::PollTimeout {
                 retry: RetryDirective::ReuseRequestId
             })
+        );
+    }
+
+    #[test]
+    fn locked_abort_timeout_reports_fulfillment_not_lock_failure() {
+        let now = now_secs();
+        let metadata = boundless_submission_metadata(
+            now,
+            BoundlessTimeoutAction::Abort,
+            -1,
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+        );
+
+        let status = classify_boundless_status(
+            RemoteSubmissionId::new(),
+            "0x1",
+            U256::from(1),
+            &metadata,
+            false,
+            true,
+            now.saturating_add(60),
+            now,
+        );
+
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(
+            status.context,
+            Some(BoundlessTerminalOutcome::NoLockAbortTimeout)
+        );
+        assert_eq!(
+            status.reason.expect("terminal reason").message,
+            "Locked Boundless request 0x1 remained unfulfilled after the local payable-window deadline"
         );
     }
 

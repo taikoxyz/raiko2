@@ -815,12 +815,14 @@ Operator notes:
   `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
   accepted, but setting both is rejected). Ordinary SDK/autoprice spikes clamp to the ceiling. A
   bid pinned at the ceiling whose dispatch was positively acknowledged — the order stream echoed
-  the id, or the submit transaction produced a successful onchain receipt (broadcast acceptance
-  alone does not count) — makes its rung final: no same-price resubmission follows (a rebid could
-  only repeat the price while restarting the offer ramp and, onchain, paying gas), and the request
-  waits out its lock deadline instead. Unconfirmed dispatches — submit errors, dropped/replaced/
-  reverted transactions, missing receipts, and resumed submissions — keep rebidding at the ceiling
-  so the same-id resubmission doubles as the delivery retry; explicit flat ladders
+  the id, or the submit transaction mined a receipt carrying the market's `RequestSubmitted`
+  event for the exact request id while the lock window was still open (broadcast acceptance or a
+  bare successful status does not count) — makes its rung final: no same-price resubmission
+  follows (a rebid could only repeat the price while restarting the offer ramp and, onchain,
+  paying gas), and the request waits out its lock deadline instead. Unconfirmed dispatches —
+  submit errors, dropped/replaced/reverted transactions, missing or mismatched `RequestSubmitted`
+  events, receipts landing after the lock deadline, and resumed submissions — keep rebidding at
+  the ceiling so the same-id resubmission doubles as the delivery retry; explicit flat ladders
   (`rebid_price_step_bps = 0`) always keep their same-price rebids. If an operator lowers the ceiling below an in-progress market request's
   previous exact max, the proof attempt aborts before either offchain or onchain submission rather
   than lowering the bid or exceeding the ceiling.

@@ -17,11 +17,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use alloy_primitives::{B256, Bytes, U256, address, keccak256};
+use alloy_primitives::{Address, B256, Bytes, Log, U256, address, keccak256};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
-    contracts::RequestId,
+    alloy::sol_types::SolEvent,
+    contracts::{IBoundlessMarket, RequestId},
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
     price_oracle::{Amount, Asset},
@@ -1667,7 +1668,7 @@ impl BoundlessProver {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn submit_request_onchain(
         &self,
         client: &Client,
@@ -1768,19 +1769,37 @@ impl BoundlessProver {
                 // dropped, replaced, or mined reverted, in which case the request never reaches
                 // the market and, because `timeout > lock_timeout` is enforced, a ceiling-pinned
                 // final rung would hit `NoLockAbortTimeout` at the lock deadline before any
-                // `MarketExpired` rotation could recover it. Only a successful receipt for our
-                // own `submitRequest` call (which emits the request on success) confirms
-                // delivery; every other outcome stays unconfirmed and keeps the same-id rebid
-                // rungs as the delivery retry.
-                confirm_onchain_delivery(&mut submission, || async {
-                    match tokio::time::timeout(ONCHAIN_RECEIPT_TIMEOUT, pending_tx.get_receipt())
-                        .await
-                    {
-                        Ok(Ok(receipt)) => Ok(receipt.status()),
+                // `MarketExpired` rotation could recover it. Delivery is confirmed only by a
+                // mined receipt carrying our exact `RequestSubmitted` event inside the payable
+                // window (see `onchain_delivery_confirmation`); the wait itself is bounded by
+                // that window, since a receipt landing after it could not confirm anyway.
+                let receipt_wait = ONCHAIN_RECEIPT_TIMEOUT.min(Duration::from_secs(
+                    submission.lock_expires_at.saturating_sub(now_secs()),
+                ));
+                let market_request_id = submission.market_request_id;
+                let lock_expires_at = submission.lock_expires_at;
+                confirm_onchain_delivery(&mut submission, || async move {
+                    match tokio::time::timeout(receipt_wait, pending_tx.get_receipt()).await {
+                        Ok(Ok(receipt)) => {
+                            let logs = receipt
+                                .inner
+                                .logs()
+                                .iter()
+                                .map(|log| log.inner.clone())
+                                .collect::<Vec<_>>();
+                            onchain_delivery_confirmation(
+                                receipt.status(),
+                                &logs,
+                                market_addr,
+                                market_request_id,
+                                lock_expires_at,
+                                now_secs(),
+                            )
+                        }
                         Ok(Err(error)) => Err(error.to_string()),
                         Err(_elapsed) => Err(format!(
-                            "no receipt within {}s",
-                            ONCHAIN_RECEIPT_TIMEOUT.as_secs()
+                            "no receipt within the {}s wait window",
+                            receipt_wait.as_secs()
                         )),
                     }
                 })
@@ -2608,33 +2627,69 @@ fn submission_rung_is_final(
         && price_pinned_at_ceiling(submission.max_price_wei, ceiling_wei, step_bps)
 }
 
-/// Resolve the onchain delivery acknowledgement from the receipt wait. Only a successful receipt
-/// confirms delivery; a reverted, dropped, replaced, or not-yet-mined transaction leaves the
-/// submission unconfirmed so ceiling-pinned rungs keep their same-id rebids as the delivery
-/// retry (a never-delivered final rung would otherwise dead-wait to `NoLockAbortTimeout` at the
-/// lock deadline — always before `MarketExpired`, since `timeout > lock_timeout` is enforced).
-async fn confirm_onchain_delivery<F, Fut>(submission: &mut Submission, wait_for_receipt: F)
+/// Decide whether a mined `submitRequest` receipt confirms delivery of `market_request_id`.
+///
+/// `submitRequest` stores no request state — the `RequestSubmitted` event IS the publication
+/// mechanism, so a successful status alone proves nothing about the order (the SDK's own submit
+/// helpers likewise extract the event and treat its absence as an error). Confirmation therefore
+/// requires a log from the configured market address whose signature topic is
+/// `RequestSubmitted` and whose indexed request id matches ours exactly. And the payable window
+/// must still be open by the same local clock the no-lock machinery uses: a request published
+/// after `lock_expires_at` can no longer be locked for pay, so confirming a late receipt would
+/// only license an immediate `NoLockAbortTimeout` dead-end — left unconfirmed, the rung keeps
+/// its same-id resubmission, which reopens a fresh bidding window.
+fn onchain_delivery_confirmation(
+    status: bool,
+    logs: &[Log],
+    market_address: Address,
+    market_request_id: U256,
+    lock_expires_at: u64,
+    now_secs: u64,
+) -> Result<(), String> {
+    if !status {
+        return Err("transaction reverted".to_string());
+    }
+    let request_id_topic = B256::from(market_request_id.to_be_bytes::<32>());
+    let published = logs.iter().any(|log| {
+        log.address == market_address
+            && log.topics().first() == Some(&IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH)
+            && log.topics().get(1) == Some(&request_id_topic)
+    });
+    if !published {
+        return Err(format!(
+            "receipt succeeded but carries no RequestSubmitted log for request id \
+             0x{market_request_id:x} from market {market_address}"
+        ));
+    }
+    if lock_expires_at > 0 && now_secs >= lock_expires_at {
+        return Err(format!(
+            "receipt arrived after the payable window closed (lock_expires_at {lock_expires_at}, \
+             now {now_secs})"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the onchain delivery acknowledgement from the receipt wait. Only a mined receipt that
+/// passes [`onchain_delivery_confirmation`] confirms delivery; a reverted, dropped, replaced, or
+/// not-yet-mined transaction, a receipt without our exact `RequestSubmitted` event, or one
+/// arriving after the payable window all leave the submission unconfirmed so ceiling-pinned
+/// rungs keep their same-id rebids as the delivery retry (a never-delivered final rung would
+/// otherwise dead-wait to `NoLockAbortTimeout` at the lock deadline — always before
+/// `MarketExpired`, since `timeout > lock_timeout` is enforced).
+async fn confirm_onchain_delivery<F, Fut>(submission: &mut Submission, delivery_verdict: F)
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<bool, String>>,
+    Fut: Future<Output = Result<(), String>>,
 {
-    match wait_for_receipt().await {
-        Ok(true) => submission.delivery_confirmed = true,
-        Ok(false) => {
+    match delivery_verdict().await {
+        Ok(()) => submission.delivery_confirmed = true,
+        Err(reason) => {
             tracing::warn!(
                 provider_request_id = %submission.provider_request_id,
                 remote_tx_hash = ?submission.remote_tx_hash,
-                "Boundless submitRequest transaction reverted; leaving delivery unconfirmed and \
-                 keeping same-id rebid rungs"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                provider_request_id = %submission.provider_request_id,
-                remote_tx_hash = ?submission.remote_tx_hash,
-                error = %error,
-                "Boundless submitRequest receipt unavailable; leaving delivery unconfirmed and \
-                 keeping same-id rebid rungs"
+                reason = %reason,
+                "Boundless submitRequest delivery unconfirmed; keeping same-id rebid rungs"
             );
         }
     }
@@ -2867,17 +2922,18 @@ mod tests {
         boundless_poll_error_statuses, classify_boundless_status, confirm_onchain_delivery,
         defer_poll_timeout_while_payable, dispatch_after_boundless_progress_ack,
         escalate_and_cap_market_prices, exceeds_submission_budget, finalize_request_for_submission,
-        no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs, parse_bool_result,
-        parse_env_bool, parse_env_url, quote_proposal_mcycles, should_rebid_unlocked_request,
-        storage_uploader_config_from_env, submission_rung_is_final, user_cycles_to_mcycles,
-        validate_offer_params,
+        no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
+        onchain_delivery_confirmation, parse_bool_result, parse_env_bool, parse_env_url,
+        quote_proposal_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        submission_rung_is_final, user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use crate::{ProverProgress, ProverProgressObserver};
-    use alloy_primitives::{Bytes, U256, address, utils::parse_ether};
+    use alloy_primitives::{B256, Bytes, Log, LogData, U256, address, utils::parse_ether};
     use boundless_market::{
         Offer, ProofRequest, RequestInput, Requirements,
-        contracts::{Predicate, RequestId},
+        alloy::sol_types::SolEvent,
+        contracts::{IBoundlessMarket, Predicate, RequestId},
         price_oracle::{Amount, Asset},
         storage::StorageUploaderType,
     };
@@ -4358,13 +4414,32 @@ mod tests {
         assert!(!dispatched.load(Ordering::SeqCst));
     }
 
+    const TEST_MARKET_ADDRESS: alloy_primitives::Address =
+        address!("00000000000000000000000000000000000000aa");
+
+    fn request_submitted_log(
+        emitter: alloy_primitives::Address,
+        request_id: U256,
+    ) -> alloy_primitives::Log {
+        Log {
+            address: emitter,
+            data: LogData::new_unchecked(
+                vec![
+                    IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH,
+                    B256::from(request_id.to_be_bytes::<32>()),
+                ],
+                Bytes::new(),
+            ),
+        }
+    }
+
     #[tokio::test]
     async fn onchain_receipt_success_confirms_delivery() {
         let mut submission = test_submission(1, 2);
         submission.max_price_wei = U256::from(100);
         assert!(!submission.delivery_confirmed);
 
-        confirm_onchain_delivery(&mut submission, || async { Ok(true) }).await;
+        confirm_onchain_delivery(&mut submission, || async { Ok(()) }).await;
 
         assert!(submission.delivery_confirmed);
         assert!(submission_rung_is_final(
@@ -4374,16 +4449,126 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn onchain_delivery_requires_matching_request_submitted_event() {
+        let request_id = U256::from(0x1234);
+        let lock_expires_at = 1_000;
+        let now = 500;
+
+        // Reverted transaction.
+        let err = onchain_delivery_confirmation(
+            false,
+            &[request_submitted_log(TEST_MARKET_ADDRESS, request_id)],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("reverted receipt must not confirm");
+        assert!(err.contains("reverted"), "{err}");
+
+        // Successful receipt without any event: the order was never published.
+        let err = onchain_delivery_confirmation(
+            true,
+            &[],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("absent RequestSubmitted must not confirm");
+        assert!(err.contains("no RequestSubmitted"), "{err}");
+
+        // Right event shape from the wrong emitter.
+        let wrong_emitter = address!("00000000000000000000000000000000000000bb");
+        let err = onchain_delivery_confirmation(
+            true,
+            &[request_submitted_log(wrong_emitter, request_id)],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("wrong emitter must not confirm");
+        assert!(err.contains("no RequestSubmitted"), "{err}");
+
+        // Right emitter, wrong request id.
+        let err = onchain_delivery_confirmation(
+            true,
+            &[request_submitted_log(
+                TEST_MARKET_ADDRESS,
+                request_id.saturating_add(U256::from(1)),
+            )],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("mismatched request id must not confirm");
+        assert!(err.contains("no RequestSubmitted"), "{err}");
+
+        // Malformed event: right emitter and signature topic but no indexed request id.
+        let malformed = Log {
+            address: TEST_MARKET_ADDRESS,
+            data: LogData::new_unchecked(
+                vec![IBoundlessMarket::RequestSubmitted::SIGNATURE_HASH],
+                Bytes::new(),
+            ),
+        };
+        let err = onchain_delivery_confirmation(
+            true,
+            &[malformed],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect_err("malformed event must not confirm");
+        assert!(err.contains("no RequestSubmitted"), "{err}");
+
+        // The exact event from the configured market, inside the payable window: confirmed.
+        onchain_delivery_confirmation(
+            true,
+            &[request_submitted_log(TEST_MARKET_ADDRESS, request_id)],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            lock_expires_at,
+            now,
+        )
+        .expect("matching event inside the payable window confirms delivery");
+    }
+
+    #[test]
+    fn onchain_delivery_rejects_receipts_after_the_payable_window() {
+        // lock_expires_at < receipt observation < expires_at: the order was published too late
+        // for anyone to lock it for pay, so confirming would only license an immediate
+        // NoLockAbortTimeout dead-end. Left unconfirmed, the same-id resubmission reopens a
+        // fresh bidding window.
+        let request_id = U256::from(0x1234);
+        let err = onchain_delivery_confirmation(
+            true,
+            &[request_submitted_log(TEST_MARKET_ADDRESS, request_id)],
+            TEST_MARKET_ADDRESS,
+            request_id,
+            30, // lock_expires_at
+            60, // now: after the lock deadline, before the 120s request expiry
+        )
+        .expect_err("late receipt must not confirm");
+        assert!(err.contains("payable window"), "{err}");
+    }
+
     #[tokio::test]
     async fn onchain_broadcast_without_successful_receipt_keeps_pinned_rung_rebidding() {
         // Regression for the dropped/replaced/reverted-transaction case: the broadcast was
-        // accepted (tx hash known) but no successful receipt ever appears. The ceiling-pinned
+        // accepted (tx hash known) but no confirming receipt ever appears. The ceiling-pinned
         // rung must NOT become final — the same-id rebid is the only delivery retry, and with
         // `timeout > lock_timeout` enforced, a final rung would dead-wait to NoLockAbortTimeout
         // at the lock deadline before MarketExpired could ever rotate.
         for receipt_outcome in [
-            Ok(false),                                // mined but reverted
-            Err("no receipt within 90s".to_string()), // dropped, replaced, or RPC timeout
+            Err::<(), _>("transaction reverted".to_string()),
+            Err("no receipt within the 90s wait window".to_string()),
+            Err("receipt succeeded but carries no RequestSubmitted log".to_string()),
+            Err("receipt arrived after the payable window closed".to_string()),
         ] {
             let mut submission = test_submission(1, 2);
             submission.max_price_wei = U256::from(100);

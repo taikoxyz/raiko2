@@ -30,10 +30,13 @@ num-bigint = { version = "=0.4.6", default-features = false }
 # blst: EVM BLS12-381 (EIP-2537 contiguous 0x0b..=0x11) + EVM 0x0a KZG (revm selects
 #       blst::verify_kzg_proof when `blst` is on and `c-kzg` is off) via official risc0/blst.
 # portable: required for blst on rv32im (no host ADX/SIMD).
-# Do NOT enable revm-precompile's `c-kzg` feature. Blob PoE uses kzg-rs (accelerated by the
-# bls12_381 crates-io patch below). Cargo.lock may still list optional `c-kzg` under
-# revm-precompile — that is not the same as linking it. Check with
-# `cargo tree -p raiko2-guest-risc0 -i c-kzg`.
+# Do NOT enable revm-precompile's `c-kzg` feature. Blob PoE uses kzg-rs (standard
+# bls12_381 backend). Do **not** patch crates-io bls12_381 to
+# risc0/zkcrypto-bls12_381 (v0.8.0-risczero.1): that zkVM non-Montgomery path
+# false-negatives some valid KZG proof-of-equivalence verifies (Taiko canary
+# mainnet proposals; see risc0/zkcrypto-bls12_381#2). Cargo.lock may still list
+# optional `c-kzg` under revm-precompile — that is not the same as linking it.
+# Check with `cargo tree -p raiko2-guest-risc0 -i c-kzg`.
 revm-precompile = { version = "=34.0.0", default-features = false, features = [
     "bn",
     "blst",
@@ -55,8 +58,6 @@ p256 = { git = "https://github.com/risc0/RustCrypto-elliptic-curves", tag = "p25
 crypto-bigint = { git = "https://github.com/risc0/RustCrypto-crypto-bigint", tag = "v0.5.5-risczero.0" }
 tiny-keccak = { git = "https://github.com/risc0/tiny-keccak.git", tag = "tiny-keccak/v2.0.2-risczero.0" }
 substrate-bn = { git = "https://github.com/risc0/paritytech-bn", tag = "v0.6.0-risczero.0" }
-# Accelerate kzg-rs (and any other bls12_381 consumers) with the official RISC0 patch.
-bls12_381 = { git = "https://github.com/risc0/zkcrypto-bls12_381", tag = "bls12_381/v0.8.0-risczero.1" }
 # C BLS backend for revm-precompile EIP-2537. Compiles via the guest docker CC
 # (CC_riscv32im_risc0_zkvm_elf) and is cached by the build-guest sccache volume
 # (DOCKER_SCCACHE_CACHE=volume → raiko2-sccache-risc0). Prefer portable builds.

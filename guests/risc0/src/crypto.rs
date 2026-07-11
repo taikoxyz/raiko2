@@ -8,8 +8,10 @@
 //! - EVM `0x0a` point evaluation: revm trait default selects **blst** when the `blst` feature is
 //!   enabled (`c-kzg` > `blst` > arkworks). We do **not** enable `c-kzg` and do **not** override
 //!   with kzg-rs — lab KZG vectors via kzg-rs were far more expensive than revm's path.
-//! - Blob proof-of-equivalence (proposal path) uses kzg-rs in primitives; accelerate that stack
-//!   with the crates-io `bls12_381` RISC0 patch (separate from Crypto::verify_kzg_proof).
+//! - Blob proof-of-equivalence (proposal path) uses kzg-rs in primitives with the
+//!   crates-io `bls12_381` backend (kzg-rs `standard` feature). Do not enable the
+//!   risc0/zkcrypto-bls12_381 crates-io patch: zkVM non-Montgomery acceleration
+//!   false-negatives some valid PoE verifies (see risc0/zkcrypto-bls12_381#2).
 
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 

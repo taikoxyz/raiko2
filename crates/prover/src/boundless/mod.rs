@@ -546,16 +546,20 @@ fn classify_boundless_status(
             ))),
             Some(BoundlessTerminalOutcome::LockExpired),
         )
-    } else if Instant::now() >= metadata.poll_timeout_at
-        && !should_defer_boundless_poll_timeout(metadata, local_now)
-    {
-        let retry = retry_directive_for_unconfirmed_failure(local_now, metadata.expires_at);
+    } else if let Some(terminal_outcome) = boundless_poll_timeout_outcome(metadata, local_now) {
+        let message = match terminal_outcome {
+            BoundlessTerminalOutcome::NoLockAbortTimeout => format!(
+                "Boundless request {provider_request_id} was not locked before payable window closed"
+            ),
+            BoundlessTerminalOutcome::PollTimeout { .. } => {
+                format!("Boundless request {provider_request_id} timed out before fulfillment")
+            }
+            _ => unreachable!("poll timeout classifier returned a non-timeout outcome"),
+        };
         (
             RemoteStatus::Failed,
-            Some(RemoteStatusReason::new(format!(
-                "Boundless request {provider_request_id} timed out before fulfillment"
-            ))),
-            Some(BoundlessTerminalOutcome::PollTimeout { retry }),
+            Some(RemoteStatusReason::new(message)),
+            Some(terminal_outcome),
         )
     } else if is_locked {
         (RemoteStatus::Locked, None, None)
@@ -590,15 +594,27 @@ fn classify_boundless_status(
     }
 }
 
-const fn should_defer_boundless_poll_timeout(
+fn boundless_poll_timeout_outcome(
     metadata: &BoundlessSubmissionMetadata,
-    block_timestamp: u64,
-) -> bool {
-    matches!(
-        metadata.no_lock_timeout_action,
+    local_now: u64,
+) -> Option<BoundlessTerminalOutcome> {
+    if Instant::now() < metadata.poll_timeout_at {
+        return None;
+    }
+    match metadata.no_lock_timeout_action {
         BoundlessTimeoutAction::Abort
-    ) && block_timestamp < metadata.expires_at
-        && block_timestamp < metadata.no_lock_deadline
+            if local_now < metadata.expires_at && local_now < metadata.no_lock_deadline =>
+        {
+            return None;
+        }
+        BoundlessTimeoutAction::Abort if local_now >= metadata.no_lock_deadline => {
+            return Some(BoundlessTerminalOutcome::NoLockAbortTimeout);
+        }
+        BoundlessTimeoutAction::Rebid | BoundlessTimeoutAction::Abort => {}
+    }
+    Some(BoundlessTerminalOutcome::PollTimeout {
+        retry: retry_directive_for_unconfirmed_failure(local_now, metadata.expires_at),
+    })
 }
 
 fn unrecoverable_boundless_status(
@@ -664,19 +680,24 @@ fn boundless_single_poll_error_status(
         }
         Err(err) => return err_status(submission.id, &err),
     };
-    if Instant::now() >= metadata.poll_timeout_at
-        && !should_defer_boundless_poll_timeout(&metadata, local_now)
-    {
-        let retry = retry_directive_for_unconfirmed_failure(local_now, metadata.expires_at);
+    if let Some(terminal_outcome) = boundless_poll_timeout_outcome(&metadata, local_now) {
+        let message = match terminal_outcome {
+            BoundlessTerminalOutcome::NoLockAbortTimeout => format!(
+                "Boundless request {} was not locked before payable window closed; last polling error: {error}",
+                submission.provider_request_id
+            ),
+            BoundlessTerminalOutcome::PollTimeout { .. } => format!(
+                "Boundless request {} timed out before fulfillment; last polling error: {error}",
+                submission.provider_request_id
+            ),
+            _ => unreachable!("poll timeout classifier returned a non-timeout outcome"),
+        };
         return RemoteSubmissionStatus {
             submission_id: submission.id,
             status: RemoteStatus::Failed,
-            reason: Some(RemoteStatusReason::new(format!(
-                "Boundless request {} timed out before fulfillment; last polling error: {error}",
-                submission.provider_request_id
-            ))),
+            reason: Some(RemoteStatusReason::new(message)),
             observed_unix_secs: local_now,
-            context: Some(BoundlessTerminalOutcome::PollTimeout { retry }),
+            context: Some(terminal_outcome),
         };
     }
     RemoteSubmissionStatus {
@@ -3233,7 +3254,7 @@ mod tests {
                 expires_at: now.saturating_sub(1),
                 lock_expires_at: now.saturating_add(300),
                 submitted_at: now.saturating_sub(30),
-                no_lock_deadline: now.saturating_add(60),
+                no_lock_deadline: now.saturating_sub(1),
                 no_lock_timeout_action: BoundlessTimeoutAction::Rebid,
                 poll_timeout_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
             },
@@ -3350,6 +3371,27 @@ mod tests {
             no_lock_timeout_action,
             poll_timeout_at,
         }
+    }
+
+    fn acknowledged_pinned_rung(now: u64) -> (Submission, super::NoLockTimeout) {
+        let mut submission = test_submission(1, 2);
+        submission.expires_at = now.saturating_add(300);
+        submission.lock_expires_at = now.saturating_sub(1);
+        submission.submitted_at = now.saturating_sub(30);
+        submission.max_price_wei = U256::from(100);
+        submission.delivery_confirmed = true;
+
+        let rung_is_final = submission_rung_is_final(
+            &submission,
+            Some(submission.max_price_wei),
+            TEST_REBID_PRICE_STEP_BPS,
+        );
+        let no_lock_timeout = BiddingSession::at_attempt(2, TEST_REBID_MAX_ATTEMPTS)
+            .no_lock_timeout(TEST_REBID_TIMEOUT_MS, rung_is_final);
+        assert!(rung_is_final);
+        assert_eq!(no_lock_timeout.action, NoLockTimeoutAction::Abort);
+
+        (submission, no_lock_timeout)
     }
 
     #[test]
@@ -3502,7 +3544,7 @@ mod tests {
         let mut poll_timeout_metadata = boundless_submission_metadata(
             now,
             BoundlessTimeoutAction::Rebid,
-            60,
+            -1,
             Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         );
         poll_timeout_metadata.expires_at = now.saturating_sub(1);
@@ -3523,6 +3565,88 @@ mod tests {
                 retry: RetryDirective::ReuseRequestId
             })
         );
+    }
+
+    #[test]
+    fn acknowledged_pinned_rung_healthy_poll_aborts_after_no_lock_deadline() {
+        let now = now_secs();
+        let (submission, no_lock_timeout) = acknowledged_pinned_rung(now);
+
+        let metadata = boundless_submission_metadata(
+            now,
+            BoundlessTimeoutAction::Abort,
+            -1,
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+        );
+        let status = classify_boundless_status(
+            RemoteSubmissionId::new(),
+            &submission.provider_request_id,
+            submission.market_request_id,
+            &metadata,
+            false,
+            false,
+            0,
+            now,
+        );
+
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(
+            status.context,
+            Some(BoundlessTerminalOutcome::NoLockAbortTimeout)
+        );
+        assert!(matches!(
+            BoundlessProver::boundless_failed_terminal(
+                &submission,
+                no_lock_timeout,
+                status.reason.expect("terminal reason"),
+                status.context,
+            ),
+            Err(super::BoundlessAttemptError::Fatal(_))
+        ));
+    }
+
+    #[test]
+    fn acknowledged_pinned_rung_poll_error_aborts_after_no_lock_deadline() {
+        let now = now_secs();
+        let (submission, no_lock_timeout) = acknowledged_pinned_rung(now);
+
+        let remote_submission = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: submission.provider_request_id.clone(),
+            timeout_at: None,
+        };
+        let registry = Arc::new(Mutex::new(HashMap::from([(
+            remote_submission.id,
+            boundless_submission_metadata(
+                now,
+                BoundlessTimeoutAction::Abort,
+                -1,
+                Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+            ),
+        )])));
+        let mut statuses = boundless_poll_error_statuses(
+            vec![remote_submission],
+            "provider unavailable".to_string(),
+            &registry,
+        )
+        .expect("final timeout status");
+        let status = statuses.pop().expect("one terminal status");
+
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(
+            status.context,
+            Some(BoundlessTerminalOutcome::NoLockAbortTimeout)
+        );
+        assert!(matches!(
+            BoundlessProver::boundless_failed_terminal(
+                &submission,
+                no_lock_timeout,
+                status.reason.expect("terminal reason"),
+                status.context,
+            ),
+            Err(super::BoundlessAttemptError::Fatal(_))
+        ));
     }
 
     #[test]

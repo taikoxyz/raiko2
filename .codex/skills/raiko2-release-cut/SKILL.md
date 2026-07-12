@@ -106,12 +106,13 @@ Do not compare generated release JSON files byte-for-byte. `guest-digests-summar
 `created_at_unix`, and `tee-attestation-manifest-*.json` includes `generated_at`.
 
 - ZK: `guest-digests` hashes the current ELF/VK artifacts; it does not rebuild guests from source.
-  To prove digests from source, first run `just build-guest all --force` or the relevant backend,
-  then run `guest-digests`. Compare a sorted `.digests` projection, not the whole JSON file.
-- TEE: `release-tee-providers --no-push` is metadata-only and may emit mutable tag refs. With the
-  official signing key, compare a sorted `{lane, provider, source, attestation}` projection. With a
-  disposable local key, do not compare `attestation.mr_signer`; compare `mr_enclave` and stable
-  metadata instead.
+  To prove release digests from source, first run `just build-guest all --force`, then run
+  `guest-digests`. Compare a sorted `.digests` projection, not the whole JSON file.
+- TEE: `release-tee-providers --no-push` performs a full local rebuild without registry publication;
+  it still builds local SGX images, external provider images, and local output state, and may emit
+  mutable tag refs. With the official signing key, compare a sorted `{lane, provider, source,
+  attestation}` projection. With `RAIKO2_SGX_ENCLAVE_KEY_HOST` and a disposable local key, compare
+  the same projection after deleting `attestation.mr_signer` from both manifests.
 - Registry: verify published immutable image digests separately with `docker buildx imagetools
   inspect` or equivalent for every released runtime and TEE image tag, then record `@sha256:...`
   refs.

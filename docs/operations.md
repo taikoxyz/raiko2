@@ -485,6 +485,8 @@ git fetch --tags origin "${TAG}"
 git checkout "${TAG}"
 mkdir -p "${REPRO_DIR}"
 
+just build-guest all --force
+
 cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
   --output "${REPRO_DIR}/from-source.json"
 
@@ -618,10 +620,11 @@ GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
 ```
 
-for local smoke verification. With `--no-push`, each manifest `image.digest` field contains a
-mutable `repository:tag` reference rather than an immutable registry digest. The resulting
-manifest must not be used as release handoff metadata; run the command without `--no-push` to push
-the images and resolve immutable digests first.
+for local smoke verification without registry publication. `--no-push` still builds both local SGX
+images, clones and builds each external provider, replaces local Docker tags, and writes local output
+state. Each manifest `image.digest` field contains a mutable `repository:tag` reference rather than
+an immutable registry digest. The resulting manifest must not be used as release handoff metadata;
+run the command without `--no-push` to push the images and resolve immutable digests first.
 
 For a formal pre-release export, use:
 
@@ -746,6 +749,35 @@ jq -S '[.providers[]
   | sort_by(.provider, .lane)' \
   "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.sorted.json"
 diff -u "${REPRO_DIR}/release-tee.sorted.json" "${REPRO_DIR}/source-tee.sorted.json"
+```
+
+For a disposable local signing key, run the same rebuild with `RAIKO2_SGX_ENCLAVE_KEY_HOST` instead
+of `GCP_ENCLAVE_KEY_*`, then compare the same projection with `attestation.mr_signer` removed from
+both manifests:
+
+```bash
+RAIKO2_SGX_ENCLAVE_KEY_HOST=/path/to/local/gramine-signing-key.pem \
+cargo run -r -p xtask -- release-tee-providers --tag "${TAG}" --no-push
+
+mkdir -p "${REPRO_DIR}"
+cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
+  "${REPRO_DIR}/from-source.json"
+
+gh release download "${TAG}" --repo taikoxyz/raiko2 \
+  --pattern "tee-attestation-manifest-${TAG}.json" \
+  --dir "${REPRO_DIR}" \
+  --clobber
+
+jq -S '[.providers[]
+  | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.no-signer.sorted.json"
+jq -S '[.providers[]
+  | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.no-signer.sorted.json"
+diff -u "${REPRO_DIR}/release-tee.no-signer.sorted.json" \
+  "${REPRO_DIR}/source-tee.no-signer.sorted.json"
 ```
 
 This command does not:

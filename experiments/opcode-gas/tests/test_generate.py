@@ -184,27 +184,22 @@ class GenerateTests(unittest.TestCase):
             ("point_evaluation", 0x0A, "precompile_kzg_point_evaluation", 192),
             ("bls12_g1add", 0x0B, "precompile_bls12_g1add_zero", 256),
             ("bls12_g1msm", 0x0C, "precompile_bls12_g1msm_zero", 160),
-            ("bls12_g2add", 0x0E, "precompile_bls12_g2add_zero", 512),
-            ("bls12_g2msm", 0x0F, "precompile_bls12_g2msm_zero", 288),
-            ("bls12_pairing", 0x11, "precompile_bls12_pairing_zero", 384),
-            ("bls12_map_fp_to_g1", 0x12, "precompile_bls12_map_fp_to_g1_zero", 64),
-            ("bls12_map_fp2_to_g2", 0x13, "precompile_bls12_map_fp2_to_g2_zero", 128),
+            ("bls12_g2add", 0x0D, "precompile_bls12_g2add_zero", 512),
+            ("bls12_g2msm", 0x0E, "precompile_bls12_g2msm_zero", 288),
+            ("bls12_pairing", 0x0F, "precompile_bls12_pairing_zero", 384),
+            ("bls12_map_fp_to_g1", 0x10, "precompile_bls12_map_fp_to_g1_zero", 64),
+            ("bls12_map_fp2_to_g2", 0x11, "precompile_bls12_map_fp2_to_g2_zero", 128),
         ]
 
         for name, address, template, input_size in cases:
             with self.subTest(name=name):
-                case = opcode_gas.CaseSpec(
-                    name=name,
-                    kind="precompile",
-                    address=address,
-                    scenario="precompile",
-                    template=template,
-                    input_size=input_size,
-                    target_raw_gas=1,
-                )
+                case = opcode_gas.default_precompile_case(address)
 
                 encoded = opcode_gas.build_precompile_input(case)
 
+                self.assertEqual(case.name, name)
+                self.assertEqual(case.template, template)
+                self.assertEqual(case.input_size, input_size)
                 self.assertEqual(len(bytes.fromhex(encoded.removeprefix("0x"))), input_size)
 
 

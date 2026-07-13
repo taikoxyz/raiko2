@@ -1026,13 +1026,16 @@ mod tests {
         let (network, l1_network) = network_pair
             .split_once('/')
             .unwrap_or((network_pair, "ethereum"));
+        let (route, proof_type) = if pipeline == PipelineKey::ShastaSp1 {
+            ("sp1/local", ProofType::Sp1)
+        } else {
+            ("native/local", ProofType::Native)
+        };
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
                 pipeline_key: Some(pipeline),
-                route: "native/local"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
+                route: route.parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(request.proposal_id),
                 proof_ids: vec![task_ref.clone()],
@@ -1040,7 +1043,7 @@ mod tests {
                     network_pair: network_pair.to_string(),
                     network: network.to_string(),
                     l1_network: l1_network.to_string(),
-                    proof_type: ProofType::Native,
+                    proof_type,
                     requested_proof_type: None,
                     prover_type: None,
                     execution_mode: None,
@@ -1207,6 +1210,49 @@ mod tests {
             .expect_err("runtime database read failure must not become a fresh SP1 request");
 
         assert!(err.to_string().contains("runtime sqlite database"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_root_resumes_legacy_provider_id_only_sp1_submission() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-sp1-legacy-provider-id",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task_ref = proposal_task_ref(pipeline, &request);
+        register_observer_task(
+            runtime.as_ref(),
+            "task_sp1_legacy_provider_id",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Failed,
+        )
+        .await?;
+
+        let mut record = runtime
+            .get_task("task_sp1_legacy_provider_id")
+            .await?
+            .expect("failed runtime task");
+        record.metadata["runtime"]["proposals"][&task_ref] = serde_json::json!({
+            "updated_at": 123,
+            "provider_request_id": "0xsp1-legacy"
+        });
+        runtime.upsert_task(&record).await?;
+
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        assert_eq!(
+            observer
+                .load_sp1_network_request_id(&id, &proposal_prove_task(&id))
+                .await?
+                .as_deref(),
+            Some("0xsp1-legacy")
+        );
         Ok(())
     }
 

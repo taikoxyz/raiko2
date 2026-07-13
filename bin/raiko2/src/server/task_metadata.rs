@@ -774,9 +774,6 @@ impl TaskRuntimeMetadata {
                 .provider_request_id
                 .as_deref()
                 .is_some_and(|request_id| !request_id.is_empty())
-                && (submission.network_mode.is_some()
-                    || submission.fulfillment_strategy.is_some()
-                    || submission.timeout_secs.is_some())
         })
     }
 
@@ -985,6 +982,8 @@ mod tests {
             Some("0xsp1")
         );
         assert!(metadata.boundless_submission().is_none());
+        assert!(metadata.has_sp1_network_submission_progress());
+        assert!(metadata.has_resumable_remote_submission());
     }
 
     #[test]

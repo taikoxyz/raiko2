@@ -216,14 +216,14 @@ impl BoundlessStatusSource {
             return Ok(invalid_statuses);
         }
 
-        let (block_number, block_timestamp) = match self.latest_block_reference().await {
+        let (block_hash, block_timestamp) = match self.latest_block_reference().await {
             Ok(block) => block,
             Err(err) => {
                 return boundless_poll_error_statuses(submissions, err.to_string(), &self.registry);
             }
         };
 
-        let batch = self.build_batch_request(&pollable_submissions, &block_number);
+        let batch = self.build_batch_request(&pollable_submissions, &block_hash);
         let responses = match self.http.post(&self.rpc_url).json(&batch).send().await {
             Ok(response) => response,
             Err(err) => {
@@ -313,7 +313,7 @@ impl BoundlessStatusSource {
     fn build_batch_request(
         &self,
         submissions: &[BoundlessPollSubmission],
-        block_number: &str,
+        block_hash: &str,
     ) -> Vec<JsonRpcRequest> {
         let mut batch = Vec::with_capacity(submissions.len().saturating_mul(3));
         for (index, submission) in submissions.iter().enumerate() {
@@ -324,7 +324,7 @@ impl BoundlessStatusSource {
                 base_id,
                 &self.market_address,
                 &fulfilled_data,
-                block_number,
+                block_hash,
             ));
             let locked_data =
                 boundless_call_data("requestIsLocked(uint256)", submission.request_id);
@@ -332,7 +332,7 @@ impl BoundlessStatusSource {
                 base_id + 1,
                 &self.market_address,
                 &locked_data,
-                block_number,
+                block_hash,
             ));
             let deadline_data =
                 boundless_call_data("requestLockDeadline(uint256)", submission.request_id);
@@ -340,7 +340,7 @@ impl BoundlessStatusSource {
                 base_id + 2,
                 &self.market_address,
                 &deadline_data,
-                block_number,
+                block_hash,
             ));
         }
 
@@ -440,12 +440,7 @@ const fn json_rpc_request(
     }
 }
 
-fn eth_call_request(
-    id: u64,
-    market_address: &str,
-    data: &str,
-    block_number: &str,
-) -> JsonRpcRequest {
+fn eth_call_request(id: u64, market_address: &str, data: &str, block_hash: &str) -> JsonRpcRequest {
     json_rpc_request(
         id,
         "eth_call",
@@ -454,7 +449,10 @@ fn eth_call_request(
                 "to": market_address,
                 "data": data,
             }),
-            serde_json::json!(block_number),
+            serde_json::json!({
+                "blockHash": block_hash,
+                "requireCanonical": true,
+            }),
         ],
     )
 }
@@ -500,11 +498,11 @@ fn take_rpc_result(
 }
 
 fn parse_block_reference(value: &serde_json::Value) -> Result<(String, u64), RemotePollError> {
-    let number = value
-        .get("number")
+    let hash = value
+        .get("hash")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            RemotePollError::Transient("boundless latest block missing number".to_string())
+            RemotePollError::Transient("boundless latest block missing hash".to_string())
         })?;
     let timestamp = value
         .get("timestamp")
@@ -512,7 +510,7 @@ fn parse_block_reference(value: &serde_json::Value) -> Result<(String, u64), Rem
         .ok_or_else(|| {
             RemotePollError::Transient("boundless latest block missing timestamp".to_string())
         })?;
-    Ok((number.to_string(), parse_rpc_hex_u64(timestamp)?))
+    Ok((hash.to_string(), parse_rpc_hex_u64(timestamp)?))
 }
 
 fn parse_bool_result(value: &serde_json::Value) -> Result<bool, RemotePollError> {
@@ -3051,10 +3049,10 @@ mod tests {
         defer_poll_timeout_while_payable, dispatch_after_boundless_progress_ack,
         escalate_and_cap_market_prices, exceeds_submission_budget, finalize_request_for_submission,
         no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
-        onchain_delivery_confirmation, parse_bool_result, parse_env_bool, parse_env_url,
-        quote_proposal_mcycles, receipt_block_timestamp, should_rebid_unlocked_request,
-        storage_uploader_config_from_env, submission_rung_is_final, user_cycles_to_mcycles,
-        validate_offer_params,
+        onchain_delivery_confirmation, parse_block_reference, parse_bool_result, parse_env_bool,
+        parse_env_url, quote_proposal_mcycles, receipt_block_timestamp,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, submission_rung_is_final,
+        user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use crate::{ProverProgress, ProverProgressObserver};
@@ -3516,6 +3514,20 @@ mod tests {
     }
 
     #[test]
+    fn boundless_status_block_reference_parses_hash_and_timestamp() {
+        let block = serde_json::json!({
+            "hash": "0x000000000000000000000000000000000000000000000000000000000000002a",
+            "number": "0x2a",
+            "timestamp": "0x64",
+        });
+
+        let (block_hash, timestamp) = parse_block_reference(&block).expect("block reference");
+
+        assert_eq!(block_hash, block["hash"]);
+        assert_eq!(timestamp, 100);
+    }
+
+    #[test]
     fn boundless_status_batch_pins_market_reads_to_one_block() {
         let source = BoundlessStatusSource {
             rpc_url: "http://localhost".to_string(),
@@ -3534,14 +3546,19 @@ mod tests {
             request_id,
         };
 
-        let batch = source.build_batch_request(&[submission], "0x2a");
+        let block_hash = "0x000000000000000000000000000000000000000000000000000000000000002a";
+        let batch = source.build_batch_request(&[submission], block_hash);
+        let expected = serde_json::json!({
+            "blockHash": block_hash,
+            "requireCanonical": true,
+        });
 
         assert_eq!(batch.len(), 3);
         assert!(batch.iter().all(|request| request.method == "eth_call"));
         assert!(
             batch
                 .iter()
-                .all(|request| request.params.get(1) == Some(&serde_json::json!("0x2a")))
+                .all(|request| request.params.get(1) == Some(&expected))
         );
         assert_eq!(
             batch[2].params[0]["data"],

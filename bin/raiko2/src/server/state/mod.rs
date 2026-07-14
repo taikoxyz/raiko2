@@ -29,6 +29,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
+use tokio::sync::RwLock;
 use tracing::warn;
 
 #[cfg(feature = "redis-queue")]
@@ -105,6 +106,7 @@ pub struct AppState {
     pub pipelines: Arc<dyn PipelineFactory>,
     pub runtime: Arc<RuntimeManager>,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
+    pub(crate) artifact_cleanup_guard: Arc<RwLock<()>>,
     pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
 }
 
@@ -187,6 +189,7 @@ impl AppState {
             Arc::clone(&state.config),
             Arc::clone(&state.runtime),
             Arc::clone(&state.pipelines),
+            Arc::clone(&state.artifact_cleanup_guard),
         );
 
         Ok(state)
@@ -203,6 +206,7 @@ impl AppState {
             pipelines,
             runtime,
             zk_any_sampler,
+            artifact_cleanup_guard: Arc::new(RwLock::new(())),
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
         }
     }

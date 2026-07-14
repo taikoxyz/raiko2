@@ -1,20 +1,31 @@
 use crate::config::Config;
 use crate::server::state::PipelineFactory;
 use crate::server::state::{EngineHandle, EngineQueueTaskState};
-use crate::server::task_metadata::TaskMetadata;
+use crate::server::task_metadata::{TaskMetadata, referenced_proof_artifact_refs};
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
 use raiko2_queue::{TaskStoreError, encode_task_id};
-use raiko2_runtime::{ExpiredTaskCursor, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
+use raiko2_runtime::{
+    ExpiredTaskCursor, ProofArtifactCursor, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::fs;
+use tokio::sync::RwLock;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
+const PROOF_ARTIFACT_CLEANUP_BATCH_SIZE: usize = 64;
 const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local execution";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProofArtifactIdentity {
+    network_pair: String,
+    proof_ref: String,
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeCleanupStats {
@@ -38,6 +49,31 @@ impl RuntimeCleanupStats {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProofArtifactCleanupStats {
+    pub scanned: usize,
+    pub removed_rows: usize,
+    pub retained_active: usize,
+    pub retained_changed: usize,
+    pub files_removed: usize,
+    pub files_missing: usize,
+    pub file_delete_failures: usize,
+    pub record_delete_failures: usize,
+}
+
+impl ProofArtifactCleanupStats {
+    const fn is_idle(self) -> bool {
+        self.scanned == 0
+            && self.removed_rows == 0
+            && self.retained_active == 0
+            && self.retained_changed == 0
+            && self.files_removed == 0
+            && self.files_missing == 0
+            && self.file_delete_failures == 0
+            && self.record_delete_failures == 0
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChildCleanupOutcome {
     pub skipped_shared_children: usize,
 }
@@ -46,25 +82,28 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     config: Arc<Config>,
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
+    artifact_cleanup_guard: Arc<RwLock<()>>,
 ) {
-    if config.runtime.inactive_ttl_secs == 0 {
+    if config.runtime.inactive_ttl_secs == 0 && config.runtime.proof_artifact_ttl_secs == 0 {
         return;
     }
 
     tokio::spawn(async move {
+        let mut artifact_cursor = None;
         let mut orphan_cursor = None;
         let mut terminal_cursor = None;
         let interval_duration = Duration::from_millis(config.queue.maintenance_interval_ms);
-        log_runtime_cleanup_stats(
-            run_runtime_cleanup_pass(
-                Arc::clone(&runtime),
-                Arc::clone(&pipelines),
-                config.runtime.inactive_ttl_secs,
-                &mut orphan_cursor,
-                &mut terminal_cursor,
-            )
-            .await,
-        );
+        run_runtime_maintenance_tick(
+            config.as_ref(),
+            Arc::clone(&runtime),
+            Arc::clone(&pipelines),
+            Arc::clone(&artifact_cleanup_guard),
+            now_ts(),
+            &mut artifact_cursor,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await;
 
         let mut interval = tokio::time::interval(interval_duration);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -72,18 +111,56 @@ pub(crate) fn spawn_runtime_cleanup_loop(
 
         loop {
             interval.tick().await;
-            log_runtime_cleanup_stats(
-                run_runtime_cleanup_pass(
-                    Arc::clone(&runtime),
-                    Arc::clone(&pipelines),
-                    config.runtime.inactive_ttl_secs,
-                    &mut orphan_cursor,
-                    &mut terminal_cursor,
-                )
-                .await,
-            );
+            run_runtime_maintenance_tick(
+                config.as_ref(),
+                Arc::clone(&runtime),
+                Arc::clone(&pipelines),
+                Arc::clone(&artifact_cleanup_guard),
+                now_ts(),
+                &mut artifact_cursor,
+                &mut orphan_cursor,
+                &mut terminal_cursor,
+            )
+            .await;
         }
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_runtime_maintenance_tick(
+    config: &Config,
+    runtime: Arc<RuntimeManager>,
+    pipelines: Arc<dyn PipelineFactory>,
+    artifact_cleanup_guard: Arc<RwLock<()>>,
+    artifact_now_ts: i64,
+    artifact_cursor: &mut Option<ProofArtifactCursor>,
+    orphan_cursor: &mut Option<ExpiredTaskCursor>,
+    terminal_cursor: &mut Option<ExpiredTaskCursor>,
+) {
+    if config.runtime.inactive_ttl_secs != 0 {
+        log_runtime_cleanup_stats(
+            run_runtime_cleanup_pass(
+                Arc::clone(&runtime),
+                pipelines,
+                config.runtime.inactive_ttl_secs,
+                orphan_cursor,
+                terminal_cursor,
+            )
+            .await,
+        );
+    }
+    if config.runtime.proof_artifact_ttl_secs != 0 {
+        log_proof_artifact_cleanup_stats(
+            run_proof_artifact_cleanup_pass(
+                runtime,
+                artifact_cleanup_guard,
+                artifact_now_ts,
+                config.runtime.proof_artifact_ttl_secs,
+                artifact_cursor,
+            )
+            .await,
+        );
+    }
 }
 
 pub(crate) async fn run_runtime_cleanup_pass(
@@ -137,6 +214,118 @@ pub(crate) async fn run_runtime_cleanup_pass(
     }
 
     Ok(stats)
+}
+
+pub(crate) async fn run_proof_artifact_cleanup_pass(
+    runtime: Arc<RuntimeManager>,
+    artifact_cleanup_guard: Arc<RwLock<()>>,
+    now_ts: i64,
+    ttl_secs: u64,
+    cursor: &mut Option<ProofArtifactCursor>,
+) -> Result<ProofArtifactCleanupStats> {
+    if ttl_secs == 0 {
+        return Ok(ProofArtifactCleanupStats::default());
+    }
+
+    let _guard = artifact_cleanup_guard.write().await;
+    let artifacts = runtime
+        .list_expired_proof_artifacts(
+            now_ts,
+            ttl_secs,
+            cursor.as_ref(),
+            PROOF_ARTIFACT_CLEANUP_BATCH_SIZE,
+        )
+        .await?;
+    *cursor = artifacts.last().map(ProofArtifactCursor::from);
+    if artifacts.is_empty() {
+        return Ok(ProofArtifactCleanupStats::default());
+    }
+    let live_refs = live_proof_artifact_refs(runtime.as_ref()).await?;
+    let mut stats = ProofArtifactCleanupStats {
+        scanned: artifacts.len(),
+        ..ProofArtifactCleanupStats::default()
+    };
+
+    for artifact in artifacts {
+        let identity = ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            proof_ref: artifact.proof_ref.clone(),
+        };
+        if live_refs.contains(&identity) {
+            stats.retained_active += 1;
+            continue;
+        }
+        match runtime
+            .remove_proof_artifact_if_unchanged(
+                &artifact.network_pair,
+                &artifact.proof_ref,
+                artifact.updated_at,
+            )
+            .await
+        {
+            Ok(false) => {
+                stats.retained_changed += 1;
+                continue;
+            }
+            Ok(true) => stats.removed_rows += 1,
+            Err(err) => {
+                stats.record_delete_failures += 1;
+                warn!(
+                    network_pair = artifact.network_pair,
+                    proof_ref = artifact.proof_ref,
+                    error = %err,
+                    "failed to remove expired proof artifact record"
+                );
+                continue;
+            }
+        }
+        match fs::remove_file(&artifact.proof_path).await {
+            Ok(()) => stats.files_removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => stats.files_missing += 1,
+            Err(err) => {
+                stats.file_delete_failures += 1;
+                warn!(
+                    network_pair = artifact.network_pair,
+                    proof_ref = artifact.proof_ref,
+                    proof_path = artifact.proof_path,
+                    error = %err,
+                    "failed to remove expired proof artifact file after removing cache record"
+                );
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
+async fn live_proof_artifact_refs(
+    runtime: &RuntimeManager,
+) -> Result<HashSet<ProofArtifactIdentity>> {
+    let mut refs = HashSet::new();
+    for record in runtime.list_tasks().await? {
+        if !matches!(
+            record.runner_status,
+            RunnerStatus::Allocated | RunnerStatus::Running
+        ) {
+            continue;
+        }
+        let metadata: TaskMetadata =
+            serde_json::from_value(record.metadata.clone()).with_context(|| {
+                format!(
+                    "failed to parse non-terminal task metadata {}",
+                    record.task_id
+                )
+            })?;
+        refs.extend(
+            referenced_proof_artifact_refs(&metadata, record.pipeline_key)
+                .into_iter()
+                .map(|proof_ref| ProofArtifactIdentity {
+                    network_pair: metadata.network_pair.clone(),
+                    proof_ref,
+                }),
+        );
+    }
+    Ok(refs)
 }
 
 async fn cancel_orphaned_runtime_tasks(
@@ -494,6 +683,24 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
     }
 }
 
+fn log_proof_artifact_cleanup_stats(result: Result<ProofArtifactCleanupStats>) {
+    match result {
+        Ok(stats) if !stats.is_idle() => info!(
+            scanned = stats.scanned,
+            removed_rows = stats.removed_rows,
+            retained_active = stats.retained_active,
+            retained_changed = stats.retained_changed,
+            files_removed = stats.files_removed,
+            files_missing = stats.files_missing,
+            file_delete_failures = stats.file_delete_failures,
+            record_delete_failures = stats.record_delete_failures,
+            "proof artifact cleanup tick completed"
+        ),
+        Ok(_) => {}
+        Err(err) => warn!(error = %err, "proof artifact cleanup tick failed"),
+    }
+}
+
 async fn cleanup_expired_root_task(
     runtime: &RuntimeManager,
     pipelines: &dyn PipelineFactory,
@@ -544,11 +751,13 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_task_chain_ids,
-        proposal_task_id, run_runtime_cleanup_pass,
+        ExpiredTaskCursor, ProofArtifactCleanupStats, RuntimeCleanupStats, cancel_registered_tasks,
+        proposal_task_chain_ids, proposal_task_id, run_proof_artifact_cleanup_pass,
+        run_runtime_cleanup_pass, run_runtime_maintenance_tick,
     };
+    use crate::config::Config;
     use crate::server::state::{
-        EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
+        AppState, EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
     };
     use crate::server::task_metadata::{
         ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
@@ -561,12 +770,17 @@ mod tests {
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
-    use raiko2_runtime::{RunnerStatus, RuntimeManager, TaskRegistration};
+    use raiko2_runtime::{
+        ProofArtifactCursor, ProofArtifactRecord, ProofArtifactRegistration, RunnerStatus,
+        RuntimeManager, TaskRegistration,
+    };
     use std::collections::HashSet;
     use std::future::Future;
+    use std::path::Path;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::RwLock;
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -580,6 +794,255 @@ mod tests {
             }
             .is_idle()
         );
+    }
+
+    #[test]
+    fn artifact_cleanup_stats_report_idle_when_zero() {
+        assert!(ProofArtifactCleanupStats::default().is_idle());
+        assert!(
+            !ProofArtifactCleanupStats {
+                scanned: 1,
+                ..ProofArtifactCleanupStats::default()
+            }
+            .is_idle()
+        );
+    }
+
+    #[test]
+    fn app_state_shares_artifact_cleanup_guard_across_clones() -> Result<()> {
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::new(RuntimeManager::new(unique_runtime_root("artifact-guard"))?),
+        );
+        let cloned = state.clone();
+
+        assert!(Arc::ptr_eq(
+            &state.artifact_cleanup_guard,
+            &cloned.artifact_cleanup_guard
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maintenance_tick_runs_artifact_cleanup_when_root_cleanup_disabled() -> Result<()> {
+        let mut config = Config::default();
+        config.runtime.inactive_ttl_secs = 0;
+        config.runtime.proof_artifact_ttl_secs = 10;
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-only-maintenance",
+        ))?);
+        let artifact = register_artifact(runtime.as_ref(), "artifact-only", true).await?;
+        let mut artifact_cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+
+        run_runtime_maintenance_tick(
+            &config,
+            runtime.clone(),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            &mut artifact_cursor,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await;
+
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(!tokio::fs::try_exists(&artifact.proof_path).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_removes_expired_row_and_file() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-expired",
+        ))?);
+        let artifact = register_artifact(runtime.as_ref(), "expired", true).await?;
+        let mut cursor: Option<ProofArtifactCursor> = None;
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            10,
+            &mut cursor,
+        )
+        .await?;
+        assert_eq!(stats.removed_rows, 1);
+        assert_eq!(stats.files_removed, 1);
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(!tokio::fs::try_exists(Path::new(&artifact.proof_path)).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_retains_nonterminal_references() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("artifact-active"))?);
+        let proposal_ref = encoded_proposal_task_id(44)?;
+        let artifact = register_artifact(runtime.as_ref(), &proposal_ref, true).await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "active-root",
+            &proposal_ref,
+            RunnerStatus::Running,
+            now_ts(),
+        )
+        .await?;
+        let mut cursor = None;
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            10,
+            &mut cursor,
+        )
+        .await?;
+        assert_eq!(stats.retained_active, 1);
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_some()
+        );
+        assert!(tokio::fs::try_exists(&artifact.proof_path).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_does_not_retain_terminal_references() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-terminal",
+        ))?);
+        let proposal_ref = encoded_proposal_task_id(45)?;
+        let artifact = register_artifact(runtime.as_ref(), &proposal_ref, true).await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "terminal-root",
+            &proposal_ref,
+            RunnerStatus::Completed,
+            now_ts(),
+        )
+        .await?;
+        let mut cursor = None;
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            10,
+            &mut cursor,
+        )
+        .await?;
+        assert_eq!(stats.removed_rows, 1);
+        assert_eq!(stats.files_removed, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_removes_missing_file_rows_and_honors_zero() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-missing",
+        ))?);
+        let artifact = register_artifact(runtime.as_ref(), "missing", false).await?;
+        let guard = Arc::new(RwLock::new(()));
+        let mut cursor = None;
+        assert_eq!(
+            run_proof_artifact_cleanup_pass(
+                runtime.clone(),
+                guard.clone(),
+                artifact.updated_at + 10,
+                0,
+                &mut cursor,
+            )
+            .await?,
+            ProofArtifactCleanupStats::default()
+        );
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            guard,
+            artifact.updated_at + 10,
+            10,
+            &mut cursor,
+        )
+        .await?;
+        assert_eq!(stats.removed_rows, 1);
+        assert_eq!(stats.files_missing, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_removes_row_when_file_delete_fails() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-file-failure",
+        ))?);
+        let artifact = register_artifact(runtime.as_ref(), "delete-fails", false).await?;
+        tokio::fs::create_dir_all(&artifact.proof_path).await?;
+        let mut cursor = None;
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            10,
+            &mut cursor,
+        )
+        .await?;
+        assert_eq!(stats.removed_rows, 1);
+        assert_eq!(stats.file_delete_failures, 1);
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_fails_closed_on_invalid_live_metadata() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-invalid-metadata",
+        ))?);
+        let artifact = register_artifact(runtime.as_ref(), "retained", true).await?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "invalid-live-root".to_string(),
+                pipeline_key: Some(PipelineKey::ShastaRisc0),
+                route: "risc0/local".parse().expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: None,
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({"invalid": true}),
+                request_fingerprint: None,
+            })
+            .await?;
+        let mut cursor = None;
+        let err = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            10,
+            &mut cursor,
+        )
+        .await
+        .expect_err("invalid live metadata must fail closed");
+        assert!(err.to_string().contains("invalid-live-root"));
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_some()
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1098,6 +1561,31 @@ mod tests {
         let mut factory = StaticPipelineFactory::default();
         factory.insert("taiko_dev/ethereum", PipelineKey::ShastaRisc0, engine);
         factory
+    }
+
+    async fn register_artifact(
+        runtime: &RuntimeManager,
+        proof_ref: &str,
+        file: bool,
+    ) -> Result<ProofArtifactRecord> {
+        let proof_path = runtime.proof_artifact_path("taiko_dev/ethereum", proof_ref);
+        if file {
+            tokio::fs::create_dir_all(proof_path.parent().context("artifact parent")?).await?;
+            tokio::fs::write(&proof_path, b"{}").await?;
+        }
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: PipelineKey::ShastaRisc0,
+                route: "risc0/local".parse().expect("parse route"),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await?;
+        runtime
+            .get_proof_artifact("taiko_dev/ethereum", proof_ref)
+            .await?
+            .context("registered artifact")
     }
 
     async fn register_runtime_task(

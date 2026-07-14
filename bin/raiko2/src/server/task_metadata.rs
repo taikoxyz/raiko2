@@ -10,7 +10,7 @@ use raiko2_prover::{
 };
 use raiko2_queue::decode_task_id;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -398,6 +398,26 @@ pub(crate) fn root_proof_artifact_refs(
     }
 }
 
+pub(crate) fn referenced_proof_artifact_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for proposal in &metadata.proposals {
+        refs.extend(proposal_proof_artifact_refs(pipeline_key, proposal));
+    }
+    if let Some(root_refs) = root_proof_artifact_refs(metadata, pipeline_key) {
+        refs.extend(root_refs.refs);
+    }
+    refs.extend(
+        metadata
+            .aggregate_input_artifacts
+            .iter()
+            .map(|artifact| artifact.proof_ref.clone()),
+    );
+    refs
+}
+
 pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
     match &task_id.0 {
         EngineTaskKey::Proposal { pipeline, request } => {
@@ -577,6 +597,64 @@ impl StageTimingMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn referenced_artifact_refs_include_canonical_legacy_and_external_inputs() {
+        let proposal_request = ProposalTaskRequest {
+            proposal_id: 7,
+            l2_block_range: None,
+            l1_inclusion_block_number: 11,
+            last_anchor_block_number: 6,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: raiko2_engine::ProverTaskConfig::default(),
+        };
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "aggregate-request".to_string(),
+            proposal_ids: vec![7],
+            prover_config: raiko2_engine::ProverTaskConfig::default(),
+        };
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Risc0,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: vec![ProposalTask {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_numbers: vec![7],
+                last_anchor_block_number: 6,
+                task_id: "legacy-proposal-ref".to_string(),
+                request: Some(proposal_request.clone()),
+            }],
+            aggregate_task_id: Some("legacy-aggregate-ref".to_string()),
+            aggregate_request: Some(aggregate_request.clone()),
+            aggregate_input_artifacts: vec![AggregateInputProofArtifact {
+                proof_ref: "external-input-ref".to_string(),
+                proof_path: "cache/proofs/external.json".to_string(),
+            }],
+            runtime: RuntimeMetadata::default(),
+        };
+
+        let refs = referenced_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+        assert_eq!(
+            refs,
+            BTreeSet::from([
+                proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request),
+                "legacy-proposal-ref".to_string(),
+                aggregate_task_ref(PipelineKey::ShastaRisc0, &aggregate_request),
+                "legacy-aggregate-ref".to_string(),
+                "external-input-ref".to_string(),
+            ])
+        );
+    }
 
     #[test]
     fn task_metadata_roundtrips_canonical_proof_type() {

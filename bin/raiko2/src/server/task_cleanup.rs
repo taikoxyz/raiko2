@@ -236,11 +236,11 @@ pub(crate) async fn run_proof_artifact_cleanup_pass(
             PROOF_ARTIFACT_CLEANUP_BATCH_SIZE,
         )
         .await?;
+    let live_refs = live_proof_artifact_refs(runtime.as_ref()).await?;
     *cursor = artifacts.last().map(ProofArtifactCursor::from);
     if artifacts.is_empty() {
         return Ok(ProofArtifactCleanupStats::default());
     }
-    let live_refs = live_proof_artifact_refs(runtime.as_ref()).await?;
     let mut stats = ProofArtifactCleanupStats {
         scanned: artifacts.len(),
         ..ProofArtifactCleanupStats::default()
@@ -1045,7 +1045,10 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "artifact-invalid-metadata",
         ))?);
-        let artifact = register_artifact(runtime.as_ref(), "retained", true).await?;
+        let artifacts = [
+            register_artifact(runtime.as_ref(), "retained-first", true).await?,
+            register_artifact(runtime.as_ref(), "retained-second", true).await?,
+        ];
         runtime
             .register_task(TaskRegistration {
                 task_id: "invalid-live-root".to_string(),
@@ -1059,22 +1062,28 @@ mod tests {
             })
             .await?;
         let mut cursor = None;
-        let err = run_proof_artifact_cleanup_pass(
-            runtime.clone(),
-            Arc::new(RwLock::new(())),
-            artifact.updated_at + 10,
-            10,
-            &mut cursor,
-        )
-        .await
-        .expect_err("invalid live metadata must fail closed");
-        assert!(err.to_string().contains("invalid-live-root"));
-        assert!(
-            runtime
-                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
-                .await?
-                .is_some()
-        );
+        for _ in 0..2 {
+            let err = run_proof_artifact_cleanup_pass(
+                runtime.clone(),
+                Arc::new(RwLock::new(())),
+                artifacts[0].updated_at + 10,
+                10,
+                &mut cursor,
+            )
+            .await
+            .expect_err("invalid live metadata must fail closed");
+            assert!(err.to_string().contains("invalid-live-root"));
+            assert!(cursor.is_none());
+            for artifact in &artifacts {
+                assert!(
+                    runtime
+                        .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                        .await?
+                        .is_some()
+                );
+                assert!(tokio::fs::try_exists(&artifact.proof_path).await?);
+            }
+        }
         Ok(())
     }
 

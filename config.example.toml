@@ -55,8 +55,11 @@ compute_units_per_second = 1000
 root = "./data/runtime"
 # Terminal root tasks expire independently after two hours of inactivity. Set to 0 to disable.
 inactive_ttl_secs = 7200
-# Completed proof artifact rows/files expire after seven days unless a non-terminal root still
-# references them. Set to 0 to disable automatic artifact cleanup.
+# Completed proof artifact rows/files expire seven days after proof publication; process restart
+# does not reset their age. Active references retain artifacts, and malformed active metadata
+# pauses deletion fail-closed while incrementing the cleanup counter. Expired artifacts from
+# retained completed roots return not-found. Filesystem removal failures remain durably queued and
+# are retried. Set to 0 to disable new TTL expiry independently; queued deletions still continue.
 proof_artifact_ttl_secs = 604800
 
 # Optional preflight cross-check against a second L2 RPC endpoint.

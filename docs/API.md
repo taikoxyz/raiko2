@@ -1073,10 +1073,15 @@ Returns the root-task view derived from the original batch request.
   cleanup. Set this value to `0` to disable automatic root-task cleanup.
 - Completed proof artifacts are stored independently under `cache/proofs/...` and indexed by
   stable proof refs so aggregation can reuse them after engine task cleanup or process restart.
-  Artifact rows and files expire after `runtime.proof_artifact_ttl_secs` (default `604800`, seven
-  days). Artifacts referenced by `allocated` or `running` roots are retained, missing files do not
-  block row cleanup, and other file deletion errors are logged after the row is removed. Set this
-  value to `0` to disable automatic artifact cleanup without disabling root-task cleanup.
+  Artifact age advances when a proof is published; restoring artifacts after a process restart
+  preserves their publication time. Artifact rows and files expire after
+  `runtime.proof_artifact_ttl_secs` (default `604800`, seven days). Artifacts referenced by
+  `allocated` or `running` roots are retained. If any such root has malformed metadata, artifact
+  deletion pauses fail-closed and increments `raiko2_artifact_cleanup_invalid_metadata_total`.
+  Filesystem removals are durably queued before artifact rows are removed; failed removals remain
+  queued and are retried. A completed root retained after its artifact expires returns not-found
+  when its proof is requested. Set this value to `0` to disable new TTL expiry independently of
+  root-task cleanup; already queued file deletions continue.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`. When present,
   `proposals[].extra_data.sp1.gas` is SP1 prover gas from `ExecutionReport::gas()`, not EVM gas.

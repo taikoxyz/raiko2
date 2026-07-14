@@ -9,6 +9,8 @@ pub struct RuntimeConfig {
     pub root: PathBuf,
     #[serde(default = "default_inactive_ttl_secs")]
     pub inactive_ttl_secs: u64,
+    #[serde(default = "default_proof_artifact_ttl_secs")]
+    pub proof_artifact_ttl_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -16,6 +18,7 @@ impl Default for RuntimeConfig {
         Self {
             root: PathBuf::from("./data/runtime"),
             inactive_ttl_secs: default_inactive_ttl_secs(),
+            proof_artifact_ttl_secs: default_proof_artifact_ttl_secs(),
         }
     }
 }
@@ -34,4 +37,8 @@ impl RuntimeConfig {
 
 const fn default_inactive_ttl_secs() -> u64 {
     7_200
+}
+
+const fn default_proof_artifact_ttl_secs() -> u64 {
+    604_800
 }

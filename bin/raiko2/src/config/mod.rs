@@ -544,8 +544,22 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_config_defaults_inactive_ttl_to_two_hours() {
+    fn test_runtime_config_defaults_cleanup_ttls() {
         let config = RuntimeConfig::default();
+        assert_eq!(config.inactive_ttl_secs, 7_200);
+        assert_eq!(config.proof_artifact_ttl_secs, 604_800);
+    }
+
+    #[test]
+    fn test_runtime_config_accepts_disabled_artifact_cleanup() {
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+            root = "./data/runtime"
+            proof_artifact_ttl_secs = 0
+            "#,
+        )
+        .expect("deserialize runtime config");
+        assert_eq!(config.proof_artifact_ttl_secs, 0);
         assert_eq!(config.inactive_ttl_secs, 7_200);
     }
 

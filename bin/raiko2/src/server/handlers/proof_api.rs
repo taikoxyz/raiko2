@@ -1753,9 +1753,19 @@ async fn load_persisted_root_proof_material(
     let Some(path) = record.proof_path.as_deref() else {
         return Ok(None);
     };
-    let bytes = fs::read(path)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to read proof file {path}: {err}")))?;
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found(format!(
+                "proof artifact expired or unavailable: {path}"
+            )));
+        }
+        Err(err) => {
+            return Err(ApiError::internal(format!(
+                "failed to read proof file {path}: {err}"
+            )));
+        }
+    };
     let proof: Proof = serde_json::from_slice(&bytes)
         .map_err(|err| ApiError::internal(format!("failed to parse proof file {path}: {err}")))?;
     Ok(Some(proof))
@@ -3501,6 +3511,27 @@ mod tests {
             request_fingerprint: Some("0xfingerprint".to_string()),
             updated_at: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn missing_persisted_root_proof_is_not_found() {
+        let metadata = task_metadata_with_stage(None);
+        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        record.proof_path = Some(
+            unique_test_runtime_root("missing-persisted-root")
+                .join("proof.json")
+                .display()
+                .to_string(),
+        );
+
+        let err = load_persisted_root_proof_material(&record)
+            .await
+            .expect_err("expired proof must be not found");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(
+            err.message
+                .contains("proof artifact expired or unavailable")
+        );
     }
 
     fn task_metadata_with_stage(stage: Option<&str>) -> TaskMetadata {

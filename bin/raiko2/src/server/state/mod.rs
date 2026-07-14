@@ -586,13 +586,16 @@ async fn restore_proof_artifacts_from_runtime_task(
             .await
             .with_context(|| format!("failed to write proof artifact for {proof_ref}"))?;
         runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: metadata.network_pair.clone(),
-                proof_ref,
-                pipeline_key: record.pipeline_key,
-                route: record.route,
-                proof_path: artifact_path.display().to_string(),
-            })
+            .restore_proof_artifact(
+                ProofArtifactRegistration {
+                    network_pair: metadata.network_pair.clone(),
+                    proof_ref,
+                    pipeline_key: record.pipeline_key,
+                    route: record.route,
+                    proof_path: artifact_path.display().to_string(),
+                },
+                record.updated_at,
+            )
             .await?;
     }
     Ok(())
@@ -650,13 +653,16 @@ async fn restore_cached_proof_artifact(
     }
 
     runtime
-        .upsert_proof_artifact(ProofArtifactRegistration {
-            network_pair: metadata.network_pair.clone(),
-            proof_ref: proof_ref.to_string(),
-            pipeline_key: record.pipeline_key,
-            route: record.route,
-            proof_path: proof_path.display().to_string(),
-        })
+        .restore_proof_artifact(
+            ProofArtifactRegistration {
+                network_pair: metadata.network_pair.clone(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: record.pipeline_key,
+                route: record.route,
+                proof_path: proof_path.display().to_string(),
+            },
+            record.updated_at,
+        )
         .await?;
     Ok(())
 }
@@ -1146,30 +1152,40 @@ mod tests {
             runtime: RuntimeMetadata::default(),
         };
         runtime
-            .upsert_task(&runtime_record(
-                "legacy-root",
-                PipelineKey::ShastaNative,
-                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-                RunnerStatus::Completed,
-                Some(proof_path.display().to_string()),
-                serde_json::to_value(metadata)?,
-            ))
+            .restore_proof_artifact(
+                ProofArtifactRegistration {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    proof_ref: legacy_ref.clone(),
+                    pipeline_key: PipelineKey::ShastaNative,
+                    route: PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+                    proof_path: proof_path.display().to_string(),
+                },
+                123,
+            )
             .await?;
+        let mut record = runtime_record(
+            "legacy-root",
+            PipelineKey::ShastaNative,
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            RunnerStatus::Completed,
+            Some(proof_path.display().to_string()),
+            serde_json::to_value(metadata)?,
+        );
+        record.updated_at = 456;
+        runtime.upsert_task(&record).await?;
 
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
 
-        assert!(
-            runtime
-                .get_proof_artifact("taiko_dev/ethereum", &canonical_ref)
-                .await?
-                .is_some()
-        );
-        assert!(
-            runtime
-                .get_proof_artifact("taiko_dev/ethereum", &legacy_ref)
-                .await?
-                .is_some()
-        );
+        let canonical_artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", &canonical_ref)
+            .await?
+            .expect("canonical proof artifact");
+        assert_eq!(canonical_artifact.updated_at, 456);
+        let legacy_artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", &legacy_ref)
+            .await?
+            .expect("legacy proof artifact");
+        assert_eq!(legacy_artifact.updated_at, 123);
         Ok(())
     }
 
@@ -1221,16 +1237,16 @@ mod tests {
             aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
-        runtime
-            .upsert_task(&runtime_record(
-                "aggregate-root",
-                PipelineKey::ShastaNative,
-                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-                RunnerStatus::Allocated,
-                None,
-                serde_json::to_value(metadata)?,
-            ))
-            .await?;
+        let mut record = runtime_record(
+            "aggregate-root",
+            PipelineKey::ShastaNative,
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            RunnerStatus::Allocated,
+            None,
+            serde_json::to_value(metadata)?,
+        );
+        record.updated_at = 456;
+        runtime.upsert_task(&record).await?;
 
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
 
@@ -1238,6 +1254,7 @@ mod tests {
             .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
             .await?
             .expect("proposal proof artifact");
+        assert_eq!(artifact.updated_at, 456);
         assert!(tokio::fs::try_exists(artifact.proof_path).await?);
         Ok(())
     }

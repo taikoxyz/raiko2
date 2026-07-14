@@ -79,6 +79,7 @@ The canonical minimal metric families are:
 - `raiko2_stage_task_duration_seconds`
 - `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
+- `raiko2_artifact_cleanup_invalid_metadata_total`
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.

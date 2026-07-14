@@ -368,6 +368,7 @@ impl RuntimeObserver {
         stage: &str,
         proof: &raiko2_primitives::Proof,
     ) -> Result<HashMap<String, String>> {
+        let _artifact_cleanup_guard = self.artifact_cleanup_guard.read().await;
         let root_ref = Self::root_task_ref(id);
         let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
         if records.is_empty() {
@@ -380,7 +381,6 @@ impl RuntimeObserver {
 
         let proof_bytes =
             serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
-        let _artifact_cleanup_guard = self.artifact_cleanup_guard.read().await;
         let proof_path = self
             .runtime
             .write_proof_artifact_bytes(&self.network_pair, &root_ref, &proof_bytes)
@@ -1139,6 +1139,71 @@ mod tests {
         );
         assert!(
             tokio::fs::try_exists(runtime.proof_artifact_path("taiko_dev/ethereum", &proof_ref))
+                .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_publish_rechecks_active_root_after_cleanup_guard() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-artifact-guard-cancelled",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        register_observer_task(
+            runtime.as_ref(),
+            "task_artifact_guard_cancelled",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+
+        let artifact_cleanup_guard = Arc::new(tokio::sync::RwLock::new(()));
+        let cleanup_guard = artifact_cleanup_guard.write().await;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            Arc::clone(&artifact_cleanup_guard),
+        );
+        let mut publish = tokio::spawn(async move {
+            observer
+                .write_final_proof_files(&proposal_task_id, "prove", &proof_fixture())
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut publish)
+                .await
+                .is_err(),
+            "proof artifact publication completed while cleanup held the write guard"
+        );
+        let mut record = runtime
+            .get_task("task_artifact_guard_cancelled")
+            .await?
+            .expect("runtime task");
+        record.runner_status = RunnerStatus::Cancelled;
+        runtime.upsert_task(&record).await?;
+
+        drop(cleanup_guard);
+        let proof_paths =
+            tokio::time::timeout(std::time::Duration::from_secs(1), publish).await???;
+        assert!(proof_paths.is_empty());
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", &proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(
+            !tokio::fs::try_exists(runtime.proof_artifact_path("taiko_dev/ethereum", &proof_ref))
                 .await?
         );
         Ok(())

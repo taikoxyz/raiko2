@@ -1,11 +1,9 @@
 //! Native prover implementation (no zk proof).
 
 use alloy_primitives::{Address, B256, Bytes, address, keccak256};
-use raiko2_guest_common::{
-    aggregate_shasta_zk_with_verifier, prove_shasta_proposal_for_proof_type,
-};
+use raiko2_guest_common::{aggregate_shasta_zk_with_verifier, prove_shasta_proposal};
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{Proof, ProofType, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data,
     instance::{words_to_bytes_be, words_to_bytes_le},
@@ -62,10 +60,9 @@ where
         let proof_carry_data = input.proof_carry_data.clone();
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
-        let input_hash =
-            prove_shasta_proposal_for_proof_type(&input, ProofType::Native).map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
-            })?;
+        let input_hash = prove_shasta_proposal(&input).map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
+        })?;
         ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "native")?;
         let signature = mock_signature(input_hash);
         let sgx_instance = signer_address();
@@ -222,9 +219,7 @@ mod tests {
     use super::NativeProver;
     use crate::Prover;
     use alloy_primitives::{Address, B256};
-    use raiko2_guest_common::{
-        aggregate_shasta_zk_with_verifier, prove_shasta_proposal_for_proof_type,
-    };
+    use raiko2_guest_common::{aggregate_shasta_zk_with_verifier, prove_shasta_proposal};
     use raiko2_pipeline::NativeBackend;
     use raiko2_primitives::{
         AggregationGuestInput, Proof, ProofType, ProverConfig, RaikoError, SupportedChainSpecs,
@@ -255,6 +250,7 @@ mod tests {
         {
             guest_input.taiko.l1_ancestor_headers = vec![guest_input.taiko.l1_header.clone()];
         }
+        guest_input.taiko.prover_data.last_anchor_block_number = None;
         if let Some(chain_spec) = SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(guest_input.taiko.chain_spec.chain_id)
         {
@@ -304,8 +300,7 @@ mod tests {
         let prover = NativeProver;
         let config = ProverConfig::default();
         let input = fixture_guest_input();
-        let expected_hash =
-            prove_shasta_proposal_for_proof_type(&input, ProofType::Native).expect("proposal");
+        let expected_hash = prove_shasta_proposal(&input).expect("proposal");
         let proof = prover
             .prove(input, &config, &NativeBackend)
             .await

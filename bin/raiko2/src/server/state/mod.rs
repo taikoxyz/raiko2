@@ -48,7 +48,10 @@ use raiko2_pipeline::forks::shasta::{
 #[cfg(feature = "host")]
 use raiko2_pipeline::{Risc0ShastaBackend, Sp1ShastaBackend};
 #[cfg(feature = "host")]
-use raiko2_prover::{boundless::BoundlessProver, sp1::Sp1Prover};
+use raiko2_prover::{
+    boundless::{BoundlessBalanceGate, BoundlessProver},
+    sp1::Sp1Prover,
+};
 #[cfg(feature = "local-provers")]
 use raiko2_prover::{native::NativeProver, risc0::Risc0Prover};
 
@@ -146,6 +149,12 @@ impl AppState {
 
         let mut factory = StaticPipelineFactory::default();
 
+        // One balance gate shared by every pair's Boundless prover: all pairs fund the same market
+        // account (one global signer/rpc/deployment), so concurrent submissions across pairs must
+        // deposit against a single combined reserved total, not one per pair.
+        #[cfg(feature = "host")]
+        let boundless_balance_gate = BoundlessBalanceGate::new();
+
         for pair in &resolved_pairs {
             register_pair_pipelines(
                 &mut factory,
@@ -153,6 +162,8 @@ impl AppState {
                     config: &config,
                     pair,
                     runtime: Arc::clone(&runtime),
+                    #[cfg(feature = "host")]
+                    boundless_balance_gate: boundless_balance_gate.clone(),
                     #[cfg(feature = "local-provers")]
                     shasta_backends: &shasta_backends,
                     #[cfg(all(feature = "host", not(feature = "local-provers")))]
@@ -201,6 +212,9 @@ struct PairPipelineRegistration<'a> {
     config: &'a Config,
     pair: &'a ResolvedNetworkPair,
     runtime: Arc<RuntimeManager>,
+    /// Balance gate shared across all pairs (see the construction site in `ServerState::new`).
+    #[cfg(feature = "host")]
+    boundless_balance_gate: BoundlessBalanceGate,
     #[cfg(feature = "local-provers")]
     shasta_backends: &'a ShastaBackends,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
@@ -275,6 +289,7 @@ async fn register_pair_pipelines(
                 registration.boundless_backend.clone(),
                 setup::boundless_scheduler_config(registration.config),
                 Arc::clone(&runtime_observer),
+                registration.boundless_balance_gate.clone(),
             )
             .await?;
             boundless_engine.start_workers_with_maintenance_interval(
@@ -350,6 +365,7 @@ async fn register_pair_pipelines(
             registration.shasta_backends.risc0_boundless.clone(),
             setup::boundless_scheduler_config(registration.config),
             Arc::clone(&runtime_observer),
+            registration.boundless_balance_gate.clone(),
         )
         .await?;
         boundless_engine.start_workers_with_maintenance_interval(
@@ -887,6 +903,7 @@ async fn build_boundless_engine(
     backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    balance_gate: BoundlessBalanceGate,
 ) -> Result<Engine<BoundlessSpec>> {
     let agent_config = setup::boundless_prover_config(config, pair);
 
@@ -896,7 +913,7 @@ async fn build_boundless_engine(
             let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0Network,
-                BoundlessProver::new(agent_config),
+                BoundlessProver::with_balance_gate(agent_config, balance_gate),
                 backend,
                 provider,
             );
@@ -930,7 +947,7 @@ async fn build_boundless_engine(
                     .await?;
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0Network,
-                    BoundlessProver::new(agent_config),
+                    BoundlessProver::with_balance_gate(agent_config, balance_gate),
                     backend,
                     provider,
                 );

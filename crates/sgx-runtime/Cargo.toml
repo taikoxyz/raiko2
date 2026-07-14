@@ -15,7 +15,7 @@ clap.workspace = true
 getrandom = "0.3"
 hex.workspace = true
 raiko2-guest-common.workspace = true
-raiko2-primitives.workspace = true
+raiko2-primitives = { path = "../primitives", default-features = false }
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol-shasta.workspace = true
 raiko2-prover = { path = "../prover", default-features = false }

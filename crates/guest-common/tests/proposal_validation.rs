@@ -350,7 +350,7 @@ fn assert_rejected_with_message(guest_input: &GuestInput, expected: &str) {
 }
 
 #[test]
-fn rejects_witness_is_taiko_mismatch() {
+fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
     let mut guest_input = guest_input_with_single_block();
     let mut second = guest_input.witnesses[0].clone();
     second.block.header.number += 1;
@@ -360,7 +360,11 @@ fn rejects_witness_is_taiko_mismatch() {
     guest_input.proof_carry_data =
         build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-    assert_rejected_with_message(&guest_input, "chain_spec mismatch");
+    prove_shasta_proposal_with_validator(
+        &guest_input,
+        |stateless_input, _ancestor_headers, _runtime| Ok(stateless_input.block.header.hash_slow()),
+    )
+    .expect("guest should ignore witness chain_spec.is_taiko when chain_id matches");
 }
 
 #[test]
@@ -390,6 +394,23 @@ fn rejects_taiko_proposal_id_outside_uint48() {
     guest_input.proof_carry_data.transition_input.proposal_id = guest_input.taiko.proposal_id;
 
     assert_rejected_with_message(&guest_input, "taiko.proposal_id does not fit in uint48");
+}
+
+#[test]
+fn rejects_transition_timestamp_outside_uint48() {
+    let mut guest_input = guest_input_with_single_block();
+    // proposal.timestamp is sol uint48 and cannot exceed the bound; force the carry field only
+    // so we exercise the fail-closed check before u48 truncation in hashing.
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .transition
+        .timestamp = SHASTA_PROPOSAL_ID_MAX + 1;
+
+    assert_rejected_with_message(
+        &guest_input,
+        "proof_carry_data.transition.timestamp does not fit in uint48",
+    );
 }
 
 #[test]

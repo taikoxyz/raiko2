@@ -31,6 +31,8 @@ pub(crate) struct TeeProviderImage {
     pub(crate) repository: String,
     pub(crate) tag: String,
     pub(crate) digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sgx_edmm: Option<bool>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -99,6 +101,7 @@ mod tests {
                     tag: "v1.2.3".to_string(),
                     digest: "us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:deadbeef"
                         .to_string(),
+                    sgx_edmm: Some(false),
                 },
                 attestation: TeeProviderAttestation {
                     mr_enclave: "enclave".to_string(),
@@ -122,9 +125,24 @@ mod tests {
         assert!(contents.contains("\"release\": \"v1.2.3\""));
         assert!(contents.contains("\"providers\""));
         assert!(contents.contains("\"lane\": \"sgx\""));
+        assert!(contents.contains("\"sgx_edmm\": false"));
         assert!(contents.contains("\"attestation\""));
         assert!(contents.ends_with('\n'));
 
         std::fs::remove_file(path).expect("cleanup manifest");
+    }
+
+    #[test]
+    fn release_tee_manifest_omits_unspecified_sgx_edmm_capability() {
+        let image = TeeProviderImage {
+            repository: "example.invalid/provider/image".to_string(),
+            tag: "v1.2.3".to_string(),
+            digest: "example.invalid/provider/image@sha256:deadbeef".to_string(),
+            sgx_edmm: None,
+        };
+
+        let contents = serde_json::to_string(&image).expect("image serialization");
+
+        assert!(!contents.contains("sgx_edmm"));
     }
 }

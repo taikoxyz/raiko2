@@ -62,7 +62,7 @@ cargo run -p raiko2 --features fixture-server -- fixture-server --host 127.0.0.1
 This fixture-backed server is intended for:
 
 - API upgrade smoke tests that only need stable request/response behavior
-- local validation of `/v3/proof/batch/shasta` and `/v3/proof/report` wiring
+- local validation of `/v4/proof/proposal` and `/v4/tasks/{id}` wiring
 - development without live L1/L2 RPC or a real prover backend
 
 Do not use it as evidence for:
@@ -71,42 +71,38 @@ Do not use it as evidence for:
 - remote prover integration
 - end-to-end proposal regression on a real network window
 
-Submit an asynchronous v3 request:
+Submit an asynchronous v4 request:
 
 ```bash
-curl -X POST http://127.0.0.1:8087/v3/proof/batch/shasta \
+curl -X POST http://127.0.0.1:8087/v4/proof/proposal \
   -H 'content-type: application/json' \
   -d '{
+    "proof_type": "sp1",
+    "aggregate": false,
     "proposals": [{
       "proposal_id": 3,
+      "last_anchor_block_number": 0,
       "l1_inclusion_block_number": 1,
-      "l2_block_numbers": [3],
-      "last_anchor_block_number": 0
-    }],
-    "aggregate": false,
-    "proof_type": "sp1",
-    "network": "taiko_dev",
-    "l1_network": "ethereum",
-    "sp1": {
-      "mode": "execute",
-      "prover": "local"
-    }
+      "l2_block_number_start": 3,
+      "l2_block_number_end": 3
+    }]
   }'
 ```
 
 Query the resulting task:
 
 ```bash
-curl http://127.0.0.1:8087/v3/tasks/<task_id>
+curl http://127.0.0.1:8087/v4/tasks/<task_id>
 ```
 
-`sp1.mode=execute` completes without a zk proof and stores the execution report under
-`proposals[].extra_data.sp1`.
+The fixture engine returns deterministic task and proof data without live RPC or prover
+dependencies.
 
 ## Generate A Latest Proposal Request
 
-Use the new `xtask` helper to discover the latest onchain Shasta proposal and emit a ready-to-post
-`/v3/proof/batch/shasta` JSON body.
+Use the legacy `xtask` helper to discover the latest onchain Shasta proposal and emit a
+`/v3/proof/batch/shasta` JSON body. The default server router no longer mounts v3 routes, so prefer
+v4 request construction for active clients.
 
 Print a mainnet request to stdout:
 
@@ -144,13 +140,32 @@ CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
   cargo run -r -p xtask-build-guest --bin xtask-build-guest -- all
 ```
 
-`build-guest` updates checked-in ELF artifacts under `crates/guests/elf` when guest sources,
-toolchain inputs, or current ELF bytes change. When the fingerprint already matches, it prints a
-backend skip message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
+`build-guest` updates checked-in ELF artifacts and deterministic provenance manifests under
+`crates/guests/elf` when guest sources, transitive local dependencies, toolchain inputs, or current
+artifact bytes change. When the tracked provenance already matches, it prints a backend skip
+message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
 
 ```bash
 just build-guest sp1 --force
 ```
+
+Verify both checked-in guest families without invoking Docker:
+
+```bash
+cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check
+```
+
+Check mode exits nonzero when a source input, artifact, or provenance manifest is missing or stale.
+Refresh locally with `just build-guest <backend>`, or dispatch the manual `sync-guest-elf` workflow
+when the required guest toolchain is not available locally.
+
+Check mode is a drift detector, not a reproducibility attestation: the manifest is recorded by the
+same build tooling from local state, so it catches accidental staleness rather than substituted
+artifacts. Trust in released artifacts still comes from the release process and on-chain image-id
+registration. The source closure covers each local crate's manifest, `src/` tree, and `build.rs`;
+compile-time assets included from outside `src/` (for example via `include_str!`) are not tracked.
+No such asset currently reaches guest binaries — the chain-spec JSON embedded by
+`raiko2-primitives` is behind the `chain-spec-json` feature, which guest builds disable.
 
 The host loads those files from that fixed path at process startup; they are not embedded into
 the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
@@ -212,7 +227,7 @@ time just build-guest sp1
 ```
 
 The first two commands measure guest rebuild behavior with increasingly warm Docker Cargo and
-`sccache` volumes. The third command exercises the guest fingerprint skip path and prints
+`sccache` volumes. The third command exercises the guest provenance skip path and prints
 per-backend elapsed time when the checked-in ELFs already match the current sources and build
 inputs.
 RISC0 and SP1 Docker-image rebuilds also print `sccache --show-stats` output so cache hit/miss
@@ -277,6 +292,11 @@ This `register-image` flow only covers zk guest digests (`risc0` image IDs and `
 digests). SGX registration is separate: read `mr_enclave` from the baked
 `/opt/raiko2-sgx/etc/attestation.raiko2.json` file in the built `raiko2-sgx` image and use your
 external SGX verifier tooling, such as the `taiko-mono` SGX verifier scripts, to register it.
+
+For SP1, `register-image` derives the verifier key from the paired guest ELF at runtime with
+`setup(elf)`. The checked-in `*.vk.bin` file is consistency-checked against that derived key, but
+it is not the source of the digest registered on-chain. If the check fails, rebuild the guest
+artifacts before attempting registration.
 
 ## Guest Benchmarking
 

@@ -38,8 +38,8 @@ pairs = [
   # Optional: override Boundless quote, offer, and runtime params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
   # Leave fixed quote overrides unset unless the target network has stable proof sizes.
-# { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote_strategy = "evaluated" } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", rebid_timeout_ms = 600000, rebid_price_multiplier = 3, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
+# { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote = { strategy = "evaluated" } } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote = { strategy = "evaluated" }, rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", absolute_max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_sec = 120, lock_collateral = "20", timeouts = { mode = "per_mcycle", lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, dynamic_pricing_timeout_modifier = 2.0 } } } } },
 ]
 
 [rpc.client]
@@ -93,30 +93,22 @@ timeout_secs = 7200
 
 [prover.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`
-# can replace fixed quote overrides, `aggregation_quote_strategy`, runtime timeout/rebid fields,
+# can replace `batch_quote`/`aggregation_quote`, runtime timeout/rebid fields,
 # and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
-# Leave `batch_quoted_mcycles` unset so proposal quotes use evaluated cycles
-# (`raiko_agent` rounds up to the next 1000 mcycles with a 2000 mcycle floor).
-# Fixed quote underprices large proposals and overprices small ones.
-# batch_quoted_mcycles = 6000
-batch_quote_strategy = "raiko_agent"
-# Leave `aggregation_quoted_mcycles` unset so aggregation quotes follow the selected strategy.
-# `raiko_agent` rounds aggregation quotes to 100 mcycles with a 200 mcycle floor.
-# aggregation_quoted_mcycles = 200
-aggregation_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.
 rebid_timeout_ms = 300000
-# Each rebid multiplies the offer max price by this value (the configured max price in
-# manual mode, the SDK autopriced max price in market mode).
-rebid_price_multiplier = 2
+# Each rebid escalates the offer max price by this many basis points, compounding per attempt
+# (5000 = +50%/attempt: 1x, 1.5x, 2.25x, 3.375x, 5.06x ...). 0 = flat rebids. The base is the
+# configured max price in manual mode, the SDK autopriced max price in market mode.
+rebid_price_step_bps = 5000
 # Maximum number of rebids across all retry paths (no-lock, expired, and timed-out
 # requests share one budget); the proof task fails once it is exhausted. The default
-# allows a final 16x max price.
+# allows ~5x max price at the default step.
 rebid_max_attempts = 4
 
 # Optional request sampling policy for proof_type=zk_any.
@@ -147,43 +139,68 @@ deployment_type = "base"
 [prover.boundless.deployment.overrides]
 order_stream_url = "https://base-mainnet.boundless.network"
 
+# Quote sizing per stage. Default `raiko_agent` rounds evaluated cycles up (batch: 1000-step,
+# 2000 floor; aggregation: 100-step, 200 floor). Use `evaluated` for the honest cycle count,
+# or `fixed` to pin the quote. A fixed quote underprices large proposals and overprices small ones.
+[prover.boundless.batch_quote]
+strategy = "raiko_agent"
+# strategy = "fixed"
+# mcycles = 6000
+
+[prover.boundless.aggregation_quote]
+strategy = "raiko_agent"
+# strategy = "fixed"
+# mcycles = 200
+
 [prover.boundless.offer_params.batch]
 pricing_mode = "market"
-# Optional in market mode: multiply lockTimeout and timeout after dynamic pricing.
-# 2.0 doubles both values, giving provers more time to accept larger proofs.
-dynamic_pricing_timeout_modifier = 2.0
 # Optional in market mode: clamp autopriced (and rebid-escalated) offers to this
 # per-mcycle safety cap instead of failing them. Must be positive when set.
-max_price_per_mcycle = "0.000000600"
+# `max_price_per_mcycle` is accepted as a legacy alias; set only one spelling.
+absolute_max_price_per_mcycle = "0.000000600"
 ramp_up_start_sec = 20
-ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 300
-timeout_ms_per_mcycle = 900
+# Ramp-up duration in seconds (auction price climbs from min to max over this window).
+ramp_up_period_sec = 120
 lock_collateral = "20"
-# Optional: pin the request timeouts to fixed values in seconds instead of deriving
-# them from the quoted mcycles (prices still follow the quote strategy). A fixed
-# value is final: it is not scaled by dynamic_pricing_timeout_modifier.
-# lock_timeout_secs = 600
-# timeout_secs = 3600
 # pricing_mode = "manual", set both price fields. max price is a cap, not
 # paid price; provers lock the ramping auction price. Caps below ~0.0000001 ETH/mcycle
 # historically expired un-locked on Taiko market.
 # max_price_per_mcycle = "0.0000006"
 # min_price_per_mcycle = "0.000000010"
+# Optional in manual mode: absolute ceiling on rebid escalation (>= max_price_per_mcycle).
+# Without it, rebids escalate max_price by rebid_price_step_bps (compounded) up to rebid_max_attempts.
+# absolute_max_price_per_mcycle = "0.0000024"
+
+[prover.boundless.offer_params.batch.timeouts]
+# Derive lock/request timeouts from the quoted mcycles (per-mcycle, ms). In market mode they are
+# scaled by dynamic_pricing_timeout_modifier; a fixed policy is not scaled.
+mode = "per_mcycle"
+lock_timeout_ms_per_mcycle = 300
+timeout_ms_per_mcycle = 900
+dynamic_pricing_timeout_modifier = 2.0
+# --- or pin fixed seconds instead ---
+# mode = "fixed"
+# lock_timeout_secs = 600
+# timeout_secs = 3600
 
 [prover.boundless.offer_params.aggregation]
 pricing_mode = "market"
 ramp_up_start_sec = 20
-ramp_up_period_blocks = 60
+# Ramp-up duration in seconds (auction price climbs from min to max over this window).
+ramp_up_period_sec = 120
+lock_collateral = "20"
+
+[prover.boundless.offer_params.aggregation.timeouts]
+mode = "per_mcycle"
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
-lock_collateral = "20"
-# Aggregation uses the selected quote strategy unless `aggregation_quoted_mcycles`
-# fixes the quote, so per-mcycle cap must also amortize prover overhead (~0.0000087 ETH).
+# Aggregation uses the `aggregation_quote` strategy above, so per-mcycle cap must also
+# amortize prover overhead (~0.0000087 ETH).
 # Manual caps below ~0.0000002 ETH/mcycle (= 0.00004 ETH total at 200 mcycles)
 # rarely lock.
 # max_price_per_mcycle = "0.0000008"
 # min_price_per_mcycle = "0.000000006"
+# absolute_max_price_per_mcycle = "0.0000032"
 
 [queue]
 backend = "memory"

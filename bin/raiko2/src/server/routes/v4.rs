@@ -15,4 +15,8 @@ pub fn routes() -> Router<AppState> {
         .route("/v4/tasks/{id}", get(handlers::v4::get_task))
         .route("/v4/prover/status", get(handlers::v4::get_prover_status))
         .route("/v4/prover/clear", post(handlers::v4::clear_prover))
+        .route(
+            "/v4/prover/invalidate-artifacts",
+            post(handlers::v4::invalidate_artifacts),
+        )
 }

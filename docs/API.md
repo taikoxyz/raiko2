@@ -2,26 +2,26 @@
 
 ## Overview
 
-Raiko2 exposes a Shasta-first `/v3` API aligned with the current upstream `raiko` proof surface,
-plus `raiko2` task-inspection extensions under `/v3/tasks/*`.
+Raiko2 exposes a Shasta-first `/v4` API for explicit proof-type proposal proving,
+aggregation, task lookup, status, and clear operations.
 
-Proof submission is asynchronous. The legacy `POST /proof/*` responses intentionally match old
-`raiko` v3 response shapes and do not expose raiko2 task IDs. Operators can:
+Proof submission is asynchronous. Legacy `/v3/*` and `/proof/*` compatibility routes are kept in
+the codebase for short-term reference, but are not mounted by the default server router. The legacy
+`POST /proof/*` responses intentionally match old `raiko` v3 response shapes and do not expose
+raiko2 task IDs. When those routes are mounted in tests or a temporary compatibility build,
+operators can:
 
 - query `GET /v3/proof/report` for all root task IDs and full root-task views
 - poll `GET /v3/tasks/{id}` for one full root-task view
 - query `GET /v3/proof/list` for completed root tasks with final proof material
 
-The proof routes are available both under `/v3/proof/*` and `/proof/*`.
-
 The public API surface is:
 
-- `POST /v3/proof/batch/shasta`
-- `POST /v3/proof/aggregate`
-- `GET /v3/proof/report`
-- `GET /v3/proof/list`
-- `GET /v3/prover/status`
-- `GET /v3/tasks/{id}` (`raiko2` extension)
+- `POST /v4/proof/proposal`
+- `GET /v4/tasks/{id}`
+- `GET /v4/prover/status`
+- `POST /v4/prover/clear`
+- `POST /v4/prover/invalidate-artifacts`
 - `GET /health`
 - `GET /metrics`
 - `GET /ready`
@@ -29,15 +29,12 @@ The public API surface is:
 ACL-protected API surface requires an `x-api-key` whose ACL allows the listed feature:
 
 - A key with `admin` is accepted for any ACL-protected endpoint.
-- `POST /v3/proof/prune` requires `admin`
-- `POST /proof/prune` requires `admin`
-- `POST /v3/tasks/{id}/cancel` requires `admin`
-- `POST /v3/prover/clear` requires `prover.clear`
 - `POST /v4/proof/proposal` requires `prover.submit` when a `prover.submit` or `admin`
   ACL key is configured
 - `GET /v4/tasks/{id}` requires `prover.submit` when a `prover.submit` or `admin` ACL
   key is configured
 - `POST /v4/prover/clear` requires `prover.clear`
+- `POST /v4/prover/invalidate-artifacts` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
 
@@ -78,11 +75,18 @@ The canonical minimal metric families are:
 - `raiko2_stage_tasks_inflight`
 - `raiko2_stage_task_started_total`
 - `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_failures_total`
 - `raiko2_stage_task_duration_seconds`
+- `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
+Failure counters also include a bounded `error_kind` label, such as `rpc_error`,
+`witness_error`, `instance_id_mismatch`, `proof_persistence`, `stale_artifact`, or
+`invalid_request`. Duplicate-request counters include `runner_status` so cache hits and stale
+failed tasks can be alerted separately; completed tasks whose proof artifact is missing are
+reported as `runner_status="completed_artifact_missing"`.
 
 ## Admin Ballot
 
@@ -110,6 +114,7 @@ V4 routes:
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
+- `POST /v4/prover/invalidate-artifacts`
 
 Endpoint responsibilities:
 
@@ -117,6 +122,8 @@ Endpoint responsibilities:
   one proposal. `aggregate=true` accepts one or more contiguous proposals and registers the
   aggregation stage for that same proposal batch.
 - `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
+- `POST /v4/prover/invalidate-artifacts` removes terminal local runtime tasks and matching proof
+  artifacts for a concrete proof type.
 
 V4 success envelope:
 
@@ -520,9 +527,88 @@ Scope:
 - `proof_type` cancels tasks by their concrete requested backend. This includes non-terminal tasks
   submitted through the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that
   resolved to the same concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this
-  backend, which are cleared through `POST /v3/prover/clear`.
+  backend. If a temporary legacy v3 build admits `zk_any` tasks, they remain grouped under their
+  original `zk_any` request and are cleared through the legacy `POST /v3/prover/clear` route in that
+  legacy build.
 
-## Submit Shasta Batch Proof
+### Invalidate V4 Proof Artifacts
+
+```http
+POST /v4/prover/invalidate-artifacts
+Content-Type: application/json
+x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
+```
+
+Request:
+
+```json
+{
+  "proof_type": "sgxgeth",
+  "proof_prefix": "0x00000005",
+  "proposal_id_start": 15950,
+  "proposal_id_end": 15980,
+  "dry_run": true
+}
+```
+
+Request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_prefix` | string | no | Optional `0x`-prefixed hex prefix matched against cached proof payloads. Maximum length is 130 characters, including `0x`. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
+| `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
+| `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |
+| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof files. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "sgxgeth",
+  "data": {
+    "dry_run": true,
+    "artifacts": {
+      "matched": 10,
+      "removed": 0,
+      "files_removed": 0,
+      "files_missing": 0,
+      "failed": 0
+    },
+    "tasks": {
+      "matched": 10,
+      "removed": 0,
+      "skipped_non_terminal": 0,
+      "invalid_metadata": 0,
+      "failed": 0
+    }
+  }
+}
+```
+
+Scope:
+
+- The endpoint invalidates completed, failed, or cancelled local runtime tasks and matching proof
+  artifacts for the selected concrete proof type. It also removes completed child tasks from the local
+  engine so a retried aggregate does not reuse stale child-proof state.
+- It does not cancel or delete non-terminal tasks. Use `POST /v4/prover/clear` first if active work
+  must be cancelled.
+- If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
+  are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
+  are linked to a matched runtime task.
+
+Validation:
+
+- Unknown request body fields return `400 invalid_request`.
+- `proposal_id_start` and `proposal_id_end` must be supplied together, and start must be less than or
+  equal to end.
+- `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string no longer than 130
+  characters including `0x`.
+
+## Legacy V3 Submit Shasta Batch Proof
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/proof/batch/shasta
@@ -699,7 +785,9 @@ Example not-drawn response:
 }
 ```
 
-## Submit Aggregate Proof
+## Legacy V3 Submit Aggregate Proof
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/proof/aggregate
@@ -773,7 +861,9 @@ Repeated `POST /v3/proof/aggregate` with the same logical request is idempotent.
 existing root task and returns the same legacy-compatible `registered` / `work_in_progress` /
 `proof` / stored failure status response semantics as `POST /v3/proof/batch/shasta`.
 
-## Report All Root Tasks
+## Legacy V3 Report All Root Tasks
+
+These legacy routes are not mounted by the default server router.
 
 ```http
 GET /v3/proof/report
@@ -783,7 +873,9 @@ GET /proof/report
 Returns an array of root-task views in the same shape as `GET /v3/tasks/{id}` `data`, one entry
 per registered root task.
 
-## List Completed Root Proofs
+## Legacy V3 List Completed Root Proofs
+
+These legacy routes are not mounted by the default server router.
 
 ```http
 GET /v3/proof/list
@@ -793,7 +885,9 @@ GET /proof/list
 Returns only root-task views whose root status is `completed` and whose final `proof` field is
 present.
 
-## Prune All Root Tasks
+## Legacy V3 Prune All Root Tasks
+
+These legacy routes are not mounted by the default server router.
 
 ```http
 POST /v3/proof/prune
@@ -814,7 +908,9 @@ directories. Reusable proof artifacts under `cache/proofs/...` are retained.
 }
 ```
 
-## Query Prover Status
+## Legacy V3 Query Prover Status
+
+This legacy route is not mounted by the default server router.
 
 ```http
 GET /v3/prover/status
@@ -862,7 +958,9 @@ remote submission progress. The runtime cleanup pass cancels stale orphaned reco
 `retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.
 
-## Clear Prover
+## Legacy V3 Clear Prover
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/prover/clear
@@ -891,7 +989,9 @@ Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipp
 }
 ```
 
-## Query Root Task
+## Legacy V3 Query Root Task
+
+This legacy route is not mounted by the default server router.
 
 ```http
 GET /v3/tasks/{id}
@@ -978,7 +1078,9 @@ Returns the root-task view derived from the original batch request.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
-## Cancel Root Task
+## Legacy V3 Cancel Root Task
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/tasks/{id}/cancel
@@ -1015,35 +1117,60 @@ All API errors use the Hoodi-style envelope:
   geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
-- `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/network`
-  when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
-  `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
+- `prover.boundless.batch_quote` and `prover.boundless.aggregation_quote` select how proposal and
+  aggregation quote cycles are sized for `risc0/network`. Each is a table with
+  `strategy = "raiko_agent"` (default; rounds the evaluated dry-run mcycle count up locally — batch
+  to the next `1000` mcycles with a `2000` mcycle floor, aggregation to the next `100` mcycles with a
+  `200` mcycle floor), `"evaluated"` (use the local dry-run mcycle count as-is), or `"fixed"` with a
+  positive `mcycles` value.
+  `rpc.pairs[*].boundless` can override either table for one `(network, l1_network)` pair.
 - `prover.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It must be at least `1000` ms and is separate from the overall
   `prover.boundless.timeout_ms` fulfillment deadline.
-- `prover.boundless.rebid_price_multiplier` defaults to `2` and controls the max-price
-  multiplier applied on each rebid. `manual` pricing escalates the configured max price;
-  `market` pricing escalates the SDK autopriced max price, still subject to the optional cap.
+- `prover.boundless.rebid_price_step_bps` defaults to `5000` (+50% per rung) and sets the
+  per-rebid max-price escalation, in basis points, compounded over the offer's base max price
+  (`1 → 1.5 → 2.25 → 3.375×`). `0` is a valid flat (no-escalation) ladder; any value in `1..100`
+  is rejected as a likely basis-points/multiplier confusion (a `2` meant as "×2" is really
+  +0.02%/rung). `manual` pricing escalates the configured max price; `market` pricing escalates
+  the SDK autopriced max price, still subject to the optional cap.
 - `prover.boundless.rebid_max_attempts` defaults to `4` and caps rebids across every retry
   path: no-lock, expired, and timed-out requests all draw from the same submission budget, and
   the proof task fails once it is exhausted. It must be no greater than `31`.
   `rpc.pairs[*].boundless` can override `poll_interval_ms`, `timeout_ms`, `rebid_timeout_ms`,
-  `rebid_price_multiplier`, and `rebid_max_attempts` per `(network, l1_network)` pair.
+  `rebid_price_step_bps`, and `rebid_max_attempts` per `(network, l1_network)` pair.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
-  `market` delegates price selection to the Boundless SDK price provider, may set
-  `dynamic_pricing_timeout_modifier >= 1.0` to multiply `lockTimeout` and `timeout` after dynamic
-  pricing, and optionally accepts `max_price_per_mcycle` as a per-mcycle safety cap. The cap value
+  `market` delegates price selection to the Boundless SDK price provider and optionally accepts a
+  per-mcycle safety cap spelled either `absolute_max_price_per_mcycle` (canonical) or
+  `max_price_per_mcycle` (legacy alias, same meaning) — setting both is rejected. The cap value
   must be positive and is multiplied by the quoted mcycle count; offers whose (possibly
-  rebid-escalated) `maxPrice` exceeds that total cap are clamped to it instead of failing, with
-  the min price lowered to the cap when needed to keep the offer well-formed. `market` must omit
+  rebid-escalated) `maxPrice` exceeds that total cap are clamped to it instead of failing, with the
+  min price lowered to the cap when needed to keep the offer well-formed. `market` must omit
   `min_price_per_mcycle`.
+- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the absolute
+  per-mcycle bid ceiling in both pricing modes: no attempt, initial or rebid-escalated, ever bids
+  above it. In `manual` mode it is optional, must be at least `max_price_per_mcycle`, and clamps the
+  bps rebid escalation; without it, manual escalation is unbounded by config. In `market` mode it is
+  the canonical spelling of the safety cap. Once a rebid is clamped, later rebids repeat the ceiling
+  price.
+- `prover.boundless.offer_params.{batch,aggregation}.timeouts` is a tagged table selecting the
+  timeout policy. `mode = "per_mcycle"` sets `lock_timeout_ms_per_mcycle` and
+  `timeout_ms_per_mcycle` (scaled by the quoted mcycle count) and, under `market` pricing only, may
+  set `dynamic_pricing_timeout_modifier >= 1.0` to multiply `lockTimeout` and `timeout` after
+  dynamic pricing. `mode = "fixed"` sets `lock_timeout_secs` and `timeout_secs` directly.
+- `prover.boundless.offer_params.{batch,aggregation}.ramp_up_period_sec` is the offer ramp-up
+  duration in seconds (previously `ramp_up_period_blocks`, scaled by a per-deployment block time).
+- Boundless offer tables reject unknown keys, so a stale offer-level field left over from the
+  pre-cutover schema — for example `dynamic_pricing_timeout_modifier` at the offer level instead of
+  inside `timeouts` — fails to boot rather than being silently ignored. Keys nested one level
+  deeper, inside the tagged `timeouts` / `*_quote` tables, are **not** rejected (a serde limitation
+  on internally-tagged enums), so double-check those tables by hand during migration.
 - Expired Boundless requests are resubmitted automatically up to the shared
-  `prover.boundless.rebid_max_attempts` budget. `manual` pricing multiplies the offer's max price
-  by `prover.boundless.rebid_price_multiplier` on each resubmission; min price is unchanged.
-  `market` resubmissions are re-priced by the SDK price provider and then escalated by the same
-  multiplier, subject to the cap.
+  `prover.boundless.rebid_max_attempts` budget, each resubmission escalating the max price by
+  `prover.boundless.rebid_price_step_bps` (compounded), clamped to `absolute_max_price_per_mcycle`
+  when it is set; min price is unchanged. `market` resubmissions are re-priced by the SDK price
+  provider and then escalated by the same step, subject to the cap.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

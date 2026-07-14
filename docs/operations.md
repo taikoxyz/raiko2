@@ -181,9 +181,29 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml --pro
 docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up raiko2-sgx
 ```
 
+To build the EDMM variant without replacing or confusing it with the default local image, use a
+distinct local tag and force the service build:
+
+```bash
+SGX_EDMM_ENABLE=true \
+RAIKO2_SGX_IMAGE=raiko2-sgx:local-edmm \
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml build raiko2-sgx
+
+RAIKO2_SGX_IMAGE=raiko2-sgx:local-edmm \
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml \
+  --profile init up --no-build raiko2-sgx-init
+
+RAIKO2_SGX_IMAGE=raiko2-sgx:local-edmm \
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml \
+  up --no-build raiko2-sgx
+```
+
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
+- `Dockerfile.sgx` and the local Compose stacks default to a non-EDMM enclave for compatibility
+  with hosts that do not support EDMM. Set `SGX_EDMM_ENABLE=true` in the Compose env file to build
+  an EDMM-enabled local image explicitly.
 - Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Release builds fetch the
   signing key from GCP Secret Manager through `release-tee-providers`; do not commit signing keys.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
@@ -198,6 +218,13 @@ Operator notes:
   mounted config directory and select it with `RAIKO2_SGX_FORK`.
 - This compose file only covers the `sgx` lane. `sgxgeth` is served by external geth-backed
   remote SGX infrastructure and is not built in this repository.
+
+Migration warning: before SGX image variants were introduced, `Dockerfile.sgx` hardcoded
+`sgx.edmm_enable = true`. The unsuffixed release image and the local Compose stacks now default to
+non-EDMM.
+Operators retaining the previous EDMM behavior must select the `<release>-edmm` image or set
+`SGX_EDMM_ENABLE=true` for local builds. Changing variants changes `MRENCLAVE`; verifier
+registration and image selection must use the measurement for the selected variant.
 
 Read the baked SGX measurement from:
 
@@ -280,8 +307,10 @@ runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from a
 
 ## Source Releases
 
-Use this flow when cutting a versioned ZK/runtime source release such as
-`vX.Y.Z`. Keep TEE provider metadata in its separate release flow below.
+Use this flow as the ZK/runtime portion of a versioned release such as `vX.Y.Z`. The commands for
+TEE provider metadata remain separate, but the current default full release runs both flows and
+combines their manifests and release-note sections. A ZK-only release must be explicitly scoped as
+such and must not claim to contain TEE provider metadata.
 
 Release prerequisites:
 
@@ -350,7 +379,23 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-5. Write release notes from the ZK source release template:
+5. For the default full profile, build and validate the TEE provider images before creating the
+   release notes or GitHub Release:
+
+   ```bash
+   GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+   GCP_ENCLAVE_KEY_VERSION=latest \
+   GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
+   cargo run -r -p xtask -- release-tee-providers --tag "${TAG}"
+   ```
+
+   This must produce `target/releases/${TAG}/tee-attestation-manifest-${TAG}.json`. Record the
+   immutable image digests and attestation values from that manifest. The command validates both
+   local SGX variants before publishing their final tags.
+
+6. Write release notes from the ZK source release template, then append the TEE Provider Release
+   Notes Template below for the default full profile. The final notes must include both reproduce
+   sections.
 
    ```bash
    cat > "${RELEASE_DIR}/release-notes-${TAG}.md" <<'EOF'
@@ -381,13 +426,14 @@ See `docs/operations.md#reproduce-zk-guest-digests`.
 
 - `release-manifest-vX.Y.Z.json`
 - `guest-digests-summary.json`
+- `tee-attestation-manifest-vX.Y.Z.json` (full profile)
 - `risc0_shasta_*.elf`
 - `sp1_shasta_*.elf`
 - `sp1_shasta_*.vk.bin`
 EOF
 ```
 
-6. Create the tag and GitHub Release:
+7. Create the tag and GitHub Release:
 
    ```bash
    git tag "${TAG}" "${RELEASE_SHA}"
@@ -399,6 +445,7 @@ EOF
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
      "${RELEASE_DIR}/guest-digests-summary.json" \
+     "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
      crates/guests/elf/risc0_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.vk.bin
@@ -411,6 +458,7 @@ Expected release outputs:
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
+- TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
 - Shasta guest artifact assets:
   - `risc0_shasta_*.elf`
   - `sp1_shasta_*.elf`
@@ -436,6 +484,8 @@ export REPRO_DIR=target/releases/${TAG}/zk-digest-repro
 git fetch --tags origin "${TAG}"
 git checkout "${TAG}"
 mkdir -p "${REPRO_DIR}"
+
+just build-guest all --force
 
 cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
   --output "${REPRO_DIR}/from-source.json"
@@ -526,6 +576,9 @@ Current behavior:
   `setImageIdTrusted(bytes32,bool)`.
 - `sp1` registrations derive the current proving key digests from `setup(elf)` and call
   `setProgramTrusted(bytes32,bool)`.
+- `sp1` `*.vk.bin` artifacts are checked against the ELF-derived key before dry-run or apply.
+  A mismatch means the release artifacts are inconsistent and registration stops before any
+  transaction is sent.
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 
@@ -567,7 +620,13 @@ GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
 ```
 
-for local smoke verification, and:
+for local smoke verification without registry publication. `--no-push` still builds both local SGX
+images, clones and builds each external provider, replaces local Docker tags, and writes local output
+state. Each manifest `image.digest` field contains a mutable `repository:tag` reference rather than
+an immutable registry digest. The resulting manifest must not be used as release handoff metadata;
+run the command without `--no-push` to push the images and resolve immutable digests first.
+
+For a formal pre-release export, use:
 
 ```bash
 GCP_ENCLAVE_KEY_SECRET=<secret-name> \
@@ -576,21 +635,35 @@ GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
 ```
 
-for a formal pre-release export.
-
 This flow:
 
 - reads exact external provider pins from `release/providers.toml`
 - fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
   `GCP_ENCLAVE_KEY_SECRET` is set
-- builds the local `raiko2-sgx` provider image with the signing key passed as a Docker BuildKit
-  secret
+- builds two local `raiko2-sgx` provider images from the same source revision and signing key, with
+  the key passed as a Docker BuildKit secret:
+  - `<tag>` is the non-EDMM compatibility/default image
+  - `<tag>-edmm` is the explicitly EDMM-enabled image
 - clones and builds each pinned external TEE provider image
 - pushes provider images unless `--no-push` is set
-- records immutable image digests
+- records immutable image digests for pushed runs
 - reads baked attestation metadata from each image
-- emits one handoff artifact:
-  - `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+- emits one handoff artifact at
+  `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+
+In a pushed run, the two local images have distinct image digests and `mr_enclave` values, while
+their `mr_signer` values match because they use the same signing key. The manifest records them as
+separate local provider entries:
+
+- `raiko2-sgx` with `image.sgx_edmm = false`
+- `raiko2-sgx-edmm` with `image.sgx_edmm = true`
+
+The command fails closed if the local `mr_enclave` values are equal, the local `mr_signer` values
+differ, or the pushed image digests are equal. An invariant failure prevents the command from
+writing a new manifest. It does not remove a manifest already present at the same tagged output
+path, so operators must not treat that pre-existing file as output from the failed attempt.
+External TEE providers keep their existing single-image build behavior and do not emit
+`image.sgx_edmm`.
 
 Use this manifest to hand off:
 
@@ -617,13 +690,16 @@ ZK/runtime-only release notes.
 
 ## TEE Provider Images
 
-- `raiko2-sgx`: us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `raiko2-sgx` (non-EDMM, `<release>`): us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `raiko2-sgx-edmm` (EDMM, `<release>-edmm`): us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
 - `<provider>`: <provider image digest ref>
 
 ## TEE Attestation Metadata
 
 - `raiko2-sgx` `mr_enclave`: ...
 - `raiko2-sgx` `mr_signer`: ...
+- `raiko2-sgx-edmm` `mr_enclave`: ...
+- `raiko2-sgx-edmm` `mr_signer`: ...
 - `<provider>` `mr_enclave`: ...
 - `<provider>` `mr_signer`: ...
 
@@ -675,6 +751,35 @@ jq -S '[.providers[]
 diff -u "${REPRO_DIR}/release-tee.sorted.json" "${REPRO_DIR}/source-tee.sorted.json"
 ```
 
+For a disposable local signing key, run the same rebuild with `RAIKO2_SGX_ENCLAVE_KEY_HOST` instead
+of `GCP_ENCLAVE_KEY_*`, then compare the same projection with `attestation.mr_signer` removed from
+both manifests:
+
+```bash
+RAIKO2_SGX_ENCLAVE_KEY_HOST=/path/to/local/gramine-signing-key.pem \
+cargo run -r -p xtask -- release-tee-providers --tag "${TAG}" --no-push
+
+mkdir -p "${REPRO_DIR}"
+cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
+  "${REPRO_DIR}/from-source.json"
+
+gh release download "${TAG}" --repo taikoxyz/raiko2 \
+  --pattern "tee-attestation-manifest-${TAG}.json" \
+  --dir "${REPRO_DIR}" \
+  --clobber
+
+jq -S '[.providers[]
+  | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.no-signer.sorted.json"
+jq -S '[.providers[]
+  | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.no-signer.sorted.json"
+diff -u "${REPRO_DIR}/release-tee.no-signer.sorted.json" \
+  "${REPRO_DIR}/source-tee.no-signer.sorted.json"
+```
+
 This command does not:
 
 - run bootstrap/init
@@ -699,7 +804,7 @@ signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 rebid_timeout_ms = 300000
-rebid_price_multiplier = 2
+rebid_price_step_bps = 5000
 rebid_max_attempts = 4
 
 [prover.boundless.deployment]
@@ -715,30 +820,39 @@ Operator notes:
 - Runtime state and task workdirs are stored under `./data/runtime` by default.
 - `runtime.inactive_ttl_secs` controls automatic cleanup for terminal root tasks
   (`completed`, `failed`, `cancelled`). `0` disables cleanup; the default is `7200` seconds.
-- Proposal requests use `prover.boundless.batch_quoted_mcycles` when it is set. Otherwise,
-  `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
-  mcycles with a `2000` mcycle floor.
-- Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- Proposal requests are sized by `prover.boundless.batch_quote`. The default
+  `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
+  `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`
+  value.
+- Aggregation requests are sized by `prover.boundless.aggregation_quote` (same strategies).
 - `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.
-- `prover.boundless.rebid_price_multiplier` controls the manual max-price multiplier applied on
-  each no-lock rebid. The default is `2`.
-- `prover.boundless.rebid_max_attempts` caps no-lock rebids. The default is `4`, the maximum is
-  `31`, and the default allows a final manual max price of `16x` with the default multiplier.
+- `prover.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
+  points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
+  flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
+- `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
+  no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
+  maximum is `31`, and the default allows a final max price of about `5x` the base at the default
+  step, unless `absolute_max_price_per_mcycle` clamps it sooner.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
-- When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
-  each resubmission multiplies the offer's max price by
-  `prover.boundless.rebid_price_multiplier` up to `prover.boundless.rebid_max_attempts`; the min
-  price is unchanged. `market`
-  resubmissions are re-priced by the SDK price provider.
+- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
+  absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
+  `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
+  `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
+  accepted, but setting both is rejected).
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it. Each resubmission escalates
+  the offer's max price by `prover.boundless.rebid_price_step_bps` (compounded) up to
+  `prover.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is set;
+  the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider and
+  then escalated by the same step.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
-- `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
-  `aggregation_quoted_mcycles`, runtime timeout/rebid fields, and either offer param block for a
-  specific `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
+- `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid
+  fields (including `rebid_price_step_bps`), and either offer param block for a specific
+  `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
 - The local dry-run validates guest execution and prepares the request journal.
 
 Optional `zk_any` request sampling is configured at the server level:
@@ -856,9 +970,37 @@ health:
 - `raiko2_stage_tasks_inflight`
 - `raiko2_stage_task_started_total`
 - `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_failures_total`
 - `raiko2_stage_task_duration_seconds`
+- `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
 
 Import [raiko2-hosted-stage-latency.json](./grafana/raiko2-hosted-stage-latency.json) into
 Grafana for a baseline hosted-api dashboard with preflight, prove, aggregate, inflight, and
 external-submission panels.
+
+For the old log-based alert shape of "too many errors in the last 30 minutes", prefer Prometheus
+counters instead of matching the text `error` in logs. The broad equivalent is:
+
+```promql
+sum(increase(raiko2_stage_task_terminal_total{status="failed"}[30m])) > 30
+```
+
+For diagnosis, alert or dashboard by bounded failure kind:
+
+```promql
+sum by (pair, proof_type, stage, error_kind) (
+  increase(raiko2_stage_task_failures_total[30m])
+)
+```
+
+Duplicate requests that return completed cache hits are normally harmless. Duplicates against failed
+tasks, non-terminal tasks, or completed tasks whose proof artifact is missing should be watched
+separately. Missing completed artifacts are reported as
+`runner_status="completed_artifact_missing"`:
+
+```promql
+sum by (pair, proof_type, aggregate, runner_status) (
+  increase(raiko2_duplicate_requests_total{runner_status!="completed"}[30m])
+)
+```

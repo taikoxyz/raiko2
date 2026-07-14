@@ -158,15 +158,13 @@ pub(crate) fn boundless_prover_config(
         rpc_url: boundless.rpc_url,
         signer_key: boundless.signer_key,
         deployment: boundless.deployment,
-        batch_quoted_mcycles: boundless.batch_quoted_mcycles,
-        batch_quote_strategy: boundless.batch_quote_strategy,
-        aggregation_quoted_mcycles: boundless.aggregation_quoted_mcycles,
-        aggregation_quote_strategy: boundless.aggregation_quote_strategy,
+        batch_quote: boundless.batch_quote,
+        aggregation_quote: boundless.aggregation_quote,
         offer_params: boundless.offer_params,
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
         rebid_timeout_ms: boundless.rebid_timeout_ms,
-        rebid_price_multiplier: boundless.rebid_price_multiplier,
+        rebid_price_step_bps: boundless.rebid_price_step_bps,
         rebid_max_attempts: boundless.rebid_max_attempts,
     }
 }
@@ -326,25 +324,33 @@ mod tests {
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();
         config.prover.boundless.rebid_timeout_ms = 900_000;
-        config.prover.boundless.rebid_price_multiplier = 3;
+        config.prover.boundless.rebid_price_step_bps = 3000;
         config.prover.boundless.rebid_max_attempts = 5;
-        config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
-        config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
-        config.rpc.pairs[0].boundless.aggregation_quote_strategy =
-            Some(raiko2_prover::boundless::BatchQuoteStrategy::Evaluated);
+        config.rpc.pairs[0].boundless.batch_quote =
+            Some(raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 });
+        config.rpc.pairs[0].boundless.aggregation_quote =
+            Some(raiko2_prover::boundless::QuoteSizing::Evaluated);
         config.rpc.pairs[0].boundless.poll_interval_ms = Some(15_000);
         config.rpc.pairs[0].boundless.timeout_ms = Some(4_200_000);
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(450_000);
-        config.rpc.pairs[0].boundless.rebid_price_multiplier = Some(4);
+        config.rpc.pairs[0].boundless.rebid_price_step_bps = Some(4000);
         config.rpc.pairs[0].boundless.rebid_max_attempts = Some(2);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
-                timeout_ms_per_mcycle: 500,
+                timeouts: raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
+                    lock_timeout_ms_per_mcycle: 300,
+                    timeout_ms_per_mcycle: 500,
+                    dynamic_pricing_timeout_modifier: None,
+                },
                 ..config.prover.boundless.offer_params.batch.clone()
             });
         config.rpc.pairs[0].boundless.offer_params.aggregation =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
-                timeout_ms_per_mcycle: 7_000,
+                timeouts: raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
+                    lock_timeout_ms_per_mcycle: 3_000,
+                    timeout_ms_per_mcycle: 7_000,
+                    dynamic_pricing_timeout_modifier: None,
+                },
                 ..config.prover.boundless.offer_params.aggregation.clone()
             });
         let pair = config
@@ -356,21 +362,34 @@ mod tests {
 
         let boundless = boundless_prover_config(&config, &pair);
 
-        assert_eq!(boundless.batch_quoted_mcycles, Some(5_000));
-        assert_eq!(boundless.aggregation_quoted_mcycles, Some(320));
         assert_eq!(
-            boundless.aggregation_quote_strategy,
-            raiko2_prover::boundless::BatchQuoteStrategy::Evaluated
+            boundless.batch_quote,
+            raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 }
         );
-        assert_eq!(boundless.offer_params.batch.timeout_ms_per_mcycle, 500);
         assert_eq!(
-            boundless.offer_params.aggregation.timeout_ms_per_mcycle,
-            7_000
+            boundless.aggregation_quote,
+            raiko2_prover::boundless::QuoteSizing::Evaluated
+        );
+        assert_eq!(
+            boundless.offer_params.batch.timeouts,
+            raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
+                lock_timeout_ms_per_mcycle: 300,
+                timeout_ms_per_mcycle: 500,
+                dynamic_pricing_timeout_modifier: None,
+            }
+        );
+        assert_eq!(
+            boundless.offer_params.aggregation.timeouts,
+            raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
+                lock_timeout_ms_per_mcycle: 3_000,
+                timeout_ms_per_mcycle: 7_000,
+                dynamic_pricing_timeout_modifier: None,
+            }
         );
         assert_eq!(boundless.poll_interval_ms, 15_000);
         assert_eq!(boundless.timeout_ms, 4_200_000);
         assert_eq!(boundless.rebid_timeout_ms, 450_000);
-        assert_eq!(boundless.rebid_price_multiplier, 4);
+        assert_eq!(boundless.rebid_price_step_bps, 4000);
         assert_eq!(boundless.rebid_max_attempts, 2);
     }
 

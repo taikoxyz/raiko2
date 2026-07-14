@@ -7,12 +7,12 @@ Home / [Docs](docs/README.md) / [API](docs/API.md) /
 [Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
 Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
-validates them, runs local or remote proving routes, and exposes an asynchronous
-Hoodi-compatible v3 API plus a typed v4 proposal-side proof endpoint.
+validates them, runs local or remote proving routes, and exposes a typed v4 API for
+asynchronous proposal-side proof requests.
 
 ## At a Glance
 
-- Asynchronous Hoodi-compatible v3 API plus a typed v4 proposal-side proof endpoint
+- Typed v4 proposal-side proof endpoint
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
@@ -68,9 +68,10 @@ flowchart LR
 
 ## API Compatibility
 
-- `POST /v3/proof/batch/shasta` registers proposal proof work and, when `aggregate=true`, also
-  registers the aggregation work for that batch.
-- `POST /v3/proof/aggregate` registers aggregation work from externally supplied proposal proofs.
+- V4 is the active public API. Legacy v3 and `/proof/*` compatibility routes are not mounted by
+  the server while clients are using v4.
+- The legacy v3 contract remains documented and covered by compatibility tests while the code is
+  still present.
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.

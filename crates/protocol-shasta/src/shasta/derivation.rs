@@ -634,6 +634,68 @@ mod tests {
     }
 
     #[test]
+    fn decompress_and_decode_defaults_manifest_with_trailing_rlp_bytes() {
+        use std::io::Write;
+
+        use alloy_primitives::U256;
+        use flate2::{Compression, write::ZlibEncoder};
+
+        use crate::shasta::constants::SHASTA_PAYLOAD_VERSION;
+
+        // Mirror taiko-client-rs: a valid RLP manifest with trailing junk must not be accepted.
+        // The decoder degrades to the default single-block payload instead of deriving crafted
+        // metadata (e.g. a non-default gas_limit).
+        let crafted = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                gas_limit: 0xBEEF,
+                ..block_manifest(901)
+            }],
+        };
+        let mut rlp_body = alloy_rlp::encode(&crafted);
+        rlp_body.push(0xFF);
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&rlp_body)
+            .expect("compress trailing-rlp body");
+        let compressed = encoder.finish().expect("finish trailing-rlp body");
+
+        let mut payload = Vec::with_capacity(64 + compressed.len());
+        let mut version_bytes = [0u8; 32];
+        version_bytes[31] = SHASTA_PAYLOAD_VERSION;
+        payload.extend_from_slice(&version_bytes);
+        payload.extend_from_slice(&U256::from(compressed.len()).to_be_bytes::<32>());
+        payload.extend_from_slice(&compressed);
+
+        let decoded = DerivationSourceManifest::decompress_and_decode(&payload, 0)
+            .expect("trailing RLP must degrade to default rather than error");
+        let default = DerivationSourceManifest::default();
+        assert_eq!(decoded.blocks.len(), default.blocks.len());
+        assert_eq!(decoded.blocks[0].gas_limit, default.blocks[0].gas_limit);
+        assert_ne!(
+            decoded.blocks[0].gas_limit, 0xBEEF,
+            "trailing junk must not allow crafted gas_limit to survive"
+        );
+
+        // Host/guest derivation entrypoint must observe the same defaulting.
+        let source = DerivationSource::default();
+        let data_source = InputDataSource {
+            tx_data_from_calldata: payload,
+            ..Default::default()
+        };
+        let prepared = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect("prepare must accept defaulted trailing-rlp payload");
+        assert_eq!(prepared.blocks.len(), 1);
+        assert_ne!(prepared.blocks[0].gas_limit, 0xBEEF);
+    }
+
+    #[test]
     fn prepare_source_manifest_accepts_unzen_block_limit() {
         let source = DerivationSource::default();
         let manifest = DerivationSourceManifest {

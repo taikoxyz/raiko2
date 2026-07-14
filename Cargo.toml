@@ -9,6 +9,7 @@ members = [
     "crates/primitives",
     "crates/stateless",
     "crates/provider",
+    "crates/remote-poller",
     "crates/engine",
     "crates/runtime",
     "crates/prover",
@@ -60,11 +61,12 @@ opt-level = 1
 
 [workspace.dependencies]
 # Raiko2 crates
-raiko2-primitives = { path = "./crates/primitives" }
+raiko2-primitives = { path = "./crates/primitives", default-features = false }
 raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
+raiko2-remote-poller = { path = "./crates/remote-poller" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-runtime = { path = "./crates/runtime" }
 raiko2-stateless = { path = "./crates/stateless" }
@@ -76,22 +78,22 @@ raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "ff002a4516b489c7146675f7036d699b07a7f785", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "2a752addafd6bf4fc1a67443e82513ecaf484b2d", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
 sp1-sdk = { version = "=6.3.0", features = ["blocking", "network"] }
 
 # Alethia reth
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false, features = [
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f", default-features = false, features = [
@@ -197,6 +199,7 @@ prometheus = { version = "0.13.4", features = ["process"] }
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0.17"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # rpc-proxy dependencies
 actix-web = "4"

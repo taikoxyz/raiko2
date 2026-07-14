@@ -15,13 +15,13 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{bail, ensure, Context, Result};
 use raiko2_primitives::{
-    shasta_checkpoint_storage_slots, ChainSpec, ProofType, StatelessInput, SupportedChainSpecs,
-    WitnessHeader,
+    builtin_taiko_chain_spec, shasta_checkpoint_storage_slots, shasta_checkpoint_store_address,
+    shasta_taiko_l2_address, StatelessInput, WitnessHeader,
 };
 use raiko2_primitives_shasta::{
     instance::{
-        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
+        build_shasta_commitment_from_proof_carry_data_vec, fits_shasta_uint48,
+        shasta_aggregation_output, shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression, validate_source_aware_anchor_progression,
@@ -78,8 +78,8 @@ fn bench_report_end(label: &str) {
 fn bench_report_end(_label: &str) {}
 
 impl TaikoRuntime {
-    fn from_chain_spec(chain_spec: &raiko2_primitives::ChainSpec) -> Result<Self> {
-        let chain_spec = chain_spec.to_taiko_chain_spec()?;
+    fn from_chain_id(chain_id: u64) -> Result<Self> {
+        let chain_spec = builtin_taiko_chain_spec(chain_id)?;
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
         Ok(Self {
             chain_spec,
@@ -95,57 +95,8 @@ struct DecodedAnchorCheckpoint {
     state_root: B256,
 }
 
-fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
-    let verified_chain_spec = SupportedChainSpecs::default()
-        .get_chain_spec_with_chain_id(chain_spec.chain_id)
-        .with_context(|| {
-            format!(
-                "unknown chain_id {}: not in trusted chain-spec list",
-                chain_spec.chain_id
-            )
-        })?;
-
-    ensure!(
-        chain_spec.is_taiko == verified_chain_spec.is_taiko,
-        "unexpected is_taiko"
-    );
-
-    let runtime_chain_spec = chain_spec
-        .align_taiko_runtime_forks()
-        .context("failed to align GuestInput chain_spec runtime forks")?;
-    let verified_runtime_chain_spec = verified_chain_spec
-        .align_taiko_runtime_forks()
-        .context("failed to align trusted chain_spec runtime forks")?;
-
-    ensure!(
-        runtime_chain_spec.max_spec_id == verified_runtime_chain_spec.max_spec_id,
-        "unexpected max_spec_id"
-    );
-    ensure!(
-        runtime_chain_spec.hard_forks == verified_runtime_chain_spec.hard_forks,
-        "unexpected hard_forks"
-    );
-    ensure!(
-        chain_spec.eip_1559_constants == verified_chain_spec.eip_1559_constants,
-        "unexpected eip_1559_constants"
-    );
-    ensure!(
-        chain_spec.l1_contract == verified_chain_spec.l1_contract,
-        "unexpected l1_contract"
-    );
-    ensure!(
-        chain_spec.l2_contract == verified_chain_spec.l2_contract,
-        "unexpected l2_contract"
-    );
-    ensure!(
-        chain_spec.checkpoint_store_contract == verified_chain_spec.checkpoint_store_contract,
-        "unexpected checkpoint_store_contract"
-    );
-    ensure!(
-        chain_spec.verifier_address_forks == verified_chain_spec.verifier_address_forks,
-        "unexpected verifier_address_forks"
-    );
-
+fn validate_supported_chain_id(chain_id: u64) -> Result<()> {
+    builtin_taiko_chain_spec(chain_id)?;
     Ok(())
 }
 
@@ -164,7 +115,8 @@ fn decode_anchor_checkpoint(
         block.header.number
     );
 
-    let decoded = anchorV4Call::abi_decode(input).with_context(|| {
+    // Use validate so non-canonical uint48 ABI padding is rejected (driver parity).
+    let decoded = anchorV4Call::abi_decode_validate(input).with_context(|| {
         format!(
             "failed to decode anchorV4 calldata for block {}",
             block.header.number
@@ -377,10 +329,8 @@ fn verified_parent_shasta_checkpoint(
         .witnesses
         .first()
         .context("GuestInput must contain least one witness")?;
-    let checkpoint_store = first_witness
-        .chain_spec
-        .checkpoint_store_contract
-        .context("missing chain_spec.checkpoint_store_contract parent checkpoint validation")?;
+    let checkpoint_store = shasta_checkpoint_store_address(first_witness.chain_spec.chain_id)
+        .context("failed to derive CheckpointStore address")?;
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
     let (block_hash_slot, state_root_slot) = shasta_checkpoint_storage_slots(block_number);
     let block_hash = storage_word_as_b256(
@@ -424,10 +374,8 @@ fn verified_parent_anchor_block_number(guest_input: &GuestInput) -> Result<u64> 
         .witnesses
         .first()
         .context("GuestInput must contain least one witness")?;
-    let anchor_address = first_witness
-        .chain_spec
-        .l2_contract
-        .context("missing chain_spec.l2_contract for parent anchor state validation")?;
+    let anchor_address = shasta_taiko_l2_address(first_witness.chain_spec.chain_id)
+        .context("failed to derive TaikoL2 address")?;
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
     let storage_word = read_parent_storage_with_witness_resources(
         anchor_address,
@@ -605,10 +553,8 @@ fn validate_anchor_transaction_common(
         .transactions()
         .next()
         .context("missing anchor transaction")?;
-    let expected_anchor_recipient = stateless_input
-        .chain_spec
-        .l2_contract
-        .context("missing chain_spec.l2_contract for Shasta anchor validation")?;
+    let expected_anchor_recipient = shasta_taiko_l2_address(stateless_input.chain_spec.chain_id)
+        .context("failed to derive TaikoL2 address")?;
     ensure!(
         anchor_tx.to() == Some(expected_anchor_recipient),
         "anchor transaction recipient mismatch: expected {expected_anchor_recipient:?}, got {:?}",
@@ -804,7 +750,6 @@ fn shasta_block_env_attributes(
 
 fn prove_shasta_proposal_with_block_verifier<V>(
     guest_input: &GuestInput,
-    proof_type: ProofType,
     mut verify_block: V,
 ) -> Result<B256>
 where
@@ -829,62 +774,34 @@ where
     );
 
     bench_report_start("proposal_invariants");
-    let first_chain_spec = &guest_input.witnesses.first().expect("checked").chain_spec;
-    validate_known_chain_spec(first_chain_spec)?;
+    let first_chain_id = guest_input
+        .witnesses
+        .first()
+        .expect("checked")
+        .chain_spec
+        .chain_id;
+    validate_supported_chain_id(first_chain_id)?;
     ensure!(
-        guest_input.taiko.chain_spec.chain_id == first_chain_spec.chain_id,
+        guest_input.taiko.chain_spec.chain_id == first_chain_id,
         "taiko.chain_spec.chain_id mismatch: expected {}, got {}",
-        first_chain_spec.chain_id,
+        first_chain_id,
         guest_input.taiko.chain_spec.chain_id
-    );
-    ensure!(
-        guest_input.taiko.chain_spec.is_taiko == first_chain_spec.is_taiko,
-        "taiko.chain_spec.is_taiko mismatch: expected {}, got {}",
-        first_chain_spec.is_taiko,
-        guest_input.taiko.chain_spec.is_taiko
     );
 
     for (i, witness) in guest_input.witnesses.iter().enumerate() {
         ensure!(
-            witness.chain_spec == *first_chain_spec,
-            "witness {i} chain_spec mismatch"
+            witness.chain_spec.chain_id == first_chain_id,
+            "witness {i} chain_id mismatch: expected {}, got {}",
+            first_chain_id,
+            witness.chain_spec.chain_id
         );
     }
 
     ensure!(
-        proof_carry_data.chain_id == first_chain_spec.chain_id,
+        proof_carry_data.chain_id == first_chain_id,
         "proof_carry_data.chain_id mismatch: expected {}, got {}",
-        first_chain_spec.chain_id,
+        first_chain_id,
         proof_carry_data.chain_id
-    );
-    let verifier_proof_type = match proof_type {
-        ProofType::Native => ProofType::Sgx,
-        other => other,
-    };
-    let expected_verifier = first_chain_spec
-        .get_fork_verifier_address(
-            guest_input
-                .witnesses
-                .first()
-                .expect("checked")
-                .block
-                .header
-                .number,
-            guest_input
-                .witnesses
-                .first()
-                .expect("checked")
-                .block
-                .header
-                .timestamp,
-            verifier_proof_type,
-        )
-        .with_context(|| {
-            format!("failed to resolve verifier address for proof type {verifier_proof_type}")
-        })?;
-    ensure!(
-        proof_carry_data.verifier == expected_verifier,
-        "proof_carry_data.verifier mismatch"
     );
     ensure!(
         proof_carry_data.transition_input.proposal_id == guest_input.taiko.proposal_id,
@@ -911,6 +828,27 @@ where
         proposal_event_id,
         guest_input.taiko.proposal_id
     );
+    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48 without silent truncation.
+    ensure!(
+        fits_shasta_uint48(proof_carry_data.transition_input.transition.timestamp),
+        "proof_carry_data.transition.timestamp does not fit in uint48: {}",
+        proof_carry_data.transition_input.transition.timestamp
+    );
+    ensure!(
+        fits_shasta_uint48(
+            proof_carry_data
+                .transition_input
+                .checkpoint
+                .blockNumber
+                .to::<u64>()
+        ),
+        "proof_carry_data.checkpoint.blockNumber does not fit in uint48: {}",
+        proof_carry_data
+            .transition_input
+            .checkpoint
+            .blockNumber
+            .to::<u64>()
+    );
     let expected_proposal_hash = hash_proposal(proposal);
     ensure!(
         proof_carry_data.transition_input.proposal_hash == expected_proposal_hash,
@@ -931,8 +869,8 @@ where
     bench_report_end("proposal_invariants");
 
     bench_report_start("proposal_runtime");
-    let runtime = TaikoRuntime::from_chain_spec(first_chain_spec)
-        .context("Failed to build Taiko runtime from GuestInput chain_spec")?;
+    let runtime = TaikoRuntime::from_chain_id(first_chain_id)
+        .context("Failed to build Taiko runtime from GuestInput chain_id")?;
     bench_report_end("proposal_runtime");
 
     bench_report_start("proposal_derivation");
@@ -1060,16 +998,8 @@ where
 }
 
 pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
-    prove_shasta_proposal_for_proof_type(guest_input, ProofType::Native)
-}
-
-pub fn prove_shasta_proposal_for_proof_type(
-    guest_input: &GuestInput,
-    proof_type: ProofType,
-) -> Result<B256> {
     prove_shasta_proposal_with_block_verifier(
         guest_input,
-        proof_type,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             let expected_block = expected_block
                 .with_context(|| format!("missing expected Shasta block at index {index}"))?;
@@ -1105,21 +1035,6 @@ pub fn prove_shasta_proposal_for_proof_type(
 
 pub fn prove_shasta_proposal_with_validator<V>(
     guest_input: &GuestInput,
-    validate_block: V,
-) -> Result<B256>
-where
-    V: FnMut(&StatelessInput, &[WitnessHeader], &TaikoRuntime) -> Result<B256>,
-{
-    prove_shasta_proposal_with_validator_for_proof_type(
-        guest_input,
-        ProofType::Native,
-        validate_block,
-    )
-}
-
-pub fn prove_shasta_proposal_with_validator_for_proof_type<V>(
-    guest_input: &GuestInput,
-    proof_type: ProofType,
     mut validate_block: V,
 ) -> Result<B256>
 where
@@ -1127,7 +1042,6 @@ where
 {
     prove_shasta_proposal_with_block_verifier(
         guest_input,
-        proof_type,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             if let Some(expected_block) = expected_block {
                 validate_manifest_transactions_match_canonical(stateless_input, expected_block)
@@ -1200,7 +1114,6 @@ mod tests {
     };
     use raiko2_primitives_shasta::build_proof_carry_data;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-    use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_protocol_shasta::TaikoManifest;
     use risc0_ethereum_trie::Trie;
 
@@ -1214,83 +1127,85 @@ mod tests {
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_unlisted_chain_id() {
+    fn validate_supported_chain_id_rejects_unlisted_chain_id() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.chain_id = 424_242; // absent from config/chain_spec_list_default.json
-        let err = validate_known_chain_spec(&spec)
+        let err = validate_supported_chain_id(spec.chain_id)
             .expect_err("unlisted chain id must be rejected (F-1 regression)");
         assert!(
-            err.to_string().contains("unknown chain_id"),
+            err.to_string().contains("unsupported Taiko chain_id"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn validate_known_chain_spec_accepts_listed_chain() {
-        validate_known_chain_spec(&taiko_mainnet_chain_spec())
-            .expect("listed mainnet chain spec must validate");
+    fn validate_supported_chain_id_accepts_listed_chain() {
+        validate_supported_chain_id(taiko_mainnet_chain_spec().chain_id)
+            .expect("listed mainnet chain id must validate");
     }
 
     #[test]
-    fn validate_known_chain_spec_accepts_runtime_aligned_devnet() {
+    fn validate_supported_chain_id_accepts_runtime_aligned_devnet() {
         let spec = SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(167_001)
             .expect("supported taiko devnet chain spec")
             .align_taiko_runtime_forks()
             .expect("runtime-aligned devnet chain spec");
 
-        validate_known_chain_spec(&spec).expect("runtime-aligned devnet chain spec must validate");
+        validate_supported_chain_id(spec.chain_id)
+            .expect("runtime-aligned devnet chain id must validate");
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_field() {
+    fn validate_supported_chain_id_accepts_tampered_l2_contract() {
         let mut spec = taiko_mainnet_chain_spec();
-        spec.l2_contract = Some(Address::ZERO); // diverge from the trusted spec
-        let err =
-            validate_known_chain_spec(&spec).expect_err("tampered l2_contract must be rejected");
-        assert!(
-            err.to_string().contains("l2_contract"),
-            "unexpected error: {err}"
-        );
+        spec.l2_contract = Some(Address::ZERO);
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest derives TaikoL2 address from chain id, not witness chain spec");
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_checkpoint_store() {
+    fn validate_supported_chain_id_accepts_tampered_checkpoint_store() {
         let mut spec = taiko_mainnet_chain_spec();
-        spec.checkpoint_store_contract = None; // diverge from the trusted spec
-        let err = validate_known_chain_spec(&spec)
-            .expect_err("tampered checkpoint_store_contract must be rejected");
-        assert!(
-            err.to_string().contains("checkpoint_store_contract"),
-            "unexpected error: {err}"
-        );
+        spec.checkpoint_store_contract = None;
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest derives CheckpointStore address from chain id, not witness chain spec");
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_verifiers() {
+    fn validate_supported_chain_id_accepts_tampered_verifiers() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.verifier_address_forks
             .values_mut()
             .next()
             .expect("configured verifier fork")
             .insert(ProofType::Sgx, Some(Address::ZERO));
-        let err = validate_known_chain_spec(&spec)
-            .expect_err("tampered verifier_address_forks must be rejected");
-        assert!(
-            err.to_string().contains("verifier_address_forks"),
-            "unexpected error: {err}"
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest verifier addresses are bound by public input, not trusted chain spec");
+    }
+
+    #[test]
+    fn taiko_runtime_uses_builtin_forks_instead_of_guest_input_forks() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.hard_forks.clear();
+
+        let runtime = TaikoRuntime::from_chain_id(spec.chain_id)
+            .expect("mainnet chain id should select built-in Taiko runtime");
+
+        assert_eq!(
+            runtime
+                .chain_spec
+                .taiko_fork_activation(TaikoHardfork::Shasta),
+            alloy_hardforks::ForkCondition::Timestamp(1_775_135_700)
         );
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_is_taiko() {
+    fn validate_supported_chain_id_accepts_tampered_is_taiko() {
         let mut spec = taiko_mainnet_chain_spec();
-        spec.is_taiko = !spec.is_taiko; // diverge from the trusted spec
-        let err = validate_known_chain_spec(&spec).expect_err("tampered is_taiko must be rejected");
-        assert!(
-            err.to_string().contains("is_taiko"),
-            "unexpected error: {err}"
-        );
+        spec.is_taiko = !spec.is_taiko;
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest uses chain_id only, not witness chain_spec.is_taiko");
     }
 
     fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
@@ -1693,7 +1608,7 @@ mod tests {
         )
         .expect_err("chain_id mismatch should fail");
 
-        assert!(err.to_string().contains("chain_spec mismatch"));
+        assert!(err.to_string().contains("chain_id mismatch"));
     }
 
     #[test]
@@ -2040,46 +1955,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_verifier_mismatch_between_chain_spec_and_proof_carry_data() {
+    fn accepts_verifier_independent_of_witness_chain_spec() {
         let mut guest_input = guest_input_with_single_block();
         guest_input.proof_carry_data.verifier = Address::from([0x77; 20]);
 
-        let err = prove_shasta_proposal_with_validator(
+        prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _ancestor_headers, _runtime| Ok(B256::ZERO),
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
         )
-        .expect_err("expected verifier mismatch to fail");
-
-        assert!(err
-            .to_string()
-            .contains("proof_carry_data.verifier mismatch"));
+        .expect("verifier is bound by public input, not witness chain spec");
     }
 
     #[test]
-    fn rejects_non_taiko_chain_spec() {
-        let mut chain_spec = taiko_mainnet_chain_spec();
-        chain_spec.is_taiko = false;
+    fn accepts_tampered_non_chain_id_fields_between_taiko_and_witness_specs() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.taiko.chain_spec.is_taiko = false;
+        guest_input.witnesses[0].chain_spec.is_taiko = false;
+        guest_input.witnesses[0].chain_spec.hard_forks.clear();
+        guest_input.witnesses[0]
+            .chain_spec
+            .verifier_address_forks
+            .clear();
 
-        let input = StatelessInput {
-            chain_spec,
-            ..Default::default()
-        };
-
-        let proof_carry_data = ProofCarryData {
-            chain_id: 1,
-            ..Default::default()
-        };
-        let guest_input = GuestInput {
-            witnesses: vec![input],
-            proof_carry_data,
-            ..Default::default()
-        };
-
-        assert!(prove_shasta_proposal_with_validator(
+        prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _ancestor_headers, _runtime| { Ok(B256::ZERO) }
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
         )
-        .is_err());
+        .expect("guest must only require taiko/witness chain_id consistency");
     }
 
     #[test]
@@ -2544,5 +2450,32 @@ mod tests {
         guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource::default()];
         guest_input.taiko.data_sources = Vec::new();
         assert_guest_rejects(guest_input, "data source count");
+    }
+
+    #[test]
+    fn anchor_v4_abi_decode_validate_rejects_non_canonical_uint48_padding() {
+        // Canonical ABI: selector + (uint48 blockNumber, bytes32, bytes32) as three 32-byte words.
+        let call = anchorV4Call {
+            _checkpoint: AnchorV4Checkpoint {
+                blockNumber: 42u64.try_into().expect("fits uint48"),
+                blockHash: B256::from([0x11; 32]),
+                stateRoot: B256::from([0x22; 32]),
+            },
+        };
+        let mut encoded = call.abi_encode();
+        // Dirty a high byte of the uint48 word (outside the low 48 bits). Lenient decode may
+        // still accept this; abi_decode_validate must reject non-canonical padding.
+        let word_start = 4; // after selector
+        assert_eq!(encoded[word_start], 0);
+        encoded[word_start] = 0x01;
+
+        assert!(
+            anchorV4Call::abi_decode(&encoded).is_ok(),
+            "lenient abi_decode is expected to accept dirty high bits of uint48 word"
+        );
+        assert!(
+            anchorV4Call::abi_decode_validate(&encoded).is_err(),
+            "abi_decode_validate must reject non-canonical uint48 ABI padding"
+        );
     }
 }

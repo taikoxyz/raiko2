@@ -56,6 +56,7 @@ use crate::server::state::{
 };
 use crate::server::task_cleanup::{
     cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id, remove_task_children,
+    remove_task_children_if_unreferenced,
 };
 use crate::server::task_metadata::{
     AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
@@ -143,6 +144,63 @@ impl ProverTaskScope {
                 metadata.requested_proof_type.as_deref() == Some(proof_type.as_str())
             }
         }
+    }
+}
+
+struct DuplicateTaskLogContext {
+    proposal_ids: String,
+    proposal_count: usize,
+    active_stage: String,
+    last_event: String,
+    error: String,
+}
+
+fn duplicate_task_log_context(
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> DuplicateTaskLogContext {
+    let proposal_ids = duplicate_task_proposal_ids(metadata);
+    DuplicateTaskLogContext {
+        proposal_count: proposal_ids.len(),
+        proposal_ids: format_proposal_ids(&proposal_ids),
+        active_stage: metadata
+            .runtime
+            .active_stage
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        last_event: metadata
+            .runtime
+            .last_event
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        error: existing.error.clone().unwrap_or_else(|| "none".to_string()),
+    }
+}
+
+fn duplicate_task_proposal_ids(metadata: &TaskMetadata) -> Vec<u64> {
+    metadata.aggregate_request.as_ref().map_or_else(
+        || {
+            metadata
+                .proposals
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect()
+        },
+        |request| request.proposal_ids.clone(),
+    )
+}
+
+fn format_proposal_ids(proposal_ids: &[u64]) -> String {
+    match proposal_ids {
+        [] => "none".to_string(),
+        [single] => single.to_string(),
+        ids if ids
+            .windows(2)
+            .all(|window| window[0].checked_add(1) == Some(window[1])) =>
+        {
+            format!("{}..{}", ids[0], ids[ids.len() - 1])
+        }
+        ids => ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
     }
 }
 
@@ -985,22 +1043,39 @@ async fn handle_existing_batch_task(
     existing: raiko2_runtime::RuntimeTaskRecord,
     replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
-    info!(
-        "Detected concurrent duplicate hoodi shasta batch request: task_id={}, aggregate={}, route={}, proof_type={}, prover_type={}, pair={}",
-        existing.task_id,
-        submission.aggregate_requested,
-        submission.route.route,
-        submission.route.proof_type(),
-        prover_type_label(submission.prover_type),
-        submission.pair.key
-    );
     let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
+    let log_context = duplicate_task_log_context(&existing, &existing_metadata);
+    info!(
+        task_id = %existing.task_id,
+        aggregate = submission.aggregate_requested,
+        proposal_ids = %log_context.proposal_ids,
+        proposal_count = log_context.proposal_count,
+        runner_status = %existing.runner_status.as_str(),
+        active_stage = %log_context.active_stage,
+        last_event = %log_context.last_event,
+        error = %log_context.error,
+        updated_at = existing.updated_at,
+        route = %submission.route.route,
+        proof_type = %submission.route.proof_type(),
+        prover_type = %prover_type_label(submission.prover_type),
+        network_pair = %submission.pair.key,
+        "detected duplicate shasta batch request"
+    );
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
             .await?;
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            submission.aggregate_requested,
+        ),
+        duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
+    );
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
     {
@@ -1252,21 +1327,39 @@ async fn handle_existing_external_aggregate_task(
     submission: &ExternalAggregateSubmission,
     existing: raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
-    info!(
-        "Detected concurrent duplicate hoodi aggregate request: task_id={}, route={}, proof_type={}, prover_type={}, pair={}",
-        existing.task_id,
-        submission.route.route,
-        submission.route.proof_type(),
-        prover_type_label(submission.prover_type),
-        submission.pair.key
-    );
     let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
+    let log_context = duplicate_task_log_context(&existing, &existing_metadata);
+    info!(
+        task_id = %existing.task_id,
+        aggregate = true,
+        proposal_ids = %log_context.proposal_ids,
+        proposal_count = log_context.proposal_count,
+        runner_status = %existing.runner_status.as_str(),
+        active_stage = %log_context.active_stage,
+        last_event = %log_context.last_event,
+        error = %log_context.error,
+        updated_at = existing.updated_at,
+        route = %submission.route.route,
+        proof_type = %submission.route.proof_type(),
+        prover_type = %prover_type_label(submission.prover_type),
+        network_pair = %submission.pair.key,
+        "detected duplicate shasta aggregate request"
+    );
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
             .await?;
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            true,
+        ),
+        duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
+    );
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
     {
@@ -2449,6 +2542,7 @@ fn task_runtime_view(
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
         max_price_multiplier: runtime.max_price_multiplier,
+        max_price_wei: runtime.max_price_wei,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),
@@ -2829,6 +2923,17 @@ async fn completed_root_artifact_missing(
     Ok(true)
 }
 
+const fn duplicate_runner_status_label(
+    runner_status: RuntimeRunnerStatus,
+    missing_completed_artifact: bool,
+) -> &'static str {
+    if missing_completed_artifact {
+        "completed_artifact_missing"
+    } else {
+        runner_status.as_str()
+    }
+}
+
 fn response_is_completed(response: &Response) -> bool {
     response
         .extensions()
@@ -2970,6 +3075,37 @@ mod tests {
 
     fn batch_request_fingerprint_for_test(submission: &CanonicalBatchSubmission) -> Result<String> {
         batch_request_fingerprint(submission).map_err(|err| anyhow!(err.message))
+    }
+
+    #[test]
+    fn format_proposal_ids_compacts_contiguous_ranges() {
+        assert_eq!(format_proposal_ids(&[]), "none");
+        assert_eq!(format_proposal_ids(&[18504]), "18504");
+        assert_eq!(format_proposal_ids(&[18498, 18499, 18500]), "18498..18500");
+    }
+
+    #[test]
+    fn format_proposal_ids_keeps_non_contiguous_lists_explicit() {
+        assert_eq!(
+            format_proposal_ids(&[18498, 18500, 18503]),
+            "18498,18500,18503"
+        );
+    }
+
+    #[test]
+    fn duplicate_runner_status_label_marks_missing_completed_artifacts() {
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Completed, true),
+            "completed_artifact_missing"
+        );
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Completed, false),
+            "completed"
+        );
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Failed, false),
+            "failed"
+        );
     }
 
     struct NoopEngine;

@@ -2,21 +2,23 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sp1_sdk::{
-    ProvingKey as _,
+    HashableKey, ProvingKey as _, SP1VerifyingKey,
     blocking::{Prover as _, ProverClient},
 };
 
 #[cfg(feature = "digests")]
 pub mod guest_digests;
+mod provenance;
 mod util;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
@@ -52,8 +54,11 @@ pub struct BuildGuestArgs {
     #[arg(long)]
     pub bench: bool,
     /// Force rebuilding even when guest inputs and checked-in outputs match.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "check")]
     pub force: bool,
+    /// Verify checked-in guest artifacts without invoking a guest compiler.
+    #[arg(long, conflicts_with = "force")]
+    pub check: bool,
 }
 
 pub fn repo_root() -> PathBuf {
@@ -65,6 +70,11 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
+    if args.check {
+        verify_release_guest_elves(root, args.backend, args.bench, None)?;
+        println!("[INFO] Guest artifact provenance check complete!");
+        return Ok(());
+    }
     refresh_release_guest_elves(root, args.backend, args.bench, None, args.force)?;
     println!("[INFO] Build complete!");
     Ok(())
@@ -130,13 +140,6 @@ struct CargoLockPackage {
     version: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct GuestBuildFingerprint {
-    backend: String,
-    bench: bool,
-    fingerprint: String,
-}
-
 pub fn ensure_release_guest_elves(
     root: &Path,
     backend: Backend,
@@ -144,6 +147,45 @@ pub fn ensure_release_guest_elves(
     sp1_docker_tag: Option<&str>,
 ) -> Result<()> {
     refresh_release_guest_elves(root, backend, bench, sp1_docker_tag, false)
+}
+
+fn verify_release_guest_elves(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+) -> Result<()> {
+    match backend {
+        Backend::Risc0 | Backend::Sp1 => {
+            verify_release_backend(root, backend, bench, sp1_docker_tag)
+        }
+        Backend::All => {
+            verify_release_backend(root, Backend::Risc0, bench, sp1_docker_tag)?;
+            verify_release_backend(root, Backend::Sp1, bench, sp1_docker_tag)
+        }
+    }
+}
+
+fn verify_release_backend(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+) -> Result<()> {
+    let backend_key = match backend {
+        Backend::Risc0 => "risc0",
+        Backend::Sp1 => "sp1",
+        Backend::All => unreachable!("guest provenance is verified per concrete backend"),
+    };
+    match provenance::check_backend(root, backend, bench, sp1_docker_tag)? {
+        provenance::GuestProvenanceStatus::Current => {
+            println!("[INFO] Guest artifacts for backend `{backend_key}` are current.");
+            Ok(())
+        }
+        provenance::GuestProvenanceStatus::Stale(reason) => bail!(
+            "Guest artifacts for `{backend_key}` are stale: {reason}. Run `just build-guest {backend_key}` or dispatch `sync-guest-elf`."
+        ),
+    }
 }
 
 fn refresh_release_guest_elves(
@@ -218,20 +260,20 @@ fn ensure_release_backend(
         Backend::Sp1 => "sp1",
         Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
     };
-    let fingerprint_path = guest_fingerprint_path(root, backend_key);
-
     if !force {
-        let outputs_exist = guest_outputs_exist(root, backend)?;
-        let fingerprint =
-            compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
-        if outputs_exist
-            && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
-        {
-            println!(
-                "[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild after {}.",
-                util::format_duration(started.elapsed())
-            );
-            return Ok(());
+        match provenance::check_backend(root, backend, bench, sp1_docker_tag)? {
+            provenance::GuestProvenanceStatus::Current => {
+                println!(
+                    "[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild after {}.",
+                    util::format_duration(started.elapsed())
+                );
+                return Ok(());
+            }
+            provenance::GuestProvenanceStatus::Stale(reason) => {
+                println!(
+                    "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because {reason}..."
+                );
+            }
         }
     }
 
@@ -239,14 +281,9 @@ fn ensure_release_backend(
         println!(
             "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because --force was passed..."
         );
-    } else {
-        println!(
-            "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
-        );
     }
     build(root, backend, bench, sp1_docker_tag)?;
-    let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, true)?;
-    write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
+    provenance::write_backend(root, backend, bench, sp1_docker_tag)?;
     println!(
         "[INFO] Guest ELFs for backend `{backend_key}` refreshed in {}.",
         util::format_duration(started.elapsed())
@@ -254,105 +291,23 @@ fn ensure_release_backend(
     Ok(())
 }
 
-fn guest_fingerprint_path(root: &Path, backend_key: &str) -> PathBuf {
-    util::target_root(root)
-        .join("xtask/guest-fingerprints")
-        .join(format!("{backend_key}.json"))
-}
-
-fn matches_existing_fingerprint(
-    fingerprint_path: &Path,
-    backend_key: &str,
-    bench: bool,
-    fingerprint: &str,
-) -> Result<bool> {
-    if !fingerprint_path.exists() {
-        return Ok(false);
-    }
-    let contents = fs::read_to_string(fingerprint_path)
-        .with_context(|| format!("read guest fingerprint {fingerprint_path:?}"))?;
-    let existing: GuestBuildFingerprint = serde_json::from_str(&contents)
-        .with_context(|| format!("parse guest fingerprint {fingerprint_path:?}"))?;
-    Ok(existing.backend == backend_key
-        && existing.bench == bench
-        && existing.fingerprint == fingerprint)
-}
-
-fn write_guest_fingerprint(
-    fingerprint_path: &Path,
-    backend_key: &str,
-    bench: bool,
-    fingerprint: &str,
-) -> Result<()> {
-    if let Some(parent) = fingerprint_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create guest fingerprint directory {parent:?}"))?;
-    }
-    let payload = GuestBuildFingerprint {
-        backend: backend_key.to_string(),
-        bench,
-        fingerprint: fingerprint.to_string(),
-    };
-    let bytes = serde_json::to_vec_pretty(&payload)
-        .with_context(|| format!("serialize guest fingerprint {fingerprint_path:?}"))?;
-    fs::write(fingerprint_path, bytes)
-        .with_context(|| format!("write guest fingerprint {fingerprint_path:?}"))
-}
-
-fn guest_outputs_exist(root: &Path, backend: Backend) -> Result<bool> {
-    for output in expected_guest_outputs(root, backend)? {
-        if !output.exists() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn expected_guest_outputs(root: &Path, backend: Backend) -> Result<Vec<PathBuf>> {
-    let mut outputs = Vec::new();
-    match backend {
-        Backend::Risc0 => outputs.extend(expected_backend_outputs(root, "risc0")?),
-        Backend::Sp1 => outputs.extend(expected_backend_outputs(root, "sp1")?),
-        Backend::All => {
-            outputs.extend(expected_backend_outputs(root, "risc0")?);
-            outputs.extend(expected_backend_outputs(root, "sp1")?);
-        }
-    }
-    Ok(outputs)
-}
-
-fn expected_backend_outputs(root: &Path, backend_key: &str) -> Result<Vec<PathBuf>> {
-    let manifest = read_manifest(&root.join(format!("guests/{backend_key}/Cargo.toml")))?;
-    Ok(manifest
-        .bin
-        .iter()
-        .map(|bin| {
-            root.join("crates/guests/elf")
-                .join(format!("{}.elf", bin.name.replace('-', "_")))
-        })
-        .collect())
-}
-
 fn compute_guest_fingerprint(
     root: &Path,
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
-    include_outputs: bool,
 ) -> Result<String> {
     let mut hasher = Sha256::new();
     hash_tagged_bytes(&mut hasher, "bench", if bench { b"1" } else { b"0" });
 
     match backend {
-        Backend::Risc0 => {
-            compute_backend_fingerprint(root, &mut hasher, "risc0", None, include_outputs)?
-        }
+        Backend::Risc0 => compute_backend_fingerprint(root, &mut hasher, "risc0", bench, None)?,
         Backend::Sp1 => compute_backend_fingerprint(
             root,
             &mut hasher,
             "sp1",
+            bench,
             Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
-            include_outputs,
         )?,
         Backend::All => unreachable!("fingerprints are computed per concrete backend"),
     }
@@ -364,8 +319,8 @@ fn compute_backend_fingerprint(
     root: &Path,
     hasher: &mut Sha256,
     backend_key: &str,
+    bench: bool,
     sp1_tag: Option<String>,
-    include_outputs: bool,
 ) -> Result<()> {
     hash_tagged_bytes(hasher, "backend", backend_key.as_bytes());
     if let Some(tag) = sp1_tag {
@@ -373,29 +328,20 @@ fn compute_backend_fingerprint(
     }
     hash_backend_env(hasher, backend_key);
 
-    let mut paths = vec![
-        root.join("rust-toolchain.toml"),
-        root.join("xtask/build-guest/Cargo.toml"),
-        root.join("xtask/build-guest/src/lib.rs"),
-        root.join("xtask/build-guest/src/main.rs"),
-        root.join("xtask/build-guest/src/util.rs"),
-        root.join("crates/guest-common/Cargo.toml"),
-        root.join(format!("guests/{backend_key}/Cargo.toml")),
-        root.join(format!("guests/{backend_key}/Cargo.lock")),
-        root.join(format!("docker/{backend_key}-toolchain/Dockerfile")),
-    ];
-    collect_files_recursively(&root.join("crates/guest-common/src"), &mut paths)?;
-    collect_files_recursively(&root.join(format!("guests/{backend_key}/src")), &mut paths)?;
-    paths.sort();
+    // Prefer the provenance module's cargo-metadata closure so fingerprint and
+    // checked-in provenance stay on one source of truth for guest inputs.
+    let paths = provenance::build_input_paths(
+        root,
+        match backend_key {
+            "risc0" => Backend::Risc0,
+            "sp1" => Backend::Sp1,
+            _ => bail!("unsupported guest backend `{backend_key}`"),
+        },
+        bench,
+    )?;
 
     for path in paths {
         hash_file(root, hasher, &path)?;
-    }
-
-    if include_outputs {
-        for output in expected_backend_outputs(root, backend_key)? {
-            hash_file_with_tags(root, hasher, &output, "output_path", "output_file")?;
-        }
     }
 
     Ok(())
@@ -493,26 +439,6 @@ fn effective_mock_env(name: &str, mock_value: &str) -> String {
 fn hash_effective_env(hasher: &mut Sha256, key: &str, value: impl AsRef<str>) {
     hash_tagged_bytes(hasher, "env_key", key.as_bytes());
     hash_tagged_bytes(hasher, "env_value", value.as_ref().as_bytes());
-}
-
-fn collect_files_recursively(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(dir).with_context(|| format!("read directory {dir:?}"))? {
-        let entry = entry.with_context(|| format!("read entry under {dir:?}"))?;
-        let path = entry.path();
-        if entry
-            .file_type()
-            .with_context(|| format!("read file type for {path:?}"))?
-            .is_dir()
-        {
-            collect_files_recursively(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn hash_file(root: &Path, hasher: &mut Sha256, path: &Path) -> Result<()> {
@@ -1154,22 +1080,84 @@ fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Pa
 }
 
 fn sp1_vk_bin(elf: Vec<u8>, artifact_name: String) -> Result<Vec<u8>> {
+    let vk = derive_sp1_vk(Arc::from(elf), &artifact_name)?;
+    serialize_sp1_vk(&vk, &artifact_name)
+}
+
+pub fn derive_sp1_vk(elf: Arc<[u8]>, artifact_name: &str) -> Result<SP1VerifyingKey> {
+    let artifact_name = artifact_name.to_string();
     let panic_artifact = artifact_name.clone();
     let handle = std::thread::Builder::new()
         .name(format!("sp1-vk-{artifact_name}"))
         .spawn(move || {
-            let client = ProverClient::builder().cpu().build();
+            let client = ProverClient::builder().light().build();
             let pk = client
-                .setup(elf.as_slice().into())
+                .setup(elf.as_ref().into())
                 .with_context(|| format!("setup SP1 verifying key for {artifact_name}"))?;
-            bincode::serialize(pk.verifying_key())
-                .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+            let vk_bytes = serialize_sp1_vk(pk.verifying_key(), &artifact_name)?;
+            deserialize_sp1_vk_artifact(&artifact_name, &vk_bytes)
         })
         .with_context(|| format!("spawn SP1 verifying key setup for {panic_artifact}"))?;
 
     handle
         .join()
         .map_err(|_| anyhow::anyhow!("SP1 verifying key setup panicked for {panic_artifact}"))?
+}
+
+pub fn verified_sp1_vk(
+    elf: Arc<[u8]>,
+    vk_artifact: Option<&[u8]>,
+    artifact_name: &str,
+) -> Result<SP1VerifyingKey> {
+    let derived_vk = derive_sp1_vk(elf, artifact_name)?;
+    if let Some(vk_artifact) = vk_artifact {
+        let artifact_vk = deserialize_sp1_vk_artifact(artifact_name, vk_artifact)?;
+        ensure_sp1_vk_matches(artifact_name, &derived_vk, &artifact_vk)?;
+    }
+    Ok(derived_vk)
+}
+
+pub fn serialize_sp1_vk(vk: &SP1VerifyingKey, artifact_name: &str) -> Result<Vec<u8>> {
+    bincode::serialize(vk)
+        .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+}
+
+fn deserialize_sp1_vk_artifact(artifact_name: &str, bytes: &[u8]) -> Result<SP1VerifyingKey> {
+    bincode::deserialize(bytes)
+        .with_context(|| format!("failed to load SP1 VK artifact for {artifact_name}"))
+}
+
+fn ensure_sp1_vk_matches(
+    artifact_name: &str,
+    derived_vk: &SP1VerifyingKey,
+    artifact_vk: &SP1VerifyingKey,
+) -> Result<()> {
+    let derived_vk_bn254 = derived_vk.hash_bn254();
+    let artifact_vk_bn254 = artifact_vk.hash_bn254();
+    let derived_vk_hash_bytes = derived_vk.hash_bytes();
+    let artifact_vk_hash_bytes = artifact_vk.hash_bytes();
+
+    if derived_vk_bn254 != artifact_vk_bn254 || derived_vk_hash_bytes != artifact_vk_hash_bytes {
+        let derived_vk_hash_bytes_hex = format!("0x{}", hex_lower(&derived_vk_hash_bytes));
+        let artifact_vk_hash_bytes_hex = format!("0x{}", hex_lower(&artifact_vk_hash_bytes));
+        let derived_vk_bn254_hex = derived_vk.bytes32();
+        let artifact_vk_bn254_hex = artifact_vk.bytes32();
+        bail!(
+            "SP1 VK artifact mismatch for {artifact_name}: derived vk_bn254={derived_vk_bn254_hex}, artifact vk_bn254={artifact_vk_bn254_hex}, derived vk_hash_bytes={derived_vk_hash_bytes_hex}, artifact vk_hash_bytes={artifact_vk_hash_bytes_hex}"
+        );
+    }
+
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> Result<()> {
@@ -1276,16 +1264,231 @@ fn read_manifest(path: &Path) -> Result<CargoManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
+    use clap::Parser;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BuildGuestArgs,
+    }
+
+    #[test]
+    fn check_mode_parses_without_force() {
+        let cli = TestCli::try_parse_from(["test", "all", "--check"]).unwrap();
+        assert!(cli.args.check);
+        assert!(!cli.args.force);
+    }
+
+    #[test]
+    fn check_and_force_are_mutually_exclusive() {
+        assert!(TestCli::try_parse_from(["test", "all", "--check", "--force"]).is_err());
+    }
 
     #[test]
     fn sp1_guest_fingerprint_changes_with_docker_tag() {
         let root = repo_root();
-        let v1 =
-            compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4"), false).unwrap();
-        let v2 =
-            compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5"), false).unwrap();
+        let v1 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4")).unwrap();
+        let v2 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5")).unwrap();
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn guest_fingerprint_inputs_include_transitive_local_crates() {
+        let root = repo_root();
+        let paths = provenance::build_input_paths(&root, Backend::Risc0, false).unwrap();
+        let rendered: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        for required in [
+            "crates/guest-common/src",
+            "crates/primitives/src",
+            "crates/primitives-shasta/src",
+            "crates/protocol/src",
+            "crates/protocol-shasta/src",
+            "crates/stateless/src",
+            "guests/risc0/src",
+        ] {
+            assert!(
+                rendered.iter().any(
+                    |path| path.starts_with(required) || path.contains(&format!("{required}/"))
+                ),
+                "fingerprint inputs missing local guest crate path prefix {required}; got {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_and_guest_share_alethia_and_protocol_revs() {
+        let root = repo_root();
+        let workspace = parse_git_revs(&root.join("Cargo.toml")).unwrap();
+        let guest_common = parse_git_revs(&root.join("crates/guest-common/Cargo.toml")).unwrap();
+        let risc0_lock = parse_lock_git_revs(&root.join("guests/risc0/Cargo.lock")).unwrap();
+        let sp1_lock = parse_lock_git_revs(&root.join("guests/sp1/Cargo.lock")).unwrap();
+
+        let workspace_alethia = workspace
+            .get("alethia-reth")
+            .expect("workspace Cargo.toml must pin alethia-reth");
+        let workspace_protocol = workspace
+            .get("taiko-mono")
+            .expect("workspace Cargo.toml must pin taiko-mono protocol");
+
+        assert_eq!(
+            guest_common.get("alethia-reth"),
+            Some(workspace_alethia),
+            "guest-common alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            risc0_lock.get("alethia-reth"),
+            Some(workspace_alethia),
+            "guests/risc0 lock alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            sp1_lock.get("alethia-reth"),
+            Some(workspace_alethia),
+            "guests/sp1 lock alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            risc0_lock.get("taiko-mono"),
+            Some(workspace_protocol),
+            "guests/risc0 lock taiko-mono rev must match workspace"
+        );
+        assert_eq!(
+            sp1_lock.get("taiko-mono"),
+            Some(workspace_protocol),
+            "guests/sp1 lock taiko-mono rev must match workspace"
+        );
+    }
+
+    fn parse_git_revs(manifest_path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        let contents = fs::read_to_string(manifest_path)?;
+        let mut revs = std::collections::BTreeMap::new();
+        for line in contents.lines() {
+            let Some(repo) = git_repo_name_from_line(line) else {
+                continue;
+            };
+            if let Some(rev) = line
+                .split("rev = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+            {
+                insert_unique_rev(
+                    &mut revs,
+                    repo,
+                    rev.to_string(),
+                    &format!("manifest {}", manifest_path.display()),
+                )?;
+            }
+        }
+        Ok(revs)
+    }
+
+    fn parse_lock_git_revs(lock_path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        let contents = fs::read_to_string(lock_path)?;
+        let mut revs = std::collections::BTreeMap::new();
+        for line in contents.lines() {
+            let Some(source) = line.strip_prefix("source = \"git+") else {
+                continue;
+            };
+            let source = source.trim_end_matches('"');
+            let Some(repo) = git_repo_name_from_source(source) else {
+                continue;
+            };
+            if let Some(rev) = source
+                .split("rev=")
+                .nth(1)
+                .and_then(|rest| rest.split(['#', '&']).next().map(str::to_owned))
+            {
+                insert_unique_rev(
+                    &mut revs,
+                    repo,
+                    rev,
+                    &format!("lockfile {}", lock_path.display()),
+                )?;
+            }
+        }
+        Ok(revs)
+    }
+
+    fn insert_unique_rev(
+        revs: &mut std::collections::BTreeMap<String, String>,
+        repo: String,
+        rev: String,
+        source: &str,
+    ) -> Result<()> {
+        if let Some(existing) = revs.get(&repo) {
+            ensure!(
+                existing == &rev,
+                "inconsistent git rev pins for {repo} in {source}: {existing} vs {rev}"
+            );
+            return Ok(());
+        }
+        revs.insert(repo, rev);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_git_revs_rejects_conflicting_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let manifest = temp.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            r#"
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+"#,
+        )
+        .unwrap();
+        let err = parse_git_revs(&manifest).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent git rev pins for alethia-reth"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn parse_lock_git_revs_rejects_conflicting_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let lock = temp.join("Cargo.lock");
+        fs::write(
+            &lock,
+            r#"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"#,
+        )
+        .unwrap();
+        let err = parse_lock_git_revs(&lock).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent git rev pins for alethia-reth"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    fn git_repo_name_from_line(line: &str) -> Option<String> {
+        let marker = "git = \"https://github.com/taikoxyz/";
+        let rest = line.split(marker).nth(1)?;
+        let name = rest.split('"').next()?;
+        Some(name.trim_end_matches(".git").to_string())
+    }
+
+    fn git_repo_name_from_source(source: &str) -> Option<String> {
+        let marker = "https://github.com/taikoxyz/";
+        let rest = source.split(marker).nth(1)?;
+        let name = rest.split(['?', '#']).next()?;
+        Some(name.trim_end_matches(".git").to_string())
     }
 
     #[test]
@@ -1310,21 +1513,6 @@ mod tests {
     }
 
     #[test]
-    fn guest_fingerprint_round_trip_matches() {
-        let temp_root = temp_test_dir();
-        let fingerprint_path = temp_root.join("fingerprint.json");
-        write_guest_fingerprint(&fingerprint_path, "sp1", false, "abc123").unwrap();
-
-        assert!(matches_existing_fingerprint(&fingerprint_path, "sp1", false, "abc123").unwrap());
-        assert!(!matches_existing_fingerprint(&fingerprint_path, "sp1", false, "def456").unwrap());
-        assert!(
-            !matches_existing_fingerprint(&fingerprint_path, "risc0", false, "abc123").unwrap()
-        );
-
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
     fn sccache_compiler_wraps_only_when_enabled() {
         assert_eq!(
             sccache_compiler(true, "riscv64-unknown-elf-gcc"),
@@ -1334,6 +1522,52 @@ mod tests {
             sccache_compiler(false, "riscv64-unknown-elf-gcc"),
             "riscv64-unknown-elf-gcc"
         );
+    }
+
+    #[test]
+    fn sp1_vk_match_check_accepts_identical_key() {
+        let proposal = read_sp1_vk_artifact("sp1_shasta_proposal.vk.bin");
+
+        ensure_sp1_vk_matches("sp1_shasta_proposal", &proposal, &proposal)
+            .expect("identical SP1 VK should match");
+    }
+
+    #[test]
+    fn sp1_vk_match_check_rejects_swapped_key() {
+        let proposal = read_sp1_vk_artifact("sp1_shasta_proposal.vk.bin");
+        let aggregation = read_sp1_vk_artifact("sp1_shasta_aggregation.vk.bin");
+
+        let err = ensure_sp1_vk_matches("sp1_shasta_proposal", &proposal, &aggregation)
+            .expect_err("swapped SP1 VK should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("SP1 VK artifact mismatch for sp1_shasta_proposal"));
+        assert!(message.contains("derived vk_bn254="));
+        assert!(message.contains("artifact vk_bn254="));
+        assert!(message.contains("derived vk_hash_bytes="));
+        assert!(message.contains("artifact vk_hash_bytes="));
+    }
+
+    #[test]
+    fn deserialize_sp1_vk_artifact_names_malformed_artifact() {
+        let err = match deserialize_sp1_vk_artifact("sp1_shasta_proposal", b"not a verifying key") {
+            Ok(_) => panic!("malformed SP1 VK artifact should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("failed to load SP1 VK artifact for sp1_shasta_proposal")
+        );
+    }
+
+    fn read_sp1_vk_artifact(file_name: &str) -> SP1VerifyingKey {
+        let path = repo_root().join("crates/guests/elf").join(file_name);
+        let bytes = fs::read(&path).unwrap_or_else(|err| {
+            panic!("read {}: {err}", path.display());
+        });
+        deserialize_sp1_vk_artifact(file_name.trim_end_matches(".vk.bin"), &bytes)
+            .unwrap_or_else(|err| panic!("deserialize {}: {err}", path.display()))
     }
 
     fn temp_test_dir() -> PathBuf {

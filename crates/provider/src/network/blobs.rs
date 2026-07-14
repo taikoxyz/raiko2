@@ -7,7 +7,7 @@ use raiko2_primitives::blob::util::{
 };
 use raiko2_primitives::{ChainSpec, RaikoError, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
-use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::shasta::{DerivationSource, ShastaEventData};
 use serde::Deserialize;
 
 use super::NetworkProvider;
@@ -60,6 +60,10 @@ fn timestamp_to_slot(timestamp: u64, chain_spec: &ChainSpec) -> RaikoResult<u64>
     }
 
     Ok((timestamp - chain_spec.genesis_time) / chain_spec.seconds_per_slot)
+}
+
+fn source_timestamp(source: &DerivationSource) -> u64 {
+    source.blobSlice.timestamp.to::<u64>()
 }
 
 impl NetworkProvider {
@@ -144,12 +148,7 @@ impl NetworkProvider {
                 )));
             }
 
-            let timestamp = if source.isForcedInclusion {
-                source.blobSlice.timestamp.to::<u64>()
-            } else {
-                proposal.timestamp.to::<u64>()
-            };
-            let slot = timestamp_to_slot(timestamp, l1_chain_spec)?;
+            let slot = timestamp_to_slot(source_timestamp(source), l1_chain_spec)?;
             if let std::collections::btree_map::Entry::Vacant(entry) = sidecars_by_slot.entry(slot)
             {
                 entry.insert(self.fetch_blob_sidecars(beacon_rpc, slot).await?);
@@ -215,8 +214,31 @@ impl NetworkProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::timestamp_to_slot;
+    use super::{source_timestamp, timestamp_to_slot};
     use raiko2_primitives::ChainSpec;
+    use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource};
+
+    fn derivation_source(is_forced_inclusion: bool, timestamp: u64) -> DerivationSource {
+        DerivationSource {
+            isForcedInclusion: is_forced_inclusion,
+            blobSlice: BlobSlice {
+                timestamp: timestamp.try_into().expect("timestamp fits uint48"),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn normal_source_uses_blob_slice_timestamp() {
+        let source = derivation_source(false, 124);
+        assert_eq!(source_timestamp(&source), 124);
+    }
+
+    #[test]
+    fn forced_source_uses_blob_slice_timestamp() {
+        let source = derivation_source(true, 136);
+        assert_eq!(source_timestamp(&source), 136);
+    }
 
     #[test]
     fn timestamp_to_slot_uses_genesis_offset() {

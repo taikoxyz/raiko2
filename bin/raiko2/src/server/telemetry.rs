@@ -50,6 +50,22 @@ static STAGE_TASK_TERMINAL_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("register raiko2_stage_task_terminal_total")
 });
 
+static STAGE_TASK_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_stage_task_failures_total",
+        "Total failed stage tasks grouped by a bounded error kind",
+        &[
+            "route",
+            "proof_type",
+            "pair",
+            "aggregate",
+            "stage",
+            "error_kind"
+        ]
+    )
+    .expect("register raiko2_stage_task_failures_total")
+});
+
 static STAGE_TASK_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         histogram_opts!(
@@ -86,6 +102,15 @@ static EXTERNAL_SUBMISSION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
         ]
     )
     .expect("register raiko2_external_submission_total")
+});
+
+static DUPLICATE_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_duplicate_requests_total",
+        "Total duplicate root proof requests observed by the API",
+        &["route", "proof_type", "pair", "aggregate", "runner_status"]
+    )
+    .expect("register raiko2_duplicate_requests_total")
 });
 
 #[derive(Debug, Clone)]
@@ -185,6 +210,20 @@ pub(crate) fn record_stage_task_terminal(
     }
 }
 
+pub(crate) fn record_stage_task_failure(context: &MetricContext, stage: &str, error: &str) {
+    let proof_type = context.proof_type_label();
+    STAGE_TASK_FAILURES_TOTAL
+        .with_label_values(&[
+            context.route.as_str(),
+            proof_type.as_str(),
+            context.pair.as_str(),
+            context.aggregate_label(),
+            stage,
+            failure_error_kind(error),
+        ])
+        .inc();
+}
+
 pub(crate) fn record_stage_task_duration(
     context: &MetricContext,
     stage: &str,
@@ -204,6 +243,19 @@ pub(crate) fn record_stage_task_duration(
         .observe(duration_seconds.max(0.0));
 }
 
+pub(crate) fn record_duplicate_request(context: &MetricContext, runner_status: &str) {
+    let proof_type = context.proof_type_label();
+    DUPLICATE_REQUESTS_TOTAL
+        .with_label_values(&[
+            context.route.as_str(),
+            proof_type.as_str(),
+            context.pair.as_str(),
+            context.aggregate_label(),
+            runner_status,
+        ])
+        .inc();
+}
+
 pub(crate) fn record_external_submission(
     context: &MetricContext,
     stage: &str,
@@ -220,6 +272,55 @@ pub(crate) fn record_external_submission(
             provider,
         ])
         .inc();
+}
+
+fn failure_error_kind(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("instance id mismatch") {
+        "instance_id_mismatch"
+    } else if error.contains("verifier mismatch") {
+        "verifier_mismatch"
+    } else if error.contains("dependency_not_ready") || error.contains("dependency not ready") {
+        "dependency_not_ready"
+    } else if error.contains("persist proof output")
+        || error.contains("serialize proof output")
+        || error.contains("write proof artifact")
+        || error.contains("register proof artifact")
+    {
+        "proof_persistence"
+    } else if error.contains("proof artifact")
+        || error.contains("missing completed proposal proof")
+        || error.contains("missing completed aggregate proof")
+    {
+        "stale_artifact"
+    } else if error.contains("missing trie node")
+        || error.contains("witness state error")
+        || error.contains("witness")
+    {
+        "witness_error"
+    } else if error.contains("rpc")
+        || error.contains("eth_getlogs")
+        || error.contains("block not found")
+        || error.contains("beacon")
+        || error.contains("sidecar")
+        || error.contains("transport")
+        || error.contains("connection")
+        || error.contains("timeout")
+    {
+        "rpc_error"
+    } else if error.contains("rate limit") || error.contains("rate_limited") {
+        "rate_limited"
+    } else if error.contains("invalid_request") || error.contains("invalid request") {
+        "invalid_request"
+    } else if error.contains("prover_error") || error.contains("prover error") {
+        "remote_prover_error"
+    } else if error.contains("panic") {
+        "panic"
+    } else if error.contains("cancelled") || error.contains("canceled") {
+        "cancelled"
+    } else {
+        "internal"
+    }
 }
 
 pub(crate) fn render() -> Result<(String, Vec<u8>), prometheus::Error> {

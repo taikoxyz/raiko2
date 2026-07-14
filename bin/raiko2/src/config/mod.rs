@@ -19,7 +19,7 @@ pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
-#[cfg(any(test, feature = "fixture-server"))]
+#[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};
 
@@ -554,8 +554,11 @@ mod tests {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless_config::BoundlessOfferParams {
-                timeout_ms_per_mcycle: 100,
-                lock_timeout_ms_per_mcycle: 100,
+                timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
+                    lock_timeout_ms_per_mcycle: 100,
+                    timeout_ms_per_mcycle: 100,
+                    dynamic_pricing_timeout_modifier: None,
+                },
                 ..config.prover.boundless.offer_params.batch.clone()
             });
 
@@ -563,7 +566,7 @@ mod tests {
         assert!(err.chain().any(|source| {
             source
                 .to_string()
-                .contains("timeout must be greater than lock_timeout")
+                .contains("timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle")
         }));
     }
 

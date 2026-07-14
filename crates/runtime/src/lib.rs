@@ -29,6 +29,13 @@ pub struct ExpiredTaskCursor {
     pub task_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofArtifactCursor {
+    pub updated_at: i64,
+    pub network_pair: String,
+    pub proof_ref: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum TaskRegistrationOutcome {
     Created(RuntimeTaskRecord),
@@ -52,6 +59,16 @@ pub struct ProofArtifactRecord {
     pub route: PipelineRoute,
     pub proof_path: String,
     pub updated_at: i64,
+}
+
+impl From<&ProofArtifactRecord> for ProofArtifactCursor {
+    fn from(record: &ProofArtifactRecord) -> Self {
+        Self {
+            updated_at: record.updated_at,
+            network_pair: record.network_pair.clone(),
+            proof_ref: record.proof_ref.clone(),
+        }
+    }
 }
 
 impl RuntimeManager {
@@ -525,7 +542,11 @@ impl RuntimeManager {
                     pipeline_key = excluded.pipeline_key,
                     route = excluded.route,
                     proof_path = excluded.proof_path,
-                    updated_at = excluded.updated_at
+                    updated_at = CASE
+                        WHEN excluded.updated_at <= proof_artifacts.updated_at
+                            THEN proof_artifacts.updated_at + 1
+                        ELSE excluded.updated_at
+                    END
                 ",
                 params![
                     registration.network_pair,
@@ -601,6 +622,72 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if expired proof artifact records cannot be listed.
+    pub async fn list_expired_proof_artifacts(
+        &self,
+        now_ts: i64,
+        ttl_secs: u64,
+        after: Option<&ProofArtifactCursor>,
+        limit: usize,
+    ) -> Result<Vec<ProofArtifactRecord>> {
+        if ttl_secs == 0 || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connection().await?;
+        let cutoff = now_ts.saturating_sub(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let after = after.cloned();
+        conn.call(move |conn| {
+            let mut stmt = if after.is_some() {
+                conn.prepare(
+                    r"
+                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    FROM proof_artifacts
+                    WHERE updated_at <= ?1
+                      AND (
+                        updated_at > ?2
+                        OR (updated_at = ?2 AND network_pair > ?3)
+                        OR (updated_at = ?2 AND network_pair = ?3 AND proof_ref > ?4)
+                      )
+                    ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
+                    LIMIT ?5
+                    ",
+                )?
+            } else {
+                conn.prepare(
+                    r"
+                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    FROM proof_artifacts
+                    WHERE updated_at <= ?1
+                    ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
+                    LIMIT ?2
+                    ",
+                )?
+            };
+            let mut rows = if let Some(after) = after {
+                stmt.query(params![
+                    cutoff,
+                    after.updated_at,
+                    after.network_pair,
+                    after.proof_ref,
+                    limit
+                ])?
+            } else {
+                stmt.query(params![cutoff, limit])?
+            };
+            let mut artifacts = Vec::new();
+            while let Some(row) = rows.next()? {
+                artifacts.push(proof_artifact_record_from_row(row)?);
+            }
+            Ok(artifacts)
+        })
+        .await
+        .context("failed to list expired proof artifacts")
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the proof artifact record cannot be removed.
     pub async fn remove_proof_artifact(
         &self,
@@ -634,6 +721,33 @@ impl RuntimeManager {
             .await
             .context("failed to remove proof artifact")?;
         Ok(artifact)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record cannot be conditionally removed.
+    pub async fn remove_proof_artifact_if_unchanged(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+        expected_updated_at: i64,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let removed = conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    r"
+                    DELETE FROM proof_artifacts
+                    WHERE network_pair = ?1 AND proof_ref = ?2 AND updated_at = ?3
+                    ",
+                    params![network_pair, proof_ref, expected_updated_at],
+                )?)
+            })
+            .await
+            .context("failed to conditionally remove proof artifact")?;
+        Ok(removed == 1)
     }
 
     /// # Errors
@@ -1260,11 +1374,11 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
-        TaskRegistration, TaskRegistrationOutcome,
+        ExpiredTaskCursor, ProofArtifactCursor, ProofArtifactRegistration, RunnerStatus,
+        RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
     };
     use raiko2_pipeline::PipelineRoute;
-    use rusqlite::OptionalExtension;
+    use rusqlite::{OptionalExtension, params};
     use std::path::Path;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1277,6 +1391,44 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    async fn set_artifact_updated_at(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        proof_ref: &str,
+        updated_at: i64,
+    ) -> anyhow::Result<()> {
+        let conn = runtime.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        conn.call(move |conn| {
+            conn.execute(
+                "UPDATE proof_artifacts SET updated_at = ?1 WHERE network_pair = ?2 AND proof_ref = ?3",
+                params![updated_at, network_pair, proof_ref],
+            )?;
+            Ok(())
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn register_test_artifact(
+        runtime: &RuntimeManager,
+        proof_ref: &str,
+    ) -> anyhow::Result<()> {
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: raiko2_pipeline::PipelineKey::ShastaRisc0,
+                route: "risc0/local".parse().expect("parse route"),
+                proof_path: runtime
+                    .proof_artifact_path("taiko_dev/ethereum", proof_ref)
+                    .display()
+                    .to_string(),
+            })
+            .await
     }
 
     #[tokio::test]
@@ -1331,6 +1483,108 @@ mod tests {
         assert_eq!(artifact.proof_path, proof_path.display().to_string());
         assert_eq!(artifact.network_pair, "taiko_dev/ethereum");
         assert_eq!(artifact.proof_ref, "proposal_0xabc");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_pages_expired_proof_artifacts_by_stable_cursor() -> anyhow::Result<()>
+    {
+        let root = unique_root("raiko2-runtime-expired-artifacts");
+        let runtime = RuntimeManager::new(root.clone())?;
+        for proof_ref in ["proposal-a", "proposal-b", "proposal-fresh"] {
+            register_test_artifact(&runtime, proof_ref).await?;
+        }
+        set_artifact_updated_at(&runtime, "taiko_dev/ethereum", "proposal-a", 10).await?;
+        set_artifact_updated_at(&runtime, "taiko_dev/ethereum", "proposal-b", 10).await?;
+        set_artifact_updated_at(&runtime, "taiko_dev/ethereum", "proposal-fresh", 21).await?;
+
+        let first = runtime
+            .list_expired_proof_artifacts(100, 80, None, 1)
+            .await?;
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.proof_ref.as_str())
+                .collect::<Vec<_>>(),
+            ["proposal-a"]
+        );
+        let cursor = ProofArtifactCursor::from(&first[0]);
+        let second = runtime
+            .list_expired_proof_artifacts(100, 80, Some(&cursor), 1)
+            .await?;
+        assert_eq!(
+            second
+                .iter()
+                .map(|row| row.proof_ref.as_str())
+                .collect::<Vec<_>>(),
+            ["proposal-b"]
+        );
+        let cursor = ProofArtifactCursor::from(&second[0]);
+        assert!(
+            runtime
+                .list_expired_proof_artifacts(100, 80, Some(&cursor), 1)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .list_expired_proof_artifacts(100, 0, None, 10)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .list_expired_proof_artifacts(100, 80, None, 0)
+                .await?
+                .is_empty()
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_conditionally_removes_unchanged_artifact_rows() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-conditional-artifact-remove");
+        let runtime = RuntimeManager::new(root.clone())?;
+        register_test_artifact(&runtime, "proposal-a").await?;
+        set_artifact_updated_at(&runtime, "taiko_dev/ethereum", "proposal-a", 10).await?;
+
+        register_test_artifact(&runtime, "proposal-a").await?;
+        let refreshed = runtime
+            .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+            .await?
+            .expect("refreshed artifact");
+        assert!(refreshed.updated_at > 10);
+        assert!(
+            !runtime
+                .remove_proof_artifact_if_unchanged("taiko_dev/ethereum", "proposal-a", 10)
+                .await?
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+                .await?
+                .is_some()
+        );
+
+        assert!(
+            runtime
+                .remove_proof_artifact_if_unchanged(
+                    "taiko_dev/ethereum",
+                    "proposal-a",
+                    refreshed.updated_at,
+                )
+                .await?
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+                .await?
+                .is_none()
+        );
 
         std::fs::remove_dir_all(root)?;
         Ok(())

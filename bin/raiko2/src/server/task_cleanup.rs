@@ -779,7 +779,7 @@ mod tests {
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::sync::RwLock;
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -883,6 +883,39 @@ mod tests {
                 .is_none()
         );
         assert!(!tokio::fs::try_exists(Path::new(&artifact.proof_path)).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_waits_for_submission_read_guard() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("artifact-guard"))?);
+        let artifact = register_artifact(runtime.as_ref(), "guarded", true).await?;
+        let guard = Arc::new(RwLock::new(()));
+        let read_guard = guard.read().await;
+        let mut cleanup = tokio::spawn({
+            let runtime = runtime.clone();
+            let guard = guard.clone();
+            async move {
+                let mut cursor = None;
+                run_proof_artifact_cleanup_pass(
+                    runtime,
+                    guard,
+                    artifact.updated_at + 10,
+                    10,
+                    &mut cursor,
+                )
+                .await
+            }
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut cleanup)
+                .await
+                .is_err()
+        );
+        drop(read_guard);
+        let stats = cleanup.await??;
+        assert_eq!(stats.removed_rows, 1);
         Ok(())
     }
 

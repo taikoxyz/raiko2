@@ -1355,6 +1355,7 @@ async fn submit_submission(
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
 ) -> Result<(), Error> {
+    let _artifact_guard = state.artifact_cleanup_guard.read().await;
     // Deterministic v4 task IDs are reusable only when the normalized request fingerprint matches.
     if let Some(existing) = state
         .runtime
@@ -1481,8 +1482,8 @@ mod tests {
     use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
     use crate::server::task_metadata::ProposalTask;
     use raiko2_engine::{
-        AggregateProofInput, AggregationTaskRequest, EngineTaskId, ProposalTaskRequest,
-        ProverTaskConfig,
+        AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey,
+        ProposalTaskRequest, ProverTaskConfig,
     };
     use raiko2_primitives::L2BlockRange;
     use raiko2_primitives::Proof;
@@ -1491,11 +1492,85 @@ mod tests {
         ProofArtifactRegistration, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
         TaskRegistration,
     };
-    use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
+    use std::{
+        future::Future,
+        path::PathBuf,
+        pin::Pin,
+        process,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::SystemTime,
+    };
+    use tokio::sync::RwLock;
 
     type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
     struct RemoveFailEngine;
+
+    struct GuardProbeEngine {
+        artifact_cleanup_guard: Arc<RwLock<()>>,
+        guarded_on_submit: AtomicBool,
+    }
+
+    impl GuardProbeEngine {
+        fn new(artifact_cleanup_guard: Arc<RwLock<()>>) -> Self {
+            Self {
+                artifact_cleanup_guard,
+                guarded_on_submit: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl EngineHandle for GuardProbeEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> TestBoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            self.guarded_on_submit.store(
+                self.artifact_cleanup_guard.try_write().is_err(),
+                Ordering::SeqCst,
+            );
+            Box::pin(async move {
+                Ok(EngineTaskId::new(EngineTaskKey::Proposal {
+                    pipeline: PipelineKey::ShastaRisc0,
+                    request,
+                }))
+            })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> TestBoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregate submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> TestBoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> TestBoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     impl EngineHandle for RemoveFailEngine {
         fn submit_proposal_proof_with_dependencies(
@@ -1539,6 +1614,53 @@ mod tests {
                 )))
             })
         }
+    }
+
+    #[tokio::test]
+    async fn v4_submission_holds_cleanup_guard_through_enqueue() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("v4-submission-artifact-guard"))
+                .expect("runtime manager"),
+        );
+        let artifact_cleanup_guard = Arc::new(RwLock::new(()));
+        let engine = Arc::new(GuardProbeEngine::new(Arc::clone(&artifact_cleanup_guard)));
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_hoodi/hoodi",
+            PipelineKey::ShastaRisc0,
+            engine.clone(),
+        );
+        let state = AppState::from_parts_with_artifact_cleanup_guard(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            runtime,
+            artifact_cleanup_guard,
+        );
+        let request = wire::ProofRequest {
+            proof_type: wire::ProofType::Risc0,
+            aggregate: false,
+            prover: None,
+            proposals: vec![wire::ProposalRequest {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_number_start: 7,
+                l2_block_number_end: 7,
+                last_anchor_block_number: 6,
+            }],
+        };
+        let mut submission = proposal_submission(&state, &request).expect("canonical submission");
+        let request_fingerprint = proposal_request_fingerprint(&submission);
+        submission.public_task_id = request_fingerprint.public_task_id();
+
+        submit_submission(&state, &submission, request_fingerprint.as_str())
+            .await
+            .expect("submit proof");
+
+        assert!(
+            engine.guarded_on_submit.load(Ordering::SeqCst),
+            "cleanup write lock was available while the submission was enqueued"
+        );
     }
 
     #[test]

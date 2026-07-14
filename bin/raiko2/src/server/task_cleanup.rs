@@ -236,11 +236,12 @@ pub(crate) async fn run_proof_artifact_cleanup_pass(
             PROOF_ARTIFACT_CLEANUP_BATCH_SIZE,
         )
         .await?;
-    let live_refs = live_proof_artifact_refs(runtime.as_ref()).await?;
-    *cursor = artifacts.last().map(ProofArtifactCursor::from);
     if artifacts.is_empty() {
+        *cursor = None;
         return Ok(ProofArtifactCleanupStats::default());
     }
+    let live_refs = live_proof_artifact_refs(runtime.as_ref()).await?;
+    *cursor = artifacts.last().map(ProofArtifactCursor::from);
     let mut stats = ProofArtifactCleanupStats {
         scanned: artifacts.len(),
         ..ProofArtifactCleanupStats::default()
@@ -1084,6 +1085,43 @@ mod tests {
                 assert!(tokio::fs::try_exists(&artifact.proof_path).await?);
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_cleanup_idle_page_skips_invalid_live_metadata() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-idle-invalid-metadata",
+        ))?);
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "invalid-live-root".to_string(),
+                pipeline_key: Some(PipelineKey::ShastaRisc0),
+                route: "risc0/local".parse().expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: None,
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({"invalid": true}),
+                request_fingerprint: None,
+            })
+            .await?;
+        let mut cursor = Some(ProofArtifactCursor {
+            updated_at: 1,
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: "previous-page".to_string(),
+        });
+
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime,
+            Arc::new(RwLock::new(())),
+            now_ts(),
+            10,
+            &mut cursor,
+        )
+        .await?;
+
+        assert_eq!(stats, ProofArtifactCleanupStats::default());
+        assert!(cursor.is_none());
         Ok(())
     }
 

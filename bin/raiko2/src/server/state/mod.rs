@@ -121,6 +121,7 @@ impl AppState {
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
+        let artifact_cleanup_guard = Arc::new(RwLock::new(()));
         #[cfg(feature = "local-provers")]
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
         #[cfg(all(feature = "host", not(feature = "local-provers")))]
@@ -164,6 +165,7 @@ impl AppState {
                     config: &config,
                     pair,
                     runtime: Arc::clone(&runtime),
+                    artifact_cleanup_guard: Arc::clone(&artifact_cleanup_guard),
                     #[cfg(feature = "host")]
                     boundless_balance_gate: boundless_balance_gate.clone(),
                     #[cfg(feature = "local-provers")]
@@ -184,7 +186,12 @@ impl AppState {
 
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-        let state = Self::from_parts(config, pipelines, runtime);
+        let state = Self::from_parts_with_artifact_cleanup_guard(
+            config,
+            pipelines,
+            runtime,
+            artifact_cleanup_guard,
+        );
         spawn_runtime_cleanup_loop(
             Arc::clone(&state.config),
             Arc::clone(&state.runtime),
@@ -195,10 +202,25 @@ impl AppState {
         Ok(state)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_parts(
         config: Arc<Config>,
         pipelines: Arc<dyn PipelineFactory>,
         runtime: Arc<RuntimeManager>,
+    ) -> Self {
+        Self::from_parts_with_artifact_cleanup_guard(
+            config,
+            pipelines,
+            runtime,
+            Arc::new(RwLock::new(())),
+        )
+    }
+
+    pub(crate) fn from_parts_with_artifact_cleanup_guard(
+        config: Arc<Config>,
+        pipelines: Arc<dyn PipelineFactory>,
+        runtime: Arc<RuntimeManager>,
+        artifact_cleanup_guard: Arc<RwLock<()>>,
     ) -> Self {
         let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
         Self {
@@ -206,7 +228,7 @@ impl AppState {
             pipelines,
             runtime,
             zk_any_sampler,
-            artifact_cleanup_guard: Arc::new(RwLock::new(())),
+            artifact_cleanup_guard,
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
         }
     }
@@ -216,6 +238,7 @@ struct PairPipelineRegistration<'a> {
     config: &'a Config,
     pair: &'a ResolvedNetworkPair,
     runtime: Arc<RuntimeManager>,
+    artifact_cleanup_guard: Arc<RwLock<()>>,
     /// Balance gate shared across all pairs (see the construction site in `ServerState::new`).
     #[cfg(feature = "host")]
     boundless_balance_gate: BoundlessBalanceGate,
@@ -255,6 +278,7 @@ async fn register_pair_pipelines(
         let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
             Arc::clone(&registration.runtime),
             registration.pair.key.clone(),
+            Arc::clone(&registration.artifact_cleanup_guard),
         ));
         register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
         return Ok(());
@@ -265,6 +289,7 @@ async fn register_pair_pipelines(
         let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
             Arc::clone(&registration.runtime),
             registration.pair.key.clone(),
+            Arc::clone(&registration.artifact_cleanup_guard),
         ));
 
         let route = registration.config.prover.route();
@@ -344,6 +369,7 @@ async fn register_pair_pipelines(
         let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
             Arc::clone(&registration.runtime),
             registration.pair.key.clone(),
+            Arc::clone(&registration.artifact_cleanup_guard),
         ));
         let risc0_engine = build_risc0_engine(
             registration.config,

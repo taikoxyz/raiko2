@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
 use crate::server::task_metadata::{
     TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
@@ -25,6 +26,7 @@ use raiko2_pipeline::PipelineRoute;
 pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
+    artifact_cleanup_guard: Arc<RwLock<()>>,
     started_stage_tasks: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -35,10 +37,15 @@ enum FailedRootPolicy {
 }
 
 impl RuntimeObserver {
-    pub(crate) fn new(runtime: Arc<RuntimeManager>, network_pair: String) -> Self {
+    pub(crate) fn new(
+        runtime: Arc<RuntimeManager>,
+        network_pair: String,
+        artifact_cleanup_guard: Arc<RwLock<()>>,
+    ) -> Self {
         Self {
             runtime,
             network_pair,
+            artifact_cleanup_guard,
             started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -373,6 +380,7 @@ impl RuntimeObserver {
 
         let proof_bytes =
             serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
+        let _artifact_cleanup_guard = self.artifact_cleanup_guard.read().await;
         let proof_path = self
             .runtime
             .write_proof_artifact_bytes(&self.network_pair, &root_ref, &proof_bytes)
@@ -1010,6 +1018,17 @@ mod tests {
         }
     }
 
+    fn runtime_observer_for_test(
+        runtime: Arc<RuntimeManager>,
+        network_pair: impl Into<String>,
+    ) -> RuntimeObserver {
+        RuntimeObserver::new(
+            runtime,
+            network_pair.into(),
+            Arc::new(tokio::sync::RwLock::new(())),
+        )
+    }
+
     async fn register_observer_task(
         runtime: &RuntimeManager,
         task_id: &str,
@@ -1053,6 +1072,75 @@ mod tests {
         let mut record = runtime.get_task(task_id).await?.expect("runtime task");
         record.runner_status = runner_status;
         runtime.upsert_task(&record).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_publish_waits_for_cleanup_write_guard() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-artifact-guard",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        register_observer_task(
+            runtime.as_ref(),
+            "task_artifact_guard",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+
+        let artifact_cleanup_guard = Arc::new(tokio::sync::RwLock::new(()));
+        let cleanup_guard = artifact_cleanup_guard.write().await;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            Arc::clone(&artifact_cleanup_guard),
+        );
+        let mut publish = tokio::spawn(async move {
+            observer
+                .write_final_proof_files(&proposal_task_id, "prove", &proof_fixture())
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut publish)
+                .await
+                .is_err(),
+            "proof artifact publication completed while cleanup held the write guard"
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", &proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(
+            !tokio::fs::try_exists(runtime.proof_artifact_path("taiko_dev/ethereum", &proof_ref))
+                .await?
+        );
+
+        drop(cleanup_guard);
+        let proof_paths =
+            tokio::time::timeout(std::time::Duration::from_secs(1), publish).await???;
+        assert_eq!(proof_paths.len(), 1);
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", &proof_ref)
+                .await?
+                .is_some()
+        );
+        assert!(
+            tokio::fs::try_exists(runtime.proof_artifact_path("taiko_dev/ethereum", &proof_ref))
+                .await?
+        );
         Ok(())
     }
 
@@ -1104,7 +1192,7 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         let future_expires_at = now_secs().saturating_add(3_600);
         observer
             .on_task_progress(
@@ -1297,7 +1385,7 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -1366,7 +1454,7 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -1427,7 +1515,7 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_started(&proposal_task_id, &task, "worker-a")
             .await;
@@ -1482,7 +1570,7 @@ mod tests {
         record.error = Some("transient preflight failure".to_string());
         runtime.upsert_task(&record).await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_started(&proposal_task_id, &task, "worker-a")
             .await;
@@ -1550,7 +1638,7 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_succeeded(
                 &first_task_id,
@@ -1656,7 +1744,7 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -1787,7 +1875,7 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -1886,7 +1974,7 @@ mod tests {
         record.provider_request_id = Some("0xsp1-proposal".to_string());
         runtime.upsert_task(&record).await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), "taiko_dev/ethereum");
         assert_eq!(
             observer
                 .load_sp1_network_request_id(
@@ -1987,10 +2075,8 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "telemetry_restart/ethereum".to_string(),
-        );
+        let observer =
+            runtime_observer_for_test(Arc::clone(&runtime), "telemetry_restart/ethereum");
         observer
             .on_task_failed(
                 &proposal_task_id,
@@ -2034,10 +2120,8 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "metrics_failure_kind/ethereum".to_string(),
-        );
+        let observer =
+            runtime_observer_for_test(Arc::clone(&runtime), "metrics_failure_kind/ethereum");
         observer
             .on_task_failed(
                 &proposal_task_id,
@@ -2091,7 +2175,7 @@ mod tests {
         tokio::fs::create_dir_all(artifact_dir.parent().expect("proof artifact root")).await?;
         tokio::fs::write(artifact_dir, b"not a directory").await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string());
+        let observer = runtime_observer_for_test(Arc::clone(&runtime), network_pair);
         observer
             .on_task_succeeded(
                 &proposal_task_id,

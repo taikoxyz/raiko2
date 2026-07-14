@@ -38,6 +38,7 @@ use raiko2_runtime::RuntimeManager;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tracing::info;
 
 use super::AppState;
@@ -531,10 +532,14 @@ const fn memory_scheduler_config() -> SchedulerConfig {
     }
 }
 
-fn engine_observer(runtime: Arc<RuntimeManager>) -> Arc<dyn EngineObserver> {
+fn engine_observer(
+    runtime: Arc<RuntimeManager>,
+    artifact_cleanup_guard: Arc<RwLock<()>>,
+) -> Arc<dyn EngineObserver> {
     Arc::new(RuntimeObserver::new(
         runtime,
         "taiko_dev/ethereum".to_string(),
+        artifact_cleanup_guard,
     ))
 }
 
@@ -738,7 +743,8 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-runtime"))
             .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let artifact_cleanup_guard = Arc::new(RwLock::new(()));
+    let observer = engine_observer(Arc::clone(&runtime), Arc::clone(&artifact_cleanup_guard));
     let engine = risc0_fixture_engine_with_observer(json!({}), Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
@@ -747,7 +753,12 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
         PipelineKey::ShastaRisc0,
         Arc::new(engine.clone()),
     );
-    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
+    let state = AppState::from_parts_with_artifact_cleanup_guard(
+        Arc::new(config),
+        Arc::new(factory),
+        runtime,
+        artifact_cleanup_guard,
+    );
 
     (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
@@ -760,7 +771,8 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-sp1-runtime"))
             .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let artifact_cleanup_guard = Arc::new(RwLock::new(()));
+    let observer = engine_observer(Arc::clone(&runtime), Arc::clone(&artifact_cleanup_guard));
     let engine = sp1_fixture_engine_with_observer(json!({}), Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
@@ -769,7 +781,12 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
         PipelineKey::ShastaSp1,
         Arc::new(engine.clone()),
     );
-    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
+    let state = AppState::from_parts_with_artifact_cleanup_guard(
+        Arc::new(config),
+        Arc::new(factory),
+        runtime,
+        artifact_cleanup_guard,
+    );
 
     (state, engine)
 }
@@ -788,7 +805,8 @@ pub(crate) fn app_with_observed_native_fixture_engine(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-native-runtime"))
             .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let artifact_cleanup_guard = Arc::new(RwLock::new(()));
+    let observer = engine_observer(Arc::clone(&runtime), Arc::clone(&artifact_cleanup_guard));
     let engine = native_fixture_engine_with_observer(Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
@@ -797,7 +815,12 @@ pub(crate) fn app_with_observed_native_fixture_engine(
         PipelineKey::ShastaNative,
         Arc::new(engine.clone()),
     );
-    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
+    let state = AppState::from_parts_with_artifact_cleanup_guard(
+        Arc::new(config),
+        Arc::new(factory),
+        runtime,
+        artifact_cleanup_guard,
+    );
 
     (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
@@ -812,7 +835,8 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
         ))
         .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let artifact_cleanup_guard = Arc::new(RwLock::new(()));
+    let observer = engine_observer(Arc::clone(&runtime), Arc::clone(&artifact_cleanup_guard));
     let engine = risc0_fixture_engine_for_pipeline(
         json!({}),
         PipelineKey::ShastaRisc0Network,
@@ -825,7 +849,12 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
         PipelineKey::ShastaRisc0Network,
         Arc::new(engine.clone()),
     );
-    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
+    let state = AppState::from_parts_with_artifact_cleanup_guard(
+        Arc::new(config),
+        Arc::new(factory),
+        runtime,
+        artifact_cleanup_guard,
+    );
 
     (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
@@ -870,7 +899,8 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
         "raiko2-fixture-runtime",
     ))?);
-    let observer = engine_observer(Arc::clone(&runtime));
+    let artifact_cleanup_guard = Arc::new(RwLock::new(()));
+    let observer = engine_observer(Arc::clone(&runtime), Arc::clone(&artifact_cleanup_guard));
     let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
     let workers = config.queue.workers;
     let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
@@ -907,10 +937,11 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(sp1_engine),
     );
 
-    Ok(AppState::from_parts(
+    Ok(AppState::from_parts_with_artifact_cleanup_guard(
         Arc::new(config),
         Arc::new(factory),
         runtime,
+        artifact_cleanup_guard,
     ))
 }
 

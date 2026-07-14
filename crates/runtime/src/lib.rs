@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::fs as stdfs;
@@ -59,6 +59,14 @@ pub struct ProofArtifactRecord {
     pub route: PipelineRoute,
     pub proof_path: String,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofArtifactFileDeletion {
+    pub proof_path: String,
+    pub queued_at: i64,
+    pub attempts: u64,
+    pub last_error: Option<String>,
 }
 
 impl From<&ProofArtifactRecord> for ProofArtifactCursor {
@@ -542,11 +550,7 @@ impl RuntimeManager {
                     pipeline_key = excluded.pipeline_key,
                     route = excluded.route,
                     proof_path = excluded.proof_path,
-                    updated_at = CASE
-                        WHEN excluded.updated_at <= proof_artifacts.updated_at
-                            THEN proof_artifacts.updated_at + 1
-                        ELSE excluded.updated_at
-                    END
+                    updated_at = excluded.updated_at
                 ",
                 params![
                     registration.network_pair,
@@ -561,6 +565,42 @@ impl RuntimeManager {
         })
         .await
         .context("failed to upsert proof artifact")?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the restored proof artifact record cannot be stored.
+    pub async fn restore_proof_artifact(
+        &self,
+        registration: ProofArtifactRegistration,
+        published_at: i64,
+    ) -> Result<()> {
+        let conn = self.connection().await?;
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                INSERT INTO proof_artifacts (
+                    network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
+                    pipeline_key = excluded.pipeline_key,
+                    route = excluded.route,
+                    proof_path = excluded.proof_path
+                ",
+                params![
+                    registration.network_pair,
+                    registration.proof_ref,
+                    registration.pipeline_key.as_str(),
+                    registration.route.to_string(),
+                    registration.proof_path,
+                    published_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to restore proof artifact")?;
         Ok(())
     }
 
@@ -645,11 +685,7 @@ impl RuntimeManager {
                     SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
                     FROM proof_artifacts
                     WHERE updated_at <= ?1
-                      AND (
-                        updated_at > ?2
-                        OR (updated_at = ?2 AND network_pair > ?3)
-                        OR (updated_at = ?2 AND network_pair = ?3 AND proof_ref > ?4)
-                      )
+                      AND (updated_at, network_pair, proof_ref) > (?2, ?3, ?4)
                     ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
                     LIMIT ?5
                     ",
@@ -752,6 +788,203 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if the proof artifact cannot be atomically queued for file deletion.
+    pub async fn queue_proof_artifact_file_deletion_if_unchanged(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+        expected_updated_at: i64,
+    ) -> Result<Option<String>> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let queued_at = now_ts();
+        conn.call(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let proof_path = tx
+                .query_row(
+                    r"
+                    SELECT proof_path
+                    FROM proof_artifacts
+                    WHERE network_pair = ?1 AND proof_ref = ?2 AND updated_at = ?3
+                    ",
+                    params![&network_pair, &proof_ref, expected_updated_at],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(proof_path) = proof_path else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            tx.execute(
+                r"
+                INSERT OR IGNORE INTO proof_artifact_file_deletions (proof_path, queued_at)
+                VALUES (?1, ?2)
+                ",
+                params![&proof_path, queued_at],
+            )?;
+            tx.execute(
+                r"
+                DELETE FROM proof_artifacts
+                WHERE network_pair = ?1 AND proof_ref = ?2 AND updated_at = ?3
+                ",
+                params![&network_pair, &proof_ref, expected_updated_at],
+            )?;
+            tx.commit()?;
+            Ok(Some(proof_path))
+        })
+        .await
+        .context("failed to conditionally queue proof artifact file deletion")
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact cannot be atomically queued for file deletion.
+    pub async fn queue_proof_artifact_file_deletion(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+    ) -> Result<Option<ProofArtifactRecord>> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let queued_at = now_ts();
+        conn.call(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let artifact = tx
+                .query_row(
+                    r"
+                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    FROM proof_artifacts
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    ",
+                    params![&network_pair, &proof_ref],
+                    proof_artifact_record_from_row,
+                )
+                .optional()?;
+            let Some(artifact) = artifact else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            tx.execute(
+                r"
+                INSERT OR IGNORE INTO proof_artifact_file_deletions (proof_path, queued_at)
+                VALUES (?1, ?2)
+                ",
+                params![&artifact.proof_path, queued_at],
+            )?;
+            tx.execute(
+                "DELETE FROM proof_artifacts WHERE network_pair = ?1 AND proof_ref = ?2",
+                params![&network_pair, &proof_ref],
+            )?;
+            tx.commit()?;
+            Ok(Some(artifact))
+        })
+        .await
+        .context("failed to queue proof artifact file deletion")
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if queued proof artifact file deletions cannot be listed.
+    pub async fn list_proof_artifact_file_deletions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProofArtifactFileDeletion>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection().await?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                r"
+                SELECT proof_path, queued_at, attempts, last_error
+                FROM proof_artifact_file_deletions
+                ORDER BY queued_at ASC, proof_path ASC
+                LIMIT ?1
+                ",
+            )?;
+            let mut rows = stmt.query(params![limit])?;
+            let mut deletions = Vec::new();
+            while let Some(row) = rows.next()? {
+                deletions.push(ProofArtifactFileDeletion {
+                    proof_path: row.get(0)?,
+                    queued_at: row.get(1)?,
+                    attempts: row.get(2)?,
+                    last_error: row.get(3)?,
+                });
+            }
+            Ok(deletions)
+        })
+        .await
+        .context("failed to list proof artifact file deletions")
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the queued proof artifact file deletion cannot be removed.
+    pub async fn remove_proof_artifact_file_deletion(&self, proof_path: &str) -> Result<()> {
+        let conn = self.connection().await?;
+        let proof_path = proof_path.to_string();
+        conn.call(move |conn| {
+            conn.execute(
+                "DELETE FROM proof_artifact_file_deletions WHERE proof_path = ?1",
+                params![proof_path],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to remove proof artifact file deletion")?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the queued proof artifact file deletion failure cannot be recorded.
+    pub async fn record_proof_artifact_file_deletion_failure(
+        &self,
+        proof_path: &str,
+        error: &str,
+    ) -> Result<()> {
+        let conn = self.connection().await?;
+        let proof_path = proof_path.to_string();
+        let error = truncate_utf8(error, 1024);
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                UPDATE proof_artifact_file_deletions
+                SET attempts = attempts + 1, last_error = ?2
+                WHERE proof_path = ?1
+                ",
+                params![proof_path, error],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to record proof artifact file deletion failure")?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if proof artifact registrations cannot be queried by path.
+    pub async fn proof_artifact_path_is_registered(&self, proof_path: &str) -> Result<bool> {
+        let conn = self.connection().await?;
+        let proof_path = proof_path.to_string();
+        conn.call(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM proof_artifacts WHERE proof_path = ?1)",
+                params![proof_path],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .context("failed to query proof artifact registration by path")
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if runtime task records cannot be loaded.
     pub async fn list_tasks(&self) -> Result<Vec<RuntimeTaskRecord>> {
         let conn = self.connection().await?;
@@ -778,6 +1011,35 @@ impl RuntimeManager {
             .await
             .context("failed to list runtime tasks")?;
         Ok(tasks)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if active runtime task records cannot be loaded.
+    pub async fn list_active_tasks(&self) -> Result<Vec<RuntimeTaskRecord>> {
+        let conn = self.connection().await?;
+        conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                r"
+                SELECT
+                    task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                    proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                    remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                    updated_at
+                FROM runtime_tasks
+                WHERE runner_status IN ('allocated', 'running')
+                ORDER BY updated_at ASC, task_id ASC
+                ",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut tasks = Vec::new();
+            while let Some(row) = rows.next()? {
+                tasks.push(runtime_task_record_from_row(row)?);
+            }
+            Ok(tasks)
+        })
+        .await
+        .context("failed to list active runtime tasks")
     }
 
     /// # Errors
@@ -1236,11 +1498,29 @@ fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(network_pair, proof_ref)
         );
-        CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx
-        ON proof_artifacts(updated_at);
+        DROP INDEX IF EXISTS proof_artifacts_updated_at_idx;
+        CREATE INDEX IF NOT EXISTS proof_artifacts_expiry_cursor_idx
+        ON proof_artifacts(updated_at, network_pair, proof_ref);
+        CREATE TABLE IF NOT EXISTS proof_artifact_file_deletions (
+            proof_path TEXT PRIMARY KEY,
+            queued_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        );
         ",
     )?;
     Ok(())
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 async fn remove_task_workspace(task_dir: &Path) -> Result<()> {
@@ -1375,7 +1655,7 @@ fn now_ts() -> i64 {
 mod tests {
     use super::{
         ExpiredTaskCursor, ProofArtifactCursor, ProofArtifactRegistration, RunnerStatus,
-        RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
+        RuntimeManager, TaskRegistration, TaskRegistrationOutcome, now_ts,
     };
     use raiko2_pipeline::PipelineRoute;
     use rusqlite::{OptionalExtension, params};
@@ -1418,17 +1698,60 @@ mod tests {
         proof_ref: &str,
     ) -> anyhow::Result<()> {
         runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: proof_ref.to_string(),
-                pipeline_key: raiko2_pipeline::PipelineKey::ShastaRisc0,
-                route: "risc0/local".parse().expect("parse route"),
-                proof_path: runtime
-                    .proof_artifact_path("taiko_dev/ethereum", proof_ref)
-                    .display()
-                    .to_string(),
-            })
+            .upsert_proof_artifact(test_artifact_registration(runtime, proof_ref))
             .await
+    }
+
+    fn test_artifact_registration(
+        runtime: &RuntimeManager,
+        proof_ref: &str,
+    ) -> ProofArtifactRegistration {
+        ProofArtifactRegistration {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: proof_ref.to_string(),
+            pipeline_key: raiko2_pipeline::PipelineKey::ShastaRisc0,
+            route: "risc0/local".parse().expect("parse route"),
+            proof_path: runtime
+                .proof_artifact_path("taiko_dev/ethereum", proof_ref)
+                .display()
+                .to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_publication_replaces_future_timestamp() -> anyhow::Result<()> {
+        let runtime = RuntimeManager::new(unique_root("artifact-future-clock"))?;
+        register_test_artifact(&runtime, "proposal-a").await?;
+        let future = now_ts().saturating_add(10_000);
+        set_artifact_updated_at(&runtime, "taiko_dev/ethereum", "proposal-a", future).await?;
+        register_test_artifact(&runtime, "proposal-a").await?;
+
+        let restored = runtime
+            .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+            .await?
+            .expect("proof artifact");
+        assert!(restored.updated_at < future);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_restore_preserves_publication_timestamp() -> anyhow::Result<()> {
+        let runtime = RuntimeManager::new(unique_root("artifact-restore-age"))?;
+        let registration = test_artifact_registration(&runtime, "proposal-a");
+        runtime
+            .restore_proof_artifact(registration.clone(), 123)
+            .await?;
+        runtime.restore_proof_artifact(registration, 456).await?;
+
+        assert_eq!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+                .await?
+                .expect("proof artifact")
+                .updated_at,
+            123
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1541,6 +1864,26 @@ mod tests {
                 .is_empty()
         );
 
+        let conn = runtime.connection().await?;
+        let index_columns = conn
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    r"
+                    SELECT name
+                    FROM pragma_index_info('proof_artifacts_expiry_cursor_idx')
+                    ORDER BY seqno ASC
+                    ",
+                )?;
+                let mut rows = stmt.query([])?;
+                let mut columns = Vec::new();
+                while let Some(row) = rows.next()? {
+                    columns.push(row.get::<_, String>(0)?);
+                }
+                Ok(columns)
+            })
+            .await?;
+        assert_eq!(index_columns, ["updated_at", "network_pair", "proof_ref"]);
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1584,6 +1927,114 @@ mod tests {
                 .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
                 .await?
                 .is_none()
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_queues_artifact_file_deletion_atomically() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-artifact-deletion");
+        let runtime = RuntimeManager::new(root.clone())?;
+        register_test_artifact(&runtime, "proposal-a").await?;
+        let artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+            .await?
+            .expect("proof artifact");
+
+        let removed_path = runtime
+            .queue_proof_artifact_file_deletion_if_unchanged(
+                "taiko_dev/ethereum",
+                "proposal-a",
+                artifact.updated_at,
+            )
+            .await?
+            .expect("matching row queued");
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+                .await?
+                .is_none()
+        );
+        drop(runtime);
+        let runtime = RuntimeManager::new(root.clone())?;
+        let queued = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].proof_path, removed_path);
+        assert_eq!(queued[0].attempts, 0);
+        assert_eq!(queued[0].last_error, None);
+
+        let error = format!("x{}tail", "🦀".repeat(300));
+        runtime
+            .record_proof_artifact_file_deletion_failure(&removed_path, &error)
+            .await?;
+        let queued = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(queued[0].attempts, 1);
+        assert_eq!(queued[0].last_error.as_deref().unwrap().len(), 1021);
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_queues_and_removes_artifact_file_deletion() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-artifact-deletion-unconditional");
+        let runtime = RuntimeManager::new(root.clone())?;
+        register_test_artifact(&runtime, "proposal-a").await?;
+
+        let removed = runtime
+            .queue_proof_artifact_file_deletion("taiko_dev/ethereum", "proposal-a")
+            .await?
+            .expect("artifact queued");
+        assert_eq!(removed.proof_ref, "proposal-a");
+        assert_eq!(
+            runtime.list_proof_artifact_file_deletions(64).await?.len(),
+            1
+        );
+
+        runtime
+            .remove_proof_artifact_file_deletion(&removed.proof_path)
+            .await?;
+        assert!(
+            runtime
+                .list_proof_artifact_file_deletions(64)
+                .await?
+                .is_empty()
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_detects_reregistered_artifact_path() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-artifact-reregister");
+        let runtime = RuntimeManager::new(root.clone())?;
+        register_test_artifact(&runtime, "proposal-a").await?;
+        let artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+            .await?
+            .expect("proof artifact");
+        runtime
+            .queue_proof_artifact_file_deletion_if_unchanged(
+                "taiko_dev/ethereum",
+                "proposal-a",
+                artifact.updated_at,
+            )
+            .await?
+            .expect("artifact queued");
+        assert!(
+            !runtime
+                .proof_artifact_path_is_registered(&artifact.proof_path)
+                .await?
+        );
+
+        register_test_artifact(&runtime, "proposal-a").await?;
+        assert!(
+            runtime
+                .proof_artifact_path_is_registered(&artifact.proof_path)
+                .await?
         );
 
         std::fs::remove_dir_all(root)?;
@@ -1722,6 +2173,43 @@ mod tests {
                 .contains("does not match route 'risc0/local'")),
             "{err:?}"
         );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_lists_only_active_tasks() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-active");
+        let runtime = RuntimeManager::new(root.clone())?;
+        for (task_id, status, updated_at) in [
+            ("running-task", RunnerStatus::Running, 20_i64),
+            ("allocated-task", RunnerStatus::Allocated, 10_i64),
+            ("completed-task", RunnerStatus::Completed, 5_i64),
+            ("failed-task", RunnerStatus::Failed, 15_i64),
+        ] {
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    pipeline_key: None,
+                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(7),
+                    proof_ids: Vec::new(),
+                    metadata: serde_json::json!({}),
+                    request_fingerprint: None,
+                })
+                .await?;
+            let mut record = runtime.get_task(task_id).await?.expect("task present");
+            record.runner_status = status;
+            record.updated_at = updated_at;
+            runtime.upsert_task(&record).await?;
+        }
+
+        let active = runtime.list_active_tasks().await?;
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].task_id, "allocated-task");
+        assert_eq!(active[1].task_id, "running-task");
 
         std::fs::remove_dir_all(root)?;
         Ok(())

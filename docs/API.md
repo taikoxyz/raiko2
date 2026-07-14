@@ -1069,9 +1069,14 @@ Returns the root-task view derived from the original batch request.
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
 - Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
-  `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
-  Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
-  stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
+  `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by root TTL
+  cleanup. Set this value to `0` to disable automatic root-task cleanup.
+- Completed proof artifacts are stored independently under `cache/proofs/...` and indexed by
+  stable proof refs so aggregation can reuse them after engine task cleanup or process restart.
+  Artifact rows and files expire after `runtime.proof_artifact_ttl_secs` (default `604800`, seven
+  days). Artifacts referenced by `allocated` or `running` roots are retained, missing files do not
+  block row cleanup, and other file deletion errors are logged after the row is removed. Set this
+  value to `0` to disable automatic artifact cleanup without disabling root-task cleanup.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`. When present,
   `proposals[].extra_data.sp1.gas` is SP1 prover gas from `ExecutionReport::gas()`, not EVM gas.

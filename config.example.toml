@@ -53,7 +53,11 @@ compute_units_per_second = 1000
 
 [runtime]
 root = "./data/runtime"
+# Terminal root tasks expire independently after two hours of inactivity. Set to 0 to disable.
 inactive_ttl_secs = 7200
+# Completed proof artifact rows/files expire after seven days unless a non-terminal root still
+# references them. Set to 0 to disable automatic artifact cleanup.
+proof_artifact_ttl_secs = 604800
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
 # Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.

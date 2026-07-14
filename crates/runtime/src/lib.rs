@@ -42,6 +42,12 @@ pub enum TaskRegistrationOutcome {
     Existing(RuntimeTaskRecord),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofArtifactRestoreOutcome {
+    Restored,
+    SkippedPendingDeletion,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProofArtifactRegistration {
     pub network_pair: String,
@@ -575,33 +581,43 @@ impl RuntimeManager {
         &self,
         registration: ProofArtifactRegistration,
         published_at: i64,
-    ) -> Result<()> {
+    ) -> Result<ProofArtifactRestoreOutcome> {
         let conn = self.connection().await?;
-        conn.call(move |conn| {
-            conn.execute(
-                r"
+        let restored = conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    r"
                 INSERT INTO proof_artifacts (
                     network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                )
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM proof_artifact_file_deletions
+                    WHERE proof_path = ?5
+                )
                 ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
                     pipeline_key = excluded.pipeline_key,
                     route = excluded.route,
                     proof_path = excluded.proof_path
                 ",
-                params![
-                    registration.network_pair,
-                    registration.proof_ref,
-                    registration.pipeline_key.as_str(),
-                    registration.route.to_string(),
-                    registration.proof_path,
-                    published_at,
-                ],
-            )?;
-            Ok(())
+                    params![
+                        registration.network_pair,
+                        registration.proof_ref,
+                        registration.pipeline_key.as_str(),
+                        registration.route.to_string(),
+                        registration.proof_path,
+                        published_at,
+                    ],
+                )?)
+            })
+            .await
+            .context("failed to restore proof artifact")?;
+        Ok(if restored == 0 {
+            ProofArtifactRestoreOutcome::SkippedPendingDeletion
+        } else {
+            ProofArtifactRestoreOutcome::Restored
         })
-        .await
-        .context("failed to restore proof artifact")?;
-        Ok(())
     }
 
     /// # Errors
@@ -1656,8 +1672,9 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, ProofArtifactCursor, ProofArtifactRegistration, RunnerStatus,
-        RuntimeManager, TaskRegistration, TaskRegistrationOutcome, now_ts,
+        ExpiredTaskCursor, ProofArtifactCursor, ProofArtifactRegistration,
+        ProofArtifactRestoreOutcome, RunnerStatus, RuntimeManager, TaskRegistration,
+        TaskRegistrationOutcome, now_ts,
     };
     use raiko2_pipeline::PipelineRoute;
     use rusqlite::{OptionalExtension, params};
@@ -1753,6 +1770,37 @@ mod tests {
                 .updated_at,
             123
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_restore_skips_pending_deletion() -> anyhow::Result<()> {
+        let root = unique_root("artifact-restore-pending-deletion");
+        let runtime = RuntimeManager::new(root.clone())?;
+        let registration = test_artifact_registration(&runtime, "proposal-a");
+        let proof_path = registration.proof_path.clone();
+        runtime.upsert_proof_artifact(registration.clone()).await?;
+        runtime
+            .queue_proof_artifact_file_deletion("taiko_dev/ethereum", "proposal-a")
+            .await?
+            .expect("artifact queued for deletion");
+        drop(runtime);
+
+        let runtime = RuntimeManager::new(root.clone())?;
+        let outcome = runtime.restore_proof_artifact(registration, 456).await?;
+
+        assert_eq!(outcome, ProofArtifactRestoreOutcome::SkippedPendingDeletion);
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", "proposal-a")
+                .await?
+                .is_none()
+        );
+        let pending = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proof_path, proof_path);
+
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

@@ -24,7 +24,9 @@ use raiko2_prover::gaiko2::Gaiko2Prover;
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
-use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
+use raiko2_runtime::{
+    ProofArtifactRegistration, ProofArtifactRestoreOutcome, RunnerStatus, RuntimeManager,
+};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -585,11 +587,11 @@ async fn restore_proof_artifacts_from_runtime_task(
             .write_proof_artifact_bytes(&metadata.network_pair, &proof_ref, &proof_bytes)
             .await
             .with_context(|| format!("failed to write proof artifact for {proof_ref}"))?;
-        runtime
+        let outcome = runtime
             .restore_proof_artifact(
                 ProofArtifactRegistration {
                     network_pair: metadata.network_pair.clone(),
-                    proof_ref,
+                    proof_ref: proof_ref.clone(),
                     pipeline_key: record.pipeline_key,
                     route: record.route,
                     proof_path: artifact_path.display().to_string(),
@@ -597,6 +599,14 @@ async fn restore_proof_artifacts_from_runtime_task(
                 record.updated_at,
             )
             .await?;
+        if outcome == ProofArtifactRestoreOutcome::SkippedPendingDeletion {
+            warn!(
+                task_id = record.task_id,
+                proof_ref,
+                proof_path = %artifact_path.display(),
+                "skipped proof artifact restore because file deletion is pending"
+            );
+        }
     }
     Ok(())
 }
@@ -652,7 +662,7 @@ async fn restore_cached_proof_artifact(
         return Ok(());
     }
 
-    runtime
+    let outcome = runtime
         .restore_proof_artifact(
             ProofArtifactRegistration {
                 network_pair: metadata.network_pair.clone(),
@@ -664,6 +674,14 @@ async fn restore_cached_proof_artifact(
             record.updated_at,
         )
         .await?;
+    if outcome == ProofArtifactRestoreOutcome::SkippedPendingDeletion {
+        warn!(
+            task_id = record.task_id,
+            proof_ref,
+            proof_path = %proof_path.display(),
+            "skipped cached proof artifact restore because file deletion is pending"
+        );
+    }
     Ok(())
 }
 
@@ -1190,6 +1208,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_proof_artifacts_skip_pending_root_deletion() -> Result<()> {
+        let root = unique_test_runtime_root("restore-pending-root-deletion");
+        let runtime = Arc::new(RuntimeManager::new(root.clone())?);
+        let request = ProposalTaskRequest {
+            proposal_id: 10,
+            l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 10, end: 10 }),
+            l1_inclusion_block_number: 21,
+            last_anchor_block_number: 9,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        let root_proof_path = runtime
+            .task_dir(PipelineKey::ShastaNative, "pending-root")
+            .join("proof.json");
+        if let Some(parent) = root_proof_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(
+            &root_proof_path,
+            serde_json::to_vec_pretty(&valid_native_proof())?,
+        )
+        .await?;
+        let artifact_path = runtime.proof_artifact_path("taiko_dev/ethereum", &proof_ref);
+        runtime
+            .restore_proof_artifact(
+                ProofArtifactRegistration {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    proof_ref: proof_ref.clone(),
+                    pipeline_key: PipelineKey::ShastaNative,
+                    route: PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+                    proof_path: artifact_path.display().to_string(),
+                },
+                123,
+            )
+            .await?;
+        runtime
+            .queue_proof_artifact_file_deletion("taiko_dev/ethereum", &proof_ref)
+            .await?
+            .expect("root artifact queued for deletion");
+
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: vec![ProposalTask {
+                proposal_id: 10,
+                checkpoint: None,
+                l1_inclusion_block_number: 21,
+                l2_block_numbers: vec![10],
+                last_anchor_block_number: 9,
+                task_id: proof_ref.clone(),
+                request: Some(request),
+            }],
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        let mut record = runtime_record(
+            "pending-root",
+            PipelineKey::ShastaNative,
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            RunnerStatus::Completed,
+            Some(root_proof_path.display().to_string()),
+            serde_json::to_value(metadata)?,
+        );
+        record.updated_at = 456;
+        runtime.upsert_task(&record).await?;
+        drop(runtime);
+
+        let runtime = Arc::new(RuntimeManager::new(root)?);
+        restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+
+        assert!(runtime.get_task("pending-root").await?.is_some());
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", &proof_ref)
+                .await?
+                .is_none()
+        );
+        let pending = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proof_path, artifact_path.display().to_string());
+        assert!(tokio::fs::try_exists(artifact_path).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn restore_proof_artifacts_registers_cached_child_proposal_refs() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "restore-child-proposal",
@@ -1256,6 +1371,98 @@ mod tests {
             .expect("proposal proof artifact");
         assert_eq!(artifact.updated_at, 456);
         assert!(tokio::fs::try_exists(artifact.proof_path).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_proof_artifacts_skip_pending_cached_deletion() -> Result<()> {
+        let root = unique_test_runtime_root("restore-pending-cached-deletion");
+        let runtime = Arc::new(RuntimeManager::new(root.clone())?);
+        let request = ProposalTaskRequest {
+            proposal_id: 11,
+            l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 11, end: 11 }),
+            l1_inclusion_block_number: 22,
+            last_anchor_block_number: 10,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        let artifact_path = runtime
+            .write_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                &proof_ref,
+                &serde_json::to_vec_pretty(&valid_native_proof())?,
+            )
+            .await?;
+        runtime
+            .restore_proof_artifact(
+                ProofArtifactRegistration {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    proof_ref: proof_ref.clone(),
+                    pipeline_key: PipelineKey::ShastaNative,
+                    route: PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+                    proof_path: artifact_path.display().to_string(),
+                },
+                123,
+            )
+            .await?;
+        runtime
+            .queue_proof_artifact_file_deletion("taiko_dev/ethereum", &proof_ref)
+            .await?
+            .expect("cached artifact queued for deletion");
+
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: vec![ProposalTask {
+                proposal_id: 11,
+                checkpoint: None,
+                l1_inclusion_block_number: 22,
+                l2_block_numbers: vec![11],
+                last_anchor_block_number: 10,
+                task_id: proof_ref.clone(),
+                request: Some(request),
+            }],
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        let mut record = runtime_record(
+            "pending-cached-root",
+            PipelineKey::ShastaNative,
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            RunnerStatus::Allocated,
+            None,
+            serde_json::to_value(metadata)?,
+        );
+        record.updated_at = 456;
+        runtime.upsert_task(&record).await?;
+        drop(runtime);
+
+        let runtime = Arc::new(RuntimeManager::new(root)?);
+        restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+
+        assert!(runtime.get_task("pending-cached-root").await?.is_some());
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", &proof_ref)
+                .await?
+                .is_none()
+        );
+        let pending = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proof_path, artifact_path.display().to_string());
+        assert!(tokio::fs::try_exists(artifact_path).await?);
         Ok(())
     }
 

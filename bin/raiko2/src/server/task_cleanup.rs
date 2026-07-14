@@ -1245,6 +1245,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_artifact_deletion_survives_restart_restoration() -> Result<()> {
+        let root = unique_runtime_root("artifact-file-restart-restore");
+        let runtime = Arc::new(RuntimeManager::new(root.clone())?);
+        let proof_ref = encoded_proposal_task_id(46)?;
+        let artifact = register_artifact(runtime.as_ref(), &proof_ref, false).await?;
+        tokio::fs::create_dir_all(&artifact.proof_path).await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "completed-root",
+            &proof_ref,
+            RunnerStatus::Completed,
+            artifact.updated_at,
+        )
+        .await?;
+        let root_proof_path = root.join("completed-root-proof.json");
+        tokio::fs::write(&root_proof_path, b"{}").await?;
+        let mut root_record = runtime
+            .get_task("completed-root")
+            .await?
+            .context("completed root record")?;
+        root_record.proof_path = Some(root_proof_path.display().to_string());
+        runtime.upsert_task(&root_record).await?;
+
+        let guard = Arc::new(RwLock::new(()));
+        let mut artifact_cursor = None;
+        let stats = run_proof_artifact_cleanup_pass(
+            runtime.clone(),
+            guard.clone(),
+            artifact.updated_at + 10,
+            10,
+            &mut artifact_cursor,
+        )
+        .await?;
+        assert_eq!(stats.removed_rows, 1);
+        assert_eq!(stats.file_delete_failures, 1);
+        assert!(runtime.get_task("completed-root").await?.is_some());
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_none()
+        );
+        let pending = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proof_path, artifact.proof_path);
+        assert_eq!(pending[0].attempts, 1);
+
+        tokio::fs::remove_dir(&artifact.proof_path).await?;
+        tokio::fs::write(&artifact.proof_path, b"retry").await?;
+        drop(runtime);
+
+        let runtime = Arc::new(RuntimeManager::new(root)?);
+        let root_record = runtime
+            .get_task("completed-root")
+            .await?
+            .context("completed root survives restart")?;
+        runtime
+            .restore_proof_artifact(
+                ProofArtifactRegistration {
+                    network_pair: artifact.network_pair.clone(),
+                    proof_ref: artifact.proof_ref.clone(),
+                    pipeline_key: artifact.pipeline_key,
+                    route: artifact.route,
+                    proof_path: artifact.proof_path.clone(),
+                },
+                root_record.updated_at,
+            )
+            .await?;
+        assert!(
+            runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            runtime.list_proof_artifact_file_deletions(64).await?.len(),
+            1
+        );
+
+        let mut config = Config::default();
+        config.runtime.inactive_ttl_secs = 0;
+        config.runtime.proof_artifact_ttl_secs = 0;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        run_runtime_maintenance_tick(
+            &config,
+            runtime.clone(),
+            Arc::new(StaticPipelineFactory::default()),
+            guard,
+            artifact.updated_at + 20,
+            &mut artifact_cursor,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await;
+
+        assert!(runtime.get_task("completed-root").await?.is_some());
+        assert!(tokio::fs::try_exists(root_proof_path).await?);
+        assert!(
+            runtime
+                .list_proof_artifact_file_deletions(64)
+                .await?
+                .is_empty()
+        );
+        assert!(!tokio::fs::try_exists(&artifact.proof_path).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn artifact_file_deletion_attempts_once_on_queuing_tick() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "artifact-file-single-attempt",

@@ -168,6 +168,11 @@ async fn invalidate_artifacts_inner(
     state: &AppState,
     req: &wire::InvalidateArtifactsRequest,
 ) -> Result<wire::InvalidateArtifactsData, ApiError> {
+    let _artifact_guard = if req.dry_run {
+        None
+    } else {
+        Some(state.artifact_cleanup_guard.write().await)
+    };
     let mut data = wire::InvalidateArtifactsData {
         dry_run: req.dry_run,
         ..wire::InvalidateArtifactsData::default()
@@ -590,65 +595,154 @@ async fn remove_invalidated_tasks(
     blocked_artifact_refs
 }
 
-enum ProofArtifactFileRemoval {
-    Removed,
-    Missing,
-    Failed,
-}
-
 async fn remove_invalidated_artifacts(
     state: &AppState,
     matched_artifacts: Vec<raiko2_runtime::ProofArtifactRecord>,
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
-        let file_removal = match fs::remove_file(&artifact.proof_path).await {
-            Ok(()) => ProofArtifactFileRemoval::Removed,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                ProofArtifactFileRemoval::Missing
+        let artifact = match state
+            .runtime
+            .queue_proof_artifact_file_deletion(&artifact.network_pair, &artifact.proof_ref)
+            .await
+        {
+            Ok(Some(artifact)) => {
+                data.artifacts.removed = data.artifacts.removed.saturating_add(1);
+                artifact
             }
+            Ok(None) => continue,
             Err(err) => {
                 data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+                tracing::warn!(
+                    network_pair = %artifact.network_pair,
+                    proof_ref = %artifact.proof_ref,
+                    error = %err,
+                    "failed to queue invalidated proof artifact file deletion"
+                );
+                continue;
+            }
+        };
+        match invalidated_artifact_path_registration(state, &artifact).await {
+            InvalidatedArtifactPathRegistration::Unregistered => {
+                remove_queued_invalidated_artifact_file(state, &artifact, data).await;
+            }
+            InvalidatedArtifactPathRegistration::Registered => {}
+            InvalidatedArtifactPathRegistration::Failed => {
+                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+            }
+        }
+    }
+}
+
+enum InvalidatedArtifactPathRegistration {
+    Unregistered,
+    Registered,
+    Failed,
+}
+
+async fn invalidated_artifact_path_registration(
+    state: &AppState,
+    artifact: &raiko2_runtime::ProofArtifactRecord,
+) -> InvalidatedArtifactPathRegistration {
+    match state
+        .runtime
+        .proof_artifact_path_is_registered(&artifact.proof_path)
+        .await
+    {
+        Ok(false) => InvalidatedArtifactPathRegistration::Unregistered,
+        Ok(true) => match state
+            .runtime
+            .remove_proof_artifact_file_deletion(&artifact.proof_path)
+            .await
+        {
+            Ok(()) => InvalidatedArtifactPathRegistration::Registered,
+            Err(err) => {
                 tracing::warn!(
                     network_pair = %artifact.network_pair,
                     proof_ref = %artifact.proof_ref,
                     proof_path = %artifact.proof_path,
                     error = %err,
-                    "failed to remove invalidated proof artifact file; removing cache record"
+                    "failed to clear invalidated proof artifact tombstone after republish"
                 );
-                ProofArtifactFileRemoval::Failed
+                InvalidatedArtifactPathRegistration::Failed
             }
-        };
-        match state
-            .runtime
-            .remove_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
-            .await
-        {
-            Ok(Some(_record)) => {
-                data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                match file_removal {
-                    ProofArtifactFileRemoval::Removed => {
-                        data.artifacts.files_removed =
-                            data.artifacts.files_removed.saturating_add(1);
-                    }
-                    ProofArtifactFileRemoval::Missing => {
-                        data.artifacts.files_missing =
-                            data.artifacts.files_missing.saturating_add(1);
-                    }
-                    ProofArtifactFileRemoval::Failed => {}
-                }
-            }
-            Ok(None) => {}
-            Err(err) => {
-                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+        },
+        Err(err) => {
+            if let Err(record_err) = state
+                .runtime
+                .record_proof_artifact_file_deletion_failure(&artifact.proof_path, &err.to_string())
+                .await
+            {
                 tracing::warn!(
                     network_pair = %artifact.network_pair,
                     proof_ref = %artifact.proof_ref,
-                    error = %err,
-                    "failed to remove invalidated proof artifact record"
+                    proof_path = %artifact.proof_path,
+                    error = %record_err,
+                    "failed to record invalidated proof artifact path-check failure"
                 );
             }
+            tracing::warn!(
+                network_pair = %artifact.network_pair,
+                proof_ref = %artifact.proof_ref,
+                proof_path = %artifact.proof_path,
+                error = %err,
+                "failed to check invalidated proof artifact path registration"
+            );
+            InvalidatedArtifactPathRegistration::Failed
         }
+    }
+}
+
+async fn remove_queued_invalidated_artifact_file(
+    state: &AppState,
+    artifact: &raiko2_runtime::ProofArtifactRecord,
+    data: &mut wire::InvalidateArtifactsData,
+) {
+    match fs::remove_file(&artifact.proof_path).await {
+        Ok(()) => {
+            data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            data.artifacts.files_missing = data.artifacts.files_missing.saturating_add(1);
+        }
+        Err(err) => {
+            data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+            if let Err(record_err) = state
+                .runtime
+                .record_proof_artifact_file_deletion_failure(&artifact.proof_path, &err.to_string())
+                .await
+            {
+                tracing::warn!(
+                    network_pair = %artifact.network_pair,
+                    proof_ref = %artifact.proof_ref,
+                    proof_path = %artifact.proof_path,
+                    error = %record_err,
+                    "failed to record invalidated proof artifact file deletion failure"
+                );
+            }
+            tracing::warn!(
+                network_pair = %artifact.network_pair,
+                proof_ref = %artifact.proof_ref,
+                proof_path = %artifact.proof_path,
+                error = %err,
+                "failed to remove invalidated proof artifact file; queued for retry"
+            );
+            return;
+        }
+    }
+    if let Err(err) = state
+        .runtime
+        .remove_proof_artifact_file_deletion(&artifact.proof_path)
+        .await
+    {
+        data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+        tracing::warn!(
+            network_pair = %artifact.network_pair,
+            proof_ref = %artifact.proof_ref,
+            proof_path = %artifact.proof_path,
+            error = %err,
+            "failed to clear invalidated proof artifact file deletion"
+        );
     }
 }
 
@@ -1501,7 +1595,7 @@ mod tests {
             Arc,
             atomic::{AtomicBool, Ordering},
         },
-        time::SystemTime,
+        time::{Duration, SystemTime},
     };
     use tokio::sync::RwLock;
 
@@ -1660,6 +1754,199 @@ mod tests {
         assert!(
             engine.guarded_on_submit.load(Ordering::SeqCst),
             "cleanup write lock was available while the submission was enqueued"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_artifacts_waits_for_cleanup_guard() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("v4-invalidation-artifact-guard"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            runtime,
+        );
+        let cleanup_guard = state.artifact_cleanup_guard.read().await;
+        let invalidation_state = state.clone();
+        let mut invalidation = tokio::spawn(async move {
+            invalidate_artifacts_inner(
+                &invalidation_state,
+                &wire::InvalidateArtifactsRequest {
+                    proof_type: wire::ProofType::Sp1,
+                    proof_prefix: None,
+                    proposal_id_start: None,
+                    proposal_id_end: None,
+                    dry_run: false,
+                },
+            )
+            .await
+        });
+
+        let completed_while_guarded =
+            tokio::time::timeout(Duration::from_millis(25), &mut invalidation).await;
+        drop(cleanup_guard);
+
+        match completed_while_guarded {
+            Err(_) => {
+                invalidation
+                    .await
+                    .expect("invalidation task")
+                    .expect("invalidate artifacts");
+            }
+            Ok(result) => {
+                result
+                    .expect("invalidation task")
+                    .expect("invalidate artifacts");
+                panic!("invalidation completed while cleanup read guard was held");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidate_artifacts_queues_failed_file_deletion() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("v4-invalidation-file-delete-failure"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let proof_ref = "failed-file-deletion";
+        let proof_path = runtime.proof_artifact_path(network_pair, proof_ref);
+        tokio::fs::create_dir_all(&proof_path)
+            .await
+            .expect("create directory at proof path");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: PipelineKey::ShastaSp1,
+                route: PipelineKey::ShastaSp1.route(),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await
+            .expect("register proof artifact");
+
+        let data = invalidate_artifacts_inner(
+            &state,
+            &wire::InvalidateArtifactsRequest {
+                proof_type: wire::ProofType::Sp1,
+                proof_prefix: None,
+                proposal_id_start: None,
+                proposal_id_end: None,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("invalidate artifacts");
+
+        assert_eq!(data.artifacts.matched, 1);
+        assert_eq!(data.artifacts.removed, 1);
+        assert_eq!(data.artifacts.failed, 1);
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "proof artifact row remained after file removal failed"
+        );
+        let deletions = runtime
+            .list_proof_artifact_file_deletions(64)
+            .await
+            .expect("list queued file deletions");
+        assert_eq!(deletions.len(), 1);
+        assert_eq!(deletions[0].proof_path, proof_path.display().to_string());
+        assert_eq!(deletions[0].attempts, 1);
+        assert!(deletions[0].last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn invalidate_artifacts_does_not_unlink_registered_path() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("v4-invalidation-republished-path"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let invalidated_ref = "invalidated-shared-path";
+        let republished_ref = "republished-shared-path";
+        let proof_path = runtime.proof_artifact_path(network_pair, "shared-path");
+        tokio::fs::create_dir_all(proof_path.parent().expect("proof directory"))
+            .await
+            .expect("create proof directory");
+        tokio::fs::write(&proof_path, br#"{"proof":"0xshared"}"#)
+            .await
+            .expect("write shared proof artifact");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: invalidated_ref.to_string(),
+                pipeline_key: PipelineKey::ShastaSp1,
+                route: PipelineKey::ShastaSp1.route(),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await
+            .expect("register invalidated proof artifact");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: republished_ref.to_string(),
+                pipeline_key: PipelineKey::ShastaRisc0,
+                route: PipelineKey::ShastaRisc0.route(),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await
+            .expect("register republished proof artifact");
+
+        let data = invalidate_artifacts_inner(
+            &state,
+            &wire::InvalidateArtifactsRequest {
+                proof_type: wire::ProofType::Sp1,
+                proof_prefix: None,
+                proposal_id_start: None,
+                proposal_id_end: None,
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("invalidate artifacts");
+
+        assert_eq!(data.artifacts.matched, 1);
+        assert_eq!(data.artifacts.removed, 1);
+        assert_eq!(data.artifacts.files_removed, 0);
+        assert_eq!(data.artifacts.files_missing, 0);
+        assert_eq!(data.artifacts.failed, 0);
+        assert!(
+            tokio::fs::try_exists(&proof_path)
+                .await
+                .expect("check shared proof path"),
+            "invalidation unlinked a path registered by another artifact"
+        );
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, republished_ref)
+                .await
+                .expect("get republished artifact")
+                .is_some(),
+            "republished artifact row was removed"
+        );
+        assert!(
+            runtime
+                .list_proof_artifact_file_deletions(64)
+                .await
+                .expect("list queued file deletions")
+                .is_empty(),
+            "obsolete file-deletion tombstone was retained"
         );
     }
 

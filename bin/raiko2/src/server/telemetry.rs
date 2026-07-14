@@ -1,8 +1,8 @@
 //! Minimal Prometheus telemetry for the hosted `raiko2` API.
 
 use prometheus::{
-    Encoder, HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder, histogram_opts,
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec,
+    Encoder, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, TextEncoder, histogram_opts,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
 };
 use raiko2_primitives::ProofType;
 use std::sync::LazyLock;
@@ -111,6 +111,14 @@ static DUPLICATE_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
         &["route", "proof_type", "pair", "aggregate", "runner_status"]
     )
     .expect("register raiko2_duplicate_requests_total")
+});
+
+static ARTIFACT_CLEANUP_INVALID_METADATA_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "raiko2_artifact_cleanup_invalid_metadata_total",
+        "Total invalid active-task metadata records that blocked proof artifact cleanup"
+    )
+    .expect("register raiko2_artifact_cleanup_invalid_metadata_total")
 });
 
 #[derive(Debug, Clone)]
@@ -274,6 +282,10 @@ pub(crate) fn record_external_submission(
         .inc();
 }
 
+pub(crate) fn record_artifact_cleanup_invalid_metadata(count: u64) {
+    ARTIFACT_CLEANUP_INVALID_METADATA_TOTAL.inc_by(count);
+}
+
 fn failure_error_kind(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
     if error.contains("instance id mismatch") {
@@ -329,4 +341,22 @@ pub(crate) fn render() -> Result<(String, Vec<u8>), prometheus::Error> {
     let mut buffer = Vec::new();
     encoder.encode(&metrics, &mut buffer)?;
     Ok((encoder.format_type().to_string(), buffer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ARTIFACT_CLEANUP_INVALID_METADATA_TOTAL, record_artifact_cleanup_invalid_metadata, render,
+    };
+
+    #[test]
+    fn telemetry_exposes_artifact_cleanup_invalid_metadata_counter() {
+        let before = ARTIFACT_CLEANUP_INVALID_METADATA_TOTAL.get();
+        record_artifact_cleanup_invalid_metadata(2);
+        assert!(ARTIFACT_CLEANUP_INVALID_METADATA_TOTAL.get() >= before + 2);
+
+        let (_, body) = render().expect("render telemetry");
+        let body = String::from_utf8(body).expect("telemetry is UTF-8");
+        assert!(body.contains("raiko2_artifact_cleanup_invalid_metadata_total"));
+    }
 }

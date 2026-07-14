@@ -901,7 +901,7 @@ impl RuntimeManager {
                 r"
                 SELECT proof_path, queued_at, attempts, last_error
                 FROM proof_artifact_file_deletions
-                ORDER BY queued_at ASC, proof_path ASC
+                ORDER BY attempts ASC, queued_at ASC, proof_path ASC
                 LIMIT ?1
                 ",
             )?;
@@ -1507,6 +1507,8 @@ fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT
         );
+        CREATE INDEX IF NOT EXISTS proof_artifact_file_deletions_retry_idx
+        ON proof_artifact_file_deletions(attempts, queued_at, proof_path);
         ",
     )?;
     Ok(())
@@ -2002,6 +2004,51 @@ mod tests {
                 .await?
                 .is_empty()
         );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_prioritizes_less_attempted_artifact_file_deletions()
+    -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-artifact-deletion-priority");
+        let runtime = RuntimeManager::new(root.clone())?;
+        register_test_artifact(&runtime, "a").await?;
+        let failed = runtime
+            .queue_proof_artifact_file_deletion("taiko_dev/ethereum", "a")
+            .await?
+            .expect("first artifact queued");
+        register_test_artifact(&runtime, "b").await?;
+        let unattempted = runtime
+            .queue_proof_artifact_file_deletion("taiko_dev/ethereum", "b")
+            .await?
+            .expect("second artifact queued");
+        runtime
+            .record_proof_artifact_file_deletion_failure(&failed.proof_path, "retry")
+            .await?;
+
+        let queued = runtime.list_proof_artifact_file_deletions(2).await?;
+        assert_eq!(queued[0].proof_path, unattempted.proof_path);
+        assert_eq!(queued[0].attempts, 0);
+        assert_eq!(queued[1].proof_path, failed.proof_path);
+        assert_eq!(queued[1].attempts, 1);
+
+        let conn = runtime.connection().await?;
+        let index_columns = conn
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT name FROM pragma_index_info('proof_artifact_file_deletions_retry_idx') ORDER BY seqno ASC",
+                )?;
+                let mut rows = stmt.query([])?;
+                let mut columns = Vec::new();
+                while let Some(row) = rows.next()? {
+                    columns.push(row.get::<_, String>(0)?);
+                }
+                Ok(columns)
+            })
+            .await?;
+        assert_eq!(index_columns, ["attempts", "queued_at", "proof_path"]);
 
         std::fs::remove_dir_all(root)?;
         Ok(())

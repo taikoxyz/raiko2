@@ -184,11 +184,19 @@ async fn run_runtime_maintenance_tick(
             .await,
         );
     }
+    log_proof_artifact_file_deletion_stats(
+        run_proof_artifact_file_deletion_pass(
+            Arc::clone(&runtime),
+            Arc::clone(&artifact_cleanup_guard),
+            PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE,
+        )
+        .await,
+    );
     if config.runtime.proof_artifact_ttl_secs != 0 {
         log_proof_artifact_cleanup_stats(
             run_proof_artifact_cleanup_pass(
-                Arc::clone(&runtime),
-                Arc::clone(&artifact_cleanup_guard),
+                runtime,
+                artifact_cleanup_guard,
                 artifact_now_ts,
                 config.runtime.proof_artifact_ttl_secs,
                 artifact_cursor,
@@ -196,14 +204,6 @@ async fn run_runtime_maintenance_tick(
             .await,
         );
     }
-    log_proof_artifact_file_deletion_stats(
-        run_proof_artifact_file_deletion_pass(
-            runtime,
-            artifact_cleanup_guard,
-            PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE,
-        )
-        .await,
-    );
 }
 
 pub(crate) async fn run_runtime_cleanup_pass(
@@ -875,7 +875,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, PROOF_ARTIFACT_CLEANUP_BATCH_SIZE, ProofArtifactCleanupStats,
+        ExpiredTaskCursor, PROOF_ARTIFACT_CLEANUP_BATCH_SIZE,
+        PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE, ProofArtifactCleanupStats,
         ProofArtifactFileDeletionStats, RuntimeCleanupStats, cancel_registered_tasks,
         proposal_task_chain_ids, proposal_task_id, run_proof_artifact_cleanup_pass,
         run_runtime_cleanup_pass, run_runtime_maintenance_tick,
@@ -1244,6 +1245,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_file_deletion_attempts_once_on_queuing_tick() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-file-single-attempt",
+        ))?);
+        let artifact = register_artifact(runtime.as_ref(), "single-attempt", false).await?;
+        tokio::fs::create_dir_all(&artifact.proof_path).await?;
+        let mut config = Config::default();
+        config.runtime.inactive_ttl_secs = 0;
+        config.runtime.proof_artifact_ttl_secs = 10;
+        let mut artifact_cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+
+        run_runtime_maintenance_tick(
+            &config,
+            runtime.clone(),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::new(RwLock::new(())),
+            artifact.updated_at + 10,
+            &mut artifact_cursor,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await;
+
+        let queued = runtime.list_proof_artifact_file_deletions(64).await?;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].proof_path, artifact.proof_path);
+        assert_eq!(queued[0].attempts, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn artifact_file_deletion_skips_republished_path() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "artifact-file-republished",
@@ -1340,6 +1374,92 @@ mod tests {
             surviving_files += usize::from(tokio::fs::try_exists(path).await?);
         }
         assert_eq!(surviving_files, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_file_deletion_fairness_processes_unattempted_path() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-file-deletion-fairness",
+        ))?);
+        for index in 0..PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE {
+            let artifact =
+                register_artifact(runtime.as_ref(), &format!("failure-{index:03}"), false).await?;
+            tokio::fs::create_dir_all(&artifact.proof_path).await?;
+            runtime
+                .queue_proof_artifact_file_deletion_if_unchanged(
+                    &artifact.network_pair,
+                    &artifact.proof_ref,
+                    artifact.updated_at,
+                )
+                .await?
+                .context("queued failing artifact deletion")?;
+        }
+        let successful = register_artifact(runtime.as_ref(), "success", true).await?;
+        runtime
+            .queue_proof_artifact_file_deletion_if_unchanged(
+                &successful.network_pair,
+                &successful.proof_ref,
+                successful.updated_at,
+            )
+            .await?
+            .context("queued successful artifact deletion")?;
+        let mut config = Config::default();
+        config.runtime.inactive_ttl_secs = 0;
+        config.runtime.proof_artifact_ttl_secs = 0;
+        let guard = Arc::new(RwLock::new(()));
+        let mut artifact_cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+
+        run_runtime_maintenance_tick(
+            &config,
+            runtime.clone(),
+            Arc::new(StaticPipelineFactory::default()),
+            guard.clone(),
+            now_ts(),
+            &mut artifact_cursor,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await;
+
+        assert!(tokio::fs::try_exists(&successful.proof_path).await?);
+        let queued = runtime.list_proof_artifact_file_deletions(65).await?;
+        assert_eq!(queued.len(), PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE + 1);
+        let unattempted = queued
+            .iter()
+            .find(|deletion| deletion.proof_path == successful.proof_path)
+            .context("unattempted successful deletion remains queued")?;
+        assert_eq!(unattempted.attempts, 0);
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|deletion| deletion.attempts == 1)
+                .count(),
+            PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE
+        );
+
+        run_runtime_maintenance_tick(
+            &config,
+            runtime.clone(),
+            Arc::new(StaticPipelineFactory::default()),
+            guard,
+            now_ts(),
+            &mut artifact_cursor,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await;
+
+        assert!(!tokio::fs::try_exists(&successful.proof_path).await?);
+        let queued = runtime.list_proof_artifact_file_deletions(65).await?;
+        assert_eq!(queued.len(), PROOF_ARTIFACT_FILE_DELETION_BATCH_SIZE);
+        assert!(
+            queued
+                .iter()
+                .all(|deletion| deletion.proof_path != successful.proof_path)
+        );
         Ok(())
     }
 

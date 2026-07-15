@@ -18,6 +18,7 @@ compute_units_per_second = 1000
 
 [runtime]
 root = "./data/runtime"
+environment_id = "docker-compose"
 
 [prover]
 guest_system = "sgx"

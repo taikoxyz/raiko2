@@ -207,7 +207,7 @@ fn format_proposal_ids(proposal_ids: &[u64]) -> String {
 #[derive(Clone)]
 struct ProofLocation {
     proof_ref: Option<String>,
-    proof_path: Option<String>,
+    proof_uri: Option<String>,
 }
 
 fn build_canonical_batch_submission(
@@ -471,6 +471,11 @@ fn validate_hosted_sp1_posture(
     pair: &ResolvedNetworkPair,
     config: &raiko2_prover::sp1_config::Sp1Config,
 ) -> Result<(), ApiError> {
+    if matches!(config.mode, Sp1ExecutionMode::Execute) {
+        return Err(ApiError::bad_request(
+            "sp1.mode=execute is not supported by the proof API",
+        ));
+    }
     if matches!(config.mode, Sp1ExecutionMode::Prove) && !config.verify {
         return Err(ApiError::bad_request(
             "sp1.mode=prove requires sp1.verify=true on the hosted API",
@@ -560,8 +565,14 @@ async fn build_external_aggregate_submission(
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.route, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let request_fingerprint =
-        external_aggregate_request_fingerprint(&pair, route, prover_type, &req, &prover_config)?;
+    let request_fingerprint = external_aggregate_request_fingerprint(
+        state.runtime.environment_id(),
+        &pair,
+        route,
+        prover_type,
+        &req,
+        &prover_config,
+    )?;
     let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let request = AggregationTaskRequest {
         request_id: aggregate_request_id(&request_fingerprint),
@@ -606,9 +617,10 @@ async fn persist_external_aggregate_input_artifacts(
     let mut input_artifacts = Vec::with_capacity(proofs.len());
     for (index, proof) in proofs.iter().enumerate() {
         let proof_ref = aggregate_input_proof_ref(request_fingerprint, index);
-        let proof_path = runtime
-            .write_proof_artifact_bytes(
+        let publication = runtime
+            .publish_proof_artifact_bytes(
                 network_pair,
+                route.pipeline_key(),
                 &proof_ref,
                 &serde_json::to_vec_pretty(proof).map_err(|err| {
                     ApiError::internal(format!("failed to serialize aggregate input proof: {err}"))
@@ -618,14 +630,17 @@ async fn persist_external_aggregate_input_artifacts(
             .map_err(|err| {
                 ApiError::internal(format!("failed to write aggregate input proof: {err}"))
             })?;
-        let proof_path = proof_path.display().to_string();
+        let artifact = publication.object();
+        let proof_uri = artifact.proof_uri.clone();
         runtime
             .upsert_proof_artifact(raiko2_runtime::ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),
                 proof_ref: proof_ref.clone(),
                 pipeline_key: route.pipeline_key(),
                 route: route.route,
-                proof_path: proof_path.clone(),
+                proof_uri: proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await
             .map_err(|err| {
@@ -633,13 +648,10 @@ async fn persist_external_aggregate_input_artifacts(
             })?;
         inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
             network_pair: network_pair.to_string(),
+            pipeline_key: route.pipeline_key(),
             proof_ref: proof_ref.clone(),
-            proof_path: proof_path.clone(),
         }));
-        input_artifacts.push(AggregateInputProofArtifact {
-            proof_ref,
-            proof_path,
-        });
+        input_artifacts.push(AggregateInputProofArtifact { proof_ref });
     }
     Ok((inputs, input_artifacts))
 }
@@ -720,13 +732,17 @@ async fn build_submission_plan(
                 proposal_sources.push(ProposalPlanSource::Cached);
                 aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                     network_pair: material.record.network_pair,
+                    pipeline_key: material.record.pipeline_key,
                     proof_ref: material.record.proof_ref,
-                    proof_path: material.record.proof_path,
                 }));
             } else {
                 proposal_sources.push(ProposalPlanSource::Pending);
                 aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
-                    artifact: proof_artifact_ref(runtime, &submission.pair.key, &proposal.task_ref),
+                    artifact: proof_artifact_ref(
+                        &submission.pair.key,
+                        submission.route.pipeline_key(),
+                        &proposal.task_ref,
+                    ),
                     dependency: Box::new(proposal.task_id.clone()),
                 });
             }
@@ -1127,7 +1143,10 @@ async fn replace_existing_batch_task(
 ) -> Result<Response, ApiError> {
     let request_fingerprint = replacement_request_fingerprint
         .map(ToOwned::to_owned)
-        .map_or_else(|| batch_request_fingerprint(submission), Ok)?;
+        .map_or_else(
+            || batch_request_fingerprint(state.runtime.environment_id(), submission),
+            Ok,
+        )?;
     let plan =
         build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
     cleanup_stale_root_before_replacement(state, existing, existing_metadata).await;
@@ -1169,7 +1188,7 @@ async fn reenqueue_existing_batch_task(
 
     let request_fingerprint = match existing.request_fingerprint.as_deref() {
         Some(value) => value.to_string(),
-        None => batch_request_fingerprint(submission)?,
+        None => batch_request_fingerprint(state.runtime.environment_id(), submission)?,
     };
     let recovery_plan = build_submission_plan(
         state.runtime.as_ref(),
@@ -1247,8 +1266,8 @@ async fn existing_batch_aggregate_inputs(
         {
             inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                 network_pair: material.record.network_pair,
+                pipeline_key: material.record.pipeline_key,
                 proof_ref: material.record.proof_ref,
-                proof_path: material.record.proof_path,
             }));
             continue;
         }
@@ -1504,6 +1523,7 @@ async fn reenqueue_existing_external_aggregate_task(
     } else {
         aggregate_inputs_from_artifacts(
             &existing_metadata.network_pair,
+            existing.pipeline_key,
             &existing_metadata.aggregate_input_artifacts,
         )
     };
@@ -1526,6 +1546,7 @@ async fn reenqueue_existing_external_aggregate_task(
 
 fn aggregate_inputs_from_artifacts(
     network_pair: &str,
+    pipeline_key: PipelineKey,
     artifacts: &[AggregateInputProofArtifact],
 ) -> Vec<AggregateProofInput> {
     artifacts
@@ -1533,8 +1554,8 @@ fn aggregate_inputs_from_artifacts(
         .map(|artifact| {
             AggregateProofInput::ProofArtifact(ProofArtifactRef {
                 network_pair: network_pair.to_string(),
+                pipeline_key,
                 proof_ref: artifact.proof_ref.clone(),
-                proof_path: artifact.proof_path.clone(),
             })
         })
         .collect()
@@ -1657,7 +1678,7 @@ async fn load_task_data_from_lookup(
         && matches!(root_state.status, ProofStatus::Completed)
         && root_proof_artifact_refs(&lookup.metadata, lookup.record.pipeline_key).is_some()
     {
-        load_persisted_root_proof(&lookup.record).await?
+        load_persisted_root_proof(state.runtime.as_ref(), &lookup.record, &lookup.metadata).await?
     } else {
         root_proof
     };
@@ -1678,17 +1699,21 @@ async fn load_task_data_from_lookup(
         proof_ref: root_proof_location
             .as_ref()
             .and_then(|location| location.proof_ref.clone()),
-        proof_path: root_proof_location.and_then(|location| location.proof_path),
+        proof_uri: root_proof_location.and_then(|location| location.proof_uri),
         error: root_state.error,
     })
 }
 
 async fn load_persisted_root_proof(
+    runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
 ) -> Result<Option<String>, ApiError> {
-    Ok(load_persisted_root_proof_material(record)
-        .await?
-        .and_then(|proof| proof.proof))
+    Ok(
+        load_persisted_root_proof_material(runtime, record, metadata)
+            .await?
+            .and_then(|proof| proof.proof),
+    )
 }
 
 async fn load_cached_proposal_artifact(
@@ -1711,9 +1736,10 @@ async fn load_cached_proposal_artifact_for_route(
     route: CanonicalProofRoute,
     proof_ref: &str,
 ) -> Result<Option<ProofArtifactMaterial>, ApiError> {
-    let Some(material) = load_proof_artifact_material(runtime, network_pair, proof_ref)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+    let Some(material) =
+        load_proof_artifact_material(runtime, network_pair, route.pipeline_key(), proof_ref)
+            .await
+            .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
     else {
         return Ok(None);
     };
@@ -1748,52 +1774,59 @@ async fn load_cached_proposal_artifact_for_route(
 }
 
 async fn load_persisted_root_proof_material(
+    runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
 ) -> Result<Option<Proof>, ApiError> {
-    let Some(path) = record.proof_path.as_deref() else {
+    let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return Ok(None);
     };
-    let bytes = fs::read(path)
+    for proof_ref in refs.refs {
+        if let Some(material) = load_proof_artifact_material(
+            runtime,
+            &metadata.network_pair,
+            record.pipeline_key,
+            &proof_ref,
+        )
         .await
-        .map_err(|err| ApiError::internal(format!("failed to read proof file {path}: {err}")))?;
-    let proof: Proof = serde_json::from_slice(&bytes)
-        .map_err(|err| ApiError::internal(format!("failed to parse proof file {path}: {err}")))?;
-    Ok(Some(proof))
+        .map_err(|err| ApiError::internal(format!("failed to read proof artifact: {err}")))?
+        {
+            return Ok(Some(material.proof));
+        }
+    }
+    Ok(None)
 }
 
 fn artifact_proof_location(record: &raiko2_runtime::ProofArtifactRecord) -> ProofLocation {
     ProofLocation {
         proof_ref: Some(record.proof_ref.clone()),
-        proof_path: Some(record.proof_path.clone()),
+        proof_uri: Some(record.proof_uri.clone()),
     }
 }
 
 fn proof_artifact_ref(
-    runtime: &RuntimeManager,
     network_pair: &str,
+    pipeline_key: PipelineKey,
     proof_ref: &str,
 ) -> ProofArtifactRef {
     ProofArtifactRef {
         network_pair: network_pair.to_string(),
+        pipeline_key,
         proof_ref: proof_ref.to_string(),
-        proof_path: runtime
-            .proof_artifact_path(network_pair, proof_ref)
-            .display()
-            .to_string(),
     }
 }
 
 fn status_proof_location(
     proof_ref: Option<&String>,
-    proof_path: Option<&String>,
+    proof_uri: Option<&String>,
 ) -> Option<ProofLocation> {
-    if proof_ref.is_none() && proof_path.is_none() {
+    if proof_ref.is_none() && proof_uri.is_none() {
         return None;
     }
 
     Some(ProofLocation {
         proof_ref: proof_ref.cloned(),
-        proof_path: proof_path.cloned(),
+        proof_uri: proof_uri.cloned(),
     })
 }
 
@@ -1805,15 +1838,15 @@ fn root_proof_location(
 ) -> Option<ProofLocation> {
     let record_location = || {
         root_proof_artifact_refs(metadata, record.pipeline_key)?;
-        record.proof_path.as_ref().map(|proof_path| ProofLocation {
+        record.proof_uri.as_ref().map(|proof_uri| ProofLocation {
             proof_ref: None,
-            proof_path: Some(proof_path.clone()),
+            proof_uri: Some(proof_uri.clone()),
         })
     };
 
     if let Some(aggregate) = aggregate
         && let Some(location) =
-            status_proof_location(aggregate.proof_ref.as_ref(), aggregate.proof_path.as_ref())
+            status_proof_location(aggregate.proof_ref.as_ref(), aggregate.proof_uri.as_ref())
     {
         return Some(location);
     }
@@ -1823,7 +1856,7 @@ fn root_proof_location(
 
     if let [proposal] = proposals
         && let Some(location) =
-            status_proof_location(proposal.proof_ref.as_ref(), proposal.proof_path.as_ref())
+            status_proof_location(proposal.proof_ref.as_ref(), proposal.proof_uri.as_ref())
     {
         return Some(location);
     }
@@ -2224,12 +2257,15 @@ async fn load_proposal_statuses(
             record.error.as_deref(),
         );
         let mut proof_location = None;
-        let status = if let Some(material) =
-            load_proof_artifact_material(runtime_manager, &metadata.network_pair, &proposal.task_id)
-                .await
-                .map_err(|err| {
-                    ApiError::internal(format!("failed to load proof artifact: {err}"))
-                })? {
+        let status = if let Some(material) = load_proof_artifact_material(
+            runtime_manager,
+            &metadata.network_pair,
+            record.pipeline_key,
+            &proposal.task_id,
+        )
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+        {
             proof_location = Some(artifact_proof_location(&material.record));
             let proof = material.proof;
             EngineStatusView {
@@ -2239,7 +2275,7 @@ async fn load_proposal_statuses(
                 extra_data: proof.extra_data,
             }
         } else {
-            status
+            require_published_proof(status, &proposal.task_id)
         };
         proposals.push(ProposalStatus {
             index,
@@ -2254,7 +2290,7 @@ async fn load_proposal_statuses(
             proof_ref: proof_location
                 .as_ref()
                 .and_then(|location| location.proof_ref.clone()),
-            proof_path: proof_location.and_then(|location| location.proof_path),
+            proof_uri: proof_location.and_then(|location| location.proof_uri),
             error: status.error,
             runtime: task_runtime_view(runtime, engine_state_present, record.updated_at),
             extra_data: status.extra_data,
@@ -2295,12 +2331,14 @@ async fn load_aggregate_status(
     );
     let mut proof_location = None;
     let status = if let Some(task_id) = metadata.aggregate_task_id.as_deref() {
-        if let Some(material) =
-            load_proof_artifact_material(runtime_manager, &metadata.network_pair, task_id)
-                .await
-                .map_err(|err| {
-                    ApiError::internal(format!("failed to load proof artifact: {err}"))
-                })?
+        if let Some(material) = load_proof_artifact_material(
+            runtime_manager,
+            &metadata.network_pair,
+            record.pipeline_key,
+            task_id,
+        )
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
         {
             proof_location = Some(artifact_proof_location(&material.record));
             let proof = material.proof;
@@ -2311,7 +2349,7 @@ async fn load_aggregate_status(
                 extra_data: proof.extra_data,
             }
         } else {
-            status
+            require_published_proof(status, task_id)
         }
     } else {
         status
@@ -2325,7 +2363,7 @@ async fn load_aggregate_status(
             proof_ref: proof_location
                 .as_ref()
                 .and_then(|location| location.proof_ref.clone()),
-            proof_path: proof_location.and_then(|location| location.proof_path),
+            proof_uri: proof_location.and_then(|location| location.proof_uri),
             error: status.error,
             runtime: task_runtime_view(
                 metadata.aggregate_runtime(),
@@ -2336,6 +2374,21 @@ async fn load_aggregate_status(
         }),
         engine_state_present,
     ))
+}
+
+fn require_published_proof(status: EngineStatusView, proof_ref: &str) -> EngineStatusView {
+    if !matches!(status.status, ProofStatus::Completed) {
+        return status;
+    }
+
+    EngineStatusView {
+        status: ProofStatus::Failed,
+        proof: None,
+        error: Some(format!(
+            "proof publication incomplete: artifact {proof_ref} is not readable"
+        )),
+        extra_data: None,
+    }
 }
 
 fn summarize_proposal_task_state(stages: &[Option<EngineStatusView>]) -> EngineStatusView {
@@ -2413,7 +2466,7 @@ fn resolve_root_task_state(
     }
 
     let computed_root_status = summarize_root_status(proposals, aggregate);
-    let status = match computed_root_status {
+    let mut status = match computed_root_status {
         ProofStatus::Pending => runner_status_to_proof_status(runner_status, runtime_has_progress),
         status => status,
     };
@@ -2424,10 +2477,14 @@ fn resolve_root_task_state(
             .and_then(|proposal| proposal.proof.clone()),
         None => None,
     };
-    let error = aggregate
+    let mut error = aggregate
         .and_then(|aggregate| aggregate.error.clone())
         .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()))
         .or_else(|| failed_runtime_error(&status, runtime_error));
+    if matches!(status, ProofStatus::Completed) && proof.is_none() {
+        status = ProofStatus::Failed;
+        error = Some("completed task has no readable root proof artifact".to_string());
+    }
     let current_index = proposals
         .iter()
         .position(|proposal| !matches!(proposal.status, ProofStatus::Completed))
@@ -2587,8 +2644,12 @@ fn resolved_pair(
         .ok_or_else(|| ApiError::internal("rpc.pairs must contain at least one network pair"))
 }
 
-fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, ApiError> {
+fn batch_request_fingerprint(
+    environment_id: &str,
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, ApiError> {
     let payload = serde_json::json!({
+        "environment_id": environment_id,
         "pair_key": submission.pair.key.as_str(),
         "route": submission.route.route.to_string(),
         "requested_proof_type": submission.requested_proof_type.as_str(),
@@ -2611,6 +2672,7 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
 }
 
 fn external_aggregate_request_fingerprint(
+    environment_id: &str,
     pair: &ResolvedNetworkPair,
     route: CanonicalProofRoute,
     prover_type: Option<ProverType>,
@@ -2618,6 +2680,7 @@ fn external_aggregate_request_fingerprint(
     prover_config: &ProverTaskConfig,
 ) -> Result<String, ApiError> {
     let payload = serde_json::json!({
+        "environment_id": environment_id,
         "pair_key": pair.key.as_str(),
         "route": route.route.to_string(),
         "prover_type": prover_type.map(ProverType::as_str),
@@ -2801,7 +2864,7 @@ fn failed_stage_is_reenqueueable(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
 ) -> bool {
-    if record.proof_path.is_some() {
+    if record.proof_uri.is_some() {
         return false;
     }
 
@@ -2906,10 +2969,15 @@ async fn completed_root_artifact_missing(
         return Ok(false);
     };
     for proof_ref in &root_refs.refs {
-        if load_proof_artifact_material(runtime, &metadata.network_pair, proof_ref)
-            .await
-            .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
-            .is_some()
+        if load_proof_artifact_material(
+            runtime,
+            &metadata.network_pair,
+            record.pipeline_key,
+            proof_ref,
+        )
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+        .is_some()
         {
             return Ok(false);
         }
@@ -2957,7 +3025,13 @@ async fn compatibility_response_for_task(
         }
         ProofStatus::Completed => legacy_proof_response(
             proof_type,
-            legacy_root_proof_material(&lookup.record, &lookup.metadata, task.proof).await?,
+            legacy_root_proof_material(
+                state.runtime.as_ref(),
+                &lookup.record,
+                &lookup.metadata,
+                task.proof,
+            )
+            .await?,
         ),
         ProofStatus::Failed => legacy_status_response(
             proof_type,
@@ -2986,12 +3060,13 @@ fn with_compatibility_status(mut response: Response, status: &ProofStatus) -> Re
 }
 
 async fn legacy_root_proof_material(
+    runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
     fallback_proof: Option<String>,
 ) -> Result<Proof, ApiError> {
     if root_proof_artifact_refs(metadata, record.pipeline_key).is_some()
-        && let Some(proof) = load_persisted_root_proof_material(record).await?
+        && let Some(proof) = load_persisted_root_proof_material(runtime, record, metadata).await?
     {
         return Ok(proof);
     }
@@ -3074,7 +3149,7 @@ mod tests {
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
     fn batch_request_fingerprint_for_test(submission: &CanonicalBatchSubmission) -> Result<String> {
-        batch_request_fingerprint(submission).map_err(|err| anyhow!(err.message))
+        batch_request_fingerprint("local", submission).map_err(|err| anyhow!(err.message))
     }
 
     #[test]
@@ -3435,16 +3510,24 @@ mod tests {
         proof_ref: &str,
         proof: &Proof,
     ) -> Result<()> {
-        let proof_path = runtime
-            .write_proof_artifact_bytes(network_pair, proof_ref, &serde_json::to_vec_pretty(proof)?)
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                network_pair,
+                PipelineKey::ShastaNative,
+                proof_ref,
+                &serde_json::to_vec_pretty(proof)?,
+            )
             .await?;
+        let artifact = publication.object();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),
                 proof_ref: proof_ref.to_string(),
                 pipeline_key: PipelineKey::ShastaNative,
                 route: "native/local".parse().expect("route"),
-                proof_path: proof_path.display().to_string(),
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await?;
         Ok(())
@@ -3495,7 +3578,7 @@ mod tests {
             image_ref: None,
             provider_request_id: None,
             remote_tx_hash: None,
-            proof_path: None,
+            proof_uri: None,
             error: None,
             metadata: serde_json::to_value(metadata).expect("serialize metadata"),
             request_fingerprint: Some("0xfingerprint".to_string()),
@@ -4427,13 +4510,13 @@ mod tests {
             RuntimeManager::new(unique_test_runtime_root("plan-task-id")).expect("runtime manager");
         let single_submission = canonical_submission(route, false);
         let single_fingerprint =
-            batch_request_fingerprint(&single_submission).expect("single fingerprint");
+            batch_request_fingerprint("local", &single_submission).expect("single fingerprint");
         let single = build_submission_plan(&runtime, &single_submission, &single_fingerprint)
             .await
             .expect("single submission plan");
         let aggregate_submission = canonical_submission(route, true);
-        let aggregate_fingerprint =
-            batch_request_fingerprint(&aggregate_submission).expect("aggregate fingerprint");
+        let aggregate_fingerprint = batch_request_fingerprint("local", &aggregate_submission)
+            .expect("aggregate fingerprint");
         let aggregate =
             build_submission_plan(&runtime, &aggregate_submission, &aggregate_fingerprint)
                 .await
@@ -4442,6 +4525,15 @@ mod tests {
         assert_eq!(single.proposals.len(), 1);
         assert_eq!(aggregate.proposals.len(), 1);
         assert_eq!(single.proposals[0].task_id, aggregate.proposals[0].task_id);
+    }
+
+    #[test]
+    fn request_fingerprint_is_scoped_to_environment() {
+        let submission = canonical_submission(native_local_route(), false);
+        let dev = batch_request_fingerprint("dev", &submission).expect("dev fingerprint");
+        let prod = batch_request_fingerprint("prod", &submission).expect("prod fingerprint");
+
+        assert_ne!(dev, prod);
     }
 
     #[tokio::test]
@@ -4455,9 +4547,9 @@ mod tests {
         second_submission.public_task_id = "task-public-b".to_string();
 
         let first_fingerprint =
-            batch_request_fingerprint(&first_submission).expect("first fingerprint");
+            batch_request_fingerprint("local", &first_submission).expect("first fingerprint");
         let second_fingerprint =
-            batch_request_fingerprint(&second_submission).expect("second fingerprint");
+            batch_request_fingerprint("local", &second_submission).expect("second fingerprint");
         assert_eq!(first_fingerprint, second_fingerprint);
 
         let first = build_submission_plan(&runtime, &first_submission, &first_fingerprint)
@@ -4486,9 +4578,10 @@ mod tests {
         let sgx_submission = canonical_submission(sgx_remote_route(), false);
         let sgxgeth_submission = canonical_submission(sgxgeth_remote_route(), false);
 
-        let sgx_fingerprint = batch_request_fingerprint(&sgx_submission).expect("sgx fingerprint");
+        let sgx_fingerprint =
+            batch_request_fingerprint("local", &sgx_submission).expect("sgx fingerprint");
         let sgxgeth_fingerprint =
-            batch_request_fingerprint(&sgxgeth_submission).expect("sgxgeth fingerprint");
+            batch_request_fingerprint("local", &sgxgeth_submission).expect("sgxgeth fingerprint");
 
         assert_ne!(sgx_fingerprint, sgxgeth_fingerprint);
     }
@@ -4551,8 +4644,8 @@ mod tests {
         assert_eq!(
             aggregate_inputs[0],
             AggregateProofInput::ProofArtifact(proof_artifact_ref(
-                &runtime,
                 &submission.pair.key,
+                PipelineKey::ShastaNative,
                 &cached_ref
             ))
         );
@@ -4560,8 +4653,8 @@ mod tests {
             aggregate_inputs[1],
             AggregateProofInput::PendingProofArtifact {
                 artifact: proof_artifact_ref(
-                    &runtime,
                     &submission.pair.key,
+                    PipelineKey::ShastaNative,
                     &plan.proposals[1].task_ref
                 ),
                 dependency: Box::new(plan.proposals[1].task_id.clone()),
@@ -4681,7 +4774,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_proof_artifact_is_treated_as_cache_miss() -> Result<()> {
+    async fn corrupt_proof_artifact_blocks_reproving() -> Result<()> {
         let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("corrupt-cache-plan"))
             .expect("runtime manager");
@@ -4698,39 +4791,38 @@ mod tests {
             prover_config: ProverTaskConfig::default(),
         };
         let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
-        let proof_path = runtime
-            .write_proof_artifact_bytes(&submission.pair.key, &proof_ref, b"{bad-json")
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &submission.pair.key,
+                PipelineKey::ShastaNative,
+                &proof_ref,
+                b"{bad-json",
+            )
             .await
             .expect("write corrupt artifact");
+        let artifact = publication.object();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: submission.pair.key.clone(),
                 proof_ref,
                 pipeline_key: PipelineKey::ShastaNative,
                 route: "native/local".parse().expect("route"),
-                proof_path: proof_path.display().to_string(),
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await
             .expect("register corrupt artifact");
 
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
-            .await
-            .expect("submission plan");
-        assert!(matches!(
-            plan.proposal_sources[0],
-            ProposalPlanSource::Pending
-        ));
-        assert_eq!(
-            plan.aggregate_inputs[0],
-            AggregateProofInput::PendingProofArtifact {
-                artifact: proof_artifact_ref(
-                    &runtime,
-                    &submission.pair.key,
-                    &proposal_task_ref(PipelineKey::ShastaNative, &request)
-                ),
-                dependency: Box::new(plan.proposals[0].task_id.clone()),
-            }
+        let error = match build_submission_plan(&runtime, &submission, &request_fingerprint).await {
+            Ok(_) => panic!("corrupt canonical artifact must require explicit invalidation"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("invalid JSON"),
+            "unexpected error: {}",
+            error.message
         );
         Ok(())
     }
@@ -4758,14 +4850,60 @@ mod tests {
         );
         assert_eq!(
             inputs,
-            aggregate_inputs_from_artifacts("taiko_dev/ethereum", &artifacts)
+            aggregate_inputs_from_artifacts(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaNative,
+                &artifacts,
+            )
         );
 
-        let stored =
-            load_proof_artifact_material(&runtime, "taiko_dev/ethereum", &artifacts[0].proof_ref)
-                .await?
-                .expect("stored aggregate input proof");
+        let stored = load_proof_artifact_material(
+            &runtime,
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaNative,
+            &artifacts[0].proof_ref,
+        )
+        .await?
+        .expect("stored aggregate input proof");
         assert_eq!(stored.proof, proof);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn published_artifact_without_db_record_is_recovered_before_reproving() -> Result<()> {
+        let runtime =
+            RuntimeManager::new(unique_test_runtime_root("artifact-registration-recovery"))?;
+        let proof = valid_native_proof();
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaNative,
+                "proposal-recovery",
+                &serde_json::to_vec_pretty(&proof)?,
+            )
+            .await?;
+        assert!(
+            runtime
+                .get_proof_artifact(
+                    "taiko_dev/ethereum",
+                    PipelineKey::ShastaNative,
+                    "proposal-recovery",
+                )
+                .await?
+                .is_none()
+        );
+
+        let recovered = load_proof_artifact_material(
+            &runtime,
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaNative,
+            "proposal-recovery",
+        )
+        .await?
+        .expect("recover published proof");
+
+        assert_eq!(recovered.proof, proof);
+        assert_eq!(recovered.record.pipeline_key, PipelineKey::ShastaNative);
         Ok(())
     }
 
@@ -4909,7 +5047,7 @@ mod tests {
             last_anchor_block_number: 41,
             proof: proof.map(str::to_string),
             proof_ref: None,
-            proof_path: None,
+            proof_uri: None,
             error: None,
             runtime: None,
             extra_data: None,
@@ -4922,7 +5060,7 @@ mod tests {
             status,
             proof: proof.map(str::to_string),
             proof_ref: None,
-            proof_path: None,
+            proof_uri: None,
             error: None,
             runtime: None,
             extra_data: None,
@@ -4976,6 +5114,26 @@ mod tests {
         assert!(matches!(root.status, ProofStatus::Proving));
         assert_eq!(root.proof, None);
         assert_eq!(root.current_index, Some(1));
+    }
+
+    #[test]
+    fn completed_engine_state_without_readable_artifact_is_failed() {
+        let status = require_published_proof(
+            EngineStatusView {
+                status: ProofStatus::Completed,
+                proof: None,
+                error: None,
+                extra_data: None,
+            },
+            "proposal-task",
+        );
+
+        assert!(matches!(status.status, ProofStatus::Failed));
+        assert!(status.proof.is_none());
+        assert_eq!(
+            status.error.as_deref(),
+            Some("proof publication incomplete: artifact proposal-task is not readable")
+        );
     }
 
     #[test]
@@ -5068,7 +5226,7 @@ mod tests {
             image_ref: None,
             provider_request_id: None,
             remote_tx_hash: None,
-            proof_path: None,
+            proof_uri: None,
             error: None,
             metadata: serde_json::to_value(&metadata)?,
             request_fingerprint: None,

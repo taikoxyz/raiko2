@@ -62,7 +62,8 @@ async fn request_batch_shasta_proof_inner(
         );
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
-    let request_fingerprint = batch_request_fingerprint(&submission)?;
+    let request_fingerprint =
+        batch_request_fingerprint(state.runtime.environment_id(), &submission)?;
     submission.public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let plan =
         build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;

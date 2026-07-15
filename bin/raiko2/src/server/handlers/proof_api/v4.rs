@@ -8,9 +8,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_pipeline::PipelineKey;
+use raiko2_runtime::RuntimeManager;
 use std::{collections::HashSet, sync::Arc};
-use tokio::fs;
-use tokio::io::AsyncReadExt;
 
 use super::super::proof_types::v4 as wire;
 use super::{
@@ -50,7 +49,8 @@ pub(crate) async fn request_proposal_proof(
     validate_proof_request_shape(&req)?;
     let (proposal_id_start, proposal_id_end) = proposal_id_range(&req.proposals)?;
     let mut submission = proposal_submission(&state, &req)?;
-    let request_fingerprint = proposal_request_fingerprint(&submission);
+    let request_fingerprint =
+        proposal_request_fingerprint(state.runtime.environment_id(), &submission);
     submission.public_task_id = request_fingerprint.public_task_id();
     submit_submission(&state, &submission, request_fingerprint.as_str()).await?;
     let data = load_task_data(&state, &submission.public_task_id)
@@ -220,6 +220,7 @@ async fn invalidate_artifacts_inner(
             matched_artifacts.retain(|artifact| {
                 !blocked_artifact_refs.contains(&ProofArtifactIdentity {
                     network_pair: artifact.network_pair.clone(),
+                    pipeline_key: artifact.pipeline_key,
                     proof_ref: artifact.proof_ref.clone(),
                 })
             });
@@ -246,6 +247,7 @@ struct CandidateInvalidationTask {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProofArtifactIdentity {
     network_pair: String,
+    pipeline_key: PipelineKey,
     proof_ref: String,
 }
 
@@ -337,7 +339,9 @@ async fn collect_invalidation_task_candidates(
         candidates
             .artifact_refs
             .extend(artifact_refs.iter().cloned());
-        let root_proof_matches_prefix = task_matches_proof_prefix(&record, proof_prefix).await;
+        let root_proof_matches_prefix =
+            task_matches_proof_prefix(state.runtime.as_ref(), &record, &metadata, proof_prefix)
+                .await;
         candidates.records.push(CandidateInvalidationTask {
             record,
             metadata,
@@ -381,6 +385,7 @@ fn proof_artifact_identities(
         .iter()
         .map(|artifact| ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
             proof_ref: artifact.proof_ref.clone(),
         })
         .collect()
@@ -408,6 +413,7 @@ async fn extend_matched_artifacts_by_refs(
         }
         let identity = ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
             proof_ref: artifact.proof_ref.clone(),
         };
         if refs.contains(&identity) && seen_artifacts.insert(identity) {
@@ -429,6 +435,7 @@ fn root_invalidation_artifact_refs(
                 .into_iter()
                 .map(|proof_ref| ProofArtifactIdentity {
                     network_pair: metadata.network_pair.clone(),
+                    pipeline_key,
                     proof_ref,
                 })
                 .collect()
@@ -451,6 +458,7 @@ fn invalidation_artifact_refs(
                 .into_iter()
                 .map(|proof_ref| ProofArtifactIdentity {
                     network_pair: metadata.network_pair.clone(),
+                    pipeline_key,
                     proof_ref,
                 }),
         );
@@ -487,10 +495,14 @@ async fn collect_invalidation_artifacts(
         if !artifact_matches_proposal_scope(&artifact, proposal_range, matched_task_artifact_refs) {
             continue;
         }
-        if !artifact_matches_proof_prefix(&artifact, proof_prefix).await {
+        if !artifact_matches_proof_prefix(state.runtime.as_ref(), &artifact, proof_prefix).await {
             continue;
         }
-        if seen_artifacts.insert((artifact.network_pair.clone(), artifact.proof_ref.clone())) {
+        if seen_artifacts.insert(ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            proof_ref: artifact.proof_ref.clone(),
+        }) {
             data.artifacts.matched = data.artifacts.matched.saturating_add(1);
             matched_artifacts.push(artifact);
         }
@@ -590,53 +602,44 @@ async fn remove_invalidated_tasks(
     blocked_artifact_refs
 }
 
-enum ProofArtifactFileRemoval {
-    Removed,
-    Missing,
-    Failed,
-}
-
 async fn remove_invalidated_artifacts(
     state: &AppState,
     matched_artifacts: Vec<raiko2_runtime::ProofArtifactRecord>,
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
-        let file_removal = match fs::remove_file(&artifact.proof_path).await {
-            Ok(()) => ProofArtifactFileRemoval::Removed,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                ProofArtifactFileRemoval::Missing
-            }
-            Err(err) => {
-                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
-                tracing::warn!(
-                    network_pair = %artifact.network_pair,
-                    proof_ref = %artifact.proof_ref,
-                    proof_path = %artifact.proof_path,
-                    error = %err,
-                    "failed to remove invalidated proof artifact file; removing cache record"
-                );
-                ProofArtifactFileRemoval::Failed
-            }
-        };
+        if let Err(err) = state
+            .runtime
+            .delete_proof_artifact(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                &artifact.proof_ref,
+                artifact.generation,
+            )
+            .await
+        {
+            data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+            tracing::warn!(
+                network_pair = %artifact.network_pair,
+                proof_ref = %artifact.proof_ref,
+                proof_uri = %artifact.proof_uri,
+                error = %err,
+                "failed to remove invalidated proof artifact; retaining cache record"
+            );
+            continue;
+        }
         match state
             .runtime
-            .remove_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+            .remove_proof_artifact(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                &artifact.proof_ref,
+            )
             .await
         {
             Ok(Some(_record)) => {
                 data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                match file_removal {
-                    ProofArtifactFileRemoval::Removed => {
-                        data.artifacts.files_removed =
-                            data.artifacts.files_removed.saturating_add(1);
-                    }
-                    ProofArtifactFileRemoval::Missing => {
-                        data.artifacts.files_missing =
-                            data.artifacts.files_missing.saturating_add(1);
-                    }
-                    ProofArtifactFileRemoval::Failed => {}
-                }
+                data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
             }
             Ok(None) => {}
             Err(err) => {
@@ -706,16 +709,31 @@ fn metadata_matches_proposal_range(metadata: &TaskMetadata, range: Option<(u64, 
 }
 
 async fn task_matches_proof_prefix(
+    runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
     proof_prefix: Option<&str>,
 ) -> bool {
     let Some(prefix) = proof_prefix else {
         return true;
     };
-    let Some(path) = record.proof_path.as_deref() else {
+    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return false;
     };
-    proof_file_starts_with(path, prefix).await
+    for proof_ref in root_refs.refs {
+        if proof_artifact_starts_with(
+            runtime,
+            &metadata.network_pair,
+            record.pipeline_key,
+            &proof_ref,
+            prefix,
+        )
+        .await
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn artifact_matches_proposal_scope(
@@ -726,48 +744,59 @@ fn artifact_matches_proposal_scope(
     proposal_range.is_none()
         || matched_task_artifact_refs.contains(&ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
             proof_ref: artifact.proof_ref.clone(),
         })
 }
 
 async fn artifact_matches_proof_prefix(
+    runtime: &RuntimeManager,
     artifact: &raiko2_runtime::ProofArtifactRecord,
     proof_prefix: Option<&str>,
 ) -> bool {
     match proof_prefix {
-        Some(prefix) => proof_file_starts_with(&artifact.proof_path, prefix).await,
+        Some(prefix) => {
+            proof_artifact_starts_with(
+                runtime,
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                &artifact.proof_ref,
+                prefix,
+            )
+            .await
+        }
         None => true,
     }
 }
 
-async fn proof_file_starts_with(path: &str, prefix: &str) -> bool {
-    let file = match fs::File::open(path).await {
-        Ok(file) => file,
+async fn proof_artifact_starts_with(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    proof_ref: &str,
+    prefix: &str,
+) -> bool {
+    let object = match runtime
+        .read_proof_artifact_bytes(network_pair, pipeline_key, proof_ref)
+        .await
+    {
+        Ok(Some(object)) => object,
+        Ok(None) => return false,
         Err(err) => {
             tracing::warn!(
-                proof_path = %path,
+                proof_ref,
                 error = %err,
-                "failed to open proof artifact for prefix match"
+                "failed to read proof artifact for prefix match"
             );
             return false;
         }
     };
-    let mut bytes = Vec::with_capacity(PROOF_PREFIX_SCAN_LIMIT.min(8 * 1024));
-    let mut reader = file.take(PROOF_PREFIX_SCAN_LIMIT as u64);
-    if let Err(err) = reader.read_to_end(&mut bytes).await {
-        tracing::warn!(
-            proof_path = %path,
-            scan_limit = PROOF_PREFIX_SCAN_LIMIT,
-            error = %err,
-            "failed to read proof artifact prefix window"
-        );
-        return false;
-    }
-    match proof_json_prefix_starts_with(&bytes, prefix) {
+    let bytes = &object.bytes[..object.bytes.len().min(PROOF_PREFIX_SCAN_LIMIT)];
+    match proof_json_prefix_starts_with(bytes, prefix) {
         Ok(matches) => matches,
         Err(err) => {
             tracing::warn!(
-                proof_path = %path,
+                proof_ref,
                 scan_limit = PROOF_PREFIX_SCAN_LIMIT,
                 error = %err,
                 "failed to inspect proof artifact prefix"
@@ -1281,12 +1310,16 @@ fn proposal_submission(
 }
 
 struct ProposalIdentity<'a> {
+    environment_id: &'a str,
     submission: &'a CanonicalBatchSubmission,
 }
 
 impl<'a> ProposalIdentity<'a> {
-    const fn new(submission: &'a CanonicalBatchSubmission) -> Self {
-        Self { submission }
+    const fn new(environment_id: &'a str, submission: &'a CanonicalBatchSubmission) -> Self {
+        Self {
+            environment_id,
+            submission,
+        }
     }
 }
 
@@ -1295,6 +1328,7 @@ impl RequestIdentity for ProposalIdentity<'_> {
 
     fn write_identity(&self, sink: &mut FingerprintSink) {
         let submission = self.submission;
+        sink.str("environment_id", self.environment_id);
         // Only client-supplied request data belongs in the idempotency key. `route` and
         // `prover_type` are server-derived and must not affect poll-by-re-POST behavior.
         sink.str("network_pair", &submission.pair.key);
@@ -1346,8 +1380,11 @@ impl RequestIdentity for ProposalIdentity<'_> {
     }
 }
 
-fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> RequestFingerprint {
-    ProposalIdentity::new(submission).fingerprint()
+fn proposal_request_fingerprint(
+    environment_id: &str,
+    submission: &CanonicalBatchSubmission,
+) -> RequestFingerprint {
+    ProposalIdentity::new(environment_id, submission).fingerprint()
 }
 
 async fn submit_submission(
@@ -1675,27 +1712,30 @@ mod tests {
             .expect("root proof ref")
             .proof_ref
             .clone();
-        let proof_path = runtime.proof_artifact_path(&metadata.network_pair, &proof_ref);
-        tokio::fs::create_dir_all(proof_path.parent().expect("proof dir"))
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &metadata.network_pair,
+                record.pipeline_key,
+                &proof_ref,
+                serde_json::to_vec(&Proof {
+                    proof: Some("0xroot".to_string()),
+                    ..Proof::default()
+                })
+                .expect("serialize proof")
+                .as_slice(),
+            )
             .await
-            .expect("create proof dir");
-        tokio::fs::write(
-            &proof_path,
-            serde_json::to_vec(&Proof {
-                proof: Some("0xroot".to_string()),
-                ..Proof::default()
-            })
-            .expect("serialize proof"),
-        )
-        .await
-        .expect("write proof artifact");
+            .expect("write proof artifact");
+        let artifact = publication.object();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: metadata.network_pair.clone(),
                 proof_ref: proof_ref.clone(),
                 pipeline_key: record.pipeline_key,
                 route: record.route,
-                proof_path: proof_path.display().to_string(),
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await
             .expect("register proof artifact");
@@ -1727,7 +1767,7 @@ mod tests {
         );
         assert!(
             runtime
-                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, &proof_ref)
                 .await
                 .expect("get proof artifact")
                 .is_some(),
@@ -1799,26 +1839,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proof_file_starts_with_matches_bounded_prefix_window() {
+    async fn proof_artifact_starts_with_matches_bounded_prefix_window() {
         let root = test_runtime_root("proof-prefix-window");
-        tokio::fs::create_dir_all(&root)
-            .await
-            .expect("create temp dir");
-        let path = root.join("proof.json");
+        let runtime = RuntimeManager::new(root).expect("runtime manager");
         let proof = format!("0x{}", "aa".repeat(PROOF_PREFIX_SCAN_LIMIT));
-        tokio::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&Proof {
-                proof: Some(proof),
-                ..Proof::default()
-            })
-            .expect("serialize proof"),
-        )
-        .await
-        .expect("write proof file");
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaSp1,
+                "proof-ref",
+                &serde_json::to_vec_pretty(&Proof {
+                    proof: Some(proof),
+                    ..Proof::default()
+                })
+                .expect("serialize proof"),
+            )
+            .await
+            .expect("write proof artifact");
 
         assert!(
-            proof_file_starts_with(path.to_str().expect("utf8 path"), "0xAAAA").await,
+            proof_artifact_starts_with(
+                &runtime,
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaSp1,
+                "proof-ref",
+                "0xAAAA",
+            )
+            .await,
             "proof prefix did not match"
         );
     }
@@ -2087,7 +2134,7 @@ mod tests {
                 last_anchor_block_number: 19,
                 proof: Some("0xproposal".to_string()),
                 proof_ref: Some("proposal-ref".to_string()),
-                proof_path: Some("proposal-path".to_string()),
+                proof_uri: Some("proposal-path".to_string()),
                 error: None,
                 runtime: None,
                 extra_data: None,
@@ -2097,14 +2144,14 @@ mod tests {
                 status: ProofStatus::Completed,
                 proof: Some("0xaggregate".to_string()),
                 proof_ref: Some("aggregate-ref".to_string()),
-                proof_path: Some("aggregate-path".to_string()),
+                proof_uri: Some("aggregate-path".to_string()),
                 error: None,
                 runtime: None,
                 extra_data: None,
             }),
             proof: Some("0xroot".to_string()),
             proof_ref: Some("root-ref".to_string()),
-            proof_path: Some("root-path".to_string()),
+            proof_uri: Some("root-path".to_string()),
             error: None,
         };
 
@@ -2185,7 +2232,7 @@ mod tests {
 pub(super) fn proposal_request_fingerprint_for_test(
     submission: &CanonicalBatchSubmission,
 ) -> Result<String, Error> {
-    Ok(proposal_request_fingerprint(submission)
+    Ok(proposal_request_fingerprint("test", submission)
         .as_str()
         .to_string())
 }

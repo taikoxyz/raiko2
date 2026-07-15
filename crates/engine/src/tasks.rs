@@ -60,8 +60,8 @@ pub enum AggregateProofInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofArtifactRef {
     pub network_pair: String,
+    pub pipeline_key: PipelineKey,
     pub proof_ref: String,
-    pub proof_path: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,8 +182,8 @@ mod tests {
     fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
+            pipeline_key: PipelineKey::ShastaNative,
             proof_ref: proof_ref.to_string(),
-            proof_path: format!("/tmp/{proof_ref}.json"),
         }
     }
 

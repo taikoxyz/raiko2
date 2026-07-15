@@ -359,13 +359,13 @@ Response:
         "last_anchor_block_number": 199,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json"
+        "proof_uri": "gs://raiko2-proofs/prod/shasta-sp1/taiko_mainnet%2fethereum/proposal_....json"
       }
     ],
     "aggregate": null,
     "proof": "0x...",
     "proof_ref": "proposal:...",
-    "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json",
+    "proof_uri": "gs://raiko2-proofs/prod/shasta-sp1/taiko_mainnet%2fethereum/proposal_....json",
     "error": null
   }
 }
@@ -378,7 +378,7 @@ Response fields:
 | `data.task_id` | string | Opaque root task ID. |
 | `data.route` | string | Resolved route, such as `sp1/network` or `risc0/network`. |
 | `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
-| `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
+| `data.execution_mode` | string/null | SP1 execution mode. Proof API tasks use `prove`; `execute` requests are rejected. |
 | `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
 | `data.network` | string | Server-configured L2 network. |
 | `data.l1_network` | string | Server-configured L1 network. |
@@ -389,7 +389,7 @@ Response fields:
 | `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
 | `data.proof` | string/null | Final root proof hex string when completed. |
 | `data.proof_ref` | string/null | Stable persisted proof reference. |
-| `data.proof_path` | string/null | Persisted proof artifact path. |
+| `data.proof_uri` | string/null | Backend-neutral persisted proof URI (`file://` or `gs://`). |
 | `data.error` | string/null | Terminal error detail when failed. |
 
 Validation:
@@ -699,9 +699,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.
-- `sp1.mode=execute` is only valid when `proof_type=sp1`.
-- `sp1.mode=execute` requires `aggregate=false`.
-- `sp1.mode=execute` does not support `sp1.prover=network`.
+- `sp1.mode=execute` is rejected by the proof API because successful proof tasks must publish a
+  non-null proof artifact before reaching `Completed`.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires the selected `(network, l1_network)` pair
   to declare `sp1_verifier_rpc_url` and `sp1_verifier_address` in server config.
@@ -1033,7 +1032,7 @@ Returns the root-task view derived from the original batch request.
         "last_anchor_block_number": 41,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_path": "cache/proofs/taiko_hoodi_hoodi/proposal_....json"
+        "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1/taiko_hoodi%2fhoodi/proposal_....json"
       }
     ],
     "aggregate": {
@@ -1041,11 +1040,11 @@ Returns the root-task view derived from the original batch request.
       "status": "completed",
       "proof": "0x...",
       "proof_ref": "aggregate:...",
-      "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+      "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1/taiko_hoodi%2fhoodi/aggregate_....json"
     },
     "proof": "0x...",
     "proof_ref": "aggregate:...",
-    "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+    "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1/taiko_hoodi%2fhoodi/aggregate_....json"
   }
 }
 ```
@@ -1061,7 +1060,7 @@ Returns the root-task view derived from the original batch request.
   `allocated`, `running`, `completed`, `failed`, or `cancelled`.
 - `data.status` is the proof-oriented root status shown to API clients:
   `pending`, `proving`, `completed`, `failed`, or `cancelled`.
-- `proof_ref` and `proof_path`, when present, point at the persisted proof artifact for the
+- `proof_ref` and `proof_uri`, when present, point at the persisted proof artifact for the
   resolved concrete route. For `zk_any` requests these fields use the selected `sp1` or `risc0`
   artifact key, never `zk_any`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
@@ -1072,9 +1071,6 @@ Returns the root-task view derived from the original batch request.
   `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
   Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
   stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
-- When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
-  execute report under `proposals[].extra_data.sp1`. When present,
-  `proposals[].extra_data.sp1.gas` is SP1 prover gas from `ExecutionReport::gas()`, not EVM gas.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1107,6 +1103,16 @@ All API errors use the Hoodi-style envelope:
 
 ## Configuration Notes
 
+- `runtime.environment_id` is required and immutable for a deployment. It scopes request
+  fingerprints, public task IDs, and proof artifacts, so identical requests in different
+  environments cannot share work or artifacts.
+- `runtime.artifact_store.backend` selects the single authoritative proof store. Use `gcs` with a
+  non-empty `bucket` in production; `filesystem` stores artifacts below
+  `<runtime.root>/cache/proofs` for local development and tests. `prefix` optionally prefixes GCS
+  object names. Dual-write is not supported.
+- A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
+  registered, readable, and contains a non-null proof payload. Publication is create-only: an
+  identical existing object is idempotent, while a different late object is discarded.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.

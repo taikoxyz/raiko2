@@ -11,11 +11,13 @@ pub use factory::{PipelineFactory, StaticPipelineFactory};
 pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};
 
+#[cfg(feature = "host")]
+use crate::config::GuestSystem;
 #[cfg(all(feature = "host", not(feature = "local-provers")))]
 use crate::config::PipelineRoute;
 #[cfg(feature = "host")]
 use crate::config::RunnerKind;
-use crate::config::{Config, GuestSystem, QueueBackend, ResolvedNetworkPair};
+use crate::config::{ArtifactStoreBackend, Config, QueueBackend, ResolvedNetworkPair};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{NativeBackend, PipelineKey, forks::shasta::ShastaSpec};
@@ -24,7 +26,10 @@ use raiko2_prover::gaiko2::Gaiko2Prover;
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
-use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
+use raiko2_runtime::{
+    FilesystemProofArtifactStore, GcsProofArtifactStore, ProofArtifactRegistration,
+    ProofArtifactStore, RunnerStatus, RuntimeManager,
+};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -113,7 +118,30 @@ impl AppState {
     pub async fn new(mut config: Config) -> Result<Self> {
         config.normalize();
         config.validate()?;
-        let runtime = Arc::new(RuntimeManager::new(config.runtime.root.clone())?);
+        let artifact_store: Arc<dyn ProofArtifactStore> =
+            match config.runtime.artifact_store.backend {
+                ArtifactStoreBackend::Filesystem => Arc::new(FilesystemProofArtifactStore::new(
+                    config.runtime.environment_id.clone(),
+                    config.runtime.root.join("cache").join("proofs"),
+                )?),
+                ArtifactStoreBackend::Gcs => Arc::new(
+                    GcsProofArtifactStore::new(
+                        config.runtime.environment_id.clone(),
+                        config
+                            .runtime
+                            .artifact_store
+                            .bucket
+                            .clone()
+                            .context("runtime.artifact_store.bucket is required for GCS")?,
+                        config.runtime.artifact_store.prefix.clone(),
+                    )
+                    .await?,
+                ),
+            };
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            config.runtime.root.clone(),
+            artifact_store,
+        )?);
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
         let workers = config.queue.workers;
@@ -526,42 +554,80 @@ async fn restore_proof_artifacts_from_runtime_task(
     if record.runner_status != RunnerStatus::Completed {
         return Ok(());
     }
-    let Some(proof_path) = record.proof_path.as_deref() else {
-        return Ok(());
-    };
     let Some(restored_refs) = root_proof_artifact_refs(&metadata, record.pipeline_key) else {
         return Ok(());
     };
-    let proof_bytes = fs::read(proof_path)
-        .await
-        .with_context(|| format!("failed to read proof file {proof_path}"))?;
-    let proof: Proof = serde_json::from_slice(&proof_bytes)
-        .with_context(|| format!("failed to parse proof file {proof_path}"))?;
+    let mut missing_refs = Vec::new();
+    for proof_ref in &restored_refs.refs {
+        if runtime
+            .get_proof_artifact(&metadata.network_pair, record.pipeline_key, proof_ref)
+            .await?
+            .is_none()
+        {
+            missing_refs.push(proof_ref.clone());
+        }
+    }
+    if missing_refs.is_empty() {
+        return Ok(());
+    }
+    let mut proof_bytes = None;
+    for proof_ref in &restored_refs.refs {
+        if let Some(object) = runtime
+            .read_proof_artifact_bytes(&metadata.network_pair, record.pipeline_key, proof_ref)
+            .await?
+        {
+            proof_bytes = Some(object.bytes);
+            break;
+        }
+    }
+    if proof_bytes.is_none()
+        && let Some(proof_uri) = record.proof_uri.as_deref()
+        && let Some(path) = proof_uri.strip_prefix("file://")
+    {
+        proof_bytes = Some(
+            fs::read(path)
+                .await
+                .with_context(|| format!("failed to read legacy proof file {proof_uri}"))?,
+        );
+    }
+    let Some(proof_bytes) = proof_bytes else {
+        return Ok(());
+    };
+    let proof: Proof =
+        serde_json::from_slice(&proof_bytes).context("failed to parse restored proof artifact")?;
 
     if restored_refs.kind == ProofArtifactKind::Proposal
         && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
     {
         warn!(
             task_id = record.task_id,
-            proof_path,
+            proof_uri = record.proof_uri.as_deref().unwrap_or_default(),
             error = %err,
             "completed proposal proof is not aggregatable; skipping artifact restore"
         );
         return Ok(());
     }
 
-    for proof_ref in restored_refs.refs {
-        let artifact_path = runtime
-            .write_proof_artifact_bytes(&metadata.network_pair, &proof_ref, &proof_bytes)
+    for proof_ref in missing_refs {
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &metadata.network_pair,
+                record.pipeline_key,
+                &proof_ref,
+                &proof_bytes,
+            )
             .await
-            .with_context(|| format!("failed to write proof artifact for {proof_ref}"))?;
+            .with_context(|| format!("failed to publish proof artifact for {proof_ref}"))?;
+        let artifact = publication.object();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: metadata.network_pair.clone(),
                 proof_ref,
                 pipeline_key: record.pipeline_key,
                 route: record.route,
-                proof_path: artifact_path.display().to_string(),
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await?;
     }
@@ -594,18 +660,20 @@ async fn restore_cached_proof_artifact(
     proof_ref: &str,
     kind: ProofArtifactKind,
 ) -> Result<()> {
-    let proof_path = runtime.proof_artifact_path(&metadata.network_pair, proof_ref);
-    if !fs::try_exists(&proof_path)
-        .await
-        .with_context(|| format!("failed to inspect proof artifact for {proof_ref}"))?
+    if runtime
+        .get_proof_artifact(&metadata.network_pair, record.pipeline_key, proof_ref)
+        .await?
+        .is_some()
     {
         return Ok(());
     }
-
-    let proof_bytes = fs::read(&proof_path)
-        .await
-        .with_context(|| format!("failed to read proof artifact for {proof_ref}"))?;
-    let proof: Proof = serde_json::from_slice(&proof_bytes)
+    let Some(artifact) = runtime
+        .read_proof_artifact_bytes(&metadata.network_pair, record.pipeline_key, proof_ref)
+        .await?
+    else {
+        return Ok(());
+    };
+    let proof: Proof = serde_json::from_slice(&artifact.bytes)
         .with_context(|| format!("failed to parse proof artifact for {proof_ref}"))?;
     if kind == ProofArtifactKind::Proposal
         && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
@@ -625,7 +693,9 @@ async fn restore_cached_proof_artifact(
             proof_ref: proof_ref.to_string(),
             pipeline_key: record.pipeline_key,
             route: record.route,
-            proof_path: proof_path.display().to_string(),
+            proof_uri: artifact.proof_uri,
+            content_hash: artifact.content_hash,
+            generation: artifact.generation,
         })
         .await?;
     Ok(())
@@ -1080,14 +1150,14 @@ mod tests {
         let canonical_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
         assert_ne!(legacy_ref, canonical_ref);
 
-        let proof_path = runtime
+        let proof_uri = runtime
             .task_dir(PipelineKey::ShastaNative, "legacy")
             .join("proof.json");
-        if let Some(parent) = proof_path.parent() {
+        if let Some(parent) = proof_uri.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(
-            &proof_path,
+            &proof_uri,
             serde_json::to_vec_pretty(&valid_native_proof())?,
         )
         .await?;
@@ -1121,7 +1191,7 @@ mod tests {
                 PipelineKey::ShastaNative,
                 PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
                 RunnerStatus::Completed,
-                Some(proof_path.display().to_string()),
+                Some(format!("file://{}", proof_uri.display())),
                 serde_json::to_value(metadata)?,
             ))
             .await?;
@@ -1130,13 +1200,17 @@ mod tests {
 
         assert!(
             runtime
-                .get_proof_artifact("taiko_dev/ethereum", &canonical_ref)
+                .get_proof_artifact(
+                    "taiko_dev/ethereum",
+                    PipelineKey::ShastaNative,
+                    &canonical_ref,
+                )
                 .await?
                 .is_some()
         );
         assert!(
             runtime
-                .get_proof_artifact("taiko_dev/ethereum", &legacy_ref)
+                .get_proof_artifact("taiko_dev/ethereum", PipelineKey::ShastaNative, &legacy_ref,)
                 .await?
                 .is_some()
         );
@@ -1161,8 +1235,9 @@ mod tests {
         };
         let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
         runtime
-            .write_proof_artifact_bytes(
+            .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
+                PipelineKey::ShastaNative,
                 &proposal_ref,
                 &serde_json::to_vec_pretty(&valid_native_proof())?,
             )
@@ -1204,11 +1279,24 @@ mod tests {
 
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
 
-        let artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
+        runtime
+            .get_proof_artifact(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaNative,
+                &proposal_ref,
+            )
             .await?
             .expect("proposal proof artifact");
-        assert!(tokio::fs::try_exists(artifact.proof_path).await?);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    PipelineKey::ShastaNative,
+                    &proposal_ref,
+                )
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 
@@ -1273,7 +1361,7 @@ mod tests {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         runner_status: RunnerStatus,
-        proof_path: Option<String>,
+        proof_uri: Option<String>,
         metadata: serde_json::Value,
     ) -> RuntimeTaskRecord {
         RuntimeTaskRecord {
@@ -1288,7 +1376,7 @@ mod tests {
             image_ref: None,
             provider_request_id: None,
             remote_tx_hash: None,
-            proof_path,
+            proof_uri,
             error: None,
             metadata,
             request_fingerprint: None,

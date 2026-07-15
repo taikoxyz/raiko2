@@ -186,6 +186,19 @@ where
         }
     }
 
+    /// Completes a running lease as failed without consulting its retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
+    pub async fn complete_permanent_failure(
+        &self,
+        lease: TaskLease<P, Id>,
+        error: String,
+    ) -> Result<bool, TaskStoreError> {
+        self.fail_completed_lease(lease, error).await
+    }
+
     async fn complete_success(
         &self,
         lease: TaskLease<P, Id>,

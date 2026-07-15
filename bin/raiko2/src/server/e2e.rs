@@ -170,17 +170,17 @@ async fn write_e2e_proof_artifact(
     route: &str,
     proof: &Proof,
 ) -> String {
-    let proof_path = state.runtime.proof_artifact_path(network_pair, proof_ref);
-    let proof_path_string = proof_path.display().to_string();
-    tokio::fs::create_dir_all(proof_path.parent().expect("proof dir"))
+    let publication = state
+        .runtime
+        .publish_proof_artifact_bytes(
+            network_pair,
+            pipeline_key,
+            proof_ref,
+            &serde_json::to_vec_pretty(proof).expect("serialize proof"),
+        )
         .await
-        .expect("create proof dir");
-    tokio::fs::write(
-        &proof_path,
-        serde_json::to_vec_pretty(proof).expect("serialize proof"),
-    )
-    .await
-    .expect("write proof artifact");
+        .expect("write proof artifact");
+    let artifact = publication.object();
     state
         .runtime
         .upsert_proof_artifact(ProofArtifactRegistration {
@@ -188,11 +188,13 @@ async fn write_e2e_proof_artifact(
             proof_ref: proof_ref.to_string(),
             pipeline_key,
             route: route.parse().expect("route"),
-            proof_path: proof_path_string.clone(),
+            proof_uri: artifact.proof_uri.clone(),
+            content_hash: artifact.content_hash.clone(),
+            generation: artifact.generation,
         })
         .await
         .expect("register proof artifact");
-    proof_path_string
+    artifact.proof_uri.clone()
 }
 
 async fn report_task_ids(app: &Router) -> Vec<String> {
@@ -1040,10 +1042,14 @@ async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
         .await
         .expect("list proof artifacts");
     let artifact = artifacts.first().expect("proof artifact").clone();
-    tokio::fs::remove_file(&artifact.proof_path)
+    let artifact_path = artifact
+        .proof_uri
+        .strip_prefix("file://")
+        .expect("filesystem proof URI");
+    tokio::fs::remove_file(artifact_path)
         .await
         .expect("remove proof file");
-    tokio::fs::create_dir(&artifact.proof_path)
+    tokio::fs::create_dir(artifact_path)
         .await
         .expect("replace proof file with directory");
 
@@ -1064,7 +1070,11 @@ async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
     assert!(
         state
             .runtime
-            .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+            .get_proof_artifact(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                &artifact.proof_ref,
+            )
             .await
             .expect("get proof artifact")
             .is_none(),
@@ -1127,7 +1137,7 @@ async fn e2e_v4_invalidate_artifacts_range_removes_all_root_refs() {
         assert!(
             state
                 .runtime
-                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, &proof_ref)
                 .await
                 .expect("get proof artifact")
                 .is_none(),
@@ -1180,7 +1190,7 @@ async fn e2e_v4_invalidate_artifacts_range_removes_aggregate_child_refs() {
         assert!(
             state
                 .runtime
-                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, &proof_ref)
                 .await
                 .expect("get proof artifact")
                 .is_none(),
@@ -1254,7 +1264,7 @@ async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root
         assert!(
             state
                 .runtime
-                .get_proof_artifact(&metadata.network_pair, proof_ref)
+                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, proof_ref)
                 .await
                 .expect("get proof artifact")
                 .is_none(),
@@ -2909,7 +2919,7 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     let proof_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request);
     let proof: Proof = serde_json::from_value(sp1_external_proof("0xcached-sp1-proof".to_string()))
         .expect("cached proof");
-    let proof_path = write_e2e_proof_artifact(
+    let proof_uri = write_e2e_proof_artifact(
         &state,
         "taiko_dev/ethereum",
         &proof_ref,
@@ -2955,14 +2965,14 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
     assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
     assert_eq!(res["data"]["proposals"][0]["proof_ref"], proof_ref);
-    assert_eq!(res["data"]["proposals"][0]["proof_path"], proof_path);
+    assert_eq!(res["data"]["proposals"][0]["proof_uri"], proof_uri);
     assert_eq!(
         res["data"]["proof_ref"],
         res["data"]["aggregate"]["proof_ref"]
     );
     assert_eq!(
-        res["data"]["proof_path"],
-        res["data"]["aggregate"]["proof_path"]
+        res["data"]["proof_uri"],
+        res["data"]["aggregate"]["proof_uri"]
     );
 }
 
@@ -4247,9 +4257,9 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         .await
         .expect("read task")
         .expect("task exists");
-    let proof_path = std::path::Path::new(&record.task_dir).join("proof.json");
+    let proof_uri = std::path::Path::new(&record.task_dir).join("proof.json");
     tokio::fs::write(
-        &proof_path,
+        &proof_uri,
         serde_json::to_vec(&raiko2_primitives::Proof {
             proof: Some("0xpersisted-proof".to_string()),
             ..Default::default()
@@ -4259,7 +4269,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
     .await
     .expect("write proof");
     record.runner_status = RunnerStatus::Completed;
-    record.proof_path = Some(proof_path.display().to_string());
+    record.proof_uri = Some(proof_uri.display().to_string());
     state
         .runtime
         .upsert_task(&record)

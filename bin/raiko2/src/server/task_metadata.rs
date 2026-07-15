@@ -58,7 +58,6 @@ pub(crate) struct TaskMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AggregateInputProofArtifact {
     pub(crate) proof_ref: String,
-    pub(crate) proof_path: String,
 }
 
 #[derive(Debug, Clone, Copy)]

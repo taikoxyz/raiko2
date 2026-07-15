@@ -9,9 +9,13 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+google-cloud-storage.workspace = true
 raiko2-pipeline.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-rusqlite.workspace = true
 rusqlite.workspace = true

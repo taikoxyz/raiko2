@@ -1,16 +1,20 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
-    EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
-    tasks::EngineTask,
+    EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
+    ProposalStage,
+    tasks::{EngineTask, ProofArtifactRef},
 };
 use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
-use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
+use raiko2_runtime::{
+    ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
+    RuntimeTaskRecord,
+};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::{
     TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
@@ -26,6 +30,7 @@ pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
     started_stage_tasks: Arc<Mutex<HashSet<String>>>,
+    root_updates: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +45,7 @@ impl RuntimeObserver {
             runtime,
             network_pair,
             started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
+            root_updates: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -90,6 +96,7 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
+        let _guard = self.root_updates.lock().await;
         let root_ref = Self::root_task_ref(id);
         let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
         if records.is_empty() {
@@ -355,7 +362,7 @@ impl RuntimeObserver {
         }
     }
 
-    async fn write_final_proof_files(
+    async fn publish_final_proof_artifact(
         &self,
         id: &EngineTaskId,
         stage: &str,
@@ -370,27 +377,54 @@ impl RuntimeObserver {
         let Some(first_record) = records.first() else {
             return Ok(HashMap::new());
         };
+        anyhow::ensure!(
+            proof.proof.is_some(),
+            "refusing to publish proof artifact without a proof payload"
+        );
 
         let proof_bytes =
             serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
-        let proof_path = self
+        let publication = self
             .runtime
-            .write_proof_artifact_bytes(&self.network_pair, &root_ref, &proof_bytes)
+            .publish_proof_artifact_bytes(
+                &self.network_pair,
+                first_record.pipeline_key,
+                &root_ref,
+                &proof_bytes,
+            )
             .await
-            .context("failed to write proof artifact")?;
-        let proof_path = proof_path.display().to_string();
+            .context("failed to publish proof artifact")?;
+        let artifact = publication.object();
+        if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
+            let canonical = serde_json::from_slice::<raiko2_primitives::Proof>(&artifact.bytes)
+                .context("conflicting canonical proof artifact is invalid")?;
+            anyhow::ensure!(
+                canonical.proof.is_some(),
+                "conflicting canonical proof artifact has no proof payload"
+            );
+            tracing::warn!(
+                task = ?id,
+                stage,
+                proof_uri = %artifact.proof_uri,
+                content_hash = %artifact.content_hash,
+                "discarding late proof because a different canonical artifact already exists"
+            );
+        }
+        let proof_uri = artifact.proof_uri.clone();
         self.runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: self.network_pair.clone(),
                 proof_ref: root_ref,
                 pipeline_key: first_record.pipeline_key,
                 route: first_record.route,
-                proof_path: proof_path.clone(),
+                proof_uri: proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await
             .context("failed to register proof artifact")?;
 
-        let mut proof_paths = HashMap::with_capacity(records.len());
+        let mut proof_uris = HashMap::with_capacity(records.len());
         for record in records {
             let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
                 .context("failed to parse task metadata")?;
@@ -400,12 +434,12 @@ impl RuntimeObserver {
                 continue;
             }
 
-            proof_paths.insert(record.task_id, proof_path.clone());
+            proof_uris.insert(record.task_id, proof_uri.clone());
         }
-        Ok(proof_paths)
+        Ok(proof_uris)
     }
 
-    async fn mark_proof_persistence_failed(
+    async fn mark_proof_publication_failed(
         &self,
         id: &EngineTaskId,
         stage: &'static str,
@@ -431,7 +465,7 @@ impl RuntimeObserver {
                 task = ?id,
                 stage,
                 error = %sync_err,
-                "failed to sync proof persistence failure"
+                "failed to sync proof publication failure"
             );
         }
     }
@@ -443,83 +477,99 @@ impl RuntimeObserver {
         stage: &'static str,
         finished_at_ms: i64,
         proof: &raiko2_primitives::Proof,
-    ) {
+    ) -> Result<()> {
         let task_id = Self::timing_key_for_task(id, task);
-        let proof_paths = match self.write_final_proof_files(id, stage, proof).await {
-            Ok(paths) => {
-                self.observe_stage_terminal_metrics(
-                    id,
-                    &task_id,
-                    stage,
-                    "completed",
-                    finished_at_ms,
-                    None,
-                )
-                .await;
-                paths
-            }
-            Err(err) => {
-                let message = format!("failed to persist proof output: {err}");
-                tracing::warn!(
-                    task = ?id,
-                    stage,
-                    error = %err,
-                    "failed to persist proof output"
-                );
-                self.observe_stage_terminal_metrics(
-                    id,
-                    &task_id,
-                    stage,
-                    "failed",
-                    finished_at_ms,
-                    Some(message.as_str()),
-                )
-                .await;
-                self.mark_proof_persistence_failed(id, stage, message.as_str())
+        let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
+        for attempt in 0..=publication_delays.len() {
+            let result = match self.publish_final_proof_artifact(id, stage, proof).await {
+                Ok(proof_uris) => self.sync_proof_success(id, task, stage, proof_uris).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => {
+                    self.observe_stage_terminal_metrics(
+                        id,
+                        &task_id,
+                        stage,
+                        "completed",
+                        finished_at_ms,
+                        None,
+                    )
                     .await;
-                return;
-            }
-        };
-
-        if let Err(err) = self
-            .update_root_records(id, move |record, updated_at, observed_at_ms| {
-                record.error = None;
-                let task_id = Self::timing_key_for_task(id, task);
-                let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-                    .context("failed to parse task metadata")?;
-                metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
-                let root_completed =
-                    Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
-                metadata.runtime.active_stage = Some(stage.to_string());
-                metadata.runtime.last_event = Some(
-                    if root_completed {
-                        "completed"
-                    } else {
-                        "stage_completed"
-                    }
-                    .to_string(),
-                );
-                record.metadata =
-                    serde_json::to_value(metadata).context("failed to serialize task metadata")?;
-                if root_completed {
-                    record.runner_status = RunnerStatus::Completed;
-                    record.proof_path = proof_paths.get(&record.task_id).cloned();
-                } else {
-                    record.runner_status = RunnerStatus::Allocated;
-                    record.proof_path = None;
+                    return Ok(());
                 }
-                record.updated_at = updated_at;
-                Ok(())
-            })
-            .await
-        {
-            tracing::warn!(
-                task = ?id,
-                stage,
-                error = %err,
-                "failed to sync runtime task success"
-            );
+                Err(error) if attempt < publication_delays.len() => {
+                    let delay = publication_delays[attempt];
+                    tracing::warn!(
+                        task = ?id,
+                        stage,
+                        publication_attempt = attempt + 1,
+                        delay_ms = delay.as_millis(),
+                        error = %error,
+                        "proof publication commit failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => {
+                    let message = format!("failed to publish proof artifact: {error}");
+                    tracing::warn!(task = ?id, stage, error = %error, "failed to publish proof artifact");
+                    self.observe_stage_terminal_metrics(
+                        id,
+                        &task_id,
+                        stage,
+                        "failed",
+                        finished_at_ms,
+                        Some(message.as_str()),
+                    )
+                    .await;
+                    self.mark_proof_publication_failed(id, stage, message.as_str())
+                        .await;
+                    anyhow::bail!(message);
+                }
+            }
         }
+        unreachable!("publication retry loop always returns")
+    }
+
+    async fn sync_proof_success(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        stage: &'static str,
+        proof_uris: HashMap<String, String>,
+    ) -> Result<()> {
+        self.update_root_records(id, move |record, updated_at, observed_at_ms| {
+            record.error = None;
+            let task_id = Self::timing_key_for_task(id, task);
+            let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+                .context("failed to parse task metadata")?;
+            metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
+            let root_completed =
+                Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
+            metadata.runtime.active_stage = Some(stage.to_string());
+            metadata.runtime.last_event = Some(
+                if root_completed {
+                    "completed"
+                } else {
+                    "stage_completed"
+                }
+                .to_string(),
+            );
+            record.metadata =
+                serde_json::to_value(metadata).context("failed to serialize task metadata")?;
+            if root_completed {
+                record.runner_status = RunnerStatus::Completed;
+                record.proof_uri = proof_uris.get(&record.task_id).cloned();
+            } else {
+                record.runner_status = RunnerStatus::Allocated;
+                record.proof_uri = None;
+            }
+            record.updated_at = updated_at;
+            Ok(())
+        })
+        .await
+        .context("failed to sync runtime task success")?;
+        Ok(())
     }
 
     fn root_completed_by_proof_success(
@@ -553,6 +603,34 @@ impl RuntimeObserver {
 
 #[async_trait]
 impl EngineObserver for RuntimeObserver {
+    async fn load_completed_proof(
+        &self,
+        id: &EngineTaskId,
+        _task: &EngineTask,
+    ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
+        let pipeline_key = match id.0 {
+            EngineTaskKey::Proposal { pipeline, .. }
+            | EngineTaskKey::Aggregate { pipeline, .. } => pipeline,
+        };
+        let proof_ref = Self::root_task_ref(id);
+        let Some(object) = self
+            .runtime
+            .read_proof_artifact_bytes(&self.network_pair, pipeline_key, &proof_ref)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let proof: raiko2_primitives::Proof = serde_json::from_slice(&object.bytes)
+            .map_err(|error| format!("invalid completed proof artifact {proof_ref}: {error}"))?;
+        if proof.proof.is_none() {
+            return Err(format!(
+                "completed proof artifact {proof_ref} has no proof payload"
+            ));
+        }
+        Ok(Some(proof))
+    }
+
     async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
         let stage = Self::stage_name(task);
         let should_increment = self.mark_stage_started_for_metrics(id, task);
@@ -681,20 +759,43 @@ impl EngineObserver for RuntimeObserver {
         }
     }
 
+    async fn load_proof_artifact(
+        &self,
+        artifact: &ProofArtifactRef,
+    ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
+        let object = self
+            .runtime
+            .read_proof_artifact_bytes(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                &artifact.proof_ref,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        object
+            .map(|object| {
+                serde_json::from_slice(&object.bytes).map_err(|error| {
+                    format!("invalid proof artifact {}: {error}", artifact.proof_ref)
+                })
+            })
+            .transpose()
+    }
+
     async fn on_task_succeeded(
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
         success: &EngineTaskSuccess,
-    ) {
+    ) -> std::result::Result<(), EngineObserverError> {
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
         let task_id = Self::timing_key_for_task(id, task);
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
-                self.handle_proof_success(id, task, stage, finished_at_ms, proof)
-                    .await;
-                return;
+                return self
+                    .handle_proof_success(id, task, stage, finished_at_ms, proof)
+                    .await
+                    .map_err(|error| EngineObserverError::ProofPublication(format!("{error:#}")));
             }
             EngineTaskSuccess::GuestInput { stage } | EngineTaskSuccess::EncodedInput { stage } => {
                 self.observe_stage_terminal_metrics(
@@ -736,6 +837,7 @@ impl EngineObserver for RuntimeObserver {
                 "failed to sync runtime task success"
             );
         }
+        Ok(())
     }
 
     async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
@@ -943,6 +1045,7 @@ mod tests {
         ProposalTask, RuntimeMetadata, aggregate_task_ref, proposal_task_ref, stage_task_ref,
     };
     use crate::server::telemetry;
+    use async_trait::async_trait;
     use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
@@ -950,7 +1053,44 @@ mod tests {
         BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
-    use raiko2_runtime::TaskRegistration;
+    use raiko2_runtime::{
+        ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, ProofArtifactStore,
+        TaskRegistration,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Default)]
+    struct FailingArtifactStore {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ProofArtifactStore for FailingArtifactStore {
+        fn environment_id(&self) -> &str {
+            "test"
+        }
+
+        fn proof_uri(&self, key: &ProofArtifactKey) -> String {
+            format!("failing://{}", key.proof_ref)
+        }
+
+        async fn put_if_absent(
+            &self,
+            _key: &ProofArtifactKey,
+            _bytes: &[u8],
+        ) -> Result<ProofArtifactPutResult> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("injected publication failure")
+        }
+
+        async fn get(&self, _key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            Ok(None)
+        }
+
+        async fn delete(&self, _key: &ProofArtifactKey, _generation: Option<i64>) -> Result<()> {
+            Ok(())
+        }
+    }
 
     fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1310,7 +1450,8 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let record = runtime
             .get_task("task_public_aggregate_pending")
@@ -1318,7 +1459,7 @@ mod tests {
             .expect("runtime task exists");
         let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         assert_eq!(record.runner_status, RunnerStatus::Allocated);
-        assert_eq!(record.proof_path, None);
+        assert_eq!(record.proof_uri, None);
         assert_eq!(
             metadata.runtime.last_event.as_deref(),
             Some("stage_completed")
@@ -1327,11 +1468,16 @@ mod tests {
             !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
             "proposal proof must not become the root proof for aggregate requests"
         );
-        let artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
+        runtime
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, &proposal_ref)
             .await?
             .expect("proposal proof artifact");
-        assert!(tokio::fs::try_exists(Path::new(&artifact.proof_path)).await?);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, &proposal_ref)
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 
@@ -1379,7 +1525,8 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let cancelled = runtime
             .get_task("task_cancelled")
@@ -1387,9 +1534,9 @@ mod tests {
             .expect("cancelled task");
         let active = runtime.get_task("task_active").await?.expect("active task");
         assert_eq!(cancelled.runner_status, RunnerStatus::Cancelled);
-        assert_eq!(cancelled.proof_path, None);
+        assert_eq!(cancelled.proof_uri, None);
         assert_eq!(active.runner_status, RunnerStatus::Completed);
-        assert!(active.proof_path.is_some());
+        assert!(active.proof_uri.is_some());
         Ok(())
     }
 
@@ -1563,24 +1710,30 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let record = runtime
             .get_task("task_public_multi_proposal")
             .await?
             .expect("runtime task exists");
         assert_eq!(record.runner_status, RunnerStatus::Allocated);
-        assert_eq!(record.proof_path, None);
+        assert_eq!(record.proof_uri, None);
         assert!(
             !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
             "partial proposal proof must not be persisted as final root proof"
         );
         let first_ref = proposal_task_ref(pipeline, &first_request);
-        let first_artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", &first_ref)
+        runtime
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, &first_ref)
             .await?
             .expect("first proposal proof artifact");
-        assert!(tokio::fs::try_exists(Path::new(&first_artifact.proof_path)).await?);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, &first_ref)
+                .await?
+                .is_some()
+        );
 
         observer
             .on_task_succeeded(
@@ -1594,7 +1747,8 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let record = runtime
             .get_task("task_public_multi_proposal")
@@ -1602,10 +1756,19 @@ mod tests {
             .expect("runtime task exists");
         let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         assert_eq!(record.runner_status, RunnerStatus::Completed);
-        assert!(record.proof_path.is_some());
+        assert!(record.proof_uri.is_some());
         assert_eq!(metadata.runtime.last_event.as_deref(), Some("completed"));
-        let proof_path = record.proof_path.expect("root proof path");
-        assert!(tokio::fs::try_exists(Path::new(&proof_path)).await?);
+        assert!(record.proof_uri.is_some());
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    &RuntimeObserver::root_task_ref(&second_task_id),
+                )
+                .await?
+                .is_some()
+        );
         assert!(!tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?);
         Ok(())
     }
@@ -2062,9 +2225,11 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_observer_records_proof_persistence_failure_metrics() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-proof-persistence",
-        ))?);
+        let store = Arc::new(FailingArtifactStore::default());
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-proof-persistence"),
+            store.clone(),
+        )?);
         let pipeline = PipelineKey::ShastaNative;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -2083,16 +2248,8 @@ mod tests {
         )
         .await?;
 
-        let proof_path = runtime.proof_artifact_path(
-            network_pair,
-            &RuntimeObserver::root_task_ref(&proposal_task_id),
-        );
-        let artifact_dir = proof_path.parent().expect("proof artifact parent");
-        tokio::fs::create_dir_all(artifact_dir.parent().expect("proof artifact root")).await?;
-        tokio::fs::write(artifact_dir, b"not a directory").await?;
-
         let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string());
-        observer
+        let error = observer
             .on_task_succeeded(
                 &proposal_task_id,
                 &EngineTask::ProveProposal {
@@ -2104,7 +2261,13 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .expect_err("publication must fail");
+        assert!(
+            matches!(error, EngineObserverError::ProofPublication(_)),
+            "{error}"
+        );
+        assert_eq!(store.attempts.load(Ordering::SeqCst), 3);
 
         let record = runtime
             .get_task("task_proof_persistence_failure")
@@ -2115,7 +2278,7 @@ mod tests {
             record
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("failed to persist proof output")),
+                .is_some_and(|error| error.contains("failed to publish proof artifact")),
             "{record:?}"
         );
 

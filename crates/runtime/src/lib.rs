@@ -2,17 +2,22 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
+mod artifact_store;
+
+pub use artifact_store::{
+    FilesystemProofArtifactStore, GcsProofArtifactStore, ProofArtifactKey, ProofArtifactObject,
+    ProofArtifactPutResult, ProofArtifactStore, validate_environment_id,
+};
+
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
 use std::fs as stdfs;
 use std::path::{Path, PathBuf};
-use std::process;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::OnceCell;
 
 /// Runtime root managed by the host process.
@@ -20,6 +25,7 @@ use tokio::sync::OnceCell;
 pub struct RuntimeManager {
     root: PathBuf,
     db_path: PathBuf,
+    artifact_store: Arc<dyn ProofArtifactStore>,
     conn: OnceCell<tokio_rusqlite::Connection>,
 }
 
@@ -41,16 +47,21 @@ pub struct ProofArtifactRegistration {
     pub proof_ref: String,
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
-    pub proof_path: String,
+    pub proof_uri: String,
+    pub content_hash: String,
+    pub generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofArtifactRecord {
+    pub environment_id: String,
     pub network_pair: String,
     pub proof_ref: String,
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
-    pub proof_path: String,
+    pub proof_uri: String,
+    pub content_hash: String,
+    pub generation: Option<i64>,
     pub updated_at: i64,
 }
 
@@ -59,9 +70,24 @@ impl RuntimeManager {
     ///
     /// Returns an error if the runtime layout cannot be created.
     pub fn new(root: PathBuf) -> Result<Self> {
+        let artifact_store = Arc::new(FilesystemProofArtifactStore::new(
+            "local".to_string(),
+            root.join("cache").join("proofs"),
+        )?);
+        Self::new_with_artifact_store(root, artifact_store)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the runtime layout cannot be created.
+    pub fn new_with_artifact_store(
+        root: PathBuf,
+        artifact_store: Arc<dyn ProofArtifactStore>,
+    ) -> Result<Self> {
         let manager = Self {
             db_path: root.join("state").join("runtime.sqlite"),
             root,
+            artifact_store,
             conn: OnceCell::new(),
         };
         manager.ensure_layout()?;
@@ -71,6 +97,87 @@ impl RuntimeManager {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    #[must_use]
+    pub fn environment_id(&self) -> &str {
+        self.artifact_store.environment_id()
+    }
+
+    #[must_use]
+    pub fn proof_artifact_uri(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+    ) -> String {
+        self.artifact_store.proof_uri(&ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            proof_ref: proof_ref.to_string(),
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the artifact cannot be conditionally published.
+    pub async fn publish_proof_artifact_bytes(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+        bytes: &[u8],
+    ) -> Result<ProofArtifactPutResult> {
+        self.artifact_store
+            .put_if_absent(
+                &ProofArtifactKey {
+                    network_pair: network_pair.to_string(),
+                    pipeline_key,
+                    proof_ref: proof_ref.to_string(),
+                },
+                bytes,
+            )
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the artifact cannot be read.
+    pub async fn read_proof_artifact_bytes(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+    ) -> Result<Option<ProofArtifactObject>> {
+        self.artifact_store
+            .get(&ProofArtifactKey {
+                network_pair: network_pair.to_string(),
+                pipeline_key,
+                proof_ref: proof_ref.to_string(),
+            })
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the artifact cannot be deleted.
+    pub async fn delete_proof_artifact(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+        generation: Option<i64>,
+    ) -> Result<()> {
+        self.artifact_store
+            .delete(
+                &ProofArtifactKey {
+                    network_pair: network_pair.to_string(),
+                    pipeline_key,
+                    proof_ref: proof_ref.to_string(),
+                },
+                generation,
+            )
+            .await
     }
 
     /// # Errors
@@ -93,13 +200,14 @@ impl RuntimeManager {
 
     async fn connection(&self) -> Result<tokio_rusqlite::Connection> {
         let db_path = self.db_path.clone();
+        let environment_id = self.environment_id().to_string();
         let conn = self
             .conn
             .get_or_try_init(|| async move {
                 let conn = tokio_rusqlite::Connection::open(db_path)
                     .await
                     .context("failed to open runtime sqlite database")?;
-                conn.call(|conn| {
+                conn.call(move |conn| {
                     conn.execute_batch(
                         r"
                         PRAGMA journal_mode = WAL;
@@ -117,7 +225,7 @@ impl RuntimeManager {
                             image_ref TEXT,
                             provider_request_id TEXT,
                             remote_tx_hash TEXT,
-                            proof_path TEXT,
+                            proof_uri TEXT,
                             error TEXT,
                             metadata_json TEXT,
                             request_fingerprint TEXT,
@@ -125,7 +233,7 @@ impl RuntimeManager {
                         );
                         ",
                     )?;
-                    migrate_runtime_schema(conn)?;
+                    migrate_runtime_schema(conn, &environment_id)?;
                     Ok(())
                 })
                 .await
@@ -142,29 +250,6 @@ impl RuntimeManager {
             .join("tasks")
             .join(pipeline_key.as_str())
             .join(task_id)
-    }
-
-    #[must_use]
-    pub fn proof_artifact_path(&self, network_pair: &str, proof_ref: &str) -> PathBuf {
-        self.root
-            .join("cache")
-            .join("proofs")
-            .join(safe_path_component(network_pair))
-            .join(format!("{}.json", safe_path_component(proof_ref)))
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the proof artifact cannot be atomically published.
-    pub async fn write_proof_artifact_bytes(
-        &self,
-        network_pair: &str,
-        proof_ref: &str,
-        bytes: &[u8],
-    ) -> Result<PathBuf> {
-        let path = self.proof_artifact_path(network_pair, proof_ref);
-        write_file_atomic(&path, bytes).await?;
-        Ok(path)
     }
 
     /// # Errors
@@ -224,7 +309,7 @@ impl RuntimeManager {
                 INSERT INTO runtime_tasks (
                     task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                     proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                    remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                    remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                     updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 ON CONFLICT(task_id) DO UPDATE SET
@@ -240,7 +325,7 @@ impl RuntimeManager {
                     image_ref = excluded.image_ref,
                     provider_request_id = excluded.provider_request_id,
                     remote_tx_hash = excluded.remote_tx_hash,
-                    proof_path = excluded.proof_path,
+                    proof_uri = excluded.proof_uri,
                     error = excluded.error,
                     metadata_json = excluded.metadata_json,
                     request_fingerprint = excluded.request_fingerprint,
@@ -260,7 +345,7 @@ impl RuntimeManager {
                     record.image_ref,
                     record.provider_request_id,
                     record.remote_tx_hash,
-                    record.proof_path,
+                    record.proof_uri,
                     record.error,
                     metadata_json,
                     record.request_fingerprint,
@@ -287,7 +372,7 @@ impl RuntimeManager {
                     SELECT
                         task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                         proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                        remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                         updated_at
                     FROM runtime_tasks
                     WHERE task_id = ?1
@@ -320,7 +405,7 @@ impl RuntimeManager {
                     SELECT
                         task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                         proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                        remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                         updated_at
                     FROM runtime_tasks
                     WHERE request_fingerprint = ?1
@@ -383,7 +468,7 @@ impl RuntimeManager {
                     SELECT
                         task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                         proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                        remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                         updated_at
                     FROM runtime_tasks
                     WHERE task_id = ?1
@@ -416,15 +501,15 @@ impl RuntimeManager {
         task_id: &str,
         runner_status: RunnerStatus,
         error: Option<String>,
-        proof_path: Option<String>,
+        proof_uri: Option<String>,
     ) -> Result<()> {
         let Some(mut record) = self.get_task(task_id).await? else {
             return Ok(());
         };
         record.runner_status = runner_status;
         record.error = error;
-        if proof_path.is_some() {
-            record.proof_path = proof_path;
+        if proof_uri.is_some() {
+            record.proof_uri = proof_uri;
         }
         record.updated_at = now_ts();
         self.upsert_task(&record).await
@@ -515,24 +600,30 @@ impl RuntimeManager {
     ) -> Result<()> {
         let conn = self.connection().await?;
         let updated_at = now_ts();
+        let environment_id = self.environment_id().to_string();
         conn.call(move |conn| {
             conn.execute(
                 r"
                 INSERT INTO proof_artifacts (
-                    network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
-                    pipeline_key = excluded.pipeline_key,
+                    environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
+                    content_hash, generation, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ON CONFLICT(environment_id, network_pair, pipeline_key, proof_ref) DO UPDATE SET
                     route = excluded.route,
-                    proof_path = excluded.proof_path,
+                    proof_uri = excluded.proof_uri,
+                    content_hash = excluded.content_hash,
+                    generation = excluded.generation,
                     updated_at = excluded.updated_at
                 ",
                 params![
+                    environment_id,
                     registration.network_pair,
                     registration.proof_ref,
                     registration.pipeline_key.as_str(),
                     registration.route.to_string(),
-                    registration.proof_path,
+                    registration.proof_uri,
+                    registration.content_hash,
+                    registration.generation,
                     updated_at,
                 ],
             )?;
@@ -549,21 +640,25 @@ impl RuntimeManager {
     pub async fn get_proof_artifact(
         &self,
         network_pair: &str,
+        pipeline_key: PipelineKey,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactRecord>> {
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let environment_id = self.environment_id().to_string();
         let artifact = conn
             .call(move |conn| {
                 Ok(conn
                     .query_row(
                         r"
-                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    SELECT environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
+                           content_hash, generation, updated_at
                     FROM proof_artifacts
-                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
                     ",
-                        params![network_pair, proof_ref],
+                        params![environment_id, network_pair, pipeline_key, proof_ref],
                         proof_artifact_record_from_row,
                     )
                     .optional()?)
@@ -578,16 +673,19 @@ impl RuntimeManager {
     /// Returns an error if proof artifact records cannot be listed.
     pub async fn list_proof_artifacts(&self) -> Result<Vec<ProofArtifactRecord>> {
         let conn = self.connection().await?;
+        let environment_id = self.environment_id().to_string();
         let artifacts = conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     r"
-                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    SELECT environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
+                           content_hash, generation, updated_at
                     FROM proof_artifacts
+                    WHERE environment_id = ?1
                     ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
                     ",
                 )?;
-                let mut rows = stmt.query([])?;
+                let mut rows = stmt.query(params![environment_id])?;
                 let mut artifacts = Vec::new();
                 while let Some(row) = rows.next()? {
                     artifacts.push(proof_artifact_record_from_row(row)?);
@@ -605,28 +703,32 @@ impl RuntimeManager {
     pub async fn remove_proof_artifact(
         &self,
         network_pair: &str,
+        pipeline_key: PipelineKey,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactRecord>> {
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let environment_id = self.environment_id().to_string();
         let artifact = conn
             .call(move |conn| {
                 let artifact = conn
                     .query_row(
                         r"
-                        SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                        SELECT environment_id, network_pair, proof_ref, pipeline_key, route,
+                               proof_uri, content_hash, generation, updated_at
                         FROM proof_artifacts
-                        WHERE network_pair = ?1 AND proof_ref = ?2
+                        WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
                         ",
-                        params![network_pair, proof_ref],
+                        params![environment_id, network_pair, pipeline_key, proof_ref],
                         proof_artifact_record_from_row,
                     )
                     .optional()?;
                 if artifact.is_some() {
                     conn.execute(
-                        "DELETE FROM proof_artifacts WHERE network_pair = ?1 AND proof_ref = ?2",
-                        params![network_pair, proof_ref],
+                        "DELETE FROM proof_artifacts WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4",
+                        params![environment_id, network_pair, pipeline_key, proof_ref],
                     )?;
                 }
                 Ok(artifact)
@@ -648,7 +750,7 @@ impl RuntimeManager {
                     SELECT
                         task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                         proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                        remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                         updated_at
                     FROM runtime_tasks
                     ORDER BY updated_at DESC, task_id ASC
@@ -693,7 +795,7 @@ impl RuntimeManager {
                         SELECT
                             task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                             proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                            remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                             updated_at
                         FROM runtime_tasks
                         WHERE runner_status IN ('completed', 'failed', 'cancelled')
@@ -709,7 +811,7 @@ impl RuntimeManager {
                         SELECT
                             task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                             proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                            remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                             updated_at
                         FROM runtime_tasks
                         WHERE runner_status IN ('completed', 'failed', 'cancelled')
@@ -762,7 +864,7 @@ impl RuntimeManager {
                         SELECT
                             task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                             proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                            remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                             updated_at
                         FROM runtime_tasks
                         WHERE runner_status IN ('allocated', 'running')
@@ -778,7 +880,7 @@ impl RuntimeManager {
                         SELECT
                             task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                             proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                            remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                             updated_at
                         FROM runtime_tasks
                         WHERE runner_status IN ('allocated', 'running')
@@ -845,7 +947,7 @@ impl RuntimeManager {
             image_ref: None,
             provider_request_id: None,
             remote_tx_hash: None,
-            proof_path: None,
+            proof_uri: None,
             error: None,
             metadata: registration.metadata.clone(),
             request_fingerprint: registration.request_fingerprint.clone(),
@@ -887,7 +989,7 @@ impl RuntimeManager {
                 INSERT OR IGNORE INTO runtime_tasks (
                     task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                     proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                    remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                    remote_tx_hash, proof_uri, error, metadata_json, request_fingerprint,
                     updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 ",
@@ -905,7 +1007,7 @@ impl RuntimeManager {
                     record.image_ref,
                     record.provider_request_id,
                     record.remote_tx_hash,
-                    record.proof_path,
+                    record.proof_uri,
                     record.error,
                     metadata_json,
                     record.request_fingerprint,
@@ -964,7 +1066,7 @@ pub struct RuntimeTaskRecord {
     pub image_ref: Option<String>,
     pub provider_request_id: Option<String>,
     pub remote_tx_hash: Option<String>,
-    pub proof_path: Option<String>,
+    pub proof_uri: Option<String>,
     pub error: Option<String>,
     pub metadata: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1050,7 +1152,7 @@ fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run
         image_ref: row.get(10)?,
         provider_request_id: row.get(11)?,
         remote_tx_hash: row.get(12)?,
-        proof_path: row.get(13)?,
+        proof_uri: row.get(13)?,
         error: row.get(14)?,
         metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
         request_fingerprint: row.get(16)?,
@@ -1061,42 +1163,53 @@ fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run
 fn proof_artifact_record_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ProofArtifactRecord> {
-    let pipeline_key_raw: String = row.get(2)?;
-    let route_raw: String = row.get(3)?;
+    let pipeline_key_raw: String = row.get(3)?;
+    let route_raw: String = row.get(4)?;
     let pipeline_key = pipeline_key_raw.parse::<PipelineKey>().map_err(|err| {
         invalid_runtime_task_row(
-            2,
+            3,
             format!("invalid pipeline_key '{pipeline_key_raw}': {err}"),
         )
     })?;
     let route = route_raw.parse::<PipelineRoute>().map_err(|err| {
-        invalid_runtime_task_row(3, format!("invalid route '{route_raw}': {err}"))
+        invalid_runtime_task_row(4, format!("invalid route '{route_raw}': {err}"))
     })?;
     Ok(ProofArtifactRecord {
-        network_pair: row.get(0)?,
-        proof_ref: row.get(1)?,
+        environment_id: row.get(0)?,
+        network_pair: row.get(1)?,
+        proof_ref: row.get(2)?,
         pipeline_key,
         route,
-        proof_path: row.get(4)?,
-        updated_at: row.get(5)?,
+        proof_uri: row.get(5)?,
+        content_hash: row.get(6)?,
+        generation: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
-fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let request_fingerprint_exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name = 'request_fingerprint' LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if request_fingerprint_exists.is_none() {
-        conn.execute(
+fn migrate_runtime_schema(
+    conn: &rusqlite::Connection,
+    environment_id: &str,
+) -> rusqlite::Result<()> {
+    let transaction = conn.unchecked_transaction()?;
+    bind_runtime_environment(&transaction, environment_id)?;
+    if !table_column_exists(&transaction, "runtime_tasks", "request_fingerprint")? {
+        transaction.execute(
             "ALTER TABLE runtime_tasks ADD COLUMN request_fingerprint TEXT",
             [],
         )?;
     }
-    conn.execute(
+    let runtime_proof_uri_exists = table_column_exists(&transaction, "runtime_tasks", "proof_uri")?;
+    if !runtime_proof_uri_exists {
+        transaction.execute("ALTER TABLE runtime_tasks ADD COLUMN proof_uri TEXT", [])?;
+        if table_column_exists(&transaction, "runtime_tasks", "proof_path")? {
+            transaction.execute(
+                "UPDATE runtime_tasks SET proof_uri = CASE WHEN proof_path LIKE 'file://%' THEN proof_path ELSE 'file://' || proof_path END WHERE proof_path IS NOT NULL",
+                [],
+            )?;
+        }
+    }
+    transaction.execute(
         r"
         CREATE UNIQUE INDEX IF NOT EXISTS runtime_tasks_request_fingerprint_uq
         ON runtime_tasks(request_fingerprint)
@@ -1104,29 +1217,116 @@ fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         ",
         [],
     )?;
-    conn.execute(
+    transaction.execute(
         r"
         CREATE INDEX IF NOT EXISTS runtime_tasks_status_updated_at_idx
         ON runtime_tasks(runner_status, updated_at, task_id)
         ",
         [],
     )?;
-    conn.execute_batch(
-        r"
-        CREATE TABLE IF NOT EXISTS proof_artifacts (
-            network_pair TEXT NOT NULL,
-            proof_ref TEXT NOT NULL,
-            pipeline_key TEXT NOT NULL,
-            route TEXT NOT NULL,
-            proof_path TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(network_pair, proof_ref)
-        );
-        CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx
-        ON proof_artifacts(updated_at);
-        ",
+    let proof_artifacts_exists: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proof_artifacts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if proof_artifacts_exists.is_some()
+        && !table_column_exists(&transaction, "proof_artifacts", "environment_id")?
+    {
+        let legacy_location = if table_column_exists(&transaction, "proof_artifacts", "proof_uri")?
+        {
+            "proof_uri"
+        } else {
+            "CASE WHEN proof_path LIKE 'file://%' THEN proof_path ELSE 'file://' || proof_path END"
+        };
+        transaction.execute_batch(
+            r"
+            ALTER TABLE proof_artifacts RENAME TO proof_artifacts_legacy;
+            CREATE TABLE proof_artifacts (
+                environment_id TEXT NOT NULL,
+                network_pair TEXT NOT NULL,
+                proof_ref TEXT NOT NULL,
+                pipeline_key TEXT NOT NULL,
+                route TEXT NOT NULL,
+                proof_uri TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                generation INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(environment_id, network_pair, pipeline_key, proof_ref)
+            );
+            ",
+        )?;
+        transaction.execute(
+            &format!(
+                "INSERT INTO proof_artifacts (environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri, content_hash, generation, updated_at) SELECT ?1, network_pair, proof_ref, pipeline_key, route, {legacy_location}, '', NULL, updated_at FROM proof_artifacts_legacy"
+            ),
+            params![environment_id],
+        )?;
+        transaction.execute_batch("DROP TABLE proof_artifacts_legacy;")?;
+    } else {
+        transaction.execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS proof_artifacts (
+                environment_id TEXT NOT NULL,
+                network_pair TEXT NOT NULL,
+                proof_ref TEXT NOT NULL,
+                pipeline_key TEXT NOT NULL,
+                route TEXT NOT NULL,
+                proof_uri TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                generation INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(environment_id, network_pair, pipeline_key, proof_ref)
+            );
+            ",
+        )?;
+    }
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx ON proof_artifacts(updated_at);",
     )?;
-    Ok(())
+    transaction.commit()
+}
+
+fn bind_runtime_environment(
+    transaction: &rusqlite::Transaction<'_>,
+    environment_id: &str,
+) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS runtime_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )?;
+    let stored: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM runtime_metadata WHERE key = 'environment_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(stored) if stored != environment_id => Err(rusqlite::Error::InvalidParameterName(
+            format!("runtime database belongs to environment '{stored}', not '{environment_id}'"),
+        )),
+        Some(_) => Ok(()),
+        None => {
+            transaction.execute(
+                "INSERT INTO runtime_metadata (key, value) VALUES ('environment_id', ?1)",
+                params![environment_id],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn table_column_exists(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1 LIMIT 1");
+    Ok(conn
+        .query_row(&sql, params![column], |row| row.get::<_, i64>(0))
+        .optional()?
+        .is_some())
 }
 
 async fn remove_task_workspace(task_dir: &Path) -> Result<()> {
@@ -1136,72 +1336,6 @@ async fn remove_task_workspace(task_dir: &Path) -> Result<()> {
             .with_context(|| format!("failed to remove task workspace {}", task_dir.display()))?;
     }
     Ok(())
-}
-
-async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("path {} has no parent", path.display()))?;
-    fs::create_dir_all(parent)
-        .await
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-
-    let temp_path = atomic_temp_path(path);
-    let result = async {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .await
-            .with_context(|| format!("failed to create temp file {}", temp_path.display()))?;
-        file.write_all(bytes)
-            .await
-            .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("failed to sync temp file {}", temp_path.display()))?;
-        drop(file);
-        fs::rename(&temp_path, path).await.with_context(|| {
-            format!(
-                "failed to publish temp file {} to {}",
-                temp_path.display(),
-                path.display()
-            )
-        })?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path).await;
-    }
-    result
-}
-
-fn atomic_temp_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact");
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    path.with_file_name(format!(".{file_name}.tmp.{}.{}", process::id(), unique))
-}
-
-fn safe_path_component(raw: &str) -> String {
-    let mut component = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                component.push(char::from(byte));
-            }
-            _ => {
-                write!(&mut component, "%{byte:02x}").expect("writing to String should not fail");
-            }
-        }
-    }
-    component
 }
 
 fn invalid_runtime_task_row(column: usize, message: String) -> rusqlite::Error {
@@ -1260,8 +1394,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
-        TaskRegistration, TaskRegistrationOutcome,
+        ExpiredTaskCursor, FilesystemProofArtifactStore, ProofArtifactRegistration, RunnerStatus,
+        RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
     };
     use raiko2_pipeline::PipelineRoute;
     use rusqlite::OptionalExtension;
@@ -1277,6 +1411,36 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    #[tokio::test]
+    async fn runtime_database_rejects_a_different_environment() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-environment-test");
+        let first = RuntimeManager::new_with_artifact_store(
+            root.clone(),
+            Arc::new(FilesystemProofArtifactStore::new(
+                "devnet-a".to_string(),
+                root.join("artifacts"),
+            )?),
+        )?;
+        first.list_tasks().await?;
+        drop(first);
+
+        let second = RuntimeManager::new_with_artifact_store(
+            root.clone(),
+            Arc::new(FilesystemProofArtifactStore::new(
+                "devnet-b".to_string(),
+                root.join("artifacts"),
+            )?),
+        )?;
+        let error = second
+            .list_tasks()
+            .await
+            .expect_err("database environment must be immutable");
+        assert!(format!("{error:#}").contains("devnet-a"), "{error:#}");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -1307,30 +1471,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_manager_persists_proof_artifact_paths() -> anyhow::Result<()> {
+    async fn runtime_manager_persists_proof_artifact_uris() -> anyhow::Result<()> {
         let root = unique_root("raiko2-runtime-proof-artifact");
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
         let runtime = RuntimeManager::new(root.clone())?;
-        let proof_path = runtime.proof_artifact_path("taiko_dev/ethereum", "proposal_0xabc");
+        let pipeline_key = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let proof_uri =
+            runtime.proof_artifact_uri("taiko_dev/ethereum", pipeline_key, "proposal_0xabc");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),
                 proof_ref: "proposal_0xabc".to_string(),
-                pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
+                pipeline_key,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
-                proof_path: proof_path.display().to_string(),
+                proof_uri: proof_uri.clone(),
+                content_hash: "hash".to_string(),
+                generation: None,
             })
             .await?;
 
         let artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", "proposal_0xabc")
+            .get_proof_artifact("taiko_dev/ethereum", pipeline_key, "proposal_0xabc")
             .await?
             .expect("proof artifact");
-        assert_eq!(artifact.proof_path, proof_path.display().to_string());
+        assert_eq!(artifact.proof_uri, proof_uri);
         assert_eq!(artifact.network_pair, "taiko_dev/ethereum");
         assert_eq!(artifact.proof_ref, "proposal_0xabc");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_publication_does_not_overwrite_existing_content() -> anyhow::Result<()>
+    {
+        let root = unique_root("raiko2-runtime-proof-create-only");
+        let runtime = RuntimeManager::new(root.clone())?;
+
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                raiko2_pipeline::PipelineKey::ShastaSp1,
+                "proposal_0xabc",
+                b"first",
+            )
+            .await?;
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                raiko2_pipeline::PipelineKey::ShastaSp1,
+                "proposal_0xabc",
+                b"second",
+            )
+            .await?;
+
+        let artifact = runtime
+            .read_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                raiko2_pipeline::PipelineKey::ShastaSp1,
+                "proposal_0xabc",
+            )
+            .await?
+            .expect("artifact");
+        assert_eq!(artifact.bytes, b"first");
 
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1431,7 +1636,7 @@ mod tests {
                 INSERT INTO runtime_tasks (
                     task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
                     proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                    remote_tx_hash, proof_path, error, metadata_json, updated_at
+                    remote_tx_hash, proof_uri, error, metadata_json, updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 ",
                 rusqlite::params![
@@ -1705,10 +1910,25 @@ mod tests {
                     image_ref TEXT,
                     provider_request_id TEXT,
                     remote_tx_hash TEXT,
-                    proof_path TEXT,
+                    proof_uri TEXT,
                     error TEXT,
                     metadata_json TEXT,
                     updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE proof_artifacts (
+                    network_pair TEXT NOT NULL,
+                    proof_ref TEXT NOT NULL,
+                    pipeline_key TEXT NOT NULL,
+                    route TEXT NOT NULL,
+                    proof_path TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY(network_pair, proof_ref)
+                );
+                INSERT INTO proof_artifacts (
+                    network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                ) VALUES (
+                    'taiko_dev/ethereum', 'legacy-proof', 'shasta-sp1-local', 'sp1/local',
+                    '/tmp/legacy-proof.json', 1
                 );
                 ",
             )?;
@@ -1719,6 +1939,16 @@ mod tests {
 
         let runtime = RuntimeManager::new(root.clone())?;
         let _ = runtime.list_tasks().await?;
+        let artifact = runtime
+            .get_proof_artifact(
+                "taiko_dev/ethereum",
+                raiko2_pipeline::PipelineKey::ShastaSp1,
+                "legacy-proof",
+            )
+            .await?
+            .expect("migrated proof artifact");
+        assert_eq!(artifact.environment_id, "local");
+        assert_eq!(artifact.proof_uri, "file:///tmp/legacy-proof.json");
 
         let conn =
             tokio_rusqlite::Connection::open(root.join("state").join("runtime.sqlite")).await?;

@@ -53,7 +53,14 @@ compute_units_per_second = 1000
 
 [runtime]
 root = "./data/runtime"
+environment_id = "local"
 inactive_ttl_secs = 7200
+
+[runtime.artifact_store]
+# Use "gcs" in production and set bucket. Filesystem is intended for local development and tests.
+backend = "filesystem"
+# prefix = "raiko2/proofs" # GCS object prefix only
+# bucket = "my-raiko2-proof-artifacts"
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
 # Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.

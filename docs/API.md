@@ -597,6 +597,8 @@ Scope:
 - If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
   are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
   are linked to a matched runtime task.
+- If deleting a backing proof object fails, `failed` is incremented and the artifact remains
+  tombstoned for a later invalidation retry. Tombstoned artifacts are not eligible for proof reuse.
 
 Validation:
 

@@ -1736,10 +1736,15 @@ async fn load_cached_proposal_artifact_for_route(
     route: CanonicalProofRoute,
     proof_ref: &str,
 ) -> Result<Option<ProofArtifactMaterial>, ApiError> {
-    let Some(material) =
-        load_proof_artifact_material(runtime, network_pair, route.pipeline_key(), proof_ref)
-            .await
-            .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+    let Some(material) = load_proof_artifact_material(
+        runtime,
+        network_pair,
+        route.pipeline_key(),
+        route.route,
+        proof_ref,
+    )
+    .await
+    .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
     else {
         return Ok(None);
     };
@@ -1786,6 +1791,7 @@ async fn load_persisted_root_proof_material(
             runtime,
             &metadata.network_pair,
             record.pipeline_key,
+            record.route,
             &proof_ref,
         )
         .await
@@ -2261,6 +2267,7 @@ async fn load_proposal_statuses(
             runtime_manager,
             &metadata.network_pair,
             record.pipeline_key,
+            record.route,
             &proposal.task_id,
         )
         .await
@@ -2335,6 +2342,7 @@ async fn load_aggregate_status(
             runtime_manager,
             &metadata.network_pair,
             record.pipeline_key,
+            record.route,
             task_id,
         )
         .await
@@ -2973,6 +2981,7 @@ async fn completed_root_artifact_missing(
             runtime,
             &metadata.network_pair,
             record.pipeline_key,
+            record.route,
             proof_ref,
         )
         .await
@@ -4861,6 +4870,7 @@ mod tests {
             &runtime,
             "taiko_dev/ethereum",
             PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
             &artifacts[0].proof_ref,
         )
         .await?
@@ -4897,6 +4907,7 @@ mod tests {
             &runtime,
             "taiko_dev/ethereum",
             PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
             "proposal-recovery",
         )
         .await?
@@ -4904,6 +4915,45 @@ mod tests {
 
         assert_eq!(recovered.proof, proof);
         assert_eq!(recovered.record.pipeline_key, PipelineKey::ShastaNative);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sp1_network_artifact_without_db_record_keeps_requested_route() -> Result<()> {
+        let runtime = RuntimeManager::new(unique_test_runtime_root("sp1-network-artifact-route"))?;
+        let route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
+            PipelineKey::ShastaSp1,
+            ProofType::Sp1,
+        );
+        let proof = Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(alloy_primitives::B256::ZERO),
+            uuid: Some("sp1-proof-id".to_string()),
+            extra_data: Some(serde_json::json!({ "sp1": true })),
+            ..Proof::default()
+        };
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaSp1,
+                "sp1-network-proposal",
+                &serde_json::to_vec_pretty(&proof)?,
+            )
+            .await?;
+
+        let recovered = load_cached_proposal_artifact_for_route(
+            &runtime,
+            "taiko_dev/ethereum",
+            route,
+            "sp1-network-proposal",
+        )
+        .await
+        .map_err(|err| anyhow!(err.message))?
+        .expect("recover SP1 network proof");
+
+        assert_eq!(recovered.proof, proof);
+        assert_eq!(recovered.record.route, route.route);
         Ok(())
     }
 

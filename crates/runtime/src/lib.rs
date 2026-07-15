@@ -62,6 +62,7 @@ pub struct ProofArtifactRecord {
     pub proof_uri: String,
     pub content_hash: String,
     pub generation: Option<i64>,
+    pub invalidated_at: Option<i64>,
     pub updated_at: i64,
 }
 
@@ -676,9 +677,10 @@ impl RuntimeManager {
                     .query_row(
                         r"
                     SELECT environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
-                           content_hash, generation, updated_at
+                           content_hash, generation, invalidated_at, updated_at
                     FROM proof_artifacts
                     WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
+                      AND invalidated_at IS NULL
                     ",
                         params![environment_id, network_pair, pipeline_key, proof_ref],
                         proof_artifact_record_from_row,
@@ -701,7 +703,7 @@ impl RuntimeManager {
                 let mut stmt = conn.prepare(
                     r"
                     SELECT environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
-                           content_hash, generation, updated_at
+                           content_hash, generation, invalidated_at, updated_at
                     FROM proof_artifacts
                     WHERE environment_id = ?1
                     ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
@@ -739,7 +741,7 @@ impl RuntimeManager {
                     .query_row(
                         r"
                         SELECT environment_id, network_pair, proof_ref, pipeline_key, route,
-                               proof_uri, content_hash, generation, updated_at
+                               proof_uri, content_hash, generation, invalidated_at, updated_at
                         FROM proof_artifacts
                         WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
                         ",
@@ -758,6 +760,79 @@ impl RuntimeManager {
             .await
             .context("failed to remove proof artifact")?;
         Ok(artifact)
+    }
+
+    /// Marks a proof artifact as unavailable for reuse while retaining it for deletion retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record cannot be updated.
+    pub async fn mark_proof_artifact_invalidated(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let environment_id = self.environment_id().to_string();
+        let invalidated_at = now_ts();
+        let updated = conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    r"
+                    UPDATE proof_artifacts
+                    SET invalidated_at = COALESCE(invalidated_at, ?1), updated_at = ?1
+                    WHERE environment_id = ?2 AND network_pair = ?3 AND pipeline_key = ?4 AND proof_ref = ?5
+                    ",
+                    params![
+                        invalidated_at,
+                        environment_id,
+                        network_pair,
+                        pipeline_key,
+                        proof_ref
+                    ],
+                )?)
+            })
+            .await
+            .context("failed to mark proof artifact invalidated")?;
+        Ok(updated > 0)
+    }
+
+    /// Returns whether a proof artifact has been invalidated but not yet deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact state cannot be loaded.
+    pub async fn proof_artifact_is_invalidated(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let environment_id = self.environment_id().to_string();
+        conn.call(move |conn| {
+            Ok(conn
+                .query_row(
+                    r"
+                    SELECT invalidated_at IS NOT NULL
+                    FROM proof_artifacts
+                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
+                    ",
+                    params![environment_id, network_pair, pipeline_key, proof_ref],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(false))
+        })
+        .await
+        .context("failed to query proof artifact invalidation state")
     }
 
     /// # Errors
@@ -1205,7 +1280,8 @@ fn proof_artifact_record_from_row(
         proof_uri: row.get(5)?,
         content_hash: row.get(6)?,
         generation: row.get(7)?,
-        updated_at: row.get(8)?,
+        invalidated_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -1256,12 +1332,6 @@ fn migrate_runtime_schema(
     if proof_artifacts_exists.is_some()
         && !table_column_exists(&transaction, "proof_artifacts", "environment_id")?
     {
-        let legacy_location = if table_column_exists(&transaction, "proof_artifacts", "proof_uri")?
-        {
-            "proof_uri"
-        } else {
-            "CASE WHEN proof_path LIKE 'file://%' THEN proof_path ELSE 'file://' || proof_path END"
-        };
         transaction.execute_batch(
             r"
             ALTER TABLE proof_artifacts RENAME TO proof_artifacts_legacy;
@@ -1274,16 +1344,11 @@ fn migrate_runtime_schema(
                 proof_uri TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 generation INTEGER,
+                invalidated_at INTEGER,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY(environment_id, network_pair, pipeline_key, proof_ref)
             );
             ",
-        )?;
-        transaction.execute(
-            &format!(
-                "INSERT INTO proof_artifacts (environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri, content_hash, generation, updated_at) SELECT ?1, network_pair, proof_ref, pipeline_key, route, {legacy_location}, '', NULL, updated_at FROM proof_artifacts_legacy"
-            ),
-            params![environment_id],
         )?;
         transaction.execute_batch("DROP TABLE proof_artifacts_legacy;")?;
     } else {
@@ -1298,10 +1363,17 @@ fn migrate_runtime_schema(
                 proof_uri TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 generation INTEGER,
+                invalidated_at INTEGER,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY(environment_id, network_pair, pipeline_key, proof_ref)
             );
             ",
+        )?;
+    }
+    if !table_column_exists(&transaction, "proof_artifacts", "invalidated_at")? {
+        transaction.execute(
+            "ALTER TABLE proof_artifacts ADD COLUMN invalidated_at INTEGER",
+            [],
         )?;
     }
     transaction.execute_batch(
@@ -1521,6 +1593,52 @@ mod tests {
         assert_eq!(artifact.proof_uri, proof_uri);
         assert_eq!(artifact.network_pair, "taiko_dev/ethereum");
         assert_eq!(artifact.proof_ref, "proposal_0xabc");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_tombstone_survives_reregistration() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-proof-artifact-tombstone");
+        let runtime = RuntimeManager::new(root.clone())?;
+        let pipeline_key = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let registration = ProofArtifactRegistration {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: "proposal_0xabc".to_string(),
+            pipeline_key,
+            route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
+            proof_uri: "file:///proof.json".to_string(),
+            content_hash: "hash".to_string(),
+            generation: Some(7),
+        };
+        runtime.upsert_proof_artifact(registration.clone()).await?;
+        assert!(
+            runtime
+                .mark_proof_artifact_invalidated(
+                    &registration.network_pair,
+                    pipeline_key,
+                    &registration.proof_ref,
+                )
+                .await?
+        );
+
+        runtime.upsert_proof_artifact(registration.clone()).await?;
+
+        assert!(
+            runtime
+                .get_proof_artifact(
+                    &registration.network_pair,
+                    pipeline_key,
+                    &registration.proof_ref,
+                )
+                .await?
+                .is_none(),
+            "re-registration cleared the tombstone"
+        );
+        let artifacts = runtime.list_proof_artifacts().await?;
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].invalidated_at.is_some());
 
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1907,7 +2025,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_manager_migrates_request_fingerprint_column() -> anyhow::Result<()> {
+    async fn runtime_manager_drops_legacy_artifact_rows_for_republication() -> anyhow::Result<()> {
         let root = unique_root("raiko2-runtime-migration");
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
@@ -1967,10 +2085,11 @@ mod tests {
                 raiko2_pipeline::PipelineKey::ShastaSp1,
                 "legacy-proof",
             )
-            .await?
-            .expect("migrated proof artifact");
-        assert_eq!(artifact.environment_id, "local");
-        assert_eq!(artifact.proof_uri, "file:///tmp/legacy-proof.json");
+            .await?;
+        assert!(
+            artifact.is_none(),
+            "legacy locations must not masquerade as canonical artifacts"
+        );
 
         let conn =
             tokio_rusqlite::Connection::open(root.join("state").join("runtime.sqlite")).await?;

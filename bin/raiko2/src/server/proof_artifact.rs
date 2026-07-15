@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
 use raiko2_runtime::{ProofArtifactRecord, ProofArtifactRegistration, RuntimeManager};
 
@@ -12,8 +12,16 @@ pub(crate) async fn load_proof_artifact_material(
     runtime: &RuntimeManager,
     network_pair: &str,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proof_ref: &str,
 ) -> Result<Option<ProofArtifactMaterial>> {
+    if runtime
+        .proof_artifact_is_invalidated(network_pair, pipeline_key, proof_ref)
+        .await
+        .context("failed to check proof artifact invalidation state")?
+    {
+        return Ok(None);
+    }
     let object = match runtime
         .read_proof_artifact_bytes(network_pair, pipeline_key, proof_ref)
         .await
@@ -40,7 +48,7 @@ pub(crate) async fn load_proof_artifact_material(
             network_pair: network_pair.to_string(),
             proof_ref: proof_ref.to_string(),
             pipeline_key,
-            route: pipeline_key.route(),
+            route,
             proof_uri: object.proof_uri.clone(),
             content_hash: object.content_hash.clone(),
             generation: object.generation,

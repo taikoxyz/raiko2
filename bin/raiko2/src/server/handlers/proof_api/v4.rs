@@ -608,7 +608,30 @@ async fn remove_invalidated_artifacts(
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
-        let backing_artifact_removed = match state
+        match state
+            .runtime
+            .mark_proof_artifact_invalidated(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                &artifact.proof_ref,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(err) => {
+                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+                tracing::warn!(
+                    network_pair = %artifact.network_pair,
+                    proof_ref = %artifact.proof_ref,
+                    error = %err,
+                    "failed to mark proof artifact invalidated"
+                );
+                continue;
+            }
+        }
+
+        if let Err(err) = state
             .runtime
             .delete_proof_artifact(
                 &artifact.network_pair,
@@ -618,19 +641,17 @@ async fn remove_invalidated_artifacts(
             )
             .await
         {
-            Ok(()) => true,
-            Err(err) => {
-                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
-                tracing::warn!(
-                    network_pair = %artifact.network_pair,
-                    proof_ref = %artifact.proof_ref,
-                    proof_uri = %artifact.proof_uri,
-                    error = %err,
-                    "failed to remove invalidated proof artifact; removing stale cache record"
-                );
-                false
-            }
-        };
+            data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+            tracing::warn!(
+                network_pair = %artifact.network_pair,
+                proof_ref = %artifact.proof_ref,
+                proof_uri = %artifact.proof_uri,
+                error = %err,
+                "failed to remove invalidated proof artifact; retaining tombstone for retry"
+            );
+            continue;
+        }
+
         match state
             .runtime
             .remove_proof_artifact(
@@ -642,9 +663,7 @@ async fn remove_invalidated_artifacts(
         {
             Ok(Some(_record)) => {
                 data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                if backing_artifact_removed {
-                    data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
-                }
+                data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
             }
             Ok(None) => {}
             Err(err) => {
@@ -1524,6 +1543,7 @@ mod tests {
     use super::super::{AggregateStatus, ProposalStatus, RootRuntime, RuntimeRunnerStatus};
     use super::*;
     use crate::config::Config;
+    use crate::server::proof_artifact::load_proof_artifact_material;
     use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
     use crate::server::task_metadata::ProposalTask;
     use raiko2_engine::{
@@ -1565,11 +1585,16 @@ mod tests {
             panic!("unexpected proof artifact publication")
         }
 
-        async fn get(
-            &self,
-            _key: &ProofArtifactKey,
-        ) -> anyhow::Result<Option<ProofArtifactObject>> {
-            Ok(None)
+        async fn get(&self, key: &ProofArtifactKey) -> anyhow::Result<Option<ProofArtifactObject>> {
+            Ok(Some(ProofArtifactObject {
+                proof_uri: self.proof_uri(key),
+                content_hash: "content-hash".to_string(),
+                generation: Some(7),
+                bytes: serde_json::to_vec(&Proof {
+                    proof: Some("0xproof".to_string()),
+                    ..Proof::default()
+                })?,
+            }))
         }
 
         async fn get_prefix(
@@ -1831,7 +1856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_invalidated_artifacts_removes_stale_record_when_backing_delete_fails() {
+    async fn remove_invalidated_artifacts_keeps_retryable_record_when_backing_delete_fails() {
         let runtime = Arc::new(
             RuntimeManager::new_with_artifact_store(
                 test_runtime_root("invalidate-backing-delete-fails"),
@@ -1870,7 +1895,7 @@ mod tests {
         remove_invalidated_artifacts(&state, vec![artifact], &mut data).await;
 
         assert_eq!(data.artifacts.matched, 1);
-        assert_eq!(data.artifacts.removed, 1);
+        assert_eq!(data.artifacts.removed, 0);
         assert_eq!(data.artifacts.files_removed, 0);
         assert_eq!(data.artifacts.failed, 1);
         assert!(
@@ -1879,7 +1904,27 @@ mod tests {
                 .await
                 .expect("get proof artifact")
                 .is_none(),
-            "stale proof artifact record was retained after backing delete failed"
+            "invalidated proof artifact remained active after backing delete failed"
+        );
+        let retryable = runtime
+            .list_proof_artifacts()
+            .await
+            .expect("list retryable proof artifacts");
+        assert_eq!(retryable.len(), 1);
+        assert_eq!(retryable[0].proof_ref, proof_ref);
+        assert!(retryable[0].invalidated_at.is_some());
+        assert!(
+            load_proof_artifact_material(
+                runtime.as_ref(),
+                network_pair,
+                pipeline_key,
+                pipeline_key.route(),
+                proof_ref,
+            )
+            .await
+            .expect("load invalidated proof artifact")
+            .is_none(),
+            "tombstoned backing object was rediscovered"
         );
     }
 

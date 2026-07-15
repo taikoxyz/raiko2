@@ -2,7 +2,7 @@
   "schema_version": 1,
   "backend": "sp1",
   "bench": false,
-  "source_fingerprint": "8b2754a0bf3d26f16b6712d4aa5a4c01f8d549d05369d179363e6a02274a2a6b",
+  "source_fingerprint": "7ad5b575d9344ec9d841cf42d035c07b519e914f145dcc195b1d4caa25009041",
   "artifacts": {
     "crates/guests/elf/sp1_opcode_lab.elf": "a7a658eb611dbbdbd84f44f41d88c057b9e268e33979398b0117735ec7ee057c",
     "crates/guests/elf/sp1_opcode_lab.vk.bin": "087e073b27066ff28e88ce77cf3d1eecfdd8a17e66bd084c8ac55f6867bab77f",

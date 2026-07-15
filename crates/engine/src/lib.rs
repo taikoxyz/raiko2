@@ -85,13 +85,13 @@ impl std::error::Error for EngineObserverError {}
 #[derive(Debug)]
 enum TaskExecutionError {
     Retryable(String),
-    Permanent(String),
+    ProofPublication { error: String, proof: Box<Proof> },
 }
 
 impl TaskExecutionError {
     fn message(&self) -> &str {
         match self {
-            Self::Retryable(error) | Self::Permanent(error) => error,
+            Self::Retryable(error) | Self::ProofPublication { error, .. } => error,
         }
     }
 }
@@ -111,9 +111,36 @@ impl From<String> for TaskExecutionError {
 impl From<EngineObserverError> for TaskExecutionError {
     fn from(error: EngineObserverError) -> Self {
         match error {
-            EngineObserverError::ProofPublication(error) => Self::Permanent(error),
+            EngineObserverError::ProofPublication(error) => Self::Retryable(error),
         }
     }
+}
+
+const fn publication_retry_policy() -> RetryPolicy {
+    RetryPolicy::Exponential {
+        max_attempts: u32::MAX,
+        base_delay: Duration::from_secs(1),
+        max_delay: Duration::from_secs(5 * 60),
+    }
+}
+
+fn should_notify_queue_task<I>(
+    payload: &EngineTask,
+    execution_result: &Result<EngineOutput<I>, TaskExecutionError>,
+    recovered_output: bool,
+) -> bool {
+    recovered_output
+        || !matches!(payload, EngineTask::Proposal { .. })
+        || execution_result
+            .as_ref()
+            .err()
+            .map(TaskExecutionError::message)
+            == Some(task_cancelled_error().as_str())
+        || execution_result
+            .as_ref()
+            .err()
+            .map(TaskExecutionError::message)
+            == Some(task_lease_lost_error().as_str())
 }
 
 #[async_trait]
@@ -533,7 +560,7 @@ where
     ///
     /// Returns an error if the task store cannot lease or complete work.
     pub async fn run_one(&self, worker: &str) -> Result<bool, TaskStoreError> {
-        let Some(lease) = self.inner.scheduler.next_ready(worker).await? else {
+        let Some(mut lease) = self.inner.scheduler.next_ready(worker).await? else {
             return Ok(false);
         };
 
@@ -573,56 +600,54 @@ where
             observer.on_task_started(&lease.id, &payload, worker).await;
         }
 
-        let mut execution_result = match self.recover_completed_output(&lease.id, &payload).await {
-            Ok(Some(output)) => Ok(output),
-            Ok(None) => {
-                self.execute_with_task_controls(&lease.id, &lease, payload.clone())
-                    .await
-            }
-            Err(error) => Err(error),
-        };
+        let (mut execution_result, recovered_output) =
+            match self.recover_completed_output(&lease.id, &payload).await {
+                Ok(Some(output)) => (Ok(output), true),
+                Ok(None) => (
+                    self.execute_with_task_controls(&lease.id, &lease, payload.clone())
+                        .await,
+                    false,
+                ),
+                Err(error) => (Err(error), false),
+            };
         if let Err(err) = &execution_result {
             tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
         }
-        let should_notify_queue_task = !matches!(payload, EngineTask::Proposal { .. })
-            || execution_result
-                .as_ref()
-                .err()
-                .map(TaskExecutionError::message)
-                == Some(task_cancelled_error().as_str())
-            || execution_result
-                .as_ref()
-                .err()
-                .map(TaskExecutionError::message)
-                == Some(task_lease_lost_error().as_str());
+        let should_notify_queue_task =
+            should_notify_queue_task(&payload, &execution_result, recovered_output);
         if should_notify_queue_task && let Ok(output) = &execution_result {
             let success = task_success_from_output(output);
             if let Err(error) =
                 notify_stage_succeeded(self.inner.observer.as_ref(), &lease.id, &payload, &success)
                     .await
             {
-                execution_result = Err(error.into());
+                execution_result = Err(match success {
+                    EngineTaskSuccess::Proof { proof, .. } => {
+                        TaskExecutionError::ProofPublication {
+                            error: error.to_string(),
+                            proof: Box::new(proof),
+                        }
+                    }
+                    EngineTaskSuccess::GuestInput { .. }
+                    | EngineTaskSuccess::EncodedInput { .. } => error.into(),
+                });
             }
         }
-        let permanent_failure = matches!(execution_result, Err(TaskExecutionError::Permanent(_)));
+        if let Err(TaskExecutionError::ProofPublication { proof, .. }) = &execution_result {
+            lease.payload = payload.clone().with_pending_publication((**proof).clone());
+            lease.execution_policy.retry = publication_retry_policy();
+        }
         let result = execution_result.map_err(|error| error.to_string());
         let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
         let completed_id = lease.id.clone();
-        let completed = if permanent_failure {
-            self.inner
-                .scheduler
-                .complete_permanent_failure(lease, error.clone().unwrap_or_default())
-                .await?
-        } else {
-            self.inner.scheduler.complete(lease, result).await?
-        };
+        let completion = self.inner.scheduler.complete(lease, result).await;
         renew_task.abort();
+        let completed = completion?;
         if completed
             && should_notify_queue_task
             && let Some(observer) = &self.inner.observer
             && success.is_none()
-            && !permanent_failure
             && let Some(error) = error.as_deref()
         {
             observer
@@ -1050,7 +1075,10 @@ where
             },
         )
         .await
-        .map_err(TaskExecutionError::from)?;
+        .map_err(|error| TaskExecutionError::ProofPublication {
+            error: error.to_string(),
+            proof: Box::new(proof.clone()),
+        })?;
         Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
             PipelineStage::Prove,
             proof,
@@ -1148,6 +1176,15 @@ where
                     proof,
                 ))))
             }
+            EngineTask::PublishProof { proof, .. } => {
+                let stage = match &task_id.0 {
+                    EngineTaskKey::Proposal { .. } => PipelineStage::Prove,
+                    EngineTaskKey::Aggregate { .. } => PipelineStage::Aggregate,
+                };
+                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+                    stage, *proof,
+                ))))
+            }
         }
     }
 }
@@ -1232,9 +1269,18 @@ mod tests {
         EngineTaskSuccess, PROPOSAL_TASK_PRIORITY,
     };
 
-    #[derive(Default)]
     struct PublicationFailingObserver {
         proof_successes: AtomicUsize,
+        failures: usize,
+    }
+
+    impl PublicationFailingObserver {
+        fn new(failures: usize) -> Self {
+            Self {
+                proof_successes: AtomicUsize::new(0),
+                failures,
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -1246,10 +1292,42 @@ mod tests {
             success: &EngineTaskSuccess,
         ) -> Result<(), EngineObserverError> {
             if matches!(success, EngineTaskSuccess::Proof { .. }) {
+                let attempt = self.proof_successes.fetch_add(1, Ordering::SeqCst);
+                if attempt < self.failures {
+                    return Err(EngineObserverError::ProofPublication(
+                        "injected failure".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct RecoveringObserver {
+        proof_successes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for RecoveringObserver {
+        async fn load_completed_proof(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+        ) -> Result<Option<Proof>, String> {
+            Ok(Some(Proof {
+                proof: Some("recovered-proof".to_string()),
+                ..Proof::default()
+            }))
+        }
+
+        async fn on_task_succeeded(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            success: &EngineTaskSuccess,
+        ) -> Result<(), EngineObserverError> {
+            if matches!(success, EngineTaskSuccess::Proof { .. }) {
                 self.proof_successes.fetch_add(1, Ordering::SeqCst);
-                return Err(EngineObserverError::ProofPublication(
-                    "injected failure".to_string(),
-                ));
             }
             Ok(())
         }
@@ -1303,6 +1381,47 @@ mod tests {
                 proof: Some("mock-agg-proof".to_string()),
                 ..Default::default()
             })
+        }
+    }
+
+    struct CountingProver {
+        proof_runs: Arc<AtomicUsize>,
+    }
+
+    impl GuestInputCodec<GuestInput> for CountingProver {
+        fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+            Ok(Bytes::from(input.taiko.proposal_id.to_le_bytes().to_vec()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Prover<TestBackend> for CountingProver {
+        type GuestInput = GuestInput;
+
+        fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+            GuestInputCodec::encode(self, input, config)
+        }
+
+        async fn prove_encoded(
+            &self,
+            _input: Bytes,
+            _config: &ProverConfig,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            self.proof_runs.fetch_add(1, Ordering::SeqCst);
+            Ok(Proof {
+                proof: Some("counted-proof".to_string()),
+                ..Proof::default()
+            })
+        }
+
+        async fn aggregate(
+            &self,
+            _input: AggregationGuestInput,
+            _config: &ProverConfig,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            Ok(Proof::default())
         }
     }
 
@@ -1533,6 +1652,7 @@ mod tests {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
             pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
             proof_ref: proof_ref.to_string(),
         }
     }
@@ -1864,20 +1984,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proof_publication_failure_is_permanent_and_does_not_rerun_proving()
+    async fn proof_publication_failure_retries_durable_output_without_reproving()
     -> Result<(), Box<dyn std::error::Error>> {
-        let observer = Arc::new(PublicationFailingObserver::default());
+        let observer = Arc::new(PublicationFailingObserver::new(1));
+        let proof_runs = Arc::new(AtomicUsize::new(0));
         let engine = Engine::with_store_scheduler_config_and_observer(
-            TestSpec::new(MockProver),
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
             test_context(),
             raiko2_queue::MemoryStore::new(),
             SchedulerConfig {
                 lease_duration: Duration::from_secs(60),
-                retry: RetryPolicy::Fixed {
-                    max_attempts: 4,
-                    delay: Duration::from_millis(1),
-                },
+                retry: RetryPolicy::None,
             },
+            Some(observer.clone()),
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+
+        let view = engine
+            .get(job_id.clone())
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Retrying { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        engine.inner.scheduler.maintenance_tick().await?;
+        assert!(Box::pin(engine.run_one("w2")).await?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Succeeded { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovered_proposal_output_is_finalized_through_observer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(RecoveringObserver {
+            proof_successes: AtomicUsize::new(0),
+        });
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
             Some(observer.clone()),
         );
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
@@ -1888,9 +2050,9 @@ mod tests {
             .get(job_id)
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
-        assert!(matches!(view.state, TaskState::Failed { .. }));
+        assert!(matches!(view.state, TaskState::Succeeded { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 0);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
-        assert!(!Box::pin(engine.run_one("w2")).await?);
         Ok(())
     }
 

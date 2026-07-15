@@ -5,6 +5,7 @@ use raiko2_engine::{
     ProposalStage,
     tasks::{EngineTask, ProofArtifactRef},
 };
+use raiko2_pipeline::PipelineRoute;
 use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
 use raiko2_runtime::{
     ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
@@ -22,13 +23,12 @@ use crate::server::task_metadata::{
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
 use raiko2_engine::ProverTaskConfig;
-#[cfg(test)]
-use raiko2_pipeline::PipelineRoute;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
+    route: PipelineRoute,
     started_stage_tasks: Arc<Mutex<HashSet<String>>>,
     root_updates: Arc<tokio::sync::Mutex<()>>,
 }
@@ -40,10 +40,15 @@ enum FailedRootPolicy {
 }
 
 impl RuntimeObserver {
-    pub(crate) fn new(runtime: Arc<RuntimeManager>, network_pair: String) -> Self {
+    pub(crate) fn new(
+        runtime: Arc<RuntimeManager>,
+        network_pair: String,
+        route: PipelineRoute,
+    ) -> Self {
         Self {
             runtime,
             network_pair,
+            route,
             started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
             root_updates: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -60,14 +65,15 @@ impl RuntimeObserver {
         }
     }
 
-    const fn stage_name(task: &EngineTask) -> &'static str {
-        match task {
+    fn stage_name(task: &EngineTask) -> &'static str {
+        match task.publication_source() {
             EngineTask::Proposal { .. } => "proposal",
             EngineTask::Preflight { .. } => "preflight",
             EngineTask::Validate { .. } => "validation",
             EngineTask::Encode { .. } => "encode",
             EngineTask::ProveProposal { .. } => "prove",
             EngineTask::Aggregate { .. } => "aggregate",
+            EngineTask::PublishProof { .. } => unreachable!(),
         }
     }
 
@@ -186,7 +192,7 @@ impl RuntimeObserver {
         let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata")?;
         let task_ref = Self::root_task_ref(id);
-        Ok(match task {
+        Ok(match task.publication_source() {
             EngineTask::ProveProposal { .. } => metadata
                 .proposal_runtime(&task_ref)
                 .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
@@ -197,6 +203,7 @@ impl RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => false,
+            EngineTask::PublishProof { .. } => unreachable!(),
         })
     }
 
@@ -206,6 +213,9 @@ impl RuntimeObserver {
         record: &RuntimeTaskRecord,
     ) -> Result<bool> {
         if record.pipeline_key != id.0.pipeline_key() {
+            return Ok(false);
+        }
+        if record.route != self.route {
             return Ok(false);
         }
         let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
@@ -238,13 +248,14 @@ impl RuntimeObserver {
         }
     }
 
-    const fn proposal_stage_from_task(task: &EngineTask) -> Option<ProposalStage> {
-        match task {
+    fn proposal_stage_from_task(task: &EngineTask) -> Option<ProposalStage> {
+        match task.publication_source() {
             EngineTask::Preflight { .. } => Some(ProposalStage::Preflight),
             EngineTask::Validate { .. } => Some(ProposalStage::Validation),
             EngineTask::Encode { .. } => Some(ProposalStage::Encode),
             EngineTask::ProveProposal { .. } => Some(ProposalStage::Prove),
             EngineTask::Proposal { .. } | EngineTask::Aggregate { .. } => None,
+            EngineTask::PublishProof { .. } => unreachable!(),
         }
     }
 
@@ -367,16 +378,10 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         stage: &str,
         proof: &raiko2_primitives::Proof,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<Option<HashMap<String, String>>> {
         let root_ref = Self::root_task_ref(id);
         let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
-        if records.is_empty() {
-            anyhow::bail!("runtime task not registered for task ref {root_ref}");
-        }
         let records = self.matching_active_root_records(id, records)?;
-        let Some(first_record) = records.first() else {
-            return Ok(HashMap::new());
-        };
         anyhow::ensure!(
             proof.proof.is_some(),
             "refusing to publish proof artifact without a proof payload"
@@ -388,7 +393,8 @@ impl RuntimeObserver {
             .runtime
             .publish_proof_artifact_bytes(
                 &self.network_pair,
-                first_record.pipeline_key,
+                id.0.pipeline_key(),
+                self.route,
                 &root_ref,
                 &proof_bytes,
             )
@@ -415,8 +421,8 @@ impl RuntimeObserver {
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: self.network_pair.clone(),
                 proof_ref: root_ref,
-                pipeline_key: first_record.pipeline_key,
-                route: first_record.route,
+                pipeline_key: id.0.pipeline_key(),
+                route: self.route,
                 proof_uri: proof_uri.clone(),
                 content_hash: artifact.content_hash.clone(),
                 generation: artifact.generation,
@@ -425,6 +431,7 @@ impl RuntimeObserver {
             .context("failed to register proof artifact")?;
 
         let mut proof_uris = HashMap::with_capacity(records.len());
+        let has_local_records = !records.is_empty();
         for record in records {
             let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
                 .context("failed to parse task metadata")?;
@@ -436,7 +443,7 @@ impl RuntimeObserver {
 
             proof_uris.insert(record.task_id, proof_uri.clone());
         }
-        Ok(proof_uris)
+        Ok(has_local_records.then_some(proof_uris))
     }
 
     async fn mark_proof_publication_failed(
@@ -482,7 +489,8 @@ impl RuntimeObserver {
         let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
         for attempt in 0..=publication_delays.len() {
             let result = match self.publish_final_proof_artifact(id, stage, proof).await {
-                Ok(proof_uris) => self.sync_proof_success(id, task, stage, proof_uris).await,
+                Ok(Some(proof_uris)) => self.sync_proof_success(id, task, stage, proof_uris).await,
+                Ok(None) => Ok(()),
                 Err(error) => Err(error),
             };
             match result {
@@ -613,16 +621,19 @@ impl EngineObserver for RuntimeObserver {
             | EngineTaskKey::Aggregate { pipeline, .. } => pipeline,
         };
         let proof_ref = Self::root_task_ref(id);
-        let Some(object) = self
-            .runtime
-            .read_proof_artifact_bytes(&self.network_pair, pipeline_key, &proof_ref)
-            .await
-            .map_err(|error| error.to_string())?
+        let Some(material) = crate::server::proof_artifact::load_proof_artifact_material(
+            &self.runtime,
+            &self.network_pair,
+            pipeline_key,
+            self.route,
+            &proof_ref,
+        )
+        .await
+        .map_err(|error| error.to_string())?
         else {
             return Ok(None);
         };
-        let proof: raiko2_primitives::Proof = serde_json::from_slice(&object.bytes)
-            .map_err(|error| format!("invalid completed proof artifact {proof_ref}: {error}"))?;
+        let proof = material.proof;
         if proof.proof.is_none() {
             return Err(format!(
                 "completed proof artifact {proof_ref} has no proof payload"
@@ -717,33 +728,41 @@ impl EngineObserver for RuntimeObserver {
                     metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some("submission_registered".to_string());
                     match progress {
-                        ProverProgress::BoundlessSubmission(submission) => match task {
-                            EngineTask::ProveProposal { .. } => {
-                                metadata.upsert_proposal_runtime(&task_id, submission, updated_at);
+                        ProverProgress::BoundlessSubmission(submission) => {
+                            match task.publication_source() {
+                                EngineTask::ProveProposal { .. } => {
+                                    metadata
+                                        .upsert_proposal_runtime(&task_id, submission, updated_at);
+                                }
+                                EngineTask::Aggregate { .. } => {
+                                    metadata.upsert_aggregate_runtime(submission, updated_at);
+                                }
+                                EngineTask::Preflight { .. }
+                                | EngineTask::Validate { .. }
+                                | EngineTask::Encode { .. }
+                                | EngineTask::Proposal { .. } => {}
+                                EngineTask::PublishProof { .. } => unreachable!(),
                             }
-                            EngineTask::Aggregate { .. } => {
-                                metadata.upsert_aggregate_runtime(submission, updated_at);
+                        }
+                        ProverProgress::Sp1NetworkSubmission(submission) => {
+                            match task.publication_source() {
+                                EngineTask::ProveProposal { .. } => {
+                                    metadata.upsert_proposal_sp1_network_runtime(
+                                        &task_id, submission, updated_at,
+                                    );
+                                }
+                                EngineTask::Aggregate { .. } => {
+                                    metadata.upsert_aggregate_sp1_network_runtime(
+                                        submission, updated_at,
+                                    );
+                                }
+                                EngineTask::Preflight { .. }
+                                | EngineTask::Validate { .. }
+                                | EngineTask::Encode { .. }
+                                | EngineTask::Proposal { .. } => {}
+                                EngineTask::PublishProof { .. } => unreachable!(),
                             }
-                            EngineTask::Preflight { .. }
-                            | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. }
-                            | EngineTask::Proposal { .. } => {}
-                        },
-                        ProverProgress::Sp1NetworkSubmission(submission) => match task {
-                            EngineTask::ProveProposal { .. } => {
-                                metadata.upsert_proposal_sp1_network_runtime(
-                                    &task_id, submission, updated_at,
-                                );
-                            }
-                            EngineTask::Aggregate { .. } => {
-                                metadata
-                                    .upsert_aggregate_sp1_network_runtime(submission, updated_at);
-                            }
-                            EngineTask::Preflight { .. }
-                            | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. }
-                            | EngineTask::Proposal { .. } => {}
-                        },
+                        }
                     }
                 })?;
                 record.updated_at = updated_at;
@@ -763,22 +782,16 @@ impl EngineObserver for RuntimeObserver {
         &self,
         artifact: &ProofArtifactRef,
     ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
-        let object = self
-            .runtime
-            .read_proof_artifact_bytes(
-                &artifact.network_pair,
-                artifact.pipeline_key,
-                &artifact.proof_ref,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        object
-            .map(|object| {
-                serde_json::from_slice(&object.bytes).map_err(|error| {
-                    format!("invalid proof artifact {}: {error}", artifact.proof_ref)
-                })
-            })
-            .transpose()
+        let material = crate::server::proof_artifact::load_proof_artifact_material(
+            &self.runtime,
+            &artifact.network_pair,
+            artifact.pipeline_key,
+            artifact.route,
+            &artifact.proof_ref,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(material.map(|material| material.proof))
     }
 
     async fn on_task_succeeded(
@@ -904,9 +917,10 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> Option<String> {
-        let record = match task {
+        let source = task.publication_source();
+        let record = match source {
             EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, task)
+                .load_root_record_for_resume(id, source)
                 .await
                 .ok()
                 .flatten(),
@@ -914,11 +928,12 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
+            EngineTask::PublishProof { .. } => unreachable!(),
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
         let task_id = Self::root_task_ref(id);
-        match task {
+        match source {
             EngineTask::ProveProposal { .. } => metadata
                 .proposal_runtime(&task_id)
                 .and_then(|runtime| runtime.provider_request_id.clone()),
@@ -932,6 +947,7 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
+            EngineTask::PublishProof { .. } => unreachable!(),
         }
     }
 
@@ -940,9 +956,10 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> Option<BoundlessSubmissionResume> {
-        let record = match task {
+        let source = task.publication_source();
+        let record = match source {
             EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, task)
+                .load_root_record_for_resume(id, source)
                 .await
                 .ok()
                 .flatten(),
@@ -950,17 +967,19 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
+            EngineTask::PublishProof { .. } => unreachable!(),
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
         let task_id = Self::root_task_ref(id);
-        let runtime = match task {
+        let runtime = match source {
             EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
             EngineTask::Aggregate { .. } => metadata.aggregate_runtime(),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
+            EngineTask::PublishProof { .. } => unreachable!(),
         }?;
 
         let now = now_secs();
@@ -1252,7 +1271,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
         let future_expires_at = now_secs().saturating_add(3_600);
         observer
             .on_task_progress(
@@ -1445,7 +1468,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -1477,14 +1504,133 @@ mod tests {
             "proposal proof must not become the root proof for aggregate requests"
         );
         runtime
-            .get_proof_artifact("taiko_dev/ethereum", pipeline, &proposal_ref)
+            .get_proof_artifact(
+                "taiko_dev/ethereum",
+                pipeline,
+                pipeline.route(),
+                &proposal_ref,
+            )
             .await?
             .expect("proposal proof artifact");
         assert!(
             runtime
-                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, &proposal_ref)
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &proposal_ref,
+                )
                 .await?
                 .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_publishes_without_replica_local_runtime_row() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-cross-replica-publication",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        observer
+            .on_task_succeeded(
+                &task_id,
+                &EngineTask::ProveProposal {
+                    request,
+                    input_task: task_id.clone(),
+                },
+                &EngineTaskSuccess::Proof {
+                    stage: raiko2_pipeline::PipelineStage::Prove,
+                    proof: proof_fixture(),
+                },
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        assert!(runtime.list_tasks().await?.is_empty());
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref,)
+                .await?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn engine_artifact_loaders_honor_tombstones() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-tombstone-recovery",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let bytes = serde_json::to_vec_pretty(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        runtime
+            .mark_proof_artifact_invalidated("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        assert!(
+            observer
+                .load_completed_proof(
+                    &task_id,
+                    &EngineTask::Proposal {
+                        request: request.clone(),
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        assert!(
+            observer
+                .load_proof_artifact(&ProofArtifactRef {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_ref,
+                })
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
         );
         Ok(())
     }
@@ -1520,7 +1666,11 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -1582,7 +1732,11 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         observer
             .on_task_started(&proposal_task_id, &task, "worker-a")
             .await;
@@ -1637,7 +1791,11 @@ mod tests {
         record.error = Some("transient preflight failure".to_string());
         runtime.upsert_task(&record).await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         observer
             .on_task_started(&proposal_task_id, &task, "worker-a")
             .await;
@@ -1705,7 +1863,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_succeeded(
                 &first_task_id,
@@ -1733,12 +1895,17 @@ mod tests {
         );
         let first_ref = proposal_task_ref(pipeline, &first_request);
         runtime
-            .get_proof_artifact("taiko_dev/ethereum", pipeline, &first_ref)
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, pipeline.route(), &first_ref)
             .await?
             .expect("first proposal proof artifact");
         assert!(
             runtime
-                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, &first_ref)
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &first_ref,
+                )
                 .await?
                 .is_some()
         );
@@ -1772,6 +1939,7 @@ mod tests {
                 .read_proof_artifact_bytes(
                     "taiko_dev/ethereum",
                     pipeline,
+                    pipeline.route(),
                     &RuntimeObserver::root_task_ref(&second_task_id),
                 )
                 .await?
@@ -1827,7 +1995,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -1958,7 +2130,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -2057,7 +2233,11 @@ mod tests {
         record.provider_request_id = Some("0xsp1-proposal".to_string());
         runtime.upsert_task(&record).await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         assert_eq!(
             observer
                 .load_sp1_network_request_id(
@@ -2161,6 +2341,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "telemetry_restart/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
         );
         observer
             .on_task_failed(
@@ -2208,6 +2389,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "metrics_failure_kind/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
         );
         observer
             .on_task_failed(
@@ -2256,7 +2438,11 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            network_pair.to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         let error = observer
             .on_task_succeeded(
                 &proposal_task_id,

@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_runtime::RuntimeManager;
 use std::{collections::HashSet, sync::Arc};
 
@@ -613,6 +613,7 @@ async fn remove_invalidated_artifacts(
             .mark_proof_artifact_invalidated(
                 &artifact.network_pair,
                 artifact.pipeline_key,
+                artifact.route,
                 &artifact.proof_ref,
             )
             .await
@@ -636,6 +637,7 @@ async fn remove_invalidated_artifacts(
             .delete_proof_artifact(
                 &artifact.network_pair,
                 artifact.pipeline_key,
+                artifact.route,
                 &artifact.proof_ref,
                 artifact.generation,
             )
@@ -657,6 +659,7 @@ async fn remove_invalidated_artifacts(
             .remove_proof_artifact(
                 &artifact.network_pair,
                 artifact.pipeline_key,
+                artifact.route,
                 &artifact.proof_ref,
             )
             .await
@@ -749,6 +752,7 @@ async fn task_matches_proof_prefix(
             runtime,
             &metadata.network_pair,
             record.pipeline_key,
+            record.route,
             &proof_ref,
             prefix,
         )
@@ -784,6 +788,7 @@ async fn artifact_matches_proof_prefix(
                 runtime,
                 &artifact.network_pair,
                 artifact.pipeline_key,
+                artifact.route,
                 &artifact.proof_ref,
                 prefix,
             )
@@ -797,6 +802,7 @@ async fn proof_artifact_starts_with(
     runtime: &RuntimeManager,
     network_pair: &str,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proof_ref: &str,
     prefix: &str,
 ) -> bool {
@@ -804,6 +810,7 @@ async fn proof_artifact_starts_with(
         .read_proof_artifact_prefix(
             network_pair,
             pipeline_key,
+            route,
             proof_ref,
             PROOF_PREFIX_SCAN_LIMIT,
         )
@@ -1796,6 +1803,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 &metadata.network_pair,
                 record.pipeline_key,
+                record.route,
                 &proof_ref,
                 serde_json::to_vec(&Proof {
                     proof: Some("0xroot".to_string()),
@@ -1847,7 +1855,12 @@ mod tests {
         );
         assert!(
             runtime
-                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, &proof_ref)
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                )
                 .await
                 .expect("get proof artifact")
                 .is_some(),
@@ -1885,7 +1898,7 @@ mod tests {
             .await
             .expect("register proof artifact");
         let artifact = runtime
-            .get_proof_artifact(network_pair, pipeline_key, proof_ref)
+            .get_proof_artifact(network_pair, pipeline_key, pipeline_key.route(), proof_ref)
             .await
             .expect("get proof artifact")
             .expect("proof artifact record");
@@ -1900,7 +1913,7 @@ mod tests {
         assert_eq!(data.artifacts.failed, 1);
         assert!(
             runtime
-                .get_proof_artifact(network_pair, pipeline_key, proof_ref)
+                .get_proof_artifact(network_pair, pipeline_key, pipeline_key.route(), proof_ref)
                 .await
                 .expect("get proof artifact")
                 .is_none(),
@@ -2000,6 +2013,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaSp1,
+                PipelineKey::ShastaSp1.route(),
                 "proof-ref",
                 &serde_json::to_vec_pretty(&Proof {
                     proof: Some(proof),
@@ -2015,6 +2029,7 @@ mod tests {
                 &runtime,
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaSp1,
+                PipelineKey::ShastaSp1.route(),
                 "proof-ref",
                 "0xAAAA",
             )

@@ -183,19 +183,28 @@ pub(crate) const fn remote_sgx_prover_config(
 use raiko2_pipeline::PipelineKey;
 
 #[cfg(feature = "redis-queue")]
-pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: PipelineKey) -> String {
+pub(crate) fn queue_namespace(
+    base: &str,
+    environment_id: &str,
+    pair: &ResolvedNetworkPair,
+    key: PipelineKey,
+) -> String {
     let base = base.trim_end_matches('/');
-    format!("{}/{}/{}", base, pair.key, key.as_str())
+    format!("{}/{}/{}/{}", base, environment_id, pair.key, key.as_str())
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "redis-queue")]
+    use super::queue_namespace;
     #[cfg(feature = "local-provers")]
     use super::sp1_scheduler_config;
     use super::{
         boundless_prover_config, boundless_scheduler_config, build_context, scheduler_config,
     };
     use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
+    #[cfg(feature = "redis-queue")]
+    use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
     use raiko2_queue::RetryPolicy;
@@ -268,6 +277,20 @@ mod tests {
         let scheduler = scheduler_config(&config);
 
         assert_eq!(scheduler.retry, RetryPolicy::None);
+    }
+
+    #[cfg(feature = "redis-queue")]
+    #[test]
+    fn queue_namespace_isolates_environments() {
+        let pair = resolved_pair("taiko_hoodi", "hoodi");
+        let first = queue_namespace("raiko2:queue", "staging", &pair, PipelineKey::ShastaSp1);
+        let second = queue_namespace("raiko2:queue", "production", &pair, PipelineKey::ShastaSp1);
+
+        assert_eq!(
+            first,
+            "raiko2:queue/staging/taiko_hoodi/hoodi/shasta-sp1-local"
+        );
+        assert_ne!(first, second);
     }
 
     #[cfg(feature = "local-provers")]

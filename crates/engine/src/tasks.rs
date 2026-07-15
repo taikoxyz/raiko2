@@ -1,5 +1,5 @@
 use alloy_primitives::Bytes;
-use raiko2_pipeline::{PipelineKey, PipelineStageResult};
+use raiko2_pipeline::{PipelineKey, PipelineRoute, PipelineStageResult};
 use raiko2_primitives::{L2BlockRange, Proof, ShastaCheckpoint};
 use raiko2_prover::sp1_config::{Sp1ConfigOverrides, Sp1SystemConfig};
 use raiko2_queue::{ReadyQueueSort, TaskId};
@@ -61,6 +61,7 @@ pub enum AggregateProofInput {
 pub struct ProofArtifactRef {
     pub network_pair: String,
     pub pipeline_key: PipelineKey,
+    pub route: PipelineRoute,
     pub proof_ref: String,
 }
 
@@ -138,6 +139,35 @@ pub enum EngineTask {
         request: AggregationTaskRequest,
         source: AggregationSource,
     },
+    /// Durable queue payload used after proving succeeds but artifact publication fails.
+    PublishProof {
+        task: Box<EngineTask>,
+        proof: Box<Proof>,
+    },
+}
+
+impl EngineTask {
+    #[must_use]
+    pub fn with_pending_publication(self, proof: Proof) -> Self {
+        match self {
+            Self::PublishProof { task, .. } => Self::PublishProof {
+                task,
+                proof: Box::new(proof),
+            },
+            task => Self::PublishProof {
+                task: Box::new(task),
+                proof: Box::new(proof),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn publication_source(&self) -> &Self {
+        match self {
+            Self::PublishProof { task, .. } => task.publication_source(),
+            task => task,
+        }
+    }
 }
 
 pub type EncodedGuestInput = Bytes;
@@ -183,6 +213,7 @@ mod tests {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
             pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
             proof_ref: proof_ref.to_string(),
         }
     }

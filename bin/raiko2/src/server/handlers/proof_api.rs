@@ -621,6 +621,7 @@ async fn persist_external_aggregate_input_artifacts(
             .publish_proof_artifact_bytes(
                 network_pair,
                 route.pipeline_key(),
+                route.route,
                 &proof_ref,
                 &serde_json::to_vec_pretty(proof).map_err(|err| {
                     ApiError::internal(format!("failed to serialize aggregate input proof: {err}"))
@@ -649,6 +650,7 @@ async fn persist_external_aggregate_input_artifacts(
         inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
             network_pair: network_pair.to_string(),
             pipeline_key: route.pipeline_key(),
+            route: route.route,
             proof_ref: proof_ref.clone(),
         }));
         input_artifacts.push(AggregateInputProofArtifact { proof_ref });
@@ -733,6 +735,7 @@ async fn build_submission_plan(
                 aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                     network_pair: material.record.network_pair,
                     pipeline_key: material.record.pipeline_key,
+                    route: material.record.route,
                     proof_ref: material.record.proof_ref,
                 }));
             } else {
@@ -741,6 +744,7 @@ async fn build_submission_plan(
                     artifact: proof_artifact_ref(
                         &submission.pair.key,
                         submission.route.pipeline_key(),
+                        submission.route.route,
                         &proposal.task_ref,
                     ),
                     dependency: Box::new(proposal.task_id.clone()),
@@ -1267,6 +1271,7 @@ async fn existing_batch_aggregate_inputs(
             inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                 network_pair: material.record.network_pair,
                 pipeline_key: material.record.pipeline_key,
+                route: material.record.route,
                 proof_ref: material.record.proof_ref,
             }));
             continue;
@@ -1524,6 +1529,7 @@ async fn reenqueue_existing_external_aggregate_task(
         aggregate_inputs_from_artifacts(
             &existing_metadata.network_pair,
             existing.pipeline_key,
+            existing.route,
             &existing_metadata.aggregate_input_artifacts,
         )
     };
@@ -1547,6 +1553,7 @@ async fn reenqueue_existing_external_aggregate_task(
 fn aggregate_inputs_from_artifacts(
     network_pair: &str,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     artifacts: &[AggregateInputProofArtifact],
 ) -> Vec<AggregateProofInput> {
     artifacts
@@ -1555,6 +1562,7 @@ fn aggregate_inputs_from_artifacts(
             AggregateProofInput::ProofArtifact(ProofArtifactRef {
                 network_pair: network_pair.to_string(),
                 pipeline_key,
+                route,
                 proof_ref: artifact.proof_ref.clone(),
             })
         })
@@ -1813,11 +1821,13 @@ fn artifact_proof_location(record: &raiko2_runtime::ProofArtifactRecord) -> Proo
 fn proof_artifact_ref(
     network_pair: &str,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proof_ref: &str,
 ) -> ProofArtifactRef {
     ProofArtifactRef {
         network_pair: network_pair.to_string(),
         pipeline_key,
+        route,
         proof_ref: proof_ref.to_string(),
     }
 }
@@ -3523,6 +3533,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 network_pair,
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 proof_ref,
                 &serde_json::to_vec_pretty(proof)?,
             )
@@ -4655,6 +4666,7 @@ mod tests {
             AggregateProofInput::ProofArtifact(proof_artifact_ref(
                 &submission.pair.key,
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 &cached_ref
             ))
         );
@@ -4664,6 +4676,7 @@ mod tests {
                 artifact: proof_artifact_ref(
                     &submission.pair.key,
                     PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
                     &plan.proposals[1].task_ref
                 ),
                 dependency: Box::new(plan.proposals[1].task_id.clone()),
@@ -4804,6 +4817,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 &submission.pair.key,
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 &proof_ref,
                 b"{bad-json",
             )
@@ -4862,6 +4876,7 @@ mod tests {
             aggregate_inputs_from_artifacts(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 &artifacts,
             )
         );
@@ -4888,6 +4903,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 "proposal-recovery",
                 &serde_json::to_vec_pretty(&proof)?,
             )
@@ -4897,6 +4913,7 @@ mod tests {
                 .get_proof_artifact(
                     "taiko_dev/ethereum",
                     PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
                     "proposal-recovery",
                 )
                 .await?
@@ -4937,6 +4954,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaSp1,
+                route.route,
                 "sp1-network-proposal",
                 &serde_json::to_vec_pretty(&proof)?,
             )

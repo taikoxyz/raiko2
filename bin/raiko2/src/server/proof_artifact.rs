@@ -16,14 +16,14 @@ pub(crate) async fn load_proof_artifact_material(
     proof_ref: &str,
 ) -> Result<Option<ProofArtifactMaterial>> {
     if runtime
-        .proof_artifact_is_invalidated(network_pair, pipeline_key, proof_ref)
+        .proof_artifact_is_invalidated(network_pair, pipeline_key, route, proof_ref)
         .await
         .context("failed to check proof artifact invalidation state")?
     {
         return Ok(None);
     }
     let object = match runtime
-        .read_proof_artifact_bytes(network_pair, pipeline_key, proof_ref)
+        .read_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref)
         .await
     {
         Ok(Some(object)) => object,
@@ -56,7 +56,7 @@ pub(crate) async fn load_proof_artifact_material(
         .await
         .context("failed to reconcile proof artifact registration")?;
     let record = runtime
-        .get_proof_artifact(network_pair, pipeline_key, proof_ref)
+        .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
         .await
         .context("failed to load reconciled proof artifact registration")?
         .context("reconciled proof artifact registration is missing")?;

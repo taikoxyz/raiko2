@@ -1034,7 +1034,7 @@ Returns the root-task view derived from the original batch request.
         "last_anchor_block_number": 41,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1/taiko_hoodi%2fhoodi/proposal_....json"
+        "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1%2fnetwork/taiko_hoodi%2fhoodi/proposal_....json"
       }
     ],
     "aggregate": {
@@ -1042,11 +1042,11 @@ Returns the root-task view derived from the original batch request.
       "status": "completed",
       "proof": "0x...",
       "proof_ref": "aggregate:...",
-      "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1/taiko_hoodi%2fhoodi/aggregate_....json"
+      "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1%2fnetwork/taiko_hoodi%2fhoodi/aggregate_....json"
     },
     "proof": "0x...",
     "proof_ref": "aggregate:...",
-    "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1/taiko_hoodi%2fhoodi/aggregate_....json"
+    "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1%2fnetwork/taiko_hoodi%2fhoodi/aggregate_....json"
   }
 }
 ```
@@ -1106,8 +1106,8 @@ All API errors use the Hoodi-style envelope:
 ## Configuration Notes
 
 - `runtime.environment_id` is required and immutable for a deployment. It scopes request
-  fingerprints, public task IDs, and proof artifacts, so identical requests in different
-  environments cannot share work or artifacts.
+  fingerprints, public task IDs, Redis queue namespaces, and proof artifacts, so identical
+  requests in different environments cannot share work or artifacts.
 - `runtime.artifact_store.backend` selects the single authoritative proof store. Use `gcs` with a
   non-empty `bucket` in production; `filesystem` stores artifacts below
   `<runtime.root>/cache/proofs` for local development and tests. `prefix` optionally prefixes GCS
@@ -1115,6 +1115,10 @@ All API errors use the Hoodi-style envelope:
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and contains a non-null proof payload. Publication is create-only: an
   identical existing object is idempotent, while a different late object is discarded.
+- Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
+  `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
+- If publication fails after proving, the completed proof is retained in the durable queue payload
+  and publication is retried with backoff; the prover is not run again for those retries.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.

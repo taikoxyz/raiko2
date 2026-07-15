@@ -110,11 +110,13 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> String {
         self.artifact_store.proof_uri(&ProofArtifactKey {
             network_pair: network_pair.to_string(),
             pipeline_key,
+            route,
             proof_ref: proof_ref.to_string(),
         })
     }
@@ -126,6 +128,7 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
@@ -134,6 +137,7 @@ impl RuntimeManager {
                 &ProofArtifactKey {
                     network_pair: network_pair.to_string(),
                     pipeline_key,
+                    route,
                     proof_ref: proof_ref.to_string(),
                 },
                 bytes,
@@ -148,12 +152,14 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactObject>> {
         self.artifact_store
             .get(&ProofArtifactKey {
                 network_pair: network_pair.to_string(),
                 pipeline_key,
+                route,
                 proof_ref: proof_ref.to_string(),
             })
             .await
@@ -166,6 +172,7 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
         max_bytes: usize,
     ) -> Result<Option<ProofArtifactPrefix>> {
@@ -174,6 +181,7 @@ impl RuntimeManager {
                 &ProofArtifactKey {
                     network_pair: network_pair.to_string(),
                     pipeline_key,
+                    route,
                     proof_ref: proof_ref.to_string(),
                 },
                 max_bytes,
@@ -188,6 +196,7 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
         generation: Option<i64>,
     ) -> Result<()> {
@@ -196,6 +205,7 @@ impl RuntimeManager {
                 &ProofArtifactKey {
                     network_pair: network_pair.to_string(),
                     pipeline_key,
+                    route,
                     proof_ref: proof_ref.to_string(),
                 },
                 generation,
@@ -631,8 +641,7 @@ impl RuntimeManager {
                     environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
                     content_hash, generation, updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                ON CONFLICT(environment_id, network_pair, pipeline_key, proof_ref) DO UPDATE SET
-                    route = excluded.route,
+                ON CONFLICT(environment_id, network_pair, pipeline_key, route, proof_ref) DO UPDATE SET
                     proof_uri = excluded.proof_uri,
                     content_hash = excluded.content_hash,
                     generation = excluded.generation,
@@ -664,12 +673,14 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactRecord>> {
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
         let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
         let environment_id = self.environment_id().to_string();
         let artifact = conn
             .call(move |conn| {
@@ -679,10 +690,11 @@ impl RuntimeManager {
                     SELECT environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
                            content_hash, generation, invalidated_at, updated_at
                     FROM proof_artifacts
-                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
+                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
+                      AND route = ?4 AND proof_ref = ?5
                       AND invalidated_at IS NULL
                     ",
-                        params![environment_id, network_pair, pipeline_key, proof_ref],
+                        params![environment_id, network_pair, pipeline_key, route, proof_ref],
                         proof_artifact_record_from_row,
                     )
                     .optional()?)
@@ -728,12 +740,14 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactRecord>> {
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
         let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
         let environment_id = self.environment_id().to_string();
         let artifact = conn
             .call(move |conn| {
@@ -743,16 +757,17 @@ impl RuntimeManager {
                         SELECT environment_id, network_pair, proof_ref, pipeline_key, route,
                                proof_uri, content_hash, generation, invalidated_at, updated_at
                         FROM proof_artifacts
-                        WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
+                        WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
+                          AND route = ?4 AND proof_ref = ?5
                         ",
-                        params![environment_id, network_pair, pipeline_key, proof_ref],
+                        params![environment_id, network_pair, pipeline_key, route, proof_ref],
                         proof_artifact_record_from_row,
                     )
                     .optional()?;
                 if artifact.is_some() {
                     conn.execute(
-                        "DELETE FROM proof_artifacts WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4",
-                        params![environment_id, network_pair, pipeline_key, proof_ref],
+                        "DELETE FROM proof_artifacts WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND route = ?4 AND proof_ref = ?5",
+                        params![environment_id, network_pair, pipeline_key, route, proof_ref],
                     )?;
                 }
                 Ok(artifact)
@@ -771,12 +786,14 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<bool> {
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
         let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
         let environment_id = self.environment_id().to_string();
         let invalidated_at = now_ts();
         let updated = conn
@@ -785,13 +802,15 @@ impl RuntimeManager {
                     r"
                     UPDATE proof_artifacts
                     SET invalidated_at = COALESCE(invalidated_at, ?1), updated_at = ?1
-                    WHERE environment_id = ?2 AND network_pair = ?3 AND pipeline_key = ?4 AND proof_ref = ?5
+                    WHERE environment_id = ?2 AND network_pair = ?3 AND pipeline_key = ?4
+                      AND route = ?5 AND proof_ref = ?6
                     ",
                     params![
                         invalidated_at,
                         environment_id,
                         network_pair,
                         pipeline_key,
+                        route,
                         proof_ref
                     ],
                 )?)
@@ -810,12 +829,14 @@ impl RuntimeManager {
         &self,
         network_pair: &str,
         pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<bool> {
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
         let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
         let environment_id = self.environment_id().to_string();
         conn.call(move |conn| {
             Ok(conn
@@ -823,9 +844,10 @@ impl RuntimeManager {
                     r"
                     SELECT invalidated_at IS NOT NULL
                     FROM proof_artifacts
-                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3 AND proof_ref = ?4
+                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
+                      AND route = ?4 AND proof_ref = ?5
                     ",
-                    params![environment_id, network_pair, pipeline_key, proof_ref],
+                    params![environment_id, network_pair, pipeline_key, route, proof_ref],
                     |row| row.get(0),
                 )
                 .optional()?
@@ -1322,6 +1344,11 @@ fn migrate_runtime_schema(
         ",
         [],
     )?;
+    migrate_proof_artifact_schema(&transaction)?;
+    transaction.commit()
+}
+
+fn migrate_proof_artifact_schema(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
     let proof_artifacts_exists: Option<i64> = transaction
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proof_artifacts'",
@@ -1330,7 +1357,7 @@ fn migrate_runtime_schema(
         )
         .optional()?;
     if proof_artifacts_exists.is_some()
-        && !table_column_exists(&transaction, "proof_artifacts", "environment_id")?
+        && !table_column_exists(transaction, "proof_artifacts", "environment_id")?
     {
         transaction.execute_batch(
             r"
@@ -1346,7 +1373,7 @@ fn migrate_runtime_schema(
                 generation INTEGER,
                 invalidated_at INTEGER,
                 updated_at INTEGER NOT NULL,
-                PRIMARY KEY(environment_id, network_pair, pipeline_key, proof_ref)
+                PRIMARY KEY(environment_id, network_pair, pipeline_key, route, proof_ref)
             );
             ",
         )?;
@@ -1365,21 +1392,71 @@ fn migrate_runtime_schema(
                 generation INTEGER,
                 invalidated_at INTEGER,
                 updated_at INTEGER NOT NULL,
-                PRIMARY KEY(environment_id, network_pair, pipeline_key, proof_ref)
+                PRIMARY KEY(environment_id, network_pair, pipeline_key, route, proof_ref)
             );
             ",
         )?;
     }
-    if !table_column_exists(&transaction, "proof_artifacts", "invalidated_at")? {
+    if !table_column_exists(transaction, "proof_artifacts", "invalidated_at")? {
         transaction.execute(
             "ALTER TABLE proof_artifacts ADD COLUMN invalidated_at INTEGER",
             [],
         )?;
     }
+    if !proof_artifact_route_is_identity(transaction)? {
+        transaction.execute_batch(
+            r"
+            ALTER TABLE proof_artifacts RENAME TO proof_artifacts_without_route_identity;
+            CREATE TABLE proof_artifacts (
+                environment_id TEXT NOT NULL,
+                network_pair TEXT NOT NULL,
+                proof_ref TEXT NOT NULL,
+                pipeline_key TEXT NOT NULL,
+                route TEXT NOT NULL,
+                proof_uri TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                generation INTEGER,
+                invalidated_at INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(environment_id, network_pair, pipeline_key, route, proof_ref)
+            );
+            INSERT INTO proof_artifacts (
+                environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
+                content_hash, generation, invalidated_at, updated_at
+            )
+            SELECT environment_id, network_pair, proof_ref, pipeline_key, route, proof_uri,
+                   content_hash, generation, invalidated_at, updated_at
+            FROM proof_artifacts_without_route_identity;
+            DROP TABLE proof_artifacts_without_route_identity;
+            ",
+        )?;
+    }
     transaction.execute_batch(
         "CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx ON proof_artifacts(updated_at);",
     )?;
-    transaction.commit()
+    Ok(())
+}
+
+fn proof_artifact_route_is_identity(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<bool> {
+    let mut statement = transaction.prepare("PRAGMA table_info(proof_artifacts)")?;
+    let mut rows = statement.query([])?;
+    let mut primary_key = Vec::new();
+    while let Some(row) = rows.next()? {
+        let position: i64 = row.get(5)?;
+        if position > 0 {
+            primary_key.push((position, row.get::<_, String>(1)?));
+        }
+    }
+    primary_key.sort_by_key(|(position, _)| *position);
+    Ok(primary_key.iter().map(|(_, column)| column.as_str()).eq([
+        "environment_id",
+        "network_pair",
+        "pipeline_key",
+        "route",
+        "proof_ref",
+    ]))
 }
 
 fn bind_runtime_environment(
@@ -1572,14 +1649,15 @@ mod tests {
         }
         let runtime = RuntimeManager::new(root.clone())?;
         let pipeline_key = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
         let proof_uri =
-            runtime.proof_artifact_uri("taiko_dev/ethereum", pipeline_key, "proposal_0xabc");
+            runtime.proof_artifact_uri("taiko_dev/ethereum", pipeline_key, route, "proposal_0xabc");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),
                 proof_ref: "proposal_0xabc".to_string(),
                 pipeline_key,
-                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                route,
                 proof_uri: proof_uri.clone(),
                 content_hash: "hash".to_string(),
                 generation: None,
@@ -1587,7 +1665,7 @@ mod tests {
             .await?;
 
         let artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", pipeline_key, "proposal_0xabc")
+            .get_proof_artifact("taiko_dev/ethereum", pipeline_key, route, "proposal_0xabc")
             .await?
             .expect("proof artifact");
         assert_eq!(artifact.proof_uri, proof_uri);
@@ -1618,6 +1696,7 @@ mod tests {
                 .mark_proof_artifact_invalidated(
                     &registration.network_pair,
                     pipeline_key,
+                    registration.route,
                     &registration.proof_ref,
                 )
                 .await?
@@ -1630,6 +1709,7 @@ mod tests {
                 .get_proof_artifact(
                     &registration.network_pair,
                     pipeline_key,
+                    registration.route,
                     &registration.proof_ref,
                 )
                 .await?
@@ -1654,6 +1734,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 raiko2_pipeline::PipelineKey::ShastaSp1,
+                raiko2_pipeline::PipelineKey::ShastaSp1.route(),
                 "proposal_0xabc",
                 b"first",
             )
@@ -1662,6 +1743,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 raiko2_pipeline::PipelineKey::ShastaSp1,
+                raiko2_pipeline::PipelineKey::ShastaSp1.route(),
                 "proposal_0xabc",
                 b"second",
             )
@@ -1671,12 +1753,93 @@ mod tests {
             .read_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 raiko2_pipeline::PipelineKey::ShastaSp1,
+                raiko2_pipeline::PipelineKey::ShastaSp1.route(),
                 "proposal_0xabc",
             )
             .await?
             .expect("artifact");
         assert_eq!(artifact.bytes, b"first");
 
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_artifact_identity_includes_execution_route() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-proof-route-identity");
+        let runtime = RuntimeManager::new(root.clone())?;
+        let pipeline = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let local = PipelineRoute::new(
+            raiko2_pipeline::GuestSystem::Sp1,
+            raiko2_pipeline::RunnerKind::Local,
+        );
+        let network = PipelineRoute::new(
+            raiko2_pipeline::GuestSystem::Sp1,
+            raiko2_pipeline::RunnerKind::Network,
+        );
+
+        let local_put = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline,
+                local,
+                "proposal_0xabc",
+                b"local",
+            )
+            .await?;
+        let network_put = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline,
+                network,
+                "proposal_0xabc",
+                b"network",
+            )
+            .await?;
+        for (route, artifact) in [(local, local_put), (network, network_put)] {
+            let artifact = artifact.object();
+            runtime
+                .upsert_proof_artifact(ProofArtifactRegistration {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    proof_ref: "proposal_0xabc".to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_uri: artifact.proof_uri.clone(),
+                    content_hash: artifact.content_hash.clone(),
+                    generation: artifact.generation,
+                })
+                .await?;
+        }
+
+        let local_artifact = runtime
+            .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, local, "proposal_0xabc")
+            .await?
+            .expect("local artifact");
+        let network_artifact = runtime
+            .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, network, "proposal_0xabc")
+            .await?
+            .expect("network artifact");
+
+        assert_eq!(local_artifact.bytes, b"local");
+        assert_eq!(network_artifact.bytes, b"network");
+        assert_ne!(local_artifact.proof_uri, network_artifact.proof_uri);
+        assert_eq!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", pipeline, local, "proposal_0xabc")
+                .await?
+                .expect("local registration")
+                .route,
+            local
+        );
+        assert_eq!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", pipeline, network, "proposal_0xabc")
+                .await?
+                .expect("network registration")
+                .route,
+            network
+        );
+        assert_eq!(runtime.list_proof_artifacts().await?.len(), 2);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -2083,6 +2246,7 @@ mod tests {
             .get_proof_artifact(
                 "taiko_dev/ethereum",
                 raiko2_pipeline::PipelineKey::ShastaSp1,
+                raiko2_pipeline::PipelineKey::ShastaSp1.route(),
                 "legacy-proof",
             )
             .await?;

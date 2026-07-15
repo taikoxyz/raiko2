@@ -13,7 +13,6 @@ pub use types::{EngineStatusView, ProofStatus};
 
 #[cfg(feature = "host")]
 use crate::config::GuestSystem;
-#[cfg(all(feature = "host", not(feature = "local-provers")))]
 use crate::config::PipelineRoute;
 #[cfg(feature = "host")]
 use crate::config::RunnerKind;
@@ -279,6 +278,7 @@ async fn register_pair_pipelines(
         let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
             Arc::clone(&registration.runtime),
             registration.pair.key.clone(),
+            PipelineKey::ShastaSgx.route(),
         ));
         register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
         return Ok(());
@@ -286,11 +286,6 @@ async fn register_pair_pipelines(
 
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
     {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
-
         let route = registration.config.prover.route();
         let register_risc0_network = matches!(
             route,
@@ -316,7 +311,11 @@ async fn register_pair_pipelines(
                 registration.pair,
                 registration.boundless_backend.clone(),
                 setup::boundless_scheduler_config(registration.config),
-                Arc::clone(&runtime_observer),
+                Arc::new(RuntimeObserver::new(
+                    Arc::clone(&registration.runtime),
+                    registration.pair.key.clone(),
+                    PipelineKey::ShastaRisc0Network.route(),
+                )),
                 registration.boundless_balance_gate.clone(),
             )
             .await?;
@@ -341,7 +340,11 @@ async fn register_pair_pipelines(
                     .expect("sp1 prover must be initialized for network hosts"),
                 registration.sp1_backend.clone(),
                 setup::sp1_scheduler_config(registration.config),
-                Arc::clone(&runtime_observer),
+                Arc::new(RuntimeObserver::new(
+                    Arc::clone(&registration.runtime),
+                    registration.pair.key.clone(),
+                    PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network),
+                )),
             )
             .await?;
             sp1_engine.start_workers_with_maintenance_interval(
@@ -365,16 +368,16 @@ async fn register_pair_pipelines(
 
     #[cfg(feature = "local-provers")]
     {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
         let risc0_engine = build_risc0_engine(
             registration.config,
             registration.pair,
             registration.shasta_backends.risc0.clone(),
             registration.scheduler_config.clone(),
-            Arc::clone(&runtime_observer),
+            Arc::new(RuntimeObserver::new(
+                Arc::clone(&registration.runtime),
+                registration.pair.key.clone(),
+                PipelineKey::ShastaRisc0.route(),
+            )),
         )
         .await?;
         risc0_engine.start_workers_with_maintenance_interval(
@@ -392,7 +395,11 @@ async fn register_pair_pipelines(
             registration.pair,
             registration.shasta_backends.risc0_boundless.clone(),
             setup::boundless_scheduler_config(registration.config),
-            Arc::clone(&runtime_observer),
+            Arc::new(RuntimeObserver::new(
+                Arc::clone(&registration.runtime),
+                registration.pair.key.clone(),
+                PipelineKey::ShastaRisc0Network.route(),
+            )),
             registration.boundless_balance_gate.clone(),
         )
         .await?;
@@ -415,7 +422,15 @@ async fn register_pair_pipelines(
                 .expect("sp1 prover must be initialized for local prover hosts"),
             registration.shasta_backends.sp1.clone(),
             setup::sp1_scheduler_config(registration.config),
-            Arc::clone(&runtime_observer),
+            Arc::new(RuntimeObserver::new(
+                Arc::clone(&registration.runtime),
+                registration.pair.key.clone(),
+                if registration.config.prover.route().runner == RunnerKind::Network {
+                    PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
+                } else {
+                    PipelineKey::ShastaSp1.route()
+                },
+            )),
         )
         .await?;
         sp1_engine.start_workers_with_maintenance_interval(
@@ -432,7 +447,11 @@ async fn register_pair_pipelines(
             registration.config,
             registration.pair,
             registration.scheduler_config.clone(),
-            Arc::clone(&runtime_observer),
+            Arc::new(RuntimeObserver::new(
+                Arc::clone(&registration.runtime),
+                registration.pair.key.clone(),
+                PipelineKey::ShastaNative.route(),
+            )),
         )
         .await?;
         native_engine.start_workers_with_maintenance_interval(
@@ -445,7 +464,12 @@ async fn register_pair_pipelines(
             Arc::new(native_engine),
         );
 
-        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        let remote_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+            Arc::clone(&registration.runtime),
+            registration.pair.key.clone(),
+            PipelineKey::ShastaSgx.route(),
+        ));
+        register_remote_sgx_pipelines(factory, &registration, remote_observer).await?;
         Ok(())
     }
 }
@@ -560,7 +584,12 @@ async fn restore_proof_artifacts_from_runtime_task(
     let mut missing_refs = Vec::new();
     for proof_ref in &restored_refs.refs {
         if runtime
-            .get_proof_artifact(&metadata.network_pair, record.pipeline_key, proof_ref)
+            .get_proof_artifact(
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                proof_ref,
+            )
             .await?
             .is_none()
         {
@@ -573,7 +602,12 @@ async fn restore_proof_artifacts_from_runtime_task(
     let mut proof_bytes = None;
     for proof_ref in &restored_refs.refs {
         if let Some(object) = runtime
-            .read_proof_artifact_bytes(&metadata.network_pair, record.pipeline_key, proof_ref)
+            .read_proof_artifact_bytes(
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                proof_ref,
+            )
             .await?
         {
             proof_bytes = Some(object.bytes);
@@ -613,6 +647,7 @@ async fn restore_proof_artifacts_from_runtime_task(
             .publish_proof_artifact_bytes(
                 &metadata.network_pair,
                 record.pipeline_key,
+                record.route,
                 &proof_ref,
                 &proof_bytes,
             )
@@ -661,14 +696,24 @@ async fn restore_cached_proof_artifact(
     kind: ProofArtifactKind,
 ) -> Result<()> {
     if runtime
-        .get_proof_artifact(&metadata.network_pair, record.pipeline_key, proof_ref)
+        .get_proof_artifact(
+            &metadata.network_pair,
+            record.pipeline_key,
+            record.route,
+            proof_ref,
+        )
         .await?
         .is_some()
     {
         return Ok(());
     }
     let Some(artifact) = runtime
-        .read_proof_artifact_bytes(&metadata.network_pair, record.pipeline_key, proof_ref)
+        .read_proof_artifact_bytes(
+            &metadata.network_pair,
+            record.pipeline_key,
+            record.route,
+            proof_ref,
+        )
         .await?
     else {
         return Ok(());
@@ -794,8 +839,12 @@ async fn build_risc0_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Risc0)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace =
-                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaRisc0);
+                let namespace = setup::queue_namespace(
+                    &config.queue.namespace,
+                    &config.runtime.environment_id,
+                    pair,
+                    PipelineKey::ShastaRisc0,
+                );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Risc0Output, EngineTaskKey>::connect(
                         &url,
@@ -861,8 +910,12 @@ async fn build_sp1_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Sp1)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace =
-                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaSp1);
+                let namespace = setup::queue_namespace(
+                    &config.queue.namespace,
+                    &config.runtime.environment_id,
+                    pair,
+                    PipelineKey::ShastaSp1,
+                );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Sp1Output, EngineTaskKey>::connect(
                         &url,
@@ -928,6 +981,7 @@ async fn build_native_engine(
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace = setup::queue_namespace(
                     &config.queue.namespace,
+                    &config.runtime.environment_id,
                     pair,
                     PipelineKey::ShastaNative,
                 );
@@ -1005,6 +1059,7 @@ async fn build_boundless_engine(
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace = setup::queue_namespace(
                     &config.queue.namespace,
+                    &config.runtime.environment_id,
                     pair,
                     PipelineKey::ShastaRisc0Network,
                 );
@@ -1077,7 +1132,12 @@ async fn build_remote_sgx_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, proof_type)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
+                let namespace = setup::queue_namespace(
+                    &config.queue.namespace,
+                    &config.runtime.environment_id,
+                    pair,
+                    pipeline_key,
+                );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Gaiko2Output, EngineTaskKey>::connect(
                         &url,
@@ -1203,6 +1263,7 @@ mod tests {
                 .get_proof_artifact(
                     "taiko_dev/ethereum",
                     PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
                     &canonical_ref,
                 )
                 .await?
@@ -1210,7 +1271,12 @@ mod tests {
         );
         assert!(
             runtime
-                .get_proof_artifact("taiko_dev/ethereum", PipelineKey::ShastaNative, &legacy_ref,)
+                .get_proof_artifact(
+                    "taiko_dev/ethereum",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    &legacy_ref,
+                )
                 .await?
                 .is_some()
         );
@@ -1238,6 +1304,7 @@ mod tests {
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 &proposal_ref,
                 &serde_json::to_vec_pretty(&valid_native_proof())?,
             )
@@ -1283,6 +1350,7 @@ mod tests {
             .get_proof_artifact(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
                 &proposal_ref,
             )
             .await?
@@ -1292,6 +1360,7 @@ mod tests {
                 .read_proof_artifact_bytes(
                     "taiko_dev/ethereum",
                     PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
                     &proposal_ref,
                 )
                 .await?

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use google_cloud_storage::client::{Storage, StorageControl};
 use google_cloud_storage::model_ext::ReadRange;
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub struct ProofArtifactKey {
     pub network_pair: String,
     pub pipeline_key: PipelineKey,
+    pub route: PipelineRoute,
     pub proof_ref: String,
 }
 
@@ -106,6 +107,7 @@ impl FilesystemProofArtifactStore {
         self.root
             .join(safe_component(&self.environment_id))
             .join(safe_component(key.pipeline_key.as_str()))
+            .join(safe_component(&key.route.to_string()))
             .join(safe_component(&key.network_pair))
             .join(format!("{}.json", safe_component(&key.proof_ref)))
     }
@@ -293,9 +295,10 @@ impl GcsProofArtifactStore {
 
     fn object_name(&self, key: &ProofArtifactKey) -> String {
         let suffix = format!(
-            "{}/{}/{}/{}.json",
+            "{}/{}/{}/{}/{}.json",
             safe_component(&self.environment_id),
             safe_component(key.pipeline_key.as_str()),
+            safe_component(&key.route.to_string()),
             safe_component(&key.network_pair),
             safe_component(&key.proof_ref)
         );
@@ -527,6 +530,7 @@ mod tests {
         ProofArtifactKey {
             network_pair: "taiko_dev/ethereum".to_string(),
             pipeline_key: PipelineKey::ShastaSp1,
+            route: PipelineKey::ShastaSp1.route(),
             proof_ref: "proposal_0xabc".to_string(),
         }
     }

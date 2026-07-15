@@ -1054,8 +1054,8 @@ mod tests {
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
     use raiko2_runtime::{
-        ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, ProofArtifactStore,
-        TaskRegistration,
+        ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult,
+        ProofArtifactStore, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1084,6 +1084,14 @@ mod tests {
         }
 
         async fn get(&self, _key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            Ok(None)
+        }
+
+        async fn get_prefix(
+            &self,
+            _key: &ProofArtifactKey,
+            _max_bytes: usize,
+        ) -> Result<Option<ProofArtifactPrefix>> {
             Ok(None)
         }
 

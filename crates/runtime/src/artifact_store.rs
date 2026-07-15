@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use google_cloud_storage::client::{Storage, StorageControl};
+use google_cloud_storage::model_ext::ReadRange;
 use raiko2_pipeline::PipelineKey;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProofArtifactKey {
@@ -21,6 +22,13 @@ pub struct ProofArtifactKey {
 pub struct ProofArtifactObject {
     pub proof_uri: String,
     pub content_hash: String,
+    pub generation: Option<i64>,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofArtifactPrefix {
+    pub proof_uri: String,
     pub generation: Option<i64>,
     pub bytes: Vec<u8>,
 }
@@ -56,6 +64,12 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult>;
     async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>>;
+    /// Reads at most `max_bytes` from the beginning of an artifact.
+    async fn get_prefix(
+        &self,
+        key: &ProofArtifactKey,
+        max_bytes: usize,
+    ) -> Result<Option<ProofArtifactPrefix>>;
     async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()>;
 }
 
@@ -195,6 +209,38 @@ impl ProofArtifactStore for FilesystemProofArtifactStore {
 
     async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
         self.load_path(&self.path(key)).await
+    }
+
+    async fn get_prefix(
+        &self,
+        key: &ProofArtifactKey,
+        max_bytes: usize,
+    ) -> Result<Option<ProofArtifactPrefix>> {
+        anyhow::ensure!(
+            max_bytes > 0,
+            "proof artifact prefix limit must be positive"
+        );
+        let path = self.path(key);
+        let file = match fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to open proof artifact {}", path.display()));
+            }
+        };
+        let mut bytes = Vec::with_capacity(max_bytes);
+        let length =
+            u64::try_from(max_bytes).context("proof artifact prefix limit is too large")?;
+        file.take(length)
+            .read_to_end(&mut bytes)
+            .await
+            .with_context(|| format!("failed to read proof artifact prefix {}", path.display()))?;
+        Ok(Some(ProofArtifactPrefix {
+            proof_uri: file_uri(&path),
+            generation: None,
+            bytes,
+        }))
     }
 
     async fn delete(&self, key: &ProofArtifactKey, _generation: Option<i64>) -> Result<()> {
@@ -337,6 +383,45 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         self.load_object(key).await
     }
 
+    async fn get_prefix(
+        &self,
+        key: &ProofArtifactKey,
+        max_bytes: usize,
+    ) -> Result<Option<ProofArtifactPrefix>> {
+        anyhow::ensure!(
+            max_bytes > 0,
+            "proof artifact prefix limit must be positive"
+        );
+        let object_name = self.object_name(key);
+        let length =
+            u64::try_from(max_bytes).context("proof artifact prefix limit is too large")?;
+        let mut response = match self
+            .storage
+            .read_object(&self.bucket_resource, &object_name)
+            .set_read_range(ReadRange::segment(0, length))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.http_status_code() == Some(404) => return Ok(None),
+            Err(error) => return Err(error).context("failed to read GCS proof artifact prefix"),
+        };
+        let generation = response.object().generation;
+        let mut bytes = Vec::with_capacity(max_bytes);
+        while let Some(chunk) = response.next().await {
+            bytes.extend_from_slice(&chunk.context("failed to stream GCS proof artifact prefix")?);
+        }
+        anyhow::ensure!(
+            bytes.len() <= max_bytes,
+            "GCS proof artifact prefix exceeded requested limit"
+        );
+        Ok(Some(ProofArtifactPrefix {
+            proof_uri: self.proof_uri(key),
+            generation: Some(generation),
+            bytes,
+        }))
+    }
+
     async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()> {
         let mut request = self
             .control
@@ -458,6 +543,22 @@ mod tests {
         let conflict = store.put_if_absent(&key(), b"second").await?;
         assert!(matches!(conflict, ProofArtifactPutResult::Conflict(_)));
         assert_eq!(store.get(&key()).await?.expect("artifact").bytes, b"first");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_prefix_read_is_bounded() -> anyhow::Result<()> {
+        let root = unique_root();
+        let store = FilesystemProofArtifactStore::new("devnet-a".to_string(), root.clone())?;
+        store.put_if_absent(&key(), b"prefix-and-more").await?;
+
+        let prefix = store.get_prefix(&key(), 6).await?.expect("artifact prefix");
+        assert_eq!(prefix.bytes, b"prefix");
+        assert_eq!(prefix.proof_uri, store.proof_uri(&key()));
+        assert_eq!(prefix.generation, None);
+        assert!(store.get_prefix(&key(), 0).await.is_err());
 
         std::fs::remove_dir_all(root)?;
         Ok(())

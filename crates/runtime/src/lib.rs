@@ -6,7 +6,7 @@ mod artifact_store;
 
 pub use artifact_store::{
     FilesystemProofArtifactStore, GcsProofArtifactStore, ProofArtifactKey, ProofArtifactObject,
-    ProofArtifactPutResult, ProofArtifactStore, validate_environment_id,
+    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, validate_environment_id,
 };
 
 use anyhow::{Context, Result};
@@ -155,6 +155,28 @@ impl RuntimeManager {
                 pipeline_key,
                 proof_ref: proof_ref.to_string(),
             })
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the bounded artifact prefix cannot be read.
+    pub async fn read_proof_artifact_prefix(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        proof_ref: &str,
+        max_bytes: usize,
+    ) -> Result<Option<ProofArtifactPrefix>> {
+        self.artifact_store
+            .get_prefix(
+                &ProofArtifactKey {
+                    network_pair: network_pair.to_string(),
+                    pipeline_key,
+                    proof_ref: proof_ref.to_string(),
+                },
+                max_bytes,
+            )
             .await
     }
 

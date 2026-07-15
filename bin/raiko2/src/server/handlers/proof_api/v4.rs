@@ -608,7 +608,7 @@ async fn remove_invalidated_artifacts(
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
-        if let Err(err) = state
+        let backing_artifact_removed = match state
             .runtime
             .delete_proof_artifact(
                 &artifact.network_pair,
@@ -618,16 +618,19 @@ async fn remove_invalidated_artifacts(
             )
             .await
         {
-            data.artifacts.failed = data.artifacts.failed.saturating_add(1);
-            tracing::warn!(
-                network_pair = %artifact.network_pair,
-                proof_ref = %artifact.proof_ref,
-                proof_uri = %artifact.proof_uri,
-                error = %err,
-                "failed to remove invalidated proof artifact; retaining cache record"
-            );
-            continue;
-        }
+            Ok(()) => true,
+            Err(err) => {
+                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+                tracing::warn!(
+                    network_pair = %artifact.network_pair,
+                    proof_ref = %artifact.proof_ref,
+                    proof_uri = %artifact.proof_uri,
+                    error = %err,
+                    "failed to remove invalidated proof artifact; removing stale cache record"
+                );
+                false
+            }
+        };
         match state
             .runtime
             .remove_proof_artifact(
@@ -639,7 +642,9 @@ async fn remove_invalidated_artifacts(
         {
             Ok(Some(_record)) => {
                 data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
+                if backing_artifact_removed {
+                    data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
+                }
             }
             Ok(None) => {}
             Err(err) => {
@@ -777,7 +782,12 @@ async fn proof_artifact_starts_with(
     prefix: &str,
 ) -> bool {
     let object = match runtime
-        .read_proof_artifact_bytes(network_pair, pipeline_key, proof_ref)
+        .read_proof_artifact_prefix(
+            network_pair,
+            pipeline_key,
+            proof_ref,
+            PROOF_PREFIX_SCAN_LIMIT,
+        )
         .await
     {
         Ok(Some(object)) => object,
@@ -791,8 +801,7 @@ async fn proof_artifact_starts_with(
             return false;
         }
     };
-    let bytes = &object.bytes[..object.bytes.len().min(PROOF_PREFIX_SCAN_LIMIT)];
-    match proof_json_prefix_starts_with(bytes, prefix) {
+    match proof_json_prefix_starts_with(&object.bytes, prefix) {
         Ok(matches) => matches,
         Err(err) => {
             tracing::warn!(
@@ -1525,7 +1534,8 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_queue::TaskStoreError;
     use raiko2_runtime::{
-        ProofArtifactRegistration, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
+        ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration,
+        ProofArtifactStore, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
         TaskRegistration,
     };
     use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
@@ -1533,6 +1543,51 @@ mod tests {
     type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
     struct RemoveFailEngine;
+
+    #[derive(Debug)]
+    struct DeleteFailArtifactStore;
+
+    #[async_trait::async_trait]
+    impl ProofArtifactStore for DeleteFailArtifactStore {
+        fn environment_id(&self) -> &str {
+            "test"
+        }
+
+        fn proof_uri(&self, key: &ProofArtifactKey) -> String {
+            format!("delete-fails://{}", key.proof_ref)
+        }
+
+        async fn put_if_absent(
+            &self,
+            _key: &ProofArtifactKey,
+            _bytes: &[u8],
+        ) -> anyhow::Result<ProofArtifactPutResult> {
+            panic!("unexpected proof artifact publication")
+        }
+
+        async fn get(
+            &self,
+            _key: &ProofArtifactKey,
+        ) -> anyhow::Result<Option<ProofArtifactObject>> {
+            Ok(None)
+        }
+
+        async fn get_prefix(
+            &self,
+            _key: &ProofArtifactKey,
+            _max_bytes: usize,
+        ) -> anyhow::Result<Option<raiko2_runtime::ProofArtifactPrefix>> {
+            Ok(None)
+        }
+
+        async fn delete(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("injected artifact deletion failure")
+        }
+    }
 
     impl EngineHandle for RemoveFailEngine {
         fn submit_proposal_proof_with_dependencies(
@@ -1772,6 +1827,59 @@ mod tests {
                 .expect("get proof artifact")
                 .is_some(),
             "proof artifact record was removed while task cleanup failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_invalidated_artifacts_removes_stale_record_when_backing_delete_fails() {
+        let runtime = Arc::new(
+            RuntimeManager::new_with_artifact_store(
+                test_runtime_root("invalidate-backing-delete-fails"),
+                Arc::new(DeleteFailArtifactStore),
+            )
+            .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let pipeline_key = PipelineKey::ShastaSp1;
+        let proof_ref = "proposal-delete-failure";
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key,
+                route: pipeline_key.route(),
+                proof_uri: format!("delete-fails://{proof_ref}"),
+                content_hash: "content-hash".to_string(),
+                generation: Some(7),
+            })
+            .await
+            .expect("register proof artifact");
+        let artifact = runtime
+            .get_proof_artifact(network_pair, pipeline_key, proof_ref)
+            .await
+            .expect("get proof artifact")
+            .expect("proof artifact record");
+        let mut data = wire::InvalidateArtifactsData::default();
+        data.artifacts.matched = 1;
+
+        remove_invalidated_artifacts(&state, vec![artifact], &mut data).await;
+
+        assert_eq!(data.artifacts.matched, 1);
+        assert_eq!(data.artifacts.removed, 1);
+        assert_eq!(data.artifacts.files_removed, 0);
+        assert_eq!(data.artifacts.failed, 1);
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, pipeline_key, proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "stale proof artifact record was retained after backing delete failed"
         );
     }
 

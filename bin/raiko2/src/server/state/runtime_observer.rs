@@ -9,8 +9,8 @@ use raiko2_pipeline::PipelineRoute;
 use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{
-    ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
-    RuntimeManager, RuntimeTaskRecord,
+    ProofArtifactPublicationInvalidated, ProofArtifactPutResult, RunnerStatus, RuntimeManager,
+    RuntimeTaskRecord,
 };
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
@@ -77,6 +77,9 @@ fn publication_observer_error(error: &anyhow::Error) -> EngineObserverError {
     let message = format!("{error:#}");
     if error.downcast_ref::<ProofInvalidatedError>().is_some()
         || error
+            .downcast_ref::<ProofArtifactPublicationInvalidated>()
+            .is_some()
+        || error
             .downcast_ref::<raiko2_runtime::PendingProofPublicationRemoved>()
             .is_some()
     {
@@ -87,68 +90,6 @@ fn publication_observer_error(error: &anyhow::Error) -> EngineObserverError {
 }
 
 impl RuntimeObserver {
-    async fn register_published_artifact(
-        &self,
-        id: &EngineTaskId,
-        root_ref: &str,
-        artifact: &ProofArtifactObject,
-    ) -> Result<()> {
-        if self
-            .runtime
-            .proof_artifact_is_invalidated(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                root_ref,
-                &artifact.content_hash,
-            )
-            .await
-            .context("failed to check published proof invalidation state")?
-        {
-            return Err(ProofInvalidatedError(format!(
-                "canonical proof artifact {root_ref} has been invalidated"
-            ))
-            .into());
-        }
-        self.runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: self.network_pair.clone(),
-                proof_ref: root_ref.to_string(),
-                pipeline_key: id.0.pipeline_key(),
-                route: self.route,
-                proof_uri: artifact.proof_uri.clone(),
-                content_hash: artifact.content_hash.clone(),
-                generation: artifact.generation,
-            })
-            .await
-            .context("failed to register proof artifact")?;
-        if self
-            .runtime
-            .proof_artifact_is_invalidated(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                root_ref,
-                &artifact.content_hash,
-            )
-            .await
-            .context("failed to recheck published proof invalidation state")?
-        {
-            self.runtime
-                .mark_proof_artifact_invalidated(
-                    &self.network_pair,
-                    id.0.pipeline_key(),
-                    self.route,
-                    root_ref,
-                    &artifact.content_hash,
-                )
-                .await
-                .context("failed to retain local proof invalidation state")?;
-            anyhow::bail!("canonical proof artifact {root_ref} was invalidated during publication");
-        }
-        Ok(())
-    }
-
     pub(crate) fn new(
         runtime: Arc<RuntimeManager>,
         network_pair: String,
@@ -537,15 +478,16 @@ impl RuntimeObserver {
         let proof_bytes = serde_json::to_vec(proof).context("failed to serialize proof output")?;
         let publication = self
             .runtime
-            .publish_proof_artifact_bytes(
+            .commit_proof_artifact_publication(
                 &self.network_pair,
                 id.0.pipeline_key(),
                 self.route,
                 &root_ref,
+                task.publication_generation(),
                 &proof_bytes,
             )
             .await
-            .context("failed to publish proof artifact")?;
+            .context("failed to commit proof artifact publication")?;
         let artifact = publication.object();
         if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
             let canonical = serde_json::from_slice::<raiko2_primitives::Proof>(&artifact.bytes)
@@ -563,8 +505,6 @@ impl RuntimeObserver {
             );
         }
         let proof_uri = artifact.proof_uri.clone();
-        self.register_published_artifact(id, &root_ref, artifact)
-            .await?;
 
         let mut proof_uris = HashMap::with_capacity(records.len());
         // A shared queue worker may run on a replica that has no local runtime row. It must still
@@ -581,43 +521,6 @@ impl RuntimeObserver {
 
             proof_uris.insert(record.task_id, proof_uri.clone());
         }
-        if self
-            .runtime
-            .proof_artifact_is_invalidated(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                &root_ref,
-                &artifact.content_hash,
-            )
-            .await
-            .context("failed to check proof invalidation before completion")?
-        {
-            self.runtime
-                .mark_proof_artifact_invalidated(
-                    &self.network_pair,
-                    id.0.pipeline_key(),
-                    self.route,
-                    &root_ref,
-                    &artifact.content_hash,
-                )
-                .await
-                .context("failed to retain final proof invalidation state")?;
-            return Err(ProofInvalidatedError(format!(
-                "canonical proof artifact {root_ref} was invalidated before completion"
-            ))
-            .into());
-        }
-        self.runtime
-            .remove_pending_proof_publication(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                &root_ref,
-                task.publication_generation(),
-            )
-            .await
-            .context("failed to clear pending proof publication")?;
         Ok(has_local_records.then_some(PublishedProofCommit {
             proof_uris,
             root_ref,
@@ -772,6 +675,13 @@ impl RuntimeObserver {
             Ok(Some(publication)) => publication,
             Ok(None) => return ProofCommitAttempt::Committed,
             Err(error) if error.downcast_ref::<ProofInvalidatedError>().is_some() => {
+                return ProofCommitAttempt::Invalidated(error);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<ProofArtifactPublicationInvalidated>()
+                    .is_some() =>
+            {
                 return ProofCommitAttempt::Invalidated(error);
             }
             Err(error) => return ProofCommitAttempt::Retryable(error),
@@ -1390,7 +1300,7 @@ mod tests {
     };
     use raiko2_runtime::{
         FilesystemProofArtifactStore, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-        ProofArtifactPutResult, ProofArtifactStore, TaskRegistration,
+        ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 

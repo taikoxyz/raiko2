@@ -3,11 +3,13 @@
 #![allow(clippy::redundant_pub_crate)]
 
 mod artifact_store;
+mod publication;
 
 pub use artifact_store::{
     FilesystemProofArtifactStore, GcsProofArtifactStore, ProofArtifactKey, ProofArtifactObject,
     ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, validate_environment_id,
 };
+pub use publication::ProofArtifactPublicationInvalidated;
 
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};

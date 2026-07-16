@@ -598,14 +598,6 @@ where
         };
         *terminal_observer_task = proof_observer_task(&lease.id, payload);
         let completed_proof = proof.output.clone();
-        let outbox_error = if let Some(observer) = &self.inner.observer {
-            observer
-                .checkpoint_completed_proof(&lease.id, terminal_observer_task, &completed_proof)
-                .await
-                .err()
-        } else {
-            None
-        };
         let checkpoint_payload = payload
             .clone()
             .with_pending_publication(completed_proof.clone());
@@ -623,8 +615,13 @@ where
             lease.execution_policy = checkpoint_policy;
         } else {
             *execution_result = Err(task_lease_lost_error().into());
+            return Ok(());
         }
-        if checkpointed && let Some(error) = outbox_error {
+        if let Some(observer) = &self.inner.observer
+            && let Err(error) = observer
+                .checkpoint_completed_proof(&lease.id, terminal_observer_task, &completed_proof)
+                .await
+        {
             *execution_result = Err(TaskExecutionError::ProofPublication {
                 error: error.to_string(),
                 proof: Box::new(completed_proof),

@@ -34,15 +34,22 @@ pub(crate) struct RuntimeObserver {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FailedRootPolicy {
+enum TerminalRootPolicy {
     Exclude,
-    Include,
+    IncludeFailed,
+    IncludeCompleted,
 }
 
 struct PublishedProofCommit {
     proof_uris: HashMap<String, String>,
     root_ref: String,
     content_hash: String,
+}
+
+enum ProofCommitAttempt {
+    Committed,
+    Retryable(anyhow::Error),
+    Invalidated(anyhow::Error),
 }
 
 impl RuntimeObserver {
@@ -146,7 +153,7 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
-        self.update_root_records_with_policy(id, FailedRootPolicy::Exclude, mutator)
+        self.update_root_records_with_policy(id, TerminalRootPolicy::Exclude, mutator)
             .await
     }
 
@@ -154,14 +161,14 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
-        self.update_root_records_with_policy(id, FailedRootPolicy::Include, mutator)
+        self.update_root_records_with_policy(id, TerminalRootPolicy::IncludeFailed, mutator)
             .await
     }
 
     async fn update_root_records_with_policy<F>(
         &self,
         id: &EngineTaskId,
-        failed_policy: FailedRootPolicy,
+        terminal_policy: TerminalRootPolicy,
         mutator: F,
     ) -> Result<()>
     where
@@ -173,7 +180,7 @@ impl RuntimeObserver {
         if records.is_empty() {
             anyhow::bail!("runtime task not registered for task ref {root_ref}");
         }
-        let mut records = self.matching_root_records(id, records, failed_policy)?;
+        let mut records = self.matching_root_records(id, records, terminal_policy)?;
         let updated_at = now_ts();
         let observed_at_ms = now_ms();
         for record in &mut records {
@@ -198,22 +205,28 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         records: Vec<RuntimeTaskRecord>,
     ) -> Result<Vec<RuntimeTaskRecord>> {
-        self.matching_root_records(id, records, FailedRootPolicy::Exclude)
+        self.matching_root_records(id, records, TerminalRootPolicy::Exclude)
     }
 
     fn matching_root_records(
         &self,
         id: &EngineTaskId,
         records: Vec<RuntimeTaskRecord>,
-        failed_policy: FailedRootPolicy,
+        terminal_policy: TerminalRootPolicy,
     ) -> Result<Vec<RuntimeTaskRecord>> {
         records
             .into_iter()
             .filter_map(|record| match self.record_matches_observer(id, &record) {
                 Ok(true) if !is_terminal_status(record.runner_status) => Some(Ok(record)),
                 Ok(true)
-                    if failed_policy == FailedRootPolicy::Include
+                    if terminal_policy == TerminalRootPolicy::IncludeFailed
                         && record.runner_status == RunnerStatus::Failed =>
+                {
+                    Some(Ok(record))
+                }
+                Ok(true)
+                    if terminal_policy == TerminalRootPolicy::IncludeCompleted
+                        && record.runner_status == RunnerStatus::Completed =>
                 {
                     Some(Ok(record))
                 }
@@ -544,21 +557,32 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         stage: &'static str,
         message: &str,
+        include_completed: bool,
     ) {
         let message = message.to_string();
+        let terminal_policy = if include_completed {
+            TerminalRootPolicy::IncludeCompleted
+        } else {
+            TerminalRootPolicy::Exclude
+        };
         if let Err(sync_err) = self
-            .update_root_records(id, |record, updated_at, observed_at_ms| {
-                record.runner_status = RunnerStatus::Failed;
-                record.error = Some(message.clone());
-                let task_id = Self::timing_key_for_stage_name(id, stage);
-                update_task_metadata(record, |metadata| {
-                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some("failed".to_string());
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
+            .update_root_records_with_policy(
+                id,
+                terminal_policy,
+                |record, updated_at, observed_at_ms| {
+                    record.runner_status = RunnerStatus::Failed;
+                    record.proof_uri = None;
+                    record.error = Some(message.clone());
+                    let task_id = Self::timing_key_for_stage_name(id, stage);
+                    update_task_metadata(record, |metadata| {
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some("failed".to_string());
+                    })?;
+                    record.updated_at = updated_at;
+                    Ok(())
+                },
+            )
             .await
         {
             tracing::warn!(
@@ -581,37 +605,8 @@ impl RuntimeObserver {
         let task_id = Self::timing_key_for_task(id, task);
         let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
         for attempt in 0..=publication_delays.len() {
-            let result = match self.publish_final_proof_artifact(id, stage, proof).await {
-                Ok(Some(publication)) => {
-                    self.sync_proof_success(id, task, stage, publication.proof_uris)
-                        .await?;
-                    if self
-                        .runtime
-                        .proof_artifact_is_invalidated(
-                            &self.network_pair,
-                            id.0.pipeline_key(),
-                            self.route,
-                            &publication.root_ref,
-                            &publication.content_hash,
-                        )
-                        .await
-                        .context("failed to fence completed proof against invalidation")?
-                    {
-                        let message = format!(
-                            "canonical proof artifact {} was invalidated during completion",
-                            publication.root_ref
-                        );
-                        self.mark_proof_publication_failed(id, stage, &message)
-                            .await;
-                        anyhow::bail!(message);
-                    }
-                    Ok(())
-                }
-                Ok(None) => Ok(()),
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(()) => {
+            match self.commit_proof_attempt(id, task, stage, proof).await {
+                ProofCommitAttempt::Committed => {
                     self.observe_stage_terminal_metrics(
                         id,
                         &task_id,
@@ -623,7 +618,23 @@ impl RuntimeObserver {
                     .await;
                     return Ok(());
                 }
-                Err(error) if attempt < publication_delays.len() => {
+                ProofCommitAttempt::Invalidated(error) => {
+                    let message = format!("failed to publish proof artifact: {error}");
+                    tracing::warn!(task = ?id, stage, error = %error, "proof invalidated during completion");
+                    self.observe_stage_terminal_metrics(
+                        id,
+                        &task_id,
+                        stage,
+                        "failed",
+                        finished_at_ms,
+                        Some(message.as_str()),
+                    )
+                    .await;
+                    self.mark_proof_publication_failed(id, stage, message.as_str(), true)
+                        .await;
+                    anyhow::bail!(message);
+                }
+                ProofCommitAttempt::Retryable(error) if attempt < publication_delays.len() => {
                     let delay = publication_delays[attempt];
                     tracing::warn!(
                         task = ?id,
@@ -635,7 +646,7 @@ impl RuntimeObserver {
                     );
                     tokio::time::sleep(delay).await;
                 }
-                Err(error) => {
+                ProofCommitAttempt::Retryable(error) => {
                     let message = format!("failed to publish proof artifact: {error}");
                     tracing::warn!(task = ?id, stage, error = %error, "failed to publish proof artifact");
                     self.observe_stage_terminal_metrics(
@@ -647,13 +658,52 @@ impl RuntimeObserver {
                         Some(message.as_str()),
                     )
                     .await;
-                    self.mark_proof_publication_failed(id, stage, message.as_str())
+                    self.mark_proof_publication_failed(id, stage, message.as_str(), false)
                         .await;
                     anyhow::bail!(message);
                 }
             }
         }
         unreachable!("publication retry loop always returns")
+    }
+
+    async fn commit_proof_attempt(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        stage: &'static str,
+        proof: &raiko2_primitives::Proof,
+    ) -> ProofCommitAttempt {
+        let publication = match self.publish_final_proof_artifact(id, stage, proof).await {
+            Ok(Some(publication)) => publication,
+            Ok(None) => return ProofCommitAttempt::Committed,
+            Err(error) => return ProofCommitAttempt::Retryable(error),
+        };
+        if let Err(error) = self
+            .sync_proof_success(id, task, stage, publication.proof_uris)
+            .await
+        {
+            return ProofCommitAttempt::Retryable(error);
+        }
+        match self
+            .runtime
+            .proof_artifact_is_invalidated(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &publication.root_ref,
+                &publication.content_hash,
+            )
+            .await
+            .context("failed to fence completed proof against invalidation")
+        {
+            Ok(false) => ProofCommitAttempt::Committed,
+            Ok(true) => ProofCommitAttempt::Invalidated(anyhow::anyhow!(
+                "canonical proof artifact {} was invalidated during completion",
+                publication.root_ref
+            )),
+            Err(error) => ProofCommitAttempt::Retryable(error),
+        }
     }
 
     async fn sync_proof_success(
@@ -1847,6 +1897,140 @@ mod tests {
                 .map_err(anyhow::Error::msg)?,
             Some(proof)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidated_completion_demotes_the_just_completed_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-invalidated-completion-rollback",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_invalidated_completion",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Completed,
+        )
+        .await?;
+        let mut completed = runtime
+            .get_task("task_invalidated_completion")
+            .await?
+            .expect("completed runtime task");
+        completed.proof_uri = Some("file:///deleted-proof.json".to_string());
+        runtime.upsert_task(&completed).await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        observer
+            .mark_proof_publication_failed(
+                &task_id,
+                "prove",
+                "proof invalidated during completion",
+                true,
+            )
+            .await;
+
+        let rolled_back = runtime
+            .get_task("task_invalidated_completion")
+            .await?
+            .expect("rolled back runtime task");
+        assert_eq!(rolled_back.runner_status, RunnerStatus::Failed);
+        assert_eq!(rolled_back.proof_uri, None);
+        assert_eq!(
+            rolled_back.error.as_deref(),
+            Some("proof invalidated during completion")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transient_success_sync_failure_stays_in_publication_retry_loop() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-sync-retry-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: FilesystemProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root,
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 2,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-sync-retry"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_sync_retry",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+        let publication = tokio::spawn(async move {
+            observer
+                .on_task_succeeded(
+                    &task_id,
+                    &EngineTask::ProveProposal {
+                        request,
+                        input_task: task_id.clone(),
+                    },
+                    &EngineTaskSuccess::Proof {
+                        stage: raiko2_pipeline::PipelineStage::Prove,
+                        proof: proof_fixture(),
+                    },
+                )
+                .await
+        });
+
+        store.recheck_entered.notified().await;
+        let mut record = runtime
+            .get_task("task_sync_retry")
+            .await?
+            .expect("runtime task");
+        let valid_metadata = record.metadata.clone();
+        record.metadata = serde_json::json!({"invalid": true});
+        runtime.upsert_task(&record).await?;
+        store.allow_recheck.notify_one();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        record.metadata = valid_metadata;
+        runtime.upsert_task(&record).await?;
+
+        publication
+            .await?
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let completed = runtime
+            .get_task("task_sync_retry")
+            .await?
+            .expect("completed runtime task");
+        assert_eq!(completed.runner_status, RunnerStatus::Completed);
+        assert!(completed.proof_uri.is_some());
         Ok(())
     }
 

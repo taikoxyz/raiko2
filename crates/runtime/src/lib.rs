@@ -978,11 +978,48 @@ impl RuntimeManager {
         proof_bytes: &[u8],
     ) -> Result<()> {
         let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let canonical_key = ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.to_string(),
+        };
+        if self
+            .artifact_store
+            .is_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .await
+            .context("failed to check pending proof removal marker")?
+        {
+            anyhow::ensure!(
+                self.canonical_proof_is_active(&canonical_key, proof_bytes)
+                    .await?,
+                "pending proof publication {proof_ref} has been removed"
+            );
+            return Ok(());
+        }
         let pending = self
             .artifact_store
             .put_if_absent(&pending_key, proof_bytes)
             .await
             .context("failed to checkpoint pending proof in shared artifact store")?;
+        if self
+            .artifact_store
+            .is_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .await
+            .context("failed to recheck pending proof removal marker")?
+        {
+            let object = pending.object();
+            self.artifact_store
+                .delete(&pending_key, object.generation, &object.content_hash)
+                .await
+                .context("failed to remove proof checkpoint created after invalidation")?;
+            anyhow::ensure!(
+                self.canonical_proof_is_active(&canonical_key, proof_bytes)
+                    .await?,
+                "pending proof publication {proof_ref} was removed during checkpoint"
+            );
+            return Ok(());
+        }
         let proof_bytes = pending.object().bytes.clone();
         let conn = self.connection().await?;
         let environment_id = self.environment_id().to_string();
@@ -1015,6 +1052,29 @@ impl RuntimeManager {
         })
         .await
         .context("failed to checkpoint pending proof publication")
+    }
+
+    async fn canonical_proof_is_active(
+        &self,
+        key: &ProofArtifactKey,
+        expected_bytes: &[u8],
+    ) -> Result<bool> {
+        let Some(object) = self
+            .artifact_store
+            .get(key)
+            .await
+            .context("failed to load canonical proof after outbox removal")?
+        else {
+            return Ok(false);
+        };
+        if object.content_hash != artifact_store::content_hash(expected_bytes) {
+            return Ok(false);
+        }
+        Ok(!self
+            .artifact_store
+            .is_invalidated(key, &object.content_hash)
+            .await
+            .context("failed to check canonical proof invalidation marker")?)
     }
 
     /// Loads a proof waiting to be published.
@@ -2326,6 +2386,40 @@ mod tests {
         first
             .remove_pending_proof_publication(network_pair, pipeline, route, proof_ref)
             .await?;
+
+        let late_checkpoint = second
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                b"late-proof",
+            )
+            .await;
+        assert!(
+            late_checkpoint.is_err(),
+            "a stale worker recreated a deliberately removed shared checkpoint"
+        );
+
+        second
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                b"committed-proof",
+            )
+            .await?;
+        second
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                b"committed-proof",
+            )
+            .await
+            .expect("an already committed canonical proof is an idempotent checkpoint");
 
         assert!(
             second

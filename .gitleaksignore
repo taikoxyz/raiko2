@@ -1,0 +1,7 @@
+# Known historical SGX signing key removed in #105; retained in history only.
+0cb5e07b38b3071be97548df28e51e02bae28bc6:docker/enclave-key.pem:private-key:1
+
+# Historical runtime test fixtures, not production pipeline credentials.
+ebd59aa36d11374b6903e53d8e92dac1b15d2a3b:crates/runtime/src/lib.rs:generic-api-key:503
+7e0b264fb2f4e3609df9b8f2e4663e9c62ff92c0:bin/raiko2/src/server/state/runtime_observer.rs:generic-api-key:376
+7e0b264fb2f4e3609df9b8f2e4663e9c62ff92c0:crates/runtime/src/lib.rs:generic-api-key:464

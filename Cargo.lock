@@ -8748,6 +8748,7 @@ dependencies = [
  "google-cloud-storage",
  "raiko2-pipeline",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",

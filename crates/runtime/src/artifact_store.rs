@@ -380,6 +380,9 @@ impl GcsProofArtifactStore {
         if bucket_id.trim().is_empty() {
             anyhow::bail!("runtime.artifact_store.bucket must not be empty");
         }
+        // GCS enables aws-lc-rs while other HTTP clients can enable another rustls provider.
+        // Select the GCS provider explicitly before constructing its clients.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let storage = Storage::builder()
             .build()
             .await

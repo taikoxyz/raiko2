@@ -39,6 +39,12 @@ enum FailedRootPolicy {
     Include,
 }
 
+struct PublishedProofCommit {
+    proof_uris: HashMap<String, String>,
+    root_ref: String,
+    content_hash: String,
+}
+
 impl RuntimeObserver {
     async fn register_published_artifact(
         &self,
@@ -437,7 +443,7 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         stage: &str,
         proof: &raiko2_primitives::Proof,
-    ) -> Result<Option<HashMap<String, String>>> {
+    ) -> Result<Option<PublishedProofCommit>> {
         let root_ref = Self::root_task_ref(id);
         let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
         let records = self.matching_active_root_records(id, records)?;
@@ -477,15 +483,6 @@ impl RuntimeObserver {
         let proof_uri = artifact.proof_uri.clone();
         self.register_published_artifact(id, &root_ref, artifact)
             .await?;
-        self.runtime
-            .remove_pending_proof_publication(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                &root_ref,
-            )
-            .await
-            .context("failed to clear pending proof publication")?;
 
         let mut proof_uris = HashMap::with_capacity(records.len());
         // A shared queue worker may run on a replica that has no local runtime row. It must still
@@ -502,7 +499,44 @@ impl RuntimeObserver {
 
             proof_uris.insert(record.task_id, proof_uri.clone());
         }
-        Ok(has_local_records.then_some(proof_uris))
+        if self
+            .runtime
+            .proof_artifact_is_invalidated(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &root_ref,
+                &artifact.content_hash,
+            )
+            .await
+            .context("failed to check proof invalidation before completion")?
+        {
+            self.runtime
+                .mark_proof_artifact_invalidated(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &root_ref,
+                    &artifact.content_hash,
+                )
+                .await
+                .context("failed to retain final proof invalidation state")?;
+            anyhow::bail!("canonical proof artifact {root_ref} was invalidated before completion");
+        }
+        self.runtime
+            .remove_pending_proof_publication(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &root_ref,
+            )
+            .await
+            .context("failed to clear pending proof publication")?;
+        Ok(has_local_records.then_some(PublishedProofCommit {
+            proof_uris,
+            root_ref,
+            content_hash: artifact.content_hash.clone(),
+        }))
     }
 
     async fn mark_proof_publication_failed(
@@ -548,7 +582,31 @@ impl RuntimeObserver {
         let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
         for attempt in 0..=publication_delays.len() {
             let result = match self.publish_final_proof_artifact(id, stage, proof).await {
-                Ok(Some(proof_uris)) => self.sync_proof_success(id, task, stage, proof_uris).await,
+                Ok(Some(publication)) => {
+                    self.sync_proof_success(id, task, stage, publication.proof_uris)
+                        .await?;
+                    if self
+                        .runtime
+                        .proof_artifact_is_invalidated(
+                            &self.network_pair,
+                            id.0.pipeline_key(),
+                            self.route,
+                            &publication.root_ref,
+                            &publication.content_hash,
+                        )
+                        .await
+                        .context("failed to fence completed proof against invalidation")?
+                    {
+                        let message = format!(
+                            "canonical proof artifact {} was invalidated during completion",
+                            publication.root_ref
+                        );
+                        self.mark_proof_publication_failed(id, stage, &message)
+                            .await;
+                        anyhow::bail!(message);
+                    }
+                    Ok(())
+                }
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             };
@@ -1801,7 +1859,7 @@ mod tests {
                 artifact_root,
             )?,
             checks: AtomicUsize::new(0),
-            block_on_check: 1,
+            block_on_check: 2,
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });

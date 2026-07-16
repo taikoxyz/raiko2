@@ -668,6 +668,18 @@ async fn remove_invalidated_artifacts(
             }
         }
 
+        let identity = ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
+            proof_ref: artifact.proof_ref.clone(),
+        };
+        let blocked_artifact_refs =
+            remove_late_terminal_tasks_for_artifact(state, &identity, data).await;
+        if blocked_artifact_refs.contains(&identity) {
+            continue;
+        }
+
         if let Err(err) = state
             .runtime
             .delete_proof_artifact(
@@ -717,6 +729,69 @@ async fn remove_invalidated_artifacts(
             }
         }
     }
+}
+
+async fn remove_late_terminal_tasks_for_artifact(
+    state: &AppState,
+    artifact: &ProofArtifactIdentity,
+    data: &mut wire::InvalidateArtifactsData,
+) -> HashSet<ProofArtifactIdentity> {
+    let records = match state
+        .runtime
+        .find_tasks_by_task_ref(&artifact.proof_ref)
+        .await
+    {
+        Ok(records) => records,
+        Err(err) => {
+            data.tasks.failed = data.tasks.failed.saturating_add(1);
+            tracing::warn!(
+                proof_ref = %artifact.proof_ref,
+                error = %err,
+                "failed to recheck terminal tasks after proof invalidation"
+            );
+            return HashSet::from([artifact.clone()]);
+        }
+    };
+    let mut matched_tasks = Vec::new();
+    for record in records {
+        if !is_terminal_runtime_status(record.runner_status)
+            || record.pipeline_key != artifact.pipeline_key
+            || record.route != artifact.route
+        {
+            continue;
+        }
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                data.tasks.invalid_metadata = data.tasks.invalid_metadata.saturating_add(1);
+                tracing::warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping late invalidation task with invalid metadata"
+                );
+                return HashSet::from([artifact.clone()]);
+            }
+        };
+        if metadata.network_pair != artifact.network_pair {
+            continue;
+        }
+        let root_artifact_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
+        let artifact_refs =
+            invalidation_artifact_refs(&metadata, record.pipeline_key, record.route, None);
+        if !artifact_refs.contains(artifact) {
+            continue;
+        }
+        data.tasks.matched = data.tasks.matched.saturating_add(1);
+        matched_tasks.push(CandidateInvalidationTask {
+            record,
+            metadata,
+            artifact_refs,
+            root_artifact_refs,
+            root_proof_matches_prefix: true,
+        });
+    }
+    remove_invalidated_tasks(state, matched_tasks, data).await
 }
 
 fn validate_invalidate_artifacts_request(
@@ -2061,6 +2136,104 @@ mod tests {
             .expect("load invalidated proof artifact")
             .is_none(),
             "tombstoned backing object was rediscovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_rechecks_root_that_completed_after_candidate_snapshot() {
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_dev/taiko_dev_l1",
+            PipelineKey::ShastaSp1,
+            Arc::new(RemoveFailEngine),
+        );
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-late-terminal-root"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        );
+        let metadata = task_log_metadata_with_requests(&[57], false);
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = root_invalidation_artifact_refs(&metadata, pipeline, route)
+            .into_iter()
+            .next()
+            .expect("root artifact ref")
+            .proof_ref;
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &metadata.network_pair,
+                pipeline,
+                route,
+                &proof_ref,
+                &serde_json::to_vec(&Proof {
+                    proof: Some("0xlate".to_string()),
+                    ..Proof::default()
+                })
+                .expect("serialize proof"),
+            )
+            .await
+            .expect("publish proof artifact");
+        let object = publication.object();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: metadata.network_pair.clone(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await
+            .expect("register proof artifact");
+        let artifact = runtime
+            .get_proof_artifact(&metadata.network_pair, pipeline, route, &proof_ref)
+            .await
+            .expect("get proof artifact")
+            .expect("proof artifact record");
+
+        // The artifact candidate was captured while the root was non-terminal. It completes
+        // before deletion starts, so the post-marker task lookup must discover it.
+        let mut record = runtime
+            .register_task(TaskRegistration {
+                task_id: "task_late_terminal_root".to_string(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "hoodi_proposal".to_string(),
+                proposal_id: Some(57),
+                proof_ids: vec![proof_ref.clone()],
+                metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+                request_fingerprint: None,
+            })
+            .await
+            .expect("register runtime task");
+        record.runner_status = RuntimeTaskRunnerStatus::Completed;
+        runtime.upsert_task(&record).await.expect("complete task");
+
+        let mut data = wire::InvalidateArtifactsData::default();
+        data.artifacts.matched = 1;
+        remove_invalidated_artifacts(&state, vec![artifact], &mut data).await;
+
+        assert_eq!(data.tasks.matched, 1);
+        assert_eq!(data.tasks.failed, 1);
+        assert_eq!(data.artifacts.removed, 0);
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &metadata.network_pair,
+                    pipeline,
+                    route,
+                    &proof_ref,
+                )
+                .await
+                .expect("get tombstoned artifact")
+                .is_some(),
+            "artifact deletion proceeded after late root cleanup failed"
         );
     }
 

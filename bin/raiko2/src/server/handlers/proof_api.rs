@@ -1603,11 +1603,12 @@ async fn cleanup_stale_root_before_replacement(
         existing_metadata,
     )
     .await;
-    let _ = remove_task_children(
+    let _ = remove_task_children_if_unreferenced(
+        &state.runtime,
         &engine,
+        &existing.task_id,
         existing.pipeline_key,
         existing_metadata,
-        &mut HashSet::new(),
     )
     .await;
     Ok(())
@@ -3663,6 +3664,7 @@ mod tests {
         pipeline_key: PipelineKey,
         proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
         aggregate_inputs: Mutex<Vec<AggregateProofInput>>,
+        removed: Mutex<Vec<EngineTaskId>>,
     }
 
     impl RecordingEngine {
@@ -3671,6 +3673,7 @@ mod tests {
                 pipeline_key,
                 proposals: Mutex::new(Vec::new()),
                 aggregate_inputs: Mutex::new(Vec::new()),
+                removed: Mutex::new(Vec::new()),
             }
         }
     }
@@ -3725,8 +3728,11 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async move {
+                self.removed.lock().expect("removed tasks mutex").push(id);
+                Ok(())
+            })
         }
     }
 
@@ -5118,6 +5124,55 @@ mod tests {
                 )
                 .await?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_cleanup_preserves_proposal_shared_by_another_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "replacement-preserves-shared-proposal",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = test_proposal_request(42);
+        let shared_task_ref = proposal_task_ref(pipeline, &request);
+        let mut first_metadata = task_metadata_with_stage(Some("prove"));
+        first_metadata.proof_type = ProofType::Native;
+        first_metadata.aggregate_requested = false;
+        first_metadata.proposals[0]
+            .task_id
+            .clone_from(&shared_task_ref);
+        first_metadata.proposals[0].request = Some(request.clone());
+        let mut first = runtime_record(RuntimeRunnerStatus::Failed, &first_metadata);
+        first.task_id = "root-being-replaced".to_string();
+        first.pipeline_key = pipeline;
+        first.route = pipeline.route();
+        first.proof_ids = vec![shared_task_ref.clone()];
+        first.request_fingerprint = Some("root-being-replaced-fingerprint".to_string());
+        runtime.upsert_task(&first).await?;
+
+        let mut second_metadata = first_metadata.clone();
+        second_metadata.runtime.active_stage = Some("prove".to_string());
+        let mut second = runtime_record(RuntimeRunnerStatus::Running, &second_metadata);
+        second.task_id = "root-still-live".to_string();
+        second.pipeline_key = pipeline;
+        second.route = pipeline.route();
+        second.proof_ids = vec![shared_task_ref];
+        second.request_fingerprint = Some("root-still-live-fingerprint".to_string());
+        runtime.upsert_task(&second).await?;
+
+        let recorder = Arc::new(RecordingEngine::new(pipeline));
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(pipeline, recorder.clone() as Arc<dyn EngineHandle>)],
+        );
+        cleanup_stale_root_before_replacement(&state, &first, &first_metadata)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(
+            recorder.removed.lock().expect("removed tasks").is_empty(),
+            "replacement removed proposal work still referenced by another root"
         );
         Ok(())
     }

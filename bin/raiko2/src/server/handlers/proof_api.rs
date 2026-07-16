@@ -61,8 +61,8 @@ use crate::server::task_cleanup::{
 use crate::server::task_metadata::{
     AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
     RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref,
-    aggregate_task_ref, proposal_proof_artifact_refs, proposal_task_ref, root_proof_artifact_refs,
-    stage_task_ref,
+    aggregate_task_ref, proposal_proof_artifact_refs, proposal_task_ref,
+    publication_proof_artifact_refs, root_proof_artifact_refs, stage_task_ref,
 };
 use crate::server::telemetry::{self, MetricContext};
 
@@ -1105,6 +1105,11 @@ async fn handle_existing_batch_task(
         ),
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
+    if let Some(response) =
+        readable_completed_response(state, &existing, missing_completed_artifact).await?
+    {
+        return Ok(response);
+    }
     if existing.pipeline_key != submission.route.pipeline_key()
         || existing.route != submission.route.route
     {
@@ -1117,28 +1122,11 @@ async fn handle_existing_batch_task(
         )
         .await;
     }
-    if requires_queue_namespace_migration(&existing, &existing_metadata) {
-        let response = compatibility_response_for_task(state, &existing.task_id).await?;
-        if response_is_completed(&response) {
-            return Ok(response);
-        }
-        let mut migrated_metadata = existing_metadata.clone();
-        migrated_metadata.runtime.queue_namespace_version =
-            RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION;
-        let mut migrated = existing.clone();
-        migrated.metadata = serde_json::to_value(&migrated_metadata).map_err(|err| {
-            ApiError::internal(format!("failed to serialize migrated task metadata: {err}"))
-        })?;
-        state.runtime.upsert_task(&migrated).await.map_err(|err| {
-            ApiError::internal(format!(
-                "failed to persist queue namespace migration: {err}"
-            ))
-        })?;
-        recover_existing_task(state, &migrated, || {
-            reenqueue_existing_batch_task(state, submission, &migrated, &migrated_metadata)
-        })
-        .await?;
-        return compatibility_response_for_task(state, &existing.task_id).await;
+    if let Some(response) =
+        migrate_existing_batch_queue_namespace(state, submission, &existing, &existing_metadata)
+            .await?
+    {
+        return Ok(response);
     }
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
@@ -1170,6 +1158,47 @@ async fn handle_existing_batch_task(
         }
     }
     compatibility_response_for_task(state, &existing.task_id).await
+}
+
+async fn migrate_existing_batch_queue_namespace(
+    state: &AppState,
+    submission: &CanonicalBatchSubmission,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    existing_metadata: &TaskMetadata,
+) -> Result<Option<Response>, ApiError> {
+    if !requires_queue_namespace_migration(existing, existing_metadata) {
+        return Ok(None);
+    }
+    let response = compatibility_response_for_task(state, &existing.task_id).await?;
+    if response_is_completed(&response) {
+        return Ok(Some(response));
+    }
+    let mut migrated_metadata = existing_metadata.clone();
+    migrated_metadata.runtime.queue_namespace_version =
+        RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION;
+    let migrated_metadata_value = serde_json::to_value(&migrated_metadata).map_err(|err| {
+        ApiError::internal(format!("failed to serialize migrated task metadata: {err}"))
+    })?;
+    recover_existing_task(state, existing, || {
+        reenqueue_existing_batch_task(state, submission, existing, &migrated_metadata)
+    })
+    .await?;
+    persist_queue_namespace_migration(state, &existing.task_id, migrated_metadata_value).await?;
+    compatibility_response_for_task(state, &existing.task_id)
+        .await
+        .map(Some)
+}
+
+async fn readable_completed_response(
+    state: &AppState,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    missing_completed_artifact: bool,
+) -> Result<Option<Response>, ApiError> {
+    if existing.runner_status != RuntimeRunnerStatus::Completed || missing_completed_artifact {
+        return Ok(None);
+    }
+    let response = compatibility_response_for_task(state, &existing.task_id).await?;
+    Ok(response_is_completed(&response).then_some(response))
 }
 
 const fn requires_queue_namespace_migration(
@@ -1436,24 +1465,20 @@ async fn handle_existing_external_aggregate_task(
         let mut migrated_metadata = existing_metadata.clone();
         migrated_metadata.runtime.queue_namespace_version =
             RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION;
-        let mut migrated = existing.clone();
-        migrated.metadata = serde_json::to_value(&migrated_metadata).map_err(|err| {
+        let migrated_metadata_value = serde_json::to_value(&migrated_metadata).map_err(|err| {
             ApiError::internal(format!("failed to serialize migrated task metadata: {err}"))
         })?;
-        state.runtime.upsert_task(&migrated).await.map_err(|err| {
-            ApiError::internal(format!(
-                "failed to persist queue namespace migration: {err}"
-            ))
-        })?;
-        recover_existing_task(state, &migrated, || {
+        recover_existing_task(state, &existing, || {
             reenqueue_existing_external_aggregate_task(
                 engine,
                 submission,
-                &migrated,
+                &existing,
                 &migrated_metadata,
             )
         })
         .await?;
+        persist_queue_namespace_migration(state, &existing.task_id, migrated_metadata_value)
+            .await?;
         return compatibility_response_for_task(state, &existing.task_id).await;
     }
     if missing_completed_artifact
@@ -1501,6 +1526,28 @@ async fn reset_runtime_task_to_allocated(state: &AppState, task_id: &str) -> Res
         .map_err(|err| {
             ApiError::internal(format!("failed to reset recovered task {task_id}: {err}"))
         })
+}
+
+async fn persist_queue_namespace_migration(
+    state: &AppState,
+    task_id: &str,
+    metadata: serde_json::Value,
+) -> Result<(), ApiError> {
+    let updated = state
+        .runtime
+        .update_task_metadata(task_id, &metadata)
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to persist queue namespace migration: {err}"
+            ))
+        })?;
+    if !updated {
+        return Err(ApiError::internal(format!(
+            "failed to persist queue namespace migration: task {task_id} is missing"
+        )));
+    }
+    Ok(())
 }
 
 async fn restore_runtime_task_status(
@@ -1572,10 +1619,15 @@ pub(crate) async fn clear_task_publication_outboxes(
     metadata: &TaskMetadata,
     invalidate: bool,
 ) -> Result<(), ApiError> {
-    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
+    let proof_refs = publication_proof_artifact_refs(metadata, record.pipeline_key);
+    if proof_refs.is_empty() {
         return Ok(());
-    };
-    for proof_ref in root_refs.refs {
+    }
+    let other_references = pending_publication_refs_owned_by_other_tasks(runtime, record).await?;
+    for proof_ref in proof_refs {
+        if other_references.contains(&proof_ref) {
+            continue;
+        }
         let result = if invalidate {
             runtime
                 .invalidate_pending_proof_publication(
@@ -1602,6 +1654,47 @@ pub(crate) async fn clear_task_publication_outboxes(
         })?;
     }
     Ok(())
+}
+
+async fn pending_publication_refs_owned_by_other_tasks(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<HashSet<String>, ApiError> {
+    let metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).map_err(|err| {
+            ApiError::internal(format!(
+                "failed to parse runtime task metadata {}: {err}",
+                record.task_id
+            ))
+        })?;
+    let records = runtime
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
+    let mut refs = HashSet::new();
+    for other in records {
+        if other.task_id == record.task_id
+            || other.pipeline_key != record.pipeline_key
+            || other.route != record.route
+        {
+            continue;
+        }
+        let other_metadata: TaskMetadata =
+            serde_json::from_value(other.metadata).map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to parse runtime task metadata {}: {err}",
+                    other.task_id
+                ))
+            })?;
+        if other_metadata.network_pair != metadata.network_pair {
+            continue;
+        }
+        refs.extend(publication_proof_artifact_refs(
+            &other_metadata,
+            other.pipeline_key,
+        ));
+    }
+    Ok(refs)
 }
 
 async fn remove_stale_task_workspace_if_relocated(
@@ -3416,6 +3509,56 @@ mod tests {
 
     struct CancelFailEngine;
 
+    struct SubmitFailEngine;
+
+    impl EngineHandle for SubmitFailEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "injected enqueue failure",
+                )))
+            })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "injected enqueue failure",
+                )))
+            })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     impl EngineHandle for CancelFailEngine {
         fn submit_proposal_proof_with_dependencies(
             &self,
@@ -3699,11 +3842,30 @@ mod tests {
         proof_ref: &str,
         proof: &Proof,
     ) -> Result<()> {
+        write_test_proof_artifact_for_route(
+            runtime,
+            network_pair,
+            PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
+            proof_ref,
+            proof,
+        )
+        .await
+    }
+
+    async fn write_test_proof_artifact_for_route(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        proof: &Proof,
+    ) -> Result<()> {
         let publication = runtime
             .publish_proof_artifact_bytes(
                 network_pair,
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                pipeline_key,
+                route,
                 proof_ref,
                 &serde_json::to_vec(proof)?,
             )
@@ -3713,8 +3875,8 @@ mod tests {
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),
                 proof_ref: proof_ref.to_string(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: "native/local".parse().expect("route"),
+                pipeline_key,
+                route,
                 proof_uri: artifact.proof_uri.clone(),
                 content_hash: artifact.content_hash.clone(),
                 generation: artifact.generation,
@@ -4684,6 +4846,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_sp1_artifact_survives_server_route_change() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "completed-sp1-local-to-network",
+        ))?);
+        let requested_route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
+            PipelineKey::ShastaSp1,
+            ProofType::Sp1,
+        );
+        let mut submission = canonical_submission(requested_route, false);
+        submission.requested_proof_type = BatchProofType::Sp1;
+        let mut metadata = task_metadata_with_stage(None);
+        metadata.proof_type = ProofType::Sp1;
+        metadata.aggregate_requested = false;
+        metadata.proposals[0].task_id = "sp1-completed-proposal".to_string();
+        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local);
+        runtime.upsert_task(&record).await?;
+        write_test_proof_artifact_for_route(
+            &runtime,
+            &metadata.network_pair,
+            record.pipeline_key,
+            record.route,
+            &metadata.proposals[0].task_id,
+            &valid_native_proof(),
+        )
+        .await?;
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSp1,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(response_is_completed(&response));
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("completed runtime task");
+        assert_eq!(stored.route, record.route);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn running_sp1_network_record_migrates_from_legacy_queue_namespace() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "running-sp1-legacy-namespace",
@@ -4753,6 +4966,159 @@ mod tests {
             RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION
         );
         assert!(stored_metadata.has_remote_submission_progress());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_queue_namespace_reenqueue_keeps_legacy_version_retryable() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "failed-legacy-namespace-reenqueue",
+        ))?);
+        let requested_route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
+            PipelineKey::ShastaSp1,
+            ProofType::Sp1,
+        );
+        let mut submission = canonical_submission(requested_route, false);
+        submission.requested_proof_type = BatchProofType::Sp1;
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.proof_type = ProofType::Sp1;
+        metadata.aggregate_requested = false;
+        metadata.runtime.queue_namespace_version = 0;
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.route = submission.route.route;
+        record.request_fingerprint = Some(batch_request_fingerprint_for_test(&submission)?);
+        runtime.upsert_task(&record).await?;
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSp1,
+                Arc::new(SubmitFailEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+
+        let error = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .expect_err("enqueue failure");
+        assert!(error.message.contains("failed to recover dormant task"));
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        let stored_metadata: TaskMetadata = serde_json::from_value(stored.metadata)?;
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Running);
+        assert_eq!(
+            stored_metadata.runtime.queue_namespace_version, 0,
+            "failed enqueue must remain eligible for migration retry"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clearing_aggregate_outboxes_preserves_shared_proposal_until_last_root() -> Result<()> {
+        let runtime = RuntimeManager::new(unique_test_runtime_root("shared-proposal-outbox"))?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let mut aggregate_metadata = task_metadata_with_stage(Some("aggregate"));
+        aggregate_metadata.proof_type = ProofType::Native;
+        aggregate_metadata.aggregate_requested = true;
+        aggregate_metadata.proposals[0].task_id = "shared-proposal".to_string();
+        aggregate_metadata.proposals.push(ProposalTask {
+            proposal_id: 43,
+            checkpoint: None,
+            l1_inclusion_block_number: 2,
+            l2_block_numbers: vec![43],
+            last_anchor_block_number: 42,
+            task_id: "unique-proposal".to_string(),
+            request: None,
+        });
+        aggregate_metadata.aggregate_request = Some(AggregationTaskRequest {
+            request_id: "aggregate-request".to_string(),
+            proposal_ids: vec![42, 43],
+            prover_config: ProverTaskConfig::default(),
+        });
+        let mut aggregate_record =
+            runtime_record(RuntimeRunnerStatus::Running, &aggregate_metadata);
+        aggregate_record.task_id = "aggregate-root".to_string();
+        aggregate_record.request_fingerprint = Some("aggregate-root-fingerprint".to_string());
+        aggregate_record.pipeline_key = pipeline;
+        aggregate_record.route = route;
+        runtime.upsert_task(&aggregate_record).await?;
+
+        let mut proposal_metadata = task_metadata_with_stage(Some("prove"));
+        proposal_metadata.proof_type = ProofType::Native;
+        proposal_metadata.aggregate_requested = false;
+        proposal_metadata.proposals[0].task_id = "shared-proposal".to_string();
+        let mut proposal_record = runtime_record(RuntimeRunnerStatus::Running, &proposal_metadata);
+        proposal_record.task_id = "proposal-root".to_string();
+        proposal_record.request_fingerprint = Some("proposal-root-fingerprint".to_string());
+        proposal_record.pipeline_key = pipeline;
+        proposal_record.route = route;
+        runtime.upsert_task(&proposal_record).await?;
+
+        let aggregate_refs = publication_proof_artifact_refs(&aggregate_metadata, pipeline);
+        for proof_ref in &aggregate_refs {
+            runtime
+                .upsert_pending_proof_publication(
+                    &aggregate_metadata.network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    proof_ref.as_bytes(),
+                )
+                .await?;
+        }
+
+        clear_task_publication_outboxes(&runtime, &aggregate_record, &aggregate_metadata, false)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &aggregate_metadata.network_pair,
+                    pipeline,
+                    route,
+                    "shared-proposal",
+                )
+                .await?
+                .is_some()
+        );
+        for proof_ref in aggregate_refs
+            .iter()
+            .filter(|proof_ref| proof_ref.as_str() != "shared-proposal")
+        {
+            assert!(
+                runtime
+                    .get_pending_proof_publication(
+                        &aggregate_metadata.network_pair,
+                        pipeline,
+                        route,
+                        proof_ref,
+                    )
+                    .await?
+                    .is_none(),
+                "unshared outbox {proof_ref} was retained"
+            );
+        }
+
+        runtime.remove_task(&aggregate_record.task_id).await?;
+        clear_task_publication_outboxes(&runtime, &proposal_record, &proposal_metadata, false)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &proposal_metadata.network_pair,
+                    pipeline,
+                    route,
+                    "shared-proposal",
+                )
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 

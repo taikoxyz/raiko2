@@ -1952,6 +1952,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_reconciliation_tolerates_concurrent_full_invalidation() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-full-invalidation-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: FilesystemProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root,
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 1,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-full-invalidation"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = proposal_task_ref(pipeline, &proposal_request());
+        let bytes = serde_json::to_vec(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object().clone();
+        let loading_runtime = Arc::clone(&runtime);
+        let loading_ref = proof_ref.clone();
+        let loading = tokio::spawn(async move {
+            crate::server::proof_artifact::load_proof_artifact_material(
+                &loading_runtime,
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &loading_ref,
+            )
+            .await
+        });
+
+        store.recheck_entered.notified().await;
+        runtime
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        runtime
+            .delete_proof_artifact(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                object.generation,
+                &object.content_hash,
+            )
+            .await?;
+        runtime
+            .remove_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .await?;
+        store.allow_recheck.notify_one();
+
+        assert!(loading.await??.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn engine_artifact_loaders_honor_tombstones() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-tombstone-recovery",

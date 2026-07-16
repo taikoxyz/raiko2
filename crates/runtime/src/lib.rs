@@ -394,6 +394,32 @@ impl RuntimeManager {
         Ok(())
     }
 
+    /// Updates only the durable task metadata without overwriting concurrent status changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task metadata cannot be serialized or stored.
+    pub async fn update_task_metadata(
+        &self,
+        task_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let task_id = task_id.to_string();
+        let metadata_json =
+            serde_json::to_string(metadata).context("serialize runtime metadata")?;
+        let updated_at = now_ts();
+        conn.call(move |conn| {
+            Ok(conn.execute(
+                "UPDATE runtime_tasks SET metadata_json = ?2, updated_at = ?3 WHERE task_id = ?1",
+                params![task_id, metadata_json, updated_at],
+            )?)
+        })
+        .await
+        .context("failed to update runtime task metadata")
+        .map(|updated| updated > 0)
+    }
+
     /// # Errors
     ///
     /// Returns an error if the task record cannot be loaded.
@@ -1044,6 +1070,22 @@ impl RuntimeManager {
         let Some(bytes) = local else {
             return Ok(None);
         };
+        if self
+            .artifact_store
+            .is_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .await
+            .context("failed to check pending proof removal marker")?
+        {
+            let _ = self
+                .remove_local_pending_proof_publication(
+                    network_pair,
+                    pipeline_key,
+                    route,
+                    proof_ref,
+                )
+                .await?;
+            return Ok(None);
+        }
         let hash = artifact_store::content_hash(&bytes);
         if self
             .artifact_store
@@ -1077,6 +1119,10 @@ impl RuntimeManager {
         proof_ref: &str,
     ) -> Result<bool> {
         let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        self.artifact_store
+            .mark_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .await
+            .context("failed to mark pending proof publication removed")?;
         if let Some(object) = self
             .artifact_store
             .get(&pending_key)
@@ -1111,6 +1157,10 @@ impl RuntimeManager {
             route,
             proof_ref: proof_ref.to_string(),
         };
+        self.artifact_store
+            .mark_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .await
+            .context("failed to mark pending proof publication removed")?;
         let mut invalidated = false;
         if let Some(object) = self
             .artifact_store
@@ -1939,6 +1989,8 @@ fn pending_proof_artifact_key(
     }
 }
 
+const PENDING_PUBLICATION_REMOVED_MARKER: &str = "publication-removed";
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2226,6 +2278,61 @@ mod tests {
                 )
                 .await?
                 .is_none()
+        );
+        std::fs::remove_dir_all(artifact_root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removed_shared_pending_publication_blocks_replica_local_fallback() -> anyhow::Result<()>
+    {
+        let artifact_root = unique_root("raiko2-runtime-removed-pending-artifacts");
+        let store: Arc<dyn ProofArtifactStore> = Arc::new(FilesystemProofArtifactStore::new(
+            "shared-environment".to_string(),
+            artifact_root.clone(),
+        )?);
+        let first = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-removed-pending-a"),
+            Arc::clone(&store),
+        )?;
+        let second = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-removed-pending-b"),
+            store,
+        )?;
+        let pipeline = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let route = "sp1/network".parse::<PipelineRoute>().expect("route");
+        let network_pair = "taiko_dev/ethereum";
+        let proof_ref = "proposal_0xremoved";
+
+        first
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                b"pending-proof",
+            )
+            .await?;
+        second
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                b"pending-proof",
+            )
+            .await?;
+
+        first
+            .remove_pending_proof_publication(network_pair, pipeline, route, proof_ref)
+            .await?;
+
+        assert!(
+            second
+                .get_pending_proof_publication(network_pair, pipeline, route, proof_ref)
+                .await?
+                .is_none(),
+            "a replica-local checkpoint survived deliberate shared removal"
         );
         std::fs::remove_dir_all(artifact_root)?;
         Ok(())

@@ -410,6 +410,23 @@ pub(crate) fn root_proof_artifact_refs(
     }
 }
 
+pub(crate) fn publication_proof_artifact_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Vec<String> {
+    let mut refs = root_proof_artifact_refs(metadata, pipeline_key)
+        .map(|root| root.refs)
+        .unwrap_or_default();
+    for proposal in &metadata.proposals {
+        for proof_ref in proposal_proof_artifact_refs(pipeline_key, proposal) {
+            if !refs.contains(&proof_ref) {
+                refs.push(proof_ref);
+            }
+        }
+    }
+    refs
+}
+
 pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
     match &task_id.0 {
         EngineTaskKey::Proposal { pipeline, request } => {

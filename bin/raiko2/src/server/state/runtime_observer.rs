@@ -8,8 +8,8 @@ use raiko2_engine::{
 use raiko2_pipeline::PipelineRoute;
 use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
 use raiko2_runtime::{
-    ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
-    RuntimeTaskRecord,
+    ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
+    RuntimeManager, RuntimeTaskRecord,
 };
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
@@ -40,6 +40,65 @@ enum FailedRootPolicy {
 }
 
 impl RuntimeObserver {
+    async fn register_published_artifact(
+        &self,
+        id: &EngineTaskId,
+        root_ref: &str,
+        artifact: &ProofArtifactObject,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self
+                .runtime
+                .proof_artifact_is_invalidated(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    root_ref,
+                    &artifact.content_hash,
+                )
+                .await
+                .context("failed to check published proof invalidation state")?,
+            "canonical proof artifact {root_ref} has been invalidated"
+        );
+        self.runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: self.network_pair.clone(),
+                proof_ref: root_ref.to_string(),
+                pipeline_key: id.0.pipeline_key(),
+                route: self.route,
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
+            })
+            .await
+            .context("failed to register proof artifact")?;
+        if self
+            .runtime
+            .proof_artifact_is_invalidated(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                root_ref,
+                &artifact.content_hash,
+            )
+            .await
+            .context("failed to recheck published proof invalidation state")?
+        {
+            self.runtime
+                .mark_proof_artifact_invalidated(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    root_ref,
+                    &artifact.content_hash,
+                )
+                .await
+                .context("failed to retain local proof invalidation state")?;
+            anyhow::bail!("canonical proof artifact {root_ref} was invalidated during publication");
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         runtime: Arc<RuntimeManager>,
         network_pair: String,
@@ -416,33 +475,9 @@ impl RuntimeObserver {
                 "discarding late proof because a different canonical artifact already exists"
             );
         }
-        anyhow::ensure!(
-            !self
-                .runtime
-                .proof_artifact_is_invalidated(
-                    &self.network_pair,
-                    id.0.pipeline_key(),
-                    self.route,
-                    &root_ref,
-                    &artifact.content_hash,
-                )
-                .await
-                .context("failed to check published proof invalidation state")?,
-            "canonical proof artifact {root_ref} has been invalidated"
-        );
         let proof_uri = artifact.proof_uri.clone();
-        self.runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: self.network_pair.clone(),
-                proof_ref: root_ref.clone(),
-                pipeline_key: id.0.pipeline_key(),
-                route: self.route,
-                proof_uri: proof_uri.clone(),
-                content_hash: artifact.content_hash.clone(),
-                generation: artifact.generation,
-            })
-            .await
-            .context("failed to register proof artifact")?;
+        self.register_published_artifact(id, &root_ref, artifact)
+            .await?;
         self.runtime
             .remove_pending_proof_publication(
                 &self.network_pair,
@@ -1146,6 +1181,62 @@ mod tests {
         attempts: AtomicUsize,
     }
 
+    #[derive(Debug)]
+    struct InvalidatesDuringPublicationStore {
+        inner: FilesystemProofArtifactStore,
+        checks: AtomicUsize,
+        block_on_check: usize,
+        recheck_entered: tokio::sync::Notify,
+        allow_recheck: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ProofArtifactStore for InvalidatesDuringPublicationStore {
+        fn environment_id(&self) -> &str {
+            self.inner.environment_id()
+        }
+
+        fn proof_uri(&self, key: &ProofArtifactKey) -> String {
+            self.inner.proof_uri(key)
+        }
+
+        async fn put_if_absent(
+            &self,
+            key: &ProofArtifactKey,
+            bytes: &[u8],
+        ) -> Result<ProofArtifactPutResult> {
+            self.inner.put_if_absent(key, bytes).await
+        }
+
+        async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            self.inner.get(key).await
+        }
+
+        async fn get_prefix(
+            &self,
+            key: &ProofArtifactKey,
+            max_bytes: usize,
+        ) -> Result<Option<ProofArtifactPrefix>> {
+            self.inner.get_prefix(key, max_bytes).await
+        }
+
+        async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()> {
+            self.inner.mark_invalidated(key, content_hash).await
+        }
+
+        async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool> {
+            if self.checks.fetch_add(1, Ordering::SeqCst) == self.block_on_check {
+                self.recheck_entered.notify_one();
+                self.allow_recheck.notified().await;
+            }
+            self.inner.is_invalidated(key, content_hash).await
+        }
+
+        async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()> {
+            self.inner.delete(key, generation).await
+        }
+    }
+
     #[async_trait]
     impl ProofArtifactStore for FailingArtifactStore {
         fn environment_id(&self) -> &str {
@@ -1685,6 +1776,165 @@ mod tests {
                 .map_err(anyhow::Error::msg)?,
             Some(proof)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn publication_rechecks_shared_tombstone_before_clearing_outbox() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-publication-race-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: FilesystemProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root,
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 1,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let first = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-publication-race-a"),
+            store.clone(),
+        )?);
+        let second = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-publication-race-b"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let proof = proof_fixture();
+        first
+            .upsert_pending_proof_publication(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &serde_json::to_vec(&proof)?,
+            )
+            .await?;
+        let observer =
+            RuntimeObserver::new(Arc::clone(&first), "taiko_dev/ethereum".to_string(), route);
+
+        let publication = tokio::spawn(async move {
+            observer
+                .on_task_succeeded(
+                    &task_id,
+                    &EngineTask::ProveProposal {
+                        request,
+                        input_task: task_id.clone(),
+                    },
+                    &EngineTaskSuccess::Proof {
+                        stage: raiko2_pipeline::PipelineStage::Prove,
+                        proof,
+                    },
+                )
+                .await
+        });
+        store.recheck_entered.notified().await;
+        let canonical = first
+            .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .await?
+            .expect("published canonical artifact");
+        second
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &canonical.content_hash,
+            )
+            .await?;
+        store.allow_recheck.notify_one();
+        let error = publication
+            .await?
+            .expect_err("concurrent invalidation must reject publication");
+
+        assert!(matches!(error, EngineObserverError::ProofPublication(_)));
+        let pending_key = ProofArtifactKey {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            pipeline_key: pipeline,
+            route,
+            proof_ref: format!("pending:{proof_ref}"),
+        };
+        assert!(store.get(&pending_key).await?.is_some());
+        assert!(
+            first
+                .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_reconciliation_treats_concurrent_local_invalidation_as_cache_miss()
+    -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-reconcile-race-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: FilesystemProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root,
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 0,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-reconcile-race"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let bytes = serde_json::to_vec_pretty(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object().clone();
+        let loading_runtime = Arc::clone(&runtime);
+        let loading_ref = proof_ref.clone();
+        let loading = tokio::spawn(async move {
+            crate::server::proof_artifact::load_proof_artifact_material(
+                &loading_runtime,
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &loading_ref,
+            )
+            .await
+        });
+        store.recheck_entered.notified().await;
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        runtime
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        store.allow_recheck.notify_one();
+
+        assert!(loading.await??.is_none());
         Ok(())
     }
 

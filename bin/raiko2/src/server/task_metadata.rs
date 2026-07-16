@@ -86,6 +86,8 @@ pub(crate) struct ProposalTask {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct RuntimeMetadata {
+    #[serde(default)]
+    pub(crate) queue_namespace_version: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) active_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +98,17 @@ pub(crate) struct RuntimeMetadata {
     pub(crate) proposals: BTreeMap<String, TaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate: Option<TaskRuntimeMetadata>,
+}
+
+impl RuntimeMetadata {
+    pub(crate) const CURRENT_QUEUE_NAMESPACE_VERSION: u8 = 1;
+
+    pub(crate) fn current() -> Self {
+        Self {
+            queue_namespace_version: Self::CURRENT_QUEUE_NAMESPACE_VERSION,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

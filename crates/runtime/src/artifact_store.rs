@@ -545,7 +545,7 @@ pub fn validate_environment_id(environment_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn content_hash(bytes: &[u8]) -> String {
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 

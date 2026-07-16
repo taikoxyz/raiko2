@@ -1121,12 +1121,14 @@ All API errors use the Hoodi-style envelope:
   `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
 - Before the first publication attempt, a completed proof is atomically checkpointed into the
   currently leased queue record as a publication-only payload and into the runtime publication
-  outbox. Publication retries and lease recovery consume those checkpoints without running the
-  prover again. Redis provides the cross-replica checkpoint; the SQLite outbox preserves the proof
-  across a process restart when the in-memory queue backend is used.
+  outbox. The authoritative artifact store also holds the pending publication, so invalidation and
+  recovery see the same outbox across replicas. Publication retries and lease recovery consume
+  these checkpoints without running the prover again; SQLite remains the local restart fallback.
 - Invalidation writes a content-bound marker to the authoritative artifact store before deleting
-  the proof object. Every replica checks this shared marker during recovery and reconciliation, so
-  a failed delete cannot make a tombstoned proof reusable from another replica.
+  the proof object or pending publication. Every replica checks this shared marker during recovery,
+  reconciliation, and publication finalization, so a failed delete or concurrent registration
+  cannot make a tombstoned proof reusable. Local tombstones apply only to their recorded content
+  hash, allowing a later generation with different content at the same key.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.

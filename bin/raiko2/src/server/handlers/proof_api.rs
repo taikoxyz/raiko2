@@ -939,7 +939,7 @@ fn build_task_metadata(
         aggregate_task_id: aggregate.map(|task| task.task_ref.clone()),
         aggregate_request: aggregate.map(|task| task.request.clone()),
         aggregate_input_artifacts: Vec::new(),
-        runtime: RuntimeMetadata::default(),
+        runtime: RuntimeMetadata::current(),
     }
 }
 
@@ -1096,24 +1096,43 @@ async fn handle_existing_batch_task(
         ),
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
+    if existing.pipeline_key != submission.route.pipeline_key()
+        || existing.route != submission.route.route
+    {
+        return replace_existing_batch_task(
+            state,
+            submission,
+            &existing,
+            &existing_metadata,
+            replacement_request_fingerprint,
+        )
+        .await;
+    }
+    if requires_queue_namespace_migration(&existing, &existing_metadata) {
+        let mut migrated_metadata = existing_metadata.clone();
+        migrated_metadata.runtime.queue_namespace_version =
+            RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION;
+        let mut migrated = existing.clone();
+        migrated.metadata = serde_json::to_value(&migrated_metadata).map_err(|err| {
+            ApiError::internal(format!("failed to serialize migrated task metadata: {err}"))
+        })?;
+        state.runtime.upsert_task(&migrated).await.map_err(|err| {
+            ApiError::internal(format!(
+                "failed to persist queue namespace migration: {err}"
+            ))
+        })?;
+        recover_existing_task(state, &migrated, || {
+            reenqueue_existing_batch_task(state, submission, &migrated, &migrated_metadata)
+        })
+        .await?;
+        return compatibility_response_for_task(state, &existing.task_id).await;
+    }
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
     {
         let response = compatibility_response_for_task(state, &existing.task_id).await?;
         if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
-        }
-        if existing.pipeline_key != submission.route.pipeline_key()
-            || existing.route != submission.route.route
-        {
-            return replace_existing_batch_task(
-                state,
-                submission,
-                &existing,
-                &existing_metadata,
-                replacement_request_fingerprint,
-            )
-            .await;
         }
         if let Err(err) = recover_existing_task(state, &existing, || {
             reenqueue_existing_batch_task(state, submission, &existing, &existing_metadata)
@@ -1140,6 +1159,20 @@ async fn handle_existing_batch_task(
     compatibility_response_for_task(state, &existing.task_id).await
 }
 
+fn requires_queue_namespace_migration(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> bool {
+    record.pipeline_key == PipelineKey::ShastaSp1
+        && record.route.runner == RunnerKind::Network
+        && matches!(
+            record.runner_status,
+            RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+        )
+        && metadata.runtime.queue_namespace_version
+            < RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION
+}
+
 async fn replace_existing_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
@@ -1155,7 +1188,7 @@ async fn replace_existing_batch_task(
         )?;
     let plan =
         build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
-    cleanup_stale_root_before_replacement(state, existing, existing_metadata).await;
+    cleanup_stale_root_before_replacement(state, existing, existing_metadata).await?;
 
     let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
     let replaced = state
@@ -1462,7 +1495,9 @@ async fn cleanup_stale_root_before_replacement(
     state: &AppState,
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
-) {
+) -> Result<(), ApiError> {
+    clear_task_publication_outboxes(state.runtime.as_ref(), existing, existing_metadata, false)
+        .await?;
     let Ok(engine) = resolve_engine(
         state,
         &existing_metadata.network_pair,
@@ -1473,7 +1508,7 @@ async fn cleanup_stale_root_before_replacement(
             pipeline_key = %existing.pipeline_key,
             "failed to resolve stale pipeline for root replacement cleanup"
         );
-        return;
+        return Ok(());
     };
 
     let _ = cancel_registered_tasks(
@@ -1491,6 +1526,45 @@ async fn cleanup_stale_root_before_replacement(
         &mut HashSet::new(),
     )
     .await;
+    Ok(())
+}
+
+pub(crate) async fn clear_task_publication_outboxes(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+    invalidate: bool,
+) -> Result<(), ApiError> {
+    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
+        return Ok(());
+    };
+    for proof_ref in root_refs.refs {
+        let result = if invalidate {
+            runtime
+                .invalidate_pending_proof_publication(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                )
+                .await
+        } else {
+            runtime
+                .remove_pending_proof_publication(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                )
+                .await
+        };
+        result.map_err(|err| {
+            ApiError::internal(format!(
+                "failed to clear pending proof publication {proof_ref}: {err}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 async fn remove_stale_task_workspace_if_relocated(
@@ -4449,9 +4523,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_sp1_local_record_is_replaced_after_network_route_change() -> Result<()> {
+    async fn running_sp1_network_record_is_replaced_after_local_route_change() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
-            "stale-sp1-local-to-network",
+            "running-sp1-network-to-local",
+        ))?);
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaSp1));
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSp1,
+                recorder.clone() as Arc<dyn EngineHandle>,
+            )],
+        );
+        let requested_route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
+            PipelineKey::ShastaSp1,
+            ProofType::Sp1,
+        );
+        let mut submission = canonical_submission(requested_route, false);
+        submission.requested_proof_type = BatchProofType::Sp1;
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        let mut metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: false,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        metadata.runtime.proposals.insert(
+            plan.proposals[0].task_ref.clone(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("sp1-request".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network);
+        record.request_fingerprint = Some(request_fingerprint);
+        runtime.upsert_task(&record).await?;
+
+        let response = handle_existing_batch_task(&state, &submission, record, None)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(!response_is_completed(&response));
+        let stored = runtime
+            .get_task(&submission.public_task_id)
+            .await?
+            .expect("replacement runtime task");
+        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSp1);
+        assert_eq!(stored.route, submission.route.route);
+        assert_eq!(recorder.proposals.lock().expect("submissions").len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn running_sp1_network_record_migrates_from_legacy_queue_namespace() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "running-sp1-legacy-namespace",
         ))?);
         let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaSp1));
         let state = test_state_with_engines(
@@ -4472,7 +4613,7 @@ mod tests {
         let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .map_err(|err| anyhow!(err.message))?;
-        let metadata = build_task_metadata(
+        let mut metadata = build_task_metadata(
             &submission.pair,
             BuildTaskMetadataParams {
                 network: &submission.pair.network,
@@ -4486,10 +4627,18 @@ mod tests {
             &plan.proposals,
             plan.aggregate.as_ref(),
         );
-        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        metadata.runtime.queue_namespace_version = 0;
+        metadata.runtime.proposals.insert(
+            plan.proposals[0].task_ref.clone(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("sp1-request".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
         record.pipeline_key = PipelineKey::ShastaSp1;
-        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local);
+        record.route = submission.route.route;
         record.request_fingerprint = Some(request_fingerprint);
         runtime.upsert_task(&record).await?;
 
@@ -4498,13 +4647,18 @@ mod tests {
             .map_err(|err| anyhow!(err.message))?;
 
         assert!(!response_is_completed(&response));
+        assert_eq!(recorder.proposals.lock().expect("submissions").len(), 1);
         let stored = runtime
             .get_task(&submission.public_task_id)
             .await?
-            .expect("replacement runtime task");
-        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSp1);
-        assert_eq!(stored.route, submission.route.route);
-        assert_eq!(recorder.proposals.lock().expect("submissions").len(), 1);
+            .expect("migrated runtime task");
+        let stored_metadata: TaskMetadata = serde_json::from_value(stored.metadata)?;
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Allocated);
+        assert_eq!(
+            stored_metadata.runtime.queue_namespace_version,
+            RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION
+        );
+        assert!(stored_metadata.has_remote_submission_progress());
         Ok(())
     }
 

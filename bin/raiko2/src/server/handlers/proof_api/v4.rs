@@ -18,10 +18,10 @@ use super::{
     ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, TaskMetadata,
     authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
-    collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
-    is_terminal_runtime_status, load_task_data, parse_task_metadata, proposal_proof_artifact_refs,
-    register_batch_task, remove_task_children_if_unreferenced, replace_existing_batch_task,
-    resolve_engine, root_proof_artifact_refs,
+    clear_task_publication_outboxes, collect_prover_status, handle_created_batch_task,
+    handle_existing_batch_task, is_terminal_runtime_status, load_task_data, parse_task_metadata,
+    proposal_proof_artifact_refs, register_batch_task, remove_task_children_if_unreferenced,
+    replace_existing_batch_task, resolve_engine, root_proof_artifact_refs,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -586,6 +586,20 @@ async fn remove_invalidated_tasks(
             }
         }
         if cleanup_failed {
+            blocked_artifact_refs.extend(artifact_refs);
+            blocked_artifact_refs.extend(root_artifact_refs);
+            continue;
+        }
+
+        if let Err(err) =
+            clear_task_publication_outboxes(state.runtime.as_ref(), &record, &metadata, true).await
+        {
+            data.tasks.failed = data.tasks.failed.saturating_add(1);
+            tracing::warn!(
+                task_id = %record.task_id,
+                error = %err.message,
+                "failed to invalidate pending proof publication"
+            );
             blocked_artifact_refs.extend(artifact_refs);
             blocked_artifact_refs.extend(root_artifact_refs);
             continue;

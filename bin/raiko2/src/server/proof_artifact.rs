@@ -62,7 +62,7 @@ pub(crate) async fn load_proof_artifact_material(
         .await
         .context("failed to reconcile proof artifact registration")?;
     let record = runtime
-        .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+        .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
         .await
         .context("failed to load reconciled proof artifact registration")?
         .context("reconciled proof artifact registration is missing")?;

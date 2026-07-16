@@ -14,8 +14,8 @@ use super::{
     TaskData, TaskLookup, TaskMetadata, authorize_acl_feature_with_rate_limit,
     batch_request_fingerprint, build_canonical_batch_submission,
     build_external_aggregate_submission, build_submission_plan, cancel_registered_tasks,
-    clear_prover_tasks, collect_prover_status, handle_created_batch_task,
-    handle_created_external_aggregate_task, handle_existing_batch_task,
+    clear_prover_tasks, clear_task_publication_outboxes, collect_prover_status,
+    handle_created_batch_task, handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
     load_task_data, load_task_lookup, planned_external_aggregate_task, prover_type_label,
     public_task_id_from_fingerprint, register_batch_task, register_external_aggregate_task,
@@ -266,6 +266,8 @@ pub(crate) async fn prune_proofs(
         )
         .await
         .map_err(|err| ApiError::internal(err.to_string()))?;
+
+        clear_task_publication_outboxes(&state.runtime, &record, &metadata, false).await?;
 
         state
             .runtime

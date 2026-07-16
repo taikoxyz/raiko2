@@ -604,7 +604,10 @@ impl RuntimeObserver {
                 id,
                 terminal_policy,
                 |record, updated_at, observed_at_ms| {
-                    record.runner_status = RunnerStatus::Failed;
+                    // The engine preserves the proof as a `PublishProof` task and retries
+                    // publication with a durable retry policy. Keep the root non-terminal so
+                    // prover status and clear can observe and cancel that retry.
+                    record.runner_status = RunnerStatus::Allocated;
                     record.proof_uri = None;
                     record.error = Some(message.clone());
                     let task_id = Self::timing_key_for_stage_name(id, stage);
@@ -1951,7 +1954,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidated_completion_demotes_the_just_completed_root() -> Result<()> {
+    async fn invalidated_completion_keeps_the_root_non_terminal_for_publication_retry() -> Result<()>
+    {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-invalidated-completion-rollback",
         ))?);
@@ -1996,7 +2000,7 @@ mod tests {
             .get_task("task_invalidated_completion")
             .await?
             .expect("rolled back runtime task");
-        assert_eq!(rolled_back.runner_status, RunnerStatus::Failed);
+        assert_eq!(rolled_back.runner_status, RunnerStatus::Allocated);
         assert_eq!(rolled_back.proof_uri, None);
         assert_eq!(
             rolled_back.error.as_deref(),
@@ -3344,7 +3348,7 @@ mod tests {
             .get_task("task_proof_persistence_failure")
             .await?
             .expect("runtime task exists");
-        assert_eq!(record.runner_status, RunnerStatus::Failed);
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
         assert!(
             record
                 .error

@@ -359,13 +359,13 @@ Response:
         "last_anchor_block_number": 199,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_uri": "gs://raiko2-proofs/prod/shasta-sp1/taiko_mainnet%2fethereum/proposal_....json"
+        "proof_uri": "gs://raiko2-proofs/prod/shasta-sp1-local/sp1~2fnetwork/taiko_mainnet~2fethereum/proposal_....json"
       }
     ],
     "aggregate": null,
     "proof": "0x...",
     "proof_ref": "proposal:...",
-    "proof_uri": "gs://raiko2-proofs/prod/shasta-sp1/taiko_mainnet%2fethereum/proposal_....json",
+    "proof_uri": "gs://raiko2-proofs/prod/shasta-sp1-local/sp1~2fnetwork/taiko_mainnet~2fethereum/proposal_....json",
     "error": null
   }
 }
@@ -899,7 +899,7 @@ x-api-key: <server.acl.keys[].key with allow=["admin"]>
 Requires an ACL key that allows `admin`.
 
 Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
-directories. Reusable proof artifacts under `cache/proofs/...` are retained.
+directories. Reusable proof artifacts in the configured artifact store are retained.
 
 ### Response
 
@@ -1034,7 +1034,7 @@ Returns the root-task view derived from the original batch request.
         "last_anchor_block_number": 41,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1%2fnetwork/taiko_hoodi%2fhoodi/proposal_....json"
+        "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1~2fnetwork/taiko_hoodi~2fhoodi/proposal_....json"
       }
     ],
     "aggregate": {
@@ -1042,11 +1042,11 @@ Returns the root-task view derived from the original batch request.
       "status": "completed",
       "proof": "0x...",
       "proof_ref": "aggregate:...",
-      "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1%2fnetwork/taiko_hoodi%2fhoodi/aggregate_....json"
+      "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1~2fnetwork/taiko_hoodi~2fhoodi/aggregate_....json"
     },
     "proof": "0x...",
     "proof_ref": "aggregate:...",
-    "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1%2fnetwork/taiko_hoodi%2fhoodi/aggregate_....json"
+    "proof_uri": "file:///var/lib/raiko2/proofs/local/shasta-sp1-local/sp1~2fnetwork/taiko_hoodi~2fhoodi/aggregate_....json"
   }
 }
 ```
@@ -1071,8 +1071,9 @@ Returns the root-task view derived from the original batch request.
   `evaluated_mcycles_count`.
 - Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
   `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
-  Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
-  stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
+  Completed proof artifacts are stored independently in the configured filesystem or GCS artifact
+  store and are indexed by stable proof refs, so aggregation can reuse them after engine task
+  cleanup or process restart.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1115,10 +1116,10 @@ All API errors use the Hoodi-style envelope:
   `<runtime.root>/cache/proofs` for local development and tests. `prefix` optionally prefixes GCS
   object names. Dual-write is not supported.
 - When upgrading from the legacy unscoped artifact index, keep completed task workdirs and their
-  `proof_uri` files available through the first successful restart. Legacy index rows do not carry
-  a verified content hash and are discarded; startup recovery republishes their proofs into the
-  configured canonical store. Drain proof work before the upgrade or accept recomputation if those
-  legacy files are unavailable.
+  proof files available. Legacy rows remain as read-through migration entries until the referenced
+  bytes are verified, published into the configured canonical store, and registered with a content
+  hash. Missing legacy files fail the affected read explicitly instead of silently discarding the
+  only aggregate input reference.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and contains a non-null proof payload. Publication is create-only: an
   identical existing object is idempotent, while a different late object is discarded.

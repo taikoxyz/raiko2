@@ -16,12 +16,13 @@ use super::{
     ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
     CanonicalBatchSubmission, ClearProverStatus, EngineHandle, ProofStatus, ProverStatus,
     ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, TaskMetadata,
-    authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
-    build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
-    clear_task_publication_outboxes, collect_prover_status, handle_created_batch_task,
-    handle_existing_batch_task, is_terminal_runtime_status, load_task_data, parse_task_metadata,
-    proposal_proof_artifact_refs, register_batch_task, remove_task_children_if_unreferenced,
-    replace_existing_batch_task, resolve_engine, root_proof_artifact_refs,
+    adopt_queue_publication_generations, authorize_acl_feature_with_rate_limit,
+    authorize_optional_acl_feature_with_rate_limit, build_canonical_batch_submission,
+    build_submission_plan, clear_prover_tasks, clear_task_publication_outboxes,
+    collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
+    is_terminal_runtime_status, load_task_data, parse_task_metadata, proposal_proof_artifact_refs,
+    register_batch_task, remove_task_children_if_unreferenced, replace_existing_batch_task,
+    resolve_engine, root_proof_artifact_refs,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -1660,7 +1661,12 @@ async fn submit_submission(
         submission.route.pipeline_key(),
         submission.requested_proof_type.as_str(),
     )?;
-    let plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
+    let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())
+        .map_err(Error::from_api_error)?;
+    let mut plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
+        .await
+        .map_err(Error::from_api_error)?;
+    adopt_queue_publication_generations(&engine, &mut plan)
         .await
         .map_err(Error::from_api_error)?;
     match register_batch_task(state, submission, &plan, request_fingerprint)

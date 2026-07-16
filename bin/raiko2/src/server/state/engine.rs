@@ -34,6 +34,18 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
+    fn dependents_of(
+        &self,
+        _id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Vec<EngineTaskId>, TaskStoreError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn publication_generation(
+        &self,
+        _id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Option<String>, TaskStoreError>> {
+        Box::pin(async { Ok(None) })
+    }
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
 }
@@ -173,6 +185,20 @@ where
 
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
+    }
+
+    fn dependents_of(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Vec<EngineTaskId>, TaskStoreError>> {
+        Box::pin(async move { self.dependents_of(&id).await })
+    }
+
+    fn publication_generation(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Option<String>, TaskStoreError>> {
+        Box::pin(async move { self.publication_generation(&id).await })
     }
 
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {

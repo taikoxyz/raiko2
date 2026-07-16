@@ -18,7 +18,7 @@ asynchronous proposal-side proof requests.
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
-- Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
+- Persisted runtime state and task workdirs, with reusable proof artifacts in filesystem or GCS
 - In-process memory queue by default, with an optional Redis-backed queue
 
 ## Quickstart

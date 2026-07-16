@@ -669,15 +669,32 @@ async fn persist_external_aggregate_input_artifacts(
     Ok((inputs, input_artifacts))
 }
 
-fn planned_external_aggregate_task(
+async fn planned_external_aggregate_task(
+    runtime: &RuntimeManager,
     submission: &ExternalAggregateSubmission,
-) -> PlannedAggregateTask {
-    PlannedAggregateTask {
-        task_ref: aggregate_task_ref(submission.route.pipeline_key(), &submission.request),
+) -> Result<PlannedAggregateTask, ApiError> {
+    let task_ref = aggregate_task_ref(submission.route.pipeline_key(), &submission.request);
+    let proposed_generation = uuid::Uuid::new_v4().to_string();
+    let publication_generation = runtime
+        .claim_publication_generation(
+            &submission.pair.key,
+            submission.route.pipeline_key(),
+            submission.route.route,
+            &task_ref,
+            &proposed_generation,
+        )
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to claim aggregate publication generation: {err}"
+            ))
+        })?;
+    Ok(PlannedAggregateTask {
+        task_ref,
         request: submission.request.clone(),
         task_id: submission.task_id.clone(),
-        publication_generation: uuid::Uuid::new_v4().to_string(),
-    }
+        publication_generation,
+    })
 }
 
 fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> {
@@ -736,11 +753,18 @@ async fn build_submission_plan(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
     for proposal in &mut proposals {
-        if let Some(generation) =
-            active_publication_generation(runtime, submission, &proposal.task_ref).await?
-        {
-            proposal.publication_generation = generation;
-        }
+        let proposed_generation =
+            active_publication_generation(runtime, submission, &proposal.task_ref)
+                .await?
+                .unwrap_or_else(|| proposal.publication_generation.clone());
+        proposal.publication_generation = claim_submission_publication_generation(
+            runtime,
+            submission,
+            &proposal.task_ref,
+            &proposed_generation,
+            "proposal",
+        )
+        .await?;
     }
 
     let mut proposal_sources = Vec::with_capacity(proposals.len());
@@ -775,29 +799,7 @@ async fn build_submission_plan(
         proposal_sources.resize(proposals.len(), ProposalPlanSource::Pending);
     }
 
-    let aggregate = if submission.aggregate_requested {
-        let request = AggregationTaskRequest {
-            request_id: aggregate_request_id(request_fingerprint),
-            proposal_ids: submission
-                .proposals
-                .iter()
-                .map(|proposal| proposal.proposal_id)
-                .collect(),
-            prover_config: submission.prover_config.clone(),
-        };
-        let task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
-            pipeline: submission.route.pipeline_key(),
-            request: request.clone(),
-        });
-        Some(PlannedAggregateTask {
-            task_ref: aggregate_task_ref(submission.route.pipeline_key(), &request),
-            request,
-            task_id,
-            publication_generation: uuid::Uuid::new_v4().to_string(),
-        })
-    } else {
-        None
-    };
+    let aggregate = planned_batch_aggregate(runtime, submission, request_fingerprint).await?;
 
     Ok(SubmissionPlan {
         proposals,
@@ -805,6 +807,117 @@ async fn build_submission_plan(
         aggregate,
         aggregate_inputs,
     })
+}
+
+async fn planned_batch_aggregate(
+    runtime: &RuntimeManager,
+    submission: &CanonicalBatchSubmission,
+    request_fingerprint: &str,
+) -> Result<Option<PlannedAggregateTask>, ApiError> {
+    if !submission.aggregate_requested {
+        return Ok(None);
+    }
+    let request = AggregationTaskRequest {
+        request_id: aggregate_request_id(request_fingerprint),
+        proposal_ids: submission
+            .proposals
+            .iter()
+            .map(|proposal| proposal.proposal_id)
+            .collect(),
+        prover_config: submission.prover_config.clone(),
+    };
+    let task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
+        pipeline: submission.route.pipeline_key(),
+        request: request.clone(),
+    });
+    let task_ref = aggregate_task_ref(submission.route.pipeline_key(), &request);
+    let publication_generation = claim_submission_publication_generation(
+        runtime,
+        submission,
+        &task_ref,
+        &uuid::Uuid::new_v4().to_string(),
+        "aggregate",
+    )
+    .await?;
+    Ok(Some(PlannedAggregateTask {
+        request,
+        task_id,
+        task_ref,
+        publication_generation,
+    }))
+}
+
+async fn claim_submission_publication_generation(
+    runtime: &RuntimeManager,
+    submission: &CanonicalBatchSubmission,
+    proof_ref: &str,
+    proposed_generation: &str,
+    stage: &str,
+) -> Result<String, ApiError> {
+    runtime
+        .claim_publication_generation(
+            &submission.pair.key,
+            submission.route.pipeline_key(),
+            submission.route.route,
+            proof_ref,
+            proposed_generation,
+        )
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to claim {stage} publication generation: {err}"
+            ))
+        })
+}
+
+async fn adopt_queue_publication_generations(
+    engine: &Arc<dyn EngineHandle>,
+    plan: &mut SubmissionPlan,
+) -> Result<(), ApiError> {
+    for proposal in &mut plan.proposals {
+        if let Some(generation) = engine
+            .publication_generation(proposal.task_id.clone())
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to read shared proposal publication generation: {err}"
+                ))
+            })?
+        {
+            proposal.publication_generation = generation;
+        }
+    }
+    if let Some(aggregate) = &mut plan.aggregate
+        && let Some(generation) = engine
+            .publication_generation(aggregate.task_id.clone())
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to read shared aggregate publication generation: {err}"
+                ))
+            })?
+    {
+        aggregate.publication_generation = generation;
+    }
+    Ok(())
+}
+
+async fn adopt_queue_aggregate_publication_generation(
+    engine: &Arc<dyn EngineHandle>,
+    aggregate: &mut PlannedAggregateTask,
+) -> Result<(), ApiError> {
+    if let Some(generation) = engine
+        .publication_generation(aggregate.task_id.clone())
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to read shared aggregate publication generation: {err}"
+            ))
+        })?
+    {
+        aggregate.publication_generation = generation;
+    }
+    Ok(())
 }
 
 async fn active_publication_generation(
@@ -1293,10 +1406,32 @@ pub(crate) async fn migrate_legacy_queue_namespaces_on_startup(
         }
         let configured_route = configured_pipeline_route(state, existing.pipeline_key);
         if existing.route != configured_route {
-            return Err(ApiError::internal(format!(
-                "cannot migrate legacy task {} from route {} into configured route {}",
-                existing.task_id, existing.route, configured_route
-            )));
+            let message = format!(
+                "proof route changed from {} to {}; resubmit the request to replace legacy work",
+                existing.route, configured_route
+            );
+            state
+                .runtime
+                .sync_status(
+                    &existing.task_id,
+                    RuntimeRunnerStatus::Failed,
+                    Some(message.clone()),
+                    None,
+                )
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!(
+                        "failed to defer route-mismatched legacy task {}: {err}",
+                        existing.task_id
+                    ))
+                })?;
+            warn!(
+                task_id = %existing.task_id,
+                legacy_route = %existing.route,
+                %configured_route,
+                "deferred legacy queue migration after configured route change"
+            );
+            continue;
         }
 
         let mut migrated_metadata = existing_metadata.clone();
@@ -1362,8 +1497,10 @@ async fn replace_existing_batch_task(
             || batch_request_fingerprint(state.runtime.environment_id(), submission),
             Ok,
         )?;
-    let plan =
+    let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())?;
+    let mut plan =
         build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
+    adopt_queue_publication_generations(&engine, &mut plan).await?;
     cleanup_stale_root_before_replacement(state, existing, existing_metadata).await?;
 
     let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
@@ -1421,7 +1558,23 @@ async fn build_recovery_plan_from_metadata(
 ) -> Result<SubmissionPlan, ApiError> {
     let route =
         CanonicalProofRoute::new(existing.route, existing.pipeline_key, metadata.proof_type);
-    let proposals = planned_recovery_proposals(existing, metadata)?;
+    let mut proposals = planned_recovery_proposals(existing, metadata)?;
+    for proposal in &mut proposals {
+        proposal.publication_generation = runtime
+            .claim_publication_generation(
+                &metadata.network_pair,
+                existing.pipeline_key,
+                existing.route,
+                &proposal.task_ref,
+                &proposal.publication_generation,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to claim recovered proposal publication generation: {err}"
+                ))
+            })?;
+    }
     let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
     if metadata.aggregate_requested {
@@ -1459,7 +1612,23 @@ async fn build_recovery_plan_from_metadata(
         proposal_sources.resize(proposals.len(), ProposalPlanSource::Pending);
     }
 
-    let aggregate = planned_recovery_aggregate(existing, metadata);
+    let mut aggregate = planned_recovery_aggregate(existing, metadata);
+    if let Some(task) = &mut aggregate {
+        task.publication_generation = runtime
+            .claim_publication_generation(
+                &metadata.network_pair,
+                existing.pipeline_key,
+                existing.route,
+                &task.task_ref,
+                &task.publication_generation,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to claim recovered aggregate publication generation: {err}"
+                ))
+            })?;
+    }
     if metadata.aggregate_requested && aggregate.is_none() {
         return Err(ApiError::internal(format!(
             "legacy task {} is missing persisted aggregate request",
@@ -1564,13 +1733,32 @@ async fn reenqueue_existing_batch_aggregate_task(
         .aggregate_engine_task_id(existing.pipeline_key)
         .ok_or_else(|| ApiError::internal("existing batch task missing aggregate task id"))?;
     let inputs = existing_batch_aggregate_inputs(runtime, existing, existing_metadata).await?;
-    let publication_generation = existing_metadata
+    let proposed_generation = existing_metadata
         .aggregate_task_id
         .as_deref()
         .map_or("legacy", |proof_ref| {
             existing_metadata.publication_generation(proof_ref)
         })
         .to_string();
+    let publication_generation = runtime
+        .claim_publication_generation(
+            &existing_metadata.network_pair,
+            existing.pipeline_key,
+            existing.route,
+            existing_metadata
+                .aggregate_task_id
+                .as_deref()
+                .ok_or_else(|| {
+                    ApiError::internal("existing aggregate task is missing proof ref")
+                })?,
+            &proposed_generation,
+        )
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to claim recovered aggregate publication generation: {err}"
+            ))
+        })?;
     let actual_task_id = engine
         .submit_aggregation_proof_from_inputs(request, inputs, publication_generation)
         .await
@@ -2184,7 +2372,6 @@ async fn load_task_data_from_lookup(
     } else {
         root_proof
     };
-
     Ok(TaskData {
         task_id: id.to_string(),
         route: lookup.record.route.to_string(),
@@ -2768,25 +2955,29 @@ async fn load_proposal_statuses(
         );
         let mut proof_location = None;
         let proof_refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
-        let status = if let Some(material) = load_first_proof_artifact_material(
-            runtime_manager,
-            &metadata.network_pair,
-            record.pipeline_key,
-            record.route,
-            &proof_refs,
-        )
-        .await?
-        {
-            proof_location = Some(artifact_proof_location(&material.record));
-            let proof = material.proof;
-            EngineStatusView {
-                status: ProofStatus::Completed,
-                proof: proof.proof,
-                error: None,
-                extra_data: proof.extra_data,
+        let status = if should_probe_proof_artifact(&status, engine_state_present) {
+            if let Some(material) = load_first_proof_artifact_material(
+                runtime_manager,
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                &proof_refs,
+            )
+            .await?
+            {
+                proof_location = Some(artifact_proof_location(&material.record));
+                let proof = material.proof;
+                EngineStatusView {
+                    status: ProofStatus::Completed,
+                    proof: proof.proof,
+                    error: None,
+                    extra_data: proof.extra_data,
+                }
+            } else {
+                require_published_proof(status, &proposal.task_id)
             }
         } else {
-            require_published_proof(status, &proposal.task_id)
+            status
         };
         proposals.push(ProposalStatus {
             index,
@@ -2841,26 +3032,30 @@ async fn load_aggregate_status(
         record.error.as_deref(),
     );
     let mut proof_location = None;
-    let status = if let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
-        if let Some(material) = load_first_proof_artifact_material(
-            runtime_manager,
-            &metadata.network_pair,
-            record.pipeline_key,
-            record.route,
-            &refs.refs,
-        )
-        .await?
-        {
-            proof_location = Some(artifact_proof_location(&material.record));
-            let proof = material.proof;
-            EngineStatusView {
-                status: ProofStatus::Completed,
-                proof: proof.proof,
-                error: None,
-                extra_data: proof.extra_data,
+    let status = if should_probe_proof_artifact(&status, engine_state_present) {
+        if let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
+            if let Some(material) = load_first_proof_artifact_material(
+                runtime_manager,
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                &refs.refs,
+            )
+            .await?
+            {
+                proof_location = Some(artifact_proof_location(&material.record));
+                let proof = material.proof;
+                EngineStatusView {
+                    status: ProofStatus::Completed,
+                    proof: proof.proof,
+                    error: None,
+                    extra_data: proof.extra_data,
+                }
+            } else {
+                require_published_proof(status, &refs.refs[0])
             }
         } else {
-            require_published_proof(status, &refs.refs[0])
+            status
         }
     } else {
         status
@@ -2885,6 +3080,13 @@ async fn load_aggregate_status(
         }),
         engine_state_present,
     ))
+}
+
+const fn should_probe_proof_artifact(
+    status: &EngineStatusView,
+    engine_state_present: bool,
+) -> bool {
+    !engine_state_present || !matches!(status.status, ProofStatus::Pending | ProofStatus::Proving)
 }
 
 async fn load_first_proof_artifact_material(
@@ -5286,6 +5488,50 @@ mod tests {
             RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION
         );
         assert!(stored_metadata.has_remote_submission_progress());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_defers_legacy_sp1_task_after_route_change() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "sp1-legacy-route-change",
+        ))?);
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaSp1));
+        let mut config = Config::default();
+        config.prover.guest_system = crate::config::GuestSystem::Sp1;
+        config.prover.runner = RunnerKind::Network;
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaSp1,
+            recorder.clone() as Arc<dyn EngineHandle>,
+        );
+        let state = AppState::from_parts(Arc::new(config), Arc::new(factory), Arc::clone(&runtime));
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.proof_type = ProofType::Sp1;
+        metadata.runtime.queue_namespace_version = 0;
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.task_id = "sp1-local-before-route-change".to_string();
+        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local);
+        runtime.upsert_task(&record).await?;
+
+        migrate_legacy_queue_namespaces_on_startup(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(recorder.proposals.lock().expect("submissions").is_empty());
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("deferred runtime task");
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Failed);
+        assert!(
+            stored
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("route changed"))
+        );
         Ok(())
     }
 

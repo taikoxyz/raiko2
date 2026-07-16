@@ -160,6 +160,9 @@ where
         }
     }
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()>;
+    async fn get_payload(&self, _id: &TaskId<Id>) -> StoreResult<Option<P>> {
+        Ok(None)
+    }
     async fn checkpoint_payload_if_running(
         &self,
         id: &TaskId<Id>,
@@ -691,6 +694,11 @@ where
         }
 
         Ok(())
+    }
+
+    async fn get_payload(&self, id: &TaskId<Id>) -> StoreResult<Option<P>> {
+        let g = self.inner.lock().await;
+        Ok(g.tasks.get(id).and_then(|record| record.payload.clone()))
     }
 
     async fn checkpoint_payload_if_running(

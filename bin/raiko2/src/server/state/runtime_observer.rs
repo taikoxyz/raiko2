@@ -56,6 +56,36 @@ enum ProofCommitAttempt {
     Invalidated(anyhow::Error),
 }
 
+#[derive(Clone, Copy)]
+enum PublicationFailureDisposition {
+    Retryable,
+    Invalidated,
+}
+
+#[derive(Debug)]
+struct ProofInvalidatedError(String);
+
+impl std::fmt::Display for ProofInvalidatedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProofInvalidatedError {}
+
+fn publication_observer_error(error: &anyhow::Error) -> EngineObserverError {
+    let message = format!("{error:#}");
+    if error.downcast_ref::<ProofInvalidatedError>().is_some()
+        || error
+            .downcast_ref::<raiko2_runtime::PendingProofPublicationRemoved>()
+            .is_some()
+    {
+        EngineObserverError::ProofInvalidated(message)
+    } else {
+        EngineObserverError::ProofPublication(message)
+    }
+}
+
 impl RuntimeObserver {
     async fn register_published_artifact(
         &self,
@@ -63,20 +93,23 @@ impl RuntimeObserver {
         root_ref: &str,
         artifact: &ProofArtifactObject,
     ) -> Result<()> {
-        anyhow::ensure!(
-            !self
-                .runtime
-                .proof_artifact_is_invalidated(
-                    &self.network_pair,
-                    id.0.pipeline_key(),
-                    self.route,
-                    root_ref,
-                    &artifact.content_hash,
-                )
-                .await
-                .context("failed to check published proof invalidation state")?,
-            "canonical proof artifact {root_ref} has been invalidated"
-        );
+        if self
+            .runtime
+            .proof_artifact_is_invalidated(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                root_ref,
+                &artifact.content_hash,
+            )
+            .await
+            .context("failed to check published proof invalidation state")?
+        {
+            return Err(ProofInvalidatedError(format!(
+                "canonical proof artifact {root_ref} has been invalidated"
+            ))
+            .into());
+        }
         self.runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: self.network_pair.clone(),
@@ -570,7 +603,10 @@ impl RuntimeObserver {
                 )
                 .await
                 .context("failed to retain final proof invalidation state")?;
-            anyhow::bail!("canonical proof artifact {root_ref} was invalidated before completion");
+            return Err(ProofInvalidatedError(format!(
+                "canonical proof artifact {root_ref} was invalidated before completion"
+            ))
+            .into());
         }
         self.runtime
             .remove_pending_proof_publication(
@@ -594,30 +630,35 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         stage: &'static str,
         message: &str,
-        include_completed: bool,
+        disposition: PublicationFailureDisposition,
     ) {
         let message = message.to_string();
-        let terminal_policy = if include_completed {
-            TerminalRootPolicy::IncludeCompleted
-        } else {
-            TerminalRootPolicy::Exclude
+        let terminal_policy = match disposition {
+            PublicationFailureDisposition::Retryable => TerminalRootPolicy::Exclude,
+            PublicationFailureDisposition::Invalidated => TerminalRootPolicy::IncludeCompleted,
         };
         if let Err(sync_err) = self
             .update_root_records_with_policy(
                 id,
                 terminal_policy,
                 |record, updated_at, observed_at_ms| {
-                    // The engine preserves the proof as a `PublishProof` task and retries
-                    // publication with a durable retry policy. Keep the root non-terminal so
-                    // prover status and clear can observe and cancel that retry.
-                    record.runner_status = RunnerStatus::Allocated;
+                    record.runner_status = match disposition {
+                        PublicationFailureDisposition::Retryable => RunnerStatus::Allocated,
+                        PublicationFailureDisposition::Invalidated => RunnerStatus::Cancelled,
+                    };
                     record.proof_uri = None;
                     record.error = Some(message.clone());
                     let task_id = Self::timing_key_for_stage_name(id, stage);
                     update_task_metadata(record, |metadata| {
-                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
-                        metadata.runtime.active_stage = Some(stage.to_string());
-                        metadata.runtime.last_event = Some("failed".to_string());
+                        let (terminal, active_stage) = match disposition {
+                            PublicationFailureDisposition::Retryable => {
+                                ("failed", Some(stage.to_string()))
+                            }
+                            PublicationFailureDisposition::Invalidated => ("cancelled", None),
+                        };
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, terminal);
+                        metadata.runtime.active_stage = active_stage;
+                        metadata.runtime.last_event = Some(terminal.to_string());
                     })?;
                     record.updated_at = updated_at;
                     Ok(())
@@ -670,9 +711,14 @@ impl RuntimeObserver {
                         Some(message.as_str()),
                     )
                     .await;
-                    self.mark_proof_publication_failed(id, stage, message.as_str(), true)
-                        .await;
-                    anyhow::bail!(message);
+                    self.mark_proof_publication_failed(
+                        id,
+                        stage,
+                        message.as_str(),
+                        PublicationFailureDisposition::Invalidated,
+                    )
+                    .await;
+                    return Err(ProofInvalidatedError(message).into());
                 }
                 ProofCommitAttempt::Retryable(error) if attempt < publication_delays.len() => {
                     let delay = publication_delays[attempt];
@@ -698,8 +744,13 @@ impl RuntimeObserver {
                         Some(message.as_str()),
                     )
                     .await;
-                    self.mark_proof_publication_failed(id, stage, message.as_str(), false)
-                        .await;
+                    self.mark_proof_publication_failed(
+                        id,
+                        stage,
+                        message.as_str(),
+                        PublicationFailureDisposition::Retryable,
+                    )
+                    .await;
                     anyhow::bail!(message);
                 }
             }
@@ -720,6 +771,9 @@ impl RuntimeObserver {
         {
             Ok(Some(publication)) => publication,
             Ok(None) => return ProofCommitAttempt::Committed,
+            Err(error) if error.downcast_ref::<ProofInvalidatedError>().is_some() => {
+                return ProofCommitAttempt::Invalidated(error);
+            }
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
         if let Err(error) = self
@@ -843,7 +897,7 @@ impl EngineObserver for RuntimeObserver {
                 &bytes,
             )
             .await
-            .map_err(|error| EngineObserverError::ProofPublication(format!("{error:#}")))
+            .map_err(|error| publication_observer_error(&error))
     }
 
     async fn load_completed_proof(
@@ -1062,7 +1116,7 @@ impl EngineObserver for RuntimeObserver {
                 return self
                     .handle_proof_success(id, task, stage, finished_at_ms, proof)
                     .await
-                    .map_err(|error| EngineObserverError::ProofPublication(format!("{error:#}")));
+                    .map_err(|error| publication_observer_error(&error));
             }
             EngineTaskSuccess::GuestInput { stage } | EngineTaskSuccess::EncodedInput { stage } => {
                 self.observe_stage_terminal_metrics(
@@ -1957,8 +2011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidated_completion_keeps_the_root_non_terminal_for_publication_retry() -> Result<()>
-    {
+    async fn invalidated_completion_cancels_the_publication_generation() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-invalidated-completion-rollback",
         ))?);
@@ -1995,7 +2048,7 @@ mod tests {
                 &task_id,
                 "prove",
                 "proof invalidated during completion",
-                true,
+                PublicationFailureDisposition::Invalidated,
             )
             .await;
 
@@ -2003,7 +2056,7 @@ mod tests {
             .get_task("task_invalidated_completion")
             .await?
             .expect("rolled back runtime task");
-        assert_eq!(rolled_back.runner_status, RunnerStatus::Allocated);
+        assert_eq!(rolled_back.runner_status, RunnerStatus::Cancelled);
         assert_eq!(rolled_back.proof_uri, None);
         assert_eq!(
             rolled_back.error.as_deref(),
@@ -2168,12 +2221,12 @@ mod tests {
             .await?
             .expect_err("concurrent invalidation must reject publication");
 
-        assert!(matches!(error, EngineObserverError::ProofPublication(_)));
+        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
         let pending_key = ProofArtifactKey {
             network_pair: "taiko_dev/ethereum".to_string(),
             pipeline_key: pipeline,
             route,
-            proof_ref: format!("pending:{proof_ref}"),
+            proof_ref: format!("pending:legacy:{proof_ref}"),
         };
         assert!(store.get(&pending_key).await?.is_some());
         assert!(

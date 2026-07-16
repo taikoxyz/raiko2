@@ -276,6 +276,9 @@ pub(crate) async fn cancel_registered_tasks(
     let mut errors = Vec::new();
 
     for proposal in &metadata.proposals {
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
         if has_other_live_task_reference(
             runtime,
             public_task_id,
@@ -283,12 +286,10 @@ pub(crate) async fn cancel_registered_tasks(
             &metadata.network_pair,
         )
         .await?
+            || proposal_has_other_shared_dependent(engine, &task_id, metadata, pipeline_key).await?
         {
             continue;
         }
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
         for stage_task_id in proposal_task_chain_ids(&task_id) {
             if let Err(err) = engine.cancel(stage_task_id.clone()).await {
                 let encoded = encode_task_id(&stage_task_id)
@@ -347,6 +348,27 @@ pub(crate) async fn has_other_task_reference(
         }
     }
     Ok(false)
+}
+
+async fn proposal_has_other_shared_dependent(
+    engine: &Arc<dyn EngineHandle>,
+    proposal_task_id: &EngineTaskId,
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Result<bool> {
+    let owned_dependents = metadata
+        .proposals
+        .iter()
+        .filter_map(|proposal| proposal.engine_task_id(pipeline_key))
+        .chain(metadata.aggregate_engine_task_id(pipeline_key))
+        .collect::<HashSet<_>>();
+    let dependents = engine
+        .dependents_of(proposal_task_id.clone())
+        .await
+        .map_err(|err| task_store_error_to_anyhow(&err))?;
+    Ok(dependents
+        .iter()
+        .any(|dependent| !owned_dependents.contains(dependent)))
 }
 
 pub(crate) async fn has_other_live_task_reference(
@@ -431,6 +453,7 @@ pub(crate) async fn remove_task_children_if_unreferenced(
             &metadata.network_pair,
         )
         .await?
+            || proposal_has_other_shared_dependent(engine, &task_id, metadata, pipeline_key).await?
         {
             outcome.skipped_shared_children += stage_task_ids.len();
             continue;

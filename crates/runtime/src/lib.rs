@@ -20,6 +20,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::OnceCell;
 
+#[derive(Debug)]
+pub struct PendingProofPublicationRemoved {
+    proof_ref: String,
+}
+
+impl std::fmt::Display for PendingProofPublicationRemoved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "pending proof publication {} has been removed",
+            self.proof_ref
+        )
+    }
+}
+
+impl std::error::Error for PendingProofPublicationRemoved {}
+
 /// Runtime root managed by the host process.
 #[derive(Debug, Clone)]
 pub struct RuntimeManager {
@@ -155,14 +172,101 @@ impl RuntimeManager {
         route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactObject>> {
-        self.artifact_store
-            .get(&ProofArtifactKey {
-                network_pair: network_pair.to_string(),
-                pipeline_key,
-                route,
-                proof_ref: proof_ref.to_string(),
+        let key = ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.to_string(),
+        };
+        if let Some(object) = self.artifact_store.get(&key).await? {
+            return Ok(Some(object));
+        }
+        self.migrate_legacy_proof_artifact(&key).await
+    }
+
+    async fn migrate_legacy_proof_artifact(
+        &self,
+        key: &ProofArtifactKey,
+    ) -> Result<Option<ProofArtifactObject>> {
+        let conn = self.connection().await?;
+        let network_pair = key.network_pair.clone();
+        let proof_ref = key.proof_ref.clone();
+        let pipeline_key = key.pipeline_key.as_str().to_string();
+        let route = key.route.to_string();
+        let legacy_path = conn
+            .call(move |conn| {
+                let exists: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proof_artifacts_legacy'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if exists.is_none() {
+                    return Ok(None);
+                }
+                Ok(conn
+                    .query_row(
+                    r"
+                    SELECT proof_path
+                    FROM proof_artifacts_legacy
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                      AND pipeline_key = ?3 AND route = ?4
+                    ",
+                    params![network_pair, proof_ref, pipeline_key, route],
+                    |row| row.get::<_, String>(0),
+                )
+                    .optional()?)
             })
             .await
+            .context("failed to look up legacy proof artifact")?;
+        let Some(legacy_path) = legacy_path else {
+            return Ok(None);
+        };
+        let raw_path = legacy_path.strip_prefix("file://").unwrap_or(&legacy_path);
+        let path = PathBuf::from(raw_path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        };
+        let bytes = fs::read(&path)
+            .await
+            .with_context(|| format!("failed to read legacy proof artifact {}", path.display()))?;
+        let publication = self
+            .artifact_store
+            .put_if_absent(key, &bytes)
+            .await
+            .context("failed to migrate legacy proof artifact")?;
+        let object = publication.object().clone();
+        self.upsert_proof_artifact(ProofArtifactRegistration {
+            network_pair: key.network_pair.clone(),
+            proof_ref: key.proof_ref.clone(),
+            pipeline_key: key.pipeline_key,
+            route: key.route,
+            proof_uri: object.proof_uri.clone(),
+            content_hash: object.content_hash.clone(),
+            generation: object.generation,
+        })
+        .await?;
+        let network_pair = key.network_pair.clone();
+        let proof_ref = key.proof_ref.clone();
+        let pipeline_key = key.pipeline_key.as_str().to_string();
+        let route = key.route.to_string();
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                DELETE FROM proof_artifacts_legacy
+                WHERE network_pair = ?1 AND proof_ref = ?2
+                  AND pipeline_key = ?3 AND route = ?4
+                ",
+                params![network_pair, proof_ref, pipeline_key, route],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to retire migrated legacy proof artifact row")?;
+        Ok(Some(object))
     }
 
     /// # Errors
@@ -176,17 +280,24 @@ impl RuntimeManager {
         proof_ref: &str,
         max_bytes: usize,
     ) -> Result<Option<ProofArtifactPrefix>> {
-        self.artifact_store
-            .get_prefix(
-                &ProofArtifactKey {
-                    network_pair: network_pair.to_string(),
-                    pipeline_key,
-                    route,
-                    proof_ref: proof_ref.to_string(),
-                },
-                max_bytes,
-            )
-            .await
+        let key = ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.to_string(),
+        };
+        if let Some(prefix) = self.artifact_store.get_prefix(&key, max_bytes).await? {
+            return Ok(Some(prefix));
+        }
+        let Some(object) = self.migrate_legacy_proof_artifact(&key).await? else {
+            return Ok(None);
+        };
+        let end = object.bytes.len().min(max_bytes);
+        Ok(Some(ProofArtifactPrefix {
+            proof_uri: object.proof_uri,
+            generation: object.generation,
+            bytes: object.bytes[..end].to_vec(),
+        }))
     }
 
     /// # Errors
@@ -366,7 +477,7 @@ impl RuntimeManager {
                     request_fingerprint = excluded.request_fingerprint,
                     updated_at = excluded.updated_at
                 ",
-                params![
+                rusqlite::params![
                     record.task_id,
                     record.pipeline_key.as_str(),
                     record.route.to_string(),
@@ -1008,7 +1119,13 @@ impl RuntimeManager {
         publication_generation: &str,
         proof_bytes: &[u8],
     ) -> Result<()> {
-        let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let pending_key = pending_proof_artifact_key(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            publication_generation,
+        );
         let canonical_key = ProofArtifactKey {
             network_pair: network_pair.to_string(),
             pipeline_key,
@@ -1022,11 +1139,15 @@ impl RuntimeManager {
             .await
             .context("failed to check pending proof removal marker")?
         {
-            anyhow::ensure!(
-                self.canonical_proof_is_active(&canonical_key, proof_bytes)
-                    .await?,
-                "pending proof publication {proof_ref} has been removed"
-            );
+            if !self
+                .canonical_proof_is_active(&canonical_key, proof_bytes)
+                .await?
+            {
+                return Err(PendingProofPublicationRemoved {
+                    proof_ref: proof_ref.to_string(),
+                }
+                .into());
+            }
             return Ok(());
         }
         let pending = self
@@ -1049,11 +1170,15 @@ impl RuntimeManager {
                 .delete(&pending_key, object.generation, &object.content_hash)
                 .await
                 .context("failed to remove proof checkpoint created after invalidation")?;
-            anyhow::ensure!(
-                self.canonical_proof_is_active(&canonical_key, proof_bytes)
-                    .await?,
-                "pending proof publication {proof_ref} was removed during checkpoint"
-            );
+            if !self
+                .canonical_proof_is_active(&canonical_key, proof_bytes)
+                .await?
+            {
+                return Err(PendingProofPublicationRemoved {
+                    proof_ref: proof_ref.to_string(),
+                }
+                .into());
+            }
             return Ok(());
         }
         let proof_bytes = pending.object().bytes.clone();
@@ -1130,7 +1255,13 @@ impl RuntimeManager {
         proof_ref: &str,
         publication_generation: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let pending_key = pending_proof_artifact_key(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            publication_generation,
+        );
         let canonical_key = ProofArtifactKey {
             network_pair: network_pair.to_string(),
             pipeline_key,
@@ -1232,7 +1363,13 @@ impl RuntimeManager {
         proof_ref: &str,
         publication_generation: &str,
     ) -> Result<bool> {
-        let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let pending_key = pending_proof_artifact_key(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            publication_generation,
+        );
         self.artifact_store
             .mark_invalidated(
                 &pending_key,
@@ -1251,14 +1388,24 @@ impl RuntimeManager {
                 .await
                 .context("failed to remove shared pending proof")?;
         }
-        self.remove_local_pending_proof_publication(
+        let removed = self
+            .remove_local_pending_proof_publication(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                publication_generation,
+            )
+            .await?;
+        self.release_publication_generation(
             network_pair,
             pipeline_key,
             route,
             proof_ref,
             publication_generation,
         )
-        .await
+        .await?;
+        Ok(removed)
     }
 
     /// Invalidates and removes a pending proof publication across replicas.
@@ -1274,7 +1421,13 @@ impl RuntimeManager {
         proof_ref: &str,
         publication_generation: &str,
     ) -> Result<bool> {
-        let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let pending_key = pending_proof_artifact_key(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            publication_generation,
+        );
         let canonical_key = ProofArtifactKey {
             network_pair: network_pair.to_string(),
             pipeline_key,
@@ -1330,7 +1483,85 @@ impl RuntimeManager {
                 publication_generation,
             )
             .await?;
+        let registered = self
+            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
+            .await?;
+        let canonical_hash = if let Some(record) = registered {
+            Some(record.content_hash)
+        } else {
+            self.artifact_store
+                .get(&canonical_key)
+                .await
+                .context("failed to load canonical proof during invalidation")?
+                .map(|object| object.content_hash)
+        };
+        if let Some(content_hash) = canonical_hash {
+            self.artifact_store
+                .mark_invalidated(&canonical_key, &content_hash)
+                .await
+                .context("failed to invalidate canonical proof")?;
+            invalidated = true;
+        }
+        self.release_publication_generation(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            publication_generation,
+        )
+        .await?;
         Ok(invalidated || removed)
+    }
+
+    /// Claims the shared publication generation for one deterministic proof task.
+    ///
+    /// Concurrent replicas adopt the generation stored by the first claimant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the shared claim cannot be published or decoded.
+    pub async fn claim_publication_generation(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        proposed_generation: &str,
+    ) -> Result<String> {
+        let key = publication_generation_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let claim = self
+            .artifact_store
+            .put_if_absent(&key, proposed_generation.as_bytes())
+            .await
+            .context("failed to claim proof publication generation")?;
+        String::from_utf8(claim.object().bytes.clone())
+            .context("shared proof publication generation is not valid UTF-8")
+    }
+
+    async fn release_publication_generation(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        publication_generation: &str,
+    ) -> Result<()> {
+        let key = publication_generation_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let Some(claim) = self
+            .artifact_store
+            .get(&key)
+            .await
+            .context("failed to load proof publication generation claim")?
+        else {
+            return Ok(());
+        };
+        if claim.bytes != publication_generation.as_bytes() {
+            return Ok(());
+        }
+        self.artifact_store
+            .delete(&key, claim.generation, &claim.content_hash)
+            .await
+            .context("failed to release proof publication generation claim")
     }
 
     async fn get_local_pending_proof_publication(
@@ -1956,9 +2187,9 @@ fn migrate_proof_artifact_schema(transaction: &rusqlite::Transaction<'_>) -> rus
             );
             ",
         )?;
-        // Legacy rows point at non-canonical local paths and have no verified content hash.
-        // Startup recovery republishes completed runtime-task proofs into the configured store.
-        transaction.execute_batch("DROP TABLE proof_artifacts_legacy;")?;
+        // Keep legacy rows until their bytes are read and republished into the canonical store.
+        // Active aggregate tasks can outlive the proposal runtime rows that originally produced
+        // these artifacts, so startup recovery alone cannot safely reconstruct every reference.
     } else {
         transaction.execute_batch(
             r"
@@ -2148,12 +2379,27 @@ fn pending_proof_artifact_key(
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_ref: &str,
+    publication_generation: &str,
 ) -> ProofArtifactKey {
     ProofArtifactKey {
         network_pair: network_pair.to_string(),
         pipeline_key,
         route,
-        proof_ref: format!("pending:{proof_ref}"),
+        proof_ref: format!("pending:{publication_generation}:{proof_ref}"),
+    }
+}
+
+fn publication_generation_artifact_key(
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: &str,
+) -> ProofArtifactKey {
+    ProofArtifactKey {
+        network_pair: network_pair.to_string(),
+        pipeline_key,
+        route,
+        proof_ref: format!("publication-generation:{proof_ref}"),
     }
 }
 
@@ -2458,6 +2704,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_invalidation_fences_canonical_object_published_by_another_replica()
+    -> anyhow::Result<()> {
+        let artifact_root = unique_root("raiko2-runtime-canonical-race-artifacts");
+        let store: Arc<dyn ProofArtifactStore> = Arc::new(FilesystemProofArtifactStore::new(
+            "shared-environment".to_string(),
+            artifact_root.clone(),
+        )?);
+        let first = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-canonical-race-a"),
+            Arc::clone(&store),
+        )?;
+        let second = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-canonical-race-b"),
+            store,
+        )?;
+        let pipeline = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let route = "sp1/network".parse::<PipelineRoute>().expect("route");
+        let network_pair = "taiko_dev/ethereum";
+        let proof_ref = "proposal_0xcanonical";
+        let publication = first
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                b"canonical-proof",
+            )
+            .await?;
+        let hash = publication.object().content_hash.clone();
+
+        second
+            .invalidate_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                "generation-a",
+            )
+            .await?;
+
+        assert!(
+            first
+                .read_proof_artifact_bytes(network_pair, pipeline, route, proof_ref)
+                .await?
+                .is_some(),
+            "artifact deletion remains the invalidation endpoint's retryable responsibility"
+        );
+        assert!(
+            first
+                .proof_artifact_is_invalidated(network_pair, pipeline, route, proof_ref, &hash,)
+                .await?
+        );
+        std::fs::remove_dir_all(artifact_root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn removed_shared_pending_publication_blocks_replica_local_fallback() -> anyhow::Result<()>
     {
         let artifact_root = unique_root("raiko2-runtime-removed-pending-artifacts");
@@ -2645,6 +2948,96 @@ mod tests {
             )
             .await?;
 
+        std::fs::remove_dir_all(artifact_root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cleanup_cannot_delete_a_new_replica_checkpoint() -> anyhow::Result<()>
+    {
+        let artifact_root = unique_root("raiko2-runtime-overlapping-generation-artifacts");
+        let store: Arc<dyn ProofArtifactStore> = Arc::new(FilesystemProofArtifactStore::new(
+            "shared-environment".to_string(),
+            artifact_root.clone(),
+        )?);
+        let first = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-overlapping-generation-a"),
+            Arc::clone(&store),
+        )?;
+        let second = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-overlapping-generation-b"),
+            store,
+        )?;
+        let pipeline = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let route = "sp1/network".parse::<PipelineRoute>().expect("route");
+        let network_pair = "taiko_dev/ethereum";
+        let proof_ref = "proposal_0xoverlap";
+
+        let generation_a = first
+            .claim_publication_generation(network_pair, pipeline, route, proof_ref, "generation-a")
+            .await?;
+        let adopted = second
+            .claim_publication_generation(network_pair, pipeline, route, proof_ref, "generation-b")
+            .await?;
+        assert_eq!(generation_a, "generation-a");
+        assert_eq!(adopted, generation_a);
+
+        first
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                &generation_a,
+                b"proof-a",
+            )
+            .await?;
+        first
+            .invalidate_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                &generation_a,
+            )
+            .await?;
+
+        let generation_b = second
+            .claim_publication_generation(network_pair, pipeline, route, proof_ref, "generation-b")
+            .await?;
+        assert_eq!(generation_b, "generation-b");
+        second
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                &generation_b,
+                b"proof-b",
+            )
+            .await?;
+
+        first
+            .remove_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                &generation_a,
+            )
+            .await?;
+        assert_eq!(
+            second
+                .get_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &generation_b,
+                )
+                .await?,
+            Some(b"proof-b".to_vec())
+        );
         std::fs::remove_dir_all(artifact_root)?;
         Ok(())
     }
@@ -3202,15 +3595,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_manager_drops_legacy_artifact_rows_for_republication() -> anyhow::Result<()> {
+    async fn runtime_manager_migrates_legacy_artifact_on_first_read() -> anyhow::Result<()> {
         let root = unique_root("raiko2-runtime-migration");
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
         tokio::fs::create_dir_all(root.join("state")).await?;
+        let legacy_path = root.join("legacy-proof.json");
+        tokio::fs::write(&legacy_path, br#"{"proof":"0xlegacy"}"#).await?;
         let conn =
             tokio_rusqlite::Connection::open(root.join("state").join("runtime.sqlite")).await?;
-        conn.call(|conn| {
+        conn.call(move |conn| {
             conn.execute_batch(
                 r"
                 CREATE TABLE runtime_tasks (
@@ -3241,13 +3636,22 @@ mod tests {
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY(network_pair, proof_ref)
                 );
+                ",
+            )?;
+            conn.execute(
+                r"
                 INSERT INTO proof_artifacts (
                     network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                ) VALUES (
-                    'taiko_dev/ethereum', 'legacy-proof', 'shasta-sp1-local', 'sp1/local',
-                    '/tmp/legacy-proof.json', 1
-                );
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 ",
+                rusqlite::params![
+                    "taiko_dev/ethereum",
+                    "legacy-proof",
+                    "shasta-sp1-local",
+                    "sp1/local",
+                    legacy_path.to_string_lossy(),
+                    1_i64
+                ],
             )?;
             Ok(())
         })
@@ -3257,17 +3661,19 @@ mod tests {
         let runtime = RuntimeManager::new(root.clone())?;
         let _ = runtime.list_tasks().await?;
         let artifact = runtime
-            .get_proof_artifact(
+            .read_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 raiko2_pipeline::PipelineKey::ShastaSp1,
                 raiko2_pipeline::PipelineKey::ShastaSp1.route(),
                 "legacy-proof",
             )
             .await?;
-        assert!(
-            artifact.is_none(),
-            "legacy locations must not masquerade as canonical artifacts"
+        let artifact = artifact.expect("legacy artifact must migrate into canonical store");
+        assert_eq!(
+            artifact.content_hash,
+            crate::artifact_store::content_hash(br#"{"proof":"0xlegacy"}"#)
         );
+        assert!(artifact.proof_uri.starts_with("file://"));
 
         let conn =
             tokio_rusqlite::Connection::open(root.join("state").join("runtime.sqlite")).await?;

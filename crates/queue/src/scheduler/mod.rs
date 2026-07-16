@@ -380,6 +380,27 @@ where
         Ok(())
     }
 
+    /// Returns tasks that currently depend on `id` in the shared task store.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` when the underlying store cannot read dependency edges.
+    pub async fn dependents_of(&self, id: &TaskId<Id>) -> Result<Vec<TaskId<Id>>, TaskStoreError> {
+        self.store.dependents_of(id).await
+    }
+
+    /// Returns the durable payload currently owned by `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` when the underlying store cannot read the payload.
+    pub async fn payload(&self, id: &TaskId<Id>) -> Result<Option<P>, TaskStoreError>
+    where
+        P: Clone,
+    {
+        self.store.get_payload(id).await
+    }
+
     /// # Errors
     ///
     /// Returns `TaskStoreError` if the underlying store fails.

@@ -1437,6 +1437,22 @@ return {payload, priority, attempt, execution_policy}
         Ok(())
     }
 
+    async fn get_payload(&self, id: &TaskId<Id>) -> StoreResult<Option<P>> {
+        let task_key = self.task_key(id)?;
+        let mut conn = self.conn.lock().await;
+        let payload: Option<Vec<u8>> = conn
+            .hget(task_key, FIELD_PAYLOAD)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        payload
+            .map(|payload| {
+                bincode::deserialize(&payload).map_err(|error| {
+                    TaskStoreError::corrupt_msg(format!("deserialize payload: {error}"))
+                })
+            })
+            .transpose()
+    }
+
     async fn checkpoint_payload_if_running(
         &self,
         id: &TaskId<Id>,

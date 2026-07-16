@@ -402,13 +402,21 @@ impl GcsProofArtifactStore {
     }
 
     fn object_name(&self, key: &ProofArtifactKey) -> String {
+        self.object_name_with(key, safe_component)
+    }
+
+    fn legacy_object_name(&self, key: &ProofArtifactKey) -> String {
+        self.object_name_with(key, legacy_safe_component)
+    }
+
+    fn object_name_with(&self, key: &ProofArtifactKey, encode: fn(&str) -> String) -> String {
         let suffix = format!(
             "{}/{}/{}/{}/{}.json",
-            safe_component(&self.environment_id),
-            safe_component(key.pipeline_key.as_str()),
-            safe_component(&key.route.to_string()),
-            safe_component(&key.network_pair),
-            safe_component(&key.proof_ref)
+            encode(&self.environment_id),
+            encode(key.pipeline_key.as_str()),
+            encode(&key.route.to_string()),
+            encode(&key.network_pair),
+            encode(&key.proof_ref)
         );
         if self.prefix.is_empty() {
             suffix
@@ -425,11 +433,80 @@ impl GcsProofArtifactStore {
         )
     }
 
+    fn legacy_invalidation_object_name(
+        &self,
+        key: &ProofArtifactKey,
+        content_hash: &str,
+    ) -> String {
+        format!(
+            "{}.invalidated/{}",
+            self.legacy_object_name(key),
+            legacy_safe_component(content_hash)
+        )
+    }
+
     async fn load_object(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
         let object_name = self.object_name(key);
+        if let Some(object) = self
+            .load_named_object(&object_name, self.proof_uri(key))
+            .await?
+        {
+            return Ok(Some(object));
+        }
+        self.load_and_migrate_legacy_object(key, &object_name).await
+    }
+
+    async fn load_and_migrate_legacy_object(
+        &self,
+        key: &ProofArtifactKey,
+        object_name: &str,
+    ) -> Result<Option<ProofArtifactObject>> {
+        let legacy_name = self.legacy_object_name(key);
+        if legacy_name == object_name {
+            return Ok(None);
+        }
+        let Some(legacy) = self
+            .load_named_object(
+                &legacy_name,
+                format!("gs://{}/{legacy_name}", self.bucket_id),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let upload = self
+            .storage
+            .write_object(
+                &self.bucket_resource,
+                object_name,
+                bytes::Bytes::copy_from_slice(&legacy.bytes),
+            )
+            .set_if_generation_match(0)
+            .send_buffered();
+        match Box::pin(upload).await {
+            Ok(object) => Ok(Some(ProofArtifactObject {
+                proof_uri: self.proof_uri(key),
+                content_hash: legacy.content_hash,
+                generation: Some(object.generation),
+                bytes: legacy.bytes,
+            })),
+            Err(error) if error.http_status_code() == Some(412) => self
+                .load_named_object(object_name, self.proof_uri(key))
+                .await
+                .context("canonical GCS artifact appeared during legacy migration"),
+            Err(error) => Err(error).context("failed to migrate legacy GCS proof artifact"),
+        }
+    }
+
+    async fn load_named_object(
+        &self,
+        object_name: &str,
+        proof_uri: String,
+    ) -> Result<Option<ProofArtifactObject>> {
         let mut response = match self
             .storage
-            .read_object(&self.bucket_resource, &object_name)
+            .read_object(&self.bucket_resource, object_name)
             .send()
             .await
         {
@@ -443,11 +520,48 @@ impl GcsProofArtifactStore {
             bytes.extend_from_slice(&chunk.context("failed to stream GCS proof artifact")?);
         }
         Ok(Some(ProofArtifactObject {
-            proof_uri: self.proof_uri(key),
+            proof_uri,
             content_hash: content_hash(&bytes),
             generation: Some(generation),
             bytes,
         }))
+    }
+
+    async fn put_named_if_absent(
+        &self,
+        object_name: &str,
+        proof_uri: String,
+        bytes: &[u8],
+    ) -> Result<ProofArtifactPutResult> {
+        let upload = self
+            .storage
+            .write_object(
+                &self.bucket_resource,
+                object_name,
+                bytes::Bytes::copy_from_slice(bytes),
+            )
+            .set_if_generation_match(0)
+            .send_buffered();
+        match Box::pin(upload).await {
+            Ok(object) => Ok(ProofArtifactPutResult::Created(ProofArtifactObject {
+                proof_uri,
+                content_hash: content_hash(bytes),
+                generation: Some(object.generation),
+                bytes: bytes.to_vec(),
+            })),
+            Err(error) if error.http_status_code() == Some(412) => {
+                let existing = self
+                    .load_named_object(object_name, proof_uri)
+                    .await?
+                    .context("GCS precondition failed but existing object is missing")?;
+                if existing.content_hash == content_hash(bytes) {
+                    Ok(ProofArtifactPutResult::AlreadyExists(existing))
+                } else {
+                    Ok(ProofArtifactPutResult::Conflict(existing))
+                }
+            }
+            Err(error) => Err(error).context("failed to publish GCS proof artifact"),
+        }
     }
 }
 
@@ -467,35 +581,28 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
         let object_name = self.object_name(key);
-        let upload = self
-            .storage
-            .write_object(
-                &self.bucket_resource,
-                &object_name,
-                bytes::Bytes::copy_from_slice(bytes),
-            )
-            .set_if_generation_match(0)
-            .send_buffered();
-        match Box::pin(upload).await {
-            Ok(object) => Ok(ProofArtifactPutResult::Created(ProofArtifactObject {
-                proof_uri: self.proof_uri(key),
-                content_hash: content_hash(bytes),
-                generation: Some(object.generation),
-                bytes: bytes.to_vec(),
-            })),
-            Err(error) if error.http_status_code() == Some(412) => {
-                let existing = self
-                    .load_object(key)
-                    .await?
-                    .context("GCS precondition failed but existing object is missing")?;
-                if existing.content_hash == content_hash(bytes) {
-                    Ok(ProofArtifactPutResult::AlreadyExists(existing))
-                } else {
-                    Ok(ProofArtifactPutResult::Conflict(existing))
-                }
-            }
-            Err(error) => Err(error).context("failed to publish GCS proof artifact"),
+        if let Some(existing) = self
+            .load_named_object(&object_name, self.proof_uri(key))
+            .await?
+        {
+            return if existing.content_hash == content_hash(bytes) {
+                Ok(ProofArtifactPutResult::AlreadyExists(existing))
+            } else {
+                Ok(ProofArtifactPutResult::Conflict(existing))
+            };
         }
+        let legacy_name = self.legacy_object_name(key);
+        if legacy_name != object_name {
+            let legacy_uri = format!("gs://{}/{legacy_name}", self.bucket_id);
+            let legacy = self
+                .put_named_if_absent(&legacy_name, legacy_uri, bytes)
+                .await?;
+            if let ProofArtifactPutResult::Conflict(existing) = legacy {
+                return Ok(ProofArtifactPutResult::Conflict(existing));
+            }
+        }
+        self.put_named_if_absent(&object_name, self.proof_uri(key), bytes)
+            .await
     }
 
     async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
@@ -512,11 +619,95 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             "proof artifact prefix limit must be positive"
         );
         let object_name = self.object_name(key);
+        if let Some(prefix) = self
+            .get_named_prefix(key, &object_name, max_bytes, self.proof_uri(key))
+            .await?
+        {
+            return Ok(Some(prefix));
+        }
+        let legacy_name = self.legacy_object_name(key);
+        if legacy_name == object_name {
+            return Ok(None);
+        }
+        self.get_named_prefix(
+            key,
+            &legacy_name,
+            max_bytes,
+            format!("gs://{}/{legacy_name}", self.bucket_id),
+        )
+        .await
+    }
+
+    async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()> {
+        let object_name = self.invalidation_object_name(key, content_hash);
+        self.publish_invalidation_marker(&object_name).await?;
+        let legacy_name = self.legacy_invalidation_object_name(key, content_hash);
+        if legacy_name != object_name {
+            self.publish_invalidation_marker(&legacy_name).await?;
+        }
+        Ok(())
+    }
+
+    async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool> {
+        if self
+            .invalidation_marker_exists(&self.invalidation_object_name(key, content_hash))
+            .await?
+        {
+            return Ok(true);
+        }
+        let legacy_name = self.legacy_invalidation_object_name(key, content_hash);
+        if legacy_name == self.invalidation_object_name(key, content_hash) {
+            return Ok(false);
+        }
+        self.invalidation_marker_exists(&legacy_name).await
+    }
+
+    async fn delete(
+        &self,
+        key: &ProofArtifactKey,
+        generation: Option<i64>,
+        expected_content_hash: &str,
+    ) -> Result<()> {
+        let canonical = self.object_name(key);
+        self.delete_named_object(&canonical, generation).await?;
+        let legacy = self.legacy_object_name(key);
+        if legacy != canonical {
+            let legacy_uri = format!("gs://{}/{legacy}", self.bucket_id);
+            if let Some(object) = self.load_named_object(&legacy, legacy_uri).await?
+                && object.content_hash == expected_content_hash
+            {
+                self.delete_named_object(&legacy, object.generation).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl GcsProofArtifactStore {
+    async fn publish_invalidation_marker(&self, object_name: &str) -> Result<()> {
+        let upload = self
+            .storage
+            .write_object(&self.bucket_resource, object_name, bytes::Bytes::new())
+            .set_if_generation_match(0)
+            .send_buffered();
+        match Box::pin(upload).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.http_status_code() == Some(412) => Ok(()),
+            Err(error) => Err(error).context("failed to publish GCS proof invalidation marker"),
+        }
+    }
+    async fn get_named_prefix(
+        &self,
+        _key: &ProofArtifactKey,
+        object_name: &str,
+        max_bytes: usize,
+        proof_uri: String,
+    ) -> Result<Option<ProofArtifactPrefix>> {
         let length =
             u64::try_from(max_bytes).context("proof artifact prefix limit is too large")?;
         let mut response = match self
             .storage
-            .read_object(&self.bucket_resource, &object_name)
+            .read_object(&self.bucket_resource, object_name)
             .set_read_range(ReadRange::segment(0, length))
             .send()
             .await
@@ -535,31 +726,16 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             "GCS proof artifact prefix exceeded requested limit"
         );
         Ok(Some(ProofArtifactPrefix {
-            proof_uri: self.proof_uri(key),
+            proof_uri,
             generation: Some(generation),
             bytes,
         }))
     }
 
-    async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()> {
-        let object_name = self.invalidation_object_name(key, content_hash);
-        let upload = self
-            .storage
-            .write_object(&self.bucket_resource, &object_name, bytes::Bytes::new())
-            .set_if_generation_match(0)
-            .send_buffered();
-        match Box::pin(upload).await {
-            Ok(_) => Ok(()),
-            Err(error) if error.http_status_code() == Some(412) => Ok(()),
-            Err(error) => Err(error).context("failed to publish GCS proof invalidation marker"),
-        }
-    }
-
-    async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool> {
-        let object_name = self.invalidation_object_name(key, content_hash);
+    async fn invalidation_marker_exists(&self, object_name: &str) -> Result<bool> {
         match self
             .storage
-            .read_object(&self.bucket_resource, &object_name)
+            .read_object(&self.bucket_resource, object_name)
             .send()
             .await
         {
@@ -569,23 +745,22 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         }
     }
 
-    async fn delete(
+    async fn delete_named_object(
         &self,
-        key: &ProofArtifactKey,
+        object_name: &str,
         generation: Option<i64>,
-        _expected_content_hash: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut request = self
             .control
             .delete_object()
             .set_bucket(&self.bucket_resource)
-            .set_object(self.object_name(key));
+            .set_object(object_name);
         if let Some(generation) = generation {
             request = request.set_if_generation_match(generation);
         }
         match request.send().await {
-            Ok(()) => Ok(()),
-            Err(error) if error.http_status_code() == Some(404) => Ok(()),
+            Ok(()) => Ok(true),
+            Err(error) if error.http_status_code() == Some(404) => Ok(false),
             Err(error) => Err(error).context("failed to delete GCS proof artifact"),
         }
     }
@@ -657,11 +832,32 @@ fn safe_component(raw: &str) -> String {
     component
 }
 
+fn legacy_safe_component(raw: &str) -> String {
+    if raw == "." {
+        return "%2e".to_string();
+    }
+    if raw == ".." {
+        return "%2e%2e".to_string();
+    }
+    let mut component = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                component.push(char::from(byte));
+            }
+            _ => {
+                write!(&mut component, "%{byte:02x}").expect("writing to String should not fail");
+            }
+        }
+    }
+    component
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         FilesystemProofArtifactStore, ProofArtifactKey, ProofArtifactPutResult, ProofArtifactStore,
-        safe_component,
+        legacy_safe_component, safe_component,
     };
     use raiko2_pipeline::PipelineKey;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -691,6 +887,12 @@ mod tests {
 
         assert_eq!(component, "risc0~2fnetwork");
         assert!(!component.contains('%'));
+    }
+
+    #[test]
+    fn legacy_gcs_component_encoding_remains_available_for_read_migration() {
+        assert_eq!(legacy_safe_component("risc0/network"), "risc0%2fnetwork");
+        assert_eq!(safe_component("risc0/network"), "risc0~2fnetwork");
     }
 
     #[tokio::test]

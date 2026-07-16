@@ -70,12 +70,15 @@ pub enum EngineTaskSuccess {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineObserverError {
     ProofPublication(String),
+    ProofInvalidated(String),
 }
 
 impl std::fmt::Display for EngineObserverError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ProofPublication(error) => formatter.write_str(error),
+            Self::ProofPublication(error) | Self::ProofInvalidated(error) => {
+                formatter.write_str(error)
+            }
         }
     }
 }
@@ -86,12 +89,15 @@ impl std::error::Error for EngineObserverError {}
 enum TaskExecutionError {
     Retryable(String),
     ProofPublication { error: String, proof: Box<Proof> },
+    ProofInvalidated(String),
 }
 
 impl TaskExecutionError {
     fn message(&self) -> &str {
         match self {
-            Self::Retryable(error) | Self::ProofPublication { error, .. } => error,
+            Self::Retryable(error)
+            | Self::ProofPublication { error, .. }
+            | Self::ProofInvalidated(error) => error,
         }
     }
 }
@@ -112,6 +118,7 @@ impl From<EngineObserverError> for TaskExecutionError {
     fn from(error: EngineObserverError) -> Self {
         match error {
             EngineObserverError::ProofPublication(error) => Self::Retryable(error),
+            EngineObserverError::ProofInvalidated(error) => Self::ProofInvalidated(error),
         }
     }
 }
@@ -121,6 +128,22 @@ const fn publication_retry_policy() -> RetryPolicy {
         max_attempts: u32::MAX,
         base_delay: Duration::from_secs(1),
         max_delay: Duration::from_secs(5 * 60),
+    }
+}
+
+fn apply_proof_completion_policy(
+    lease: &mut TaskLease<EngineTask, EngineTaskKey>,
+    payload: &EngineTask,
+    execution_result: &Result<EngineOutput<impl Sized>, TaskExecutionError>,
+) {
+    if let Err(TaskExecutionError::ProofPublication { proof, .. }) = execution_result {
+        lease.payload = payload.clone().with_pending_publication((**proof).clone());
+        lease.execution_policy.retry = publication_retry_policy();
+    } else if matches!(
+        execution_result,
+        Err(TaskExecutionError::ProofInvalidated(_))
+    ) {
+        lease.execution_policy.retry = RetryPolicy::None;
     }
 }
 
@@ -636,6 +659,35 @@ where
         self.inner.scheduler.remove(id).await
     }
 
+    /// Returns aggregate tasks that currently depend on a proposal task.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` when the scheduler cannot read dependency edges.
+    pub async fn dependents_of(
+        &self,
+        id: &EngineTaskId,
+    ) -> Result<Vec<EngineTaskId>, TaskStoreError> {
+        self.inner.scheduler.dependents_of(id).await
+    }
+
+    /// Returns the publication generation owned by the shared queue task.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` when the scheduler cannot read the task payload.
+    pub async fn publication_generation(
+        &self,
+        id: &EngineTaskId,
+    ) -> Result<Option<String>, TaskStoreError> {
+        Ok(self
+            .inner
+            .scheduler
+            .payload(id)
+            .await?
+            .map(|task| task.publication_generation().to_string()))
+    }
+
     async fn checkpoint_completed_proof(
         &self,
         lease: &mut TaskLease<EngineTask, EngineTaskKey>,
@@ -693,14 +745,21 @@ where
         if let Err(error) =
             notify_stage_succeeded(self.inner.observer.as_ref(), id, task, &success).await
         {
-            *execution_result = Err(match success {
-                EngineTaskSuccess::Proof { proof, .. } => TaskExecutionError::ProofPublication {
-                    error: error.to_string(),
+            *execution_result = Err(match (success, error) {
+                (EngineTaskSuccess::Proof { .. }, EngineObserverError::ProofInvalidated(error)) => {
+                    TaskExecutionError::ProofInvalidated(error)
+                }
+                (
+                    EngineTaskSuccess::Proof { proof, .. },
+                    EngineObserverError::ProofPublication(error),
+                ) => TaskExecutionError::ProofPublication {
+                    error,
                     proof: Box::new(proof),
                 },
-                EngineTaskSuccess::GuestInput { .. } | EngineTaskSuccess::EncodedInput { .. } => {
-                    error.into()
-                }
+                (
+                    EngineTaskSuccess::GuestInput { .. } | EngineTaskSuccess::EncodedInput { .. },
+                    error,
+                ) => error.into(),
             });
         }
     }
@@ -788,10 +847,7 @@ where
             )
             .await;
         }
-        if let Err(TaskExecutionError::ProofPublication { proof, .. }) = &execution_result {
-            lease.payload = payload.clone().with_pending_publication((**proof).clone());
-            lease.execution_policy.retry = publication_retry_policy();
-        }
+        apply_proof_completion_policy(&mut lease, &payload, &execution_result);
         let result = execution_result.map_err(|error| error.to_string());
         let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
@@ -1455,6 +1511,25 @@ mod tests {
         }
     }
 
+    struct PublicationInvalidatingObserver;
+
+    #[async_trait::async_trait]
+    impl EngineObserver for PublicationInvalidatingObserver {
+        async fn on_task_succeeded(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            success: &EngineTaskSuccess,
+        ) -> Result<(), EngineObserverError> {
+            if matches!(success, EngineTaskSuccess::Proof { .. }) {
+                return Err(EngineObserverError::ProofInvalidated(
+                    "injected invalidation".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
     struct RecoveringObserver {
         proof_successes: AtomicUsize,
     }
@@ -1915,6 +1990,7 @@ mod tests {
                 request,
             })
         );
+        assert_eq!(engine.dependents_of(&first).await?, vec![aggregate_id]);
         Ok(())
     }
 
@@ -2182,6 +2258,31 @@ mod tests {
         assert_eq!(publication_generations.len(), 2);
         assert_eq!(publication_generations[0], publication_generations[1]);
         assert_ne!(publication_generations[0], "legacy");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidated_proof_publication_is_terminal() -> Result<(), Box<dyn std::error::Error>> {
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
+            Some(Arc::new(PublicationInvalidatingObserver)),
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Failed { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

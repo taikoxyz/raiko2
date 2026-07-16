@@ -11,7 +11,8 @@ use tracing::{debug, info};
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchShastaRequest,
     ClearProverStatus, ProofStatus, ProverStatus, ProverTaskScope, PruneStatus, ServerAclFeature,
-    TaskData, TaskLookup, TaskMetadata, authorize_acl_feature_with_rate_limit,
+    TaskData, TaskLookup, TaskMetadata, adopt_queue_aggregate_publication_generation,
+    adopt_queue_publication_generations, authorize_acl_feature_with_rate_limit,
     batch_request_fingerprint, build_canonical_batch_submission,
     build_external_aggregate_submission, build_submission_plan, cancel_registered_tasks,
     clear_prover_tasks, clear_task_publication_outboxes, collect_prover_status,
@@ -86,8 +87,14 @@ async fn request_batch_shasta_proof_inner(
         )
         .await;
     }
-    let plan =
+    let engine = resolve_engine(
+        &state,
+        &submission.pair.key,
+        submission.route.pipeline_key(),
+    )?;
+    let mut plan =
         build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
+    adopt_queue_publication_generations(&engine, &mut plan).await?;
 
     info!(
         task_id = submission.public_task_id.as_str(),
@@ -105,12 +112,6 @@ async fn request_batch_shasta_proof_inner(
         proposal_ids = ?proposal_ids,
         "received hoodi shasta batch request proposal ids"
     );
-    resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
-
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_batch_task(&state, &submission, existing, None).await
@@ -145,7 +146,8 @@ async fn request_aggregation_proof_inner(
         &submission.pair.key,
         submission.route.pipeline_key(),
     )?;
-    let aggregate = planned_external_aggregate_task(&submission);
+    let mut aggregate = planned_external_aggregate_task(&state.runtime, &submission).await?;
+    adopt_queue_aggregate_publication_generation(&engine, &mut aggregate).await?;
 
     info!(
         task_id = submission.public_task_id.as_str(),

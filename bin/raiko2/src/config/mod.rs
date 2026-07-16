@@ -33,7 +33,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub rpc: RpcConfig,
     pub prover: ProverConfig,
-    #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
@@ -201,6 +200,11 @@ mod tests {
             .expect("time went backwards")
             .as_nanos();
         path.push(format!("raiko2-config-{nanos}.toml"));
+        let contents = if contents.contains("[runtime]") {
+            contents.to_string()
+        } else {
+            format!("{contents}\n[runtime]\nroot = './data/runtime'\nenvironment_id = 'test'\n")
+        };
         std::fs::write(&path, contents).expect("write temp config");
         path
     }
@@ -613,6 +617,20 @@ mod tests {
     fn test_config_default_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn file_config_requires_explicit_runtime_environment() {
+        let mut value = toml::Value::try_from(Config::default()).expect("serialize config");
+        value
+            .as_table_mut()
+            .expect("config table")
+            .remove("runtime");
+
+        let error = value
+            .try_into::<Config>()
+            .expect_err("runtime section must be explicit in deployment config");
+        assert!(error.to_string().contains("runtime"));
     }
 
     #[test]

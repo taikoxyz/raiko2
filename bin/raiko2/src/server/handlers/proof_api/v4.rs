@@ -51,9 +51,16 @@ pub(crate) async fn request_proposal_proof(
     let mut submission = proposal_submission(&state, &req)?;
     let request_fingerprint =
         proposal_request_fingerprint(state.runtime.environment_id(), &submission);
+    let legacy_request_fingerprint = legacy_proposal_request_fingerprint(&submission);
     submission.public_task_id = request_fingerprint.public_task_id();
-    submit_submission(&state, &submission, request_fingerprint.as_str()).await?;
-    let data = load_task_data(&state, &submission.public_task_id)
+    let task_id = submit_submission(
+        &state,
+        &submission,
+        request_fingerprint.as_str(),
+        legacy_request_fingerprint.as_str(),
+    )
+    .await?;
+    let data = load_task_data(&state, &task_id)
         .await
         .map_err(Error::from_api_error)?;
     Ok(Json(wire::TaskResponse {
@@ -669,6 +676,7 @@ async fn remove_invalidated_artifacts(
                 artifact.route,
                 &artifact.proof_ref,
                 artifact.generation,
+                &artifact.content_hash,
             )
             .await
         {
@@ -1375,14 +1383,14 @@ fn proposal_submission(
 }
 
 struct ProposalIdentity<'a> {
-    environment_id: &'a str,
+    environment_id: Option<&'a str>,
     submission: &'a CanonicalBatchSubmission,
 }
 
 impl<'a> ProposalIdentity<'a> {
     const fn new(environment_id: &'a str, submission: &'a CanonicalBatchSubmission) -> Self {
         Self {
-            environment_id,
+            environment_id: Some(environment_id),
             submission,
         }
     }
@@ -1393,7 +1401,9 @@ impl RequestIdentity for ProposalIdentity<'_> {
 
     fn write_identity(&self, sink: &mut FingerprintSink) {
         let submission = self.submission;
-        sink.str("environment_id", self.environment_id);
+        if let Some(environment_id) = self.environment_id {
+            sink.str("environment_id", environment_id);
+        }
         // Only client-supplied request data belongs in the idempotency key. `route` and
         // `prover_type` are server-derived and must not affect poll-by-re-POST behavior.
         sink.str("network_pair", &submission.pair.key);
@@ -1452,11 +1462,63 @@ fn proposal_request_fingerprint(
     ProposalIdentity::new(environment_id, submission).fingerprint()
 }
 
+fn legacy_proposal_request_fingerprint(
+    submission: &CanonicalBatchSubmission,
+) -> RequestFingerprint {
+    ProposalIdentity {
+        environment_id: None,
+        submission,
+    }
+    .fingerprint()
+}
+
+async fn recover_legacy_submission(
+    state: &AppState,
+    submission: &CanonicalBatchSubmission,
+    request_fingerprint: &str,
+    legacy_request_fingerprint: &str,
+) -> Result<Option<String>, Error> {
+    let Some(existing) = state
+        .runtime
+        .find_task_by_request_fingerprint(legacy_request_fingerprint)
+        .await
+        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
+    else {
+        return Ok(None);
+    };
+    let legacy_task_id = existing.task_id.clone();
+    if existing.pipeline_key != submission.route.pipeline_key()
+        || existing.route != submission.route.route
+    {
+        ensure_engine_available(
+            state,
+            &submission.pair.key,
+            submission.route.pipeline_key(),
+            submission.requested_proof_type.as_str(),
+        )?;
+    }
+    handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
+        .await
+        .map_err(Error::from_api_error)?;
+    let current_exists = state
+        .runtime
+        .get_task(&submission.public_task_id)
+        .await
+        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
+        .is_some();
+    Ok(Some(if current_exists {
+        submission.public_task_id.clone()
+    } else {
+        legacy_task_id
+    }))
+}
+
 async fn submit_submission(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
-) -> Result<(), Error> {
+    legacy_request_fingerprint: &str,
+) -> Result<String, Error> {
     // Deterministic v4 task IDs are reusable only when the normalized request fingerprint matches.
     if let Some(existing) = state
         .runtime
@@ -1494,7 +1556,7 @@ async fn submit_submission(
                 )
                 .await
                 .map_err(Error::from_api_error)?;
-                return Ok(());
+                return Ok(submission.public_task_id.clone());
             }
             return Err(Error::request_conflict(
                 "same proof task id was submitted with different proof input",
@@ -1503,7 +1565,18 @@ async fn submit_submission(
         handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
             .await
             .map_err(Error::from_api_error)?;
-        return Ok(());
+        return Ok(submission.public_task_id.clone());
+    }
+
+    if let Some(task_id) = recover_legacy_submission(
+        state,
+        submission,
+        request_fingerprint,
+        legacy_request_fingerprint,
+    )
+    .await?
+    {
+        return Ok(task_id);
     }
 
     ensure_engine_available(
@@ -1535,7 +1608,7 @@ async fn submit_submission(
                 .map_err(Error::from_api_error)?;
         }
     }
-    Ok(())
+    Ok(submission.public_task_id.clone())
 }
 
 fn ensure_engine_available(
@@ -1662,6 +1735,7 @@ mod tests {
             &self,
             _key: &ProofArtifactKey,
             _generation: Option<i64>,
+            _expected_content_hash: &str,
         ) -> anyhow::Result<()> {
             anyhow::bail!("injected artifact deletion failure")
         }

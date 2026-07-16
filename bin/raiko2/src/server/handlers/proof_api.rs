@@ -121,6 +121,7 @@ struct ExternalAggregateSubmission {
     inputs: Vec<AggregateProofInput>,
     input_artifacts: Vec<AggregateInputProofArtifact>,
     request_fingerprint: String,
+    legacy_request_fingerprint: String,
 }
 
 struct TaskLookup {
@@ -573,6 +574,13 @@ async fn build_external_aggregate_submission(
         &req,
         &prover_config,
     )?;
+    let legacy_request_fingerprint = legacy_external_aggregate_request_fingerprint(
+        &pair,
+        route,
+        prover_type,
+        &req,
+        &prover_config,
+    )?;
     let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let request = AggregationTaskRequest {
         request_id: aggregate_request_id(&request_fingerprint),
@@ -603,6 +611,7 @@ async fn build_external_aggregate_submission(
         inputs,
         input_artifacts,
         request_fingerprint,
+        legacy_request_fingerprint,
     })
 }
 
@@ -623,7 +632,7 @@ async fn persist_external_aggregate_input_artifacts(
                 route.pipeline_key(),
                 route.route,
                 &proof_ref,
-                &serde_json::to_vec_pretty(proof).map_err(|err| {
+                &serde_json::to_vec(proof).map_err(|err| {
                     ApiError::internal(format!("failed to serialize aggregate input proof: {err}"))
                 })?,
             )
@@ -1109,6 +1118,10 @@ async fn handle_existing_batch_task(
         .await;
     }
     if requires_queue_namespace_migration(&existing, &existing_metadata) {
+        let response = compatibility_response_for_task(state, &existing.task_id).await?;
+        if response_is_completed(&response) {
+            return Ok(response);
+        }
         let mut migrated_metadata = existing_metadata.clone();
         migrated_metadata.runtime.queue_namespace_version =
             RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION;
@@ -1159,18 +1172,14 @@ async fn handle_existing_batch_task(
     compatibility_response_for_task(state, &existing.task_id).await
 }
 
-fn requires_queue_namespace_migration(
+const fn requires_queue_namespace_migration(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
 ) -> bool {
-    record.pipeline_key == PipelineKey::ShastaSp1
-        && record.route.runner == RunnerKind::Network
-        && matches!(
-            record.runner_status,
-            RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
-        )
-        && metadata.runtime.queue_namespace_version
-            < RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION
+    matches!(
+        record.runner_status,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+    ) && metadata.runtime.queue_namespace_version < RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION
 }
 
 async fn replace_existing_batch_task(
@@ -1419,6 +1428,34 @@ async fn handle_existing_external_aggregate_task(
         ),
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
+    if requires_queue_namespace_migration(&existing, &existing_metadata) {
+        let response = compatibility_response_for_task(state, &existing.task_id).await?;
+        if response_is_completed(&response) {
+            return Ok(response);
+        }
+        let mut migrated_metadata = existing_metadata.clone();
+        migrated_metadata.runtime.queue_namespace_version =
+            RuntimeMetadata::CURRENT_QUEUE_NAMESPACE_VERSION;
+        let mut migrated = existing.clone();
+        migrated.metadata = serde_json::to_value(&migrated_metadata).map_err(|err| {
+            ApiError::internal(format!("failed to serialize migrated task metadata: {err}"))
+        })?;
+        state.runtime.upsert_task(&migrated).await.map_err(|err| {
+            ApiError::internal(format!(
+                "failed to persist queue namespace migration: {err}"
+            ))
+        })?;
+        recover_existing_task(state, &migrated, || {
+            reenqueue_existing_external_aggregate_task(
+                engine,
+                submission,
+                &migrated,
+                &migrated_metadata,
+            )
+        })
+        .await?;
+        return compatibility_response_for_task(state, &existing.task_id).await;
+    }
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
     {
@@ -2742,8 +2779,20 @@ fn batch_request_fingerprint(
     environment_id: &str,
     submission: &CanonicalBatchSubmission,
 ) -> Result<String, ApiError> {
-    let payload = serde_json::json!({
-        "environment_id": environment_id,
+    batch_request_fingerprint_inner(Some(environment_id), submission)
+}
+
+fn legacy_batch_request_fingerprint(
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, ApiError> {
+    batch_request_fingerprint_inner(None, submission)
+}
+
+fn batch_request_fingerprint_inner(
+    environment_id: Option<&str>,
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, ApiError> {
+    let mut payload = serde_json::json!({
         "pair_key": submission.pair.key.as_str(),
         "route": submission.route.route.to_string(),
         "requested_proof_type": submission.requested_proof_type.as_str(),
@@ -2759,6 +2808,15 @@ fn batch_request_fingerprint(
         "prover_config": &submission.prover_config,
         "proposals": &submission.proposals,
     });
+    if let Some(environment_id) = environment_id {
+        payload
+            .as_object_mut()
+            .expect("fingerprint payload is an object")
+            .insert(
+                "environment_id".to_string(),
+                serde_json::Value::String(environment_id.to_string()),
+            );
+    }
     let encoded = serde_json::to_vec(&payload).map_err(|err| {
         ApiError::internal(format!("failed to serialize request fingerprint: {err}"))
     })?;
@@ -2773,8 +2831,35 @@ fn external_aggregate_request_fingerprint(
     req: &AggregateProofRequest,
     prover_config: &ProverTaskConfig,
 ) -> Result<String, ApiError> {
-    let payload = serde_json::json!({
-        "environment_id": environment_id,
+    external_aggregate_request_fingerprint_inner(
+        Some(environment_id),
+        pair,
+        route,
+        prover_type,
+        req,
+        prover_config,
+    )
+}
+
+fn legacy_external_aggregate_request_fingerprint(
+    pair: &ResolvedNetworkPair,
+    route: CanonicalProofRoute,
+    prover_type: Option<ProverType>,
+    req: &AggregateProofRequest,
+    prover_config: &ProverTaskConfig,
+) -> Result<String, ApiError> {
+    external_aggregate_request_fingerprint_inner(None, pair, route, prover_type, req, prover_config)
+}
+
+fn external_aggregate_request_fingerprint_inner(
+    environment_id: Option<&str>,
+    pair: &ResolvedNetworkPair,
+    route: CanonicalProofRoute,
+    prover_type: Option<ProverType>,
+    req: &AggregateProofRequest,
+    prover_config: &ProverTaskConfig,
+) -> Result<String, ApiError> {
+    let mut payload = serde_json::json!({
         "pair_key": pair.key.as_str(),
         "route": route.route.to_string(),
         "prover_type": prover_type.map(ProverType::as_str),
@@ -2786,6 +2871,15 @@ fn external_aggregate_request_fingerprint(
         "prover": req.prover.as_deref(),
         "blob_proof_type": req.blob_proof_type.as_deref(),
     });
+    if let Some(environment_id) = environment_id {
+        payload
+            .as_object_mut()
+            .expect("fingerprint payload is an object")
+            .insert(
+                "environment_id".to_string(),
+                serde_json::Value::String(environment_id.to_string()),
+            );
+    }
     let encoded = serde_json::to_vec(&payload).map_err(|err| {
         ApiError::internal(format!(
             "failed to serialize aggregate request fingerprint: {err}"
@@ -3611,7 +3705,7 @@ mod tests {
                 PipelineKey::ShastaNative,
                 PipelineKey::ShastaNative.route(),
                 proof_ref,
-                &serde_json::to_vec_pretty(proof)?,
+                &serde_json::to_vec(proof)?,
             )
             .await?;
         let artifact = publication.object();
@@ -4768,8 +4862,31 @@ mod tests {
         let submission = canonical_submission(native_local_route(), false);
         let dev = batch_request_fingerprint("dev", &submission).expect("dev fingerprint");
         let prod = batch_request_fingerprint("prod", &submission).expect("prod fingerprint");
+        let legacy = legacy_batch_request_fingerprint(&submission).expect("legacy fingerprint");
 
         assert_ne!(dev, prod);
+        assert_ne!(legacy, dev);
+        assert_ne!(legacy, prod);
+    }
+
+    #[test]
+    fn every_inflight_route_migrates_from_the_legacy_queue_namespace() {
+        let metadata = task_metadata_with_stage(Some("prove"));
+        for (pipeline_key, route) in [
+            (PipelineKey::ShastaNative, PipelineKey::ShastaNative.route()),
+            (PipelineKey::ShastaRisc0, PipelineKey::ShastaRisc0.route()),
+            (PipelineKey::ShastaSp1, PipelineKey::ShastaSp1.route()),
+        ] {
+            let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+            record.pipeline_key = pipeline_key;
+            record.route = route;
+            assert!(requires_queue_namespace_migration(&record, &metadata));
+        }
+
+        let mut terminal = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        terminal.pipeline_key = PipelineKey::ShastaNative;
+        terminal.route = PipelineKey::ShastaNative.route();
+        assert!(!requires_queue_namespace_migration(&terminal, &metadata));
     }
 
     #[tokio::test]
@@ -5121,7 +5238,7 @@ mod tests {
                 PipelineKey::ShastaNative,
                 PipelineKey::ShastaNative.route(),
                 "proposal-recovery",
-                &serde_json::to_vec_pretty(&proof)?,
+                &serde_json::to_vec(&proof)?,
             )
             .await?;
         assert!(
@@ -5172,7 +5289,7 @@ mod tests {
                 PipelineKey::ShastaSp1,
                 route.route,
                 "sp1-network-proposal",
-                &serde_json::to_vec_pretty(&proof)?,
+                &serde_json::to_vec(&proof)?,
             )
             .await?;
 

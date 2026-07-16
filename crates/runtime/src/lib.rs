@@ -199,6 +199,7 @@ impl RuntimeManager {
         route: PipelineRoute,
         proof_ref: &str,
         generation: Option<i64>,
+        expected_content_hash: &str,
     ) -> Result<()> {
         self.artifact_store
             .delete(
@@ -209,6 +210,7 @@ impl RuntimeManager {
                     proof_ref: proof_ref.to_string(),
                 },
                 generation,
+                expected_content_hash,
             )
             .await
     }
@@ -1021,7 +1023,7 @@ impl RuntimeManager {
                 .context("failed to check pending proof invalidation marker")?
             {
                 self.artifact_store
-                    .delete(&pending_key, object.generation)
+                    .delete(&pending_key, object.generation, &object.content_hash)
                     .await
                     .context("failed to delete invalidated shared pending proof")?;
                 let _ = self
@@ -1082,7 +1084,7 @@ impl RuntimeManager {
             .context("failed to load shared pending proof before removal")?
         {
             self.artifact_store
-                .delete(&pending_key, object.generation)
+                .delete(&pending_key, object.generation, &object.content_hash)
                 .await
                 .context("failed to remove shared pending proof")?;
         }
@@ -1121,7 +1123,7 @@ impl RuntimeManager {
                 .await
                 .context("failed to invalidate shared pending proof")?;
             self.artifact_store
-                .delete(&pending_key, object.generation)
+                .delete(&pending_key, object.generation, &object.content_hash)
                 .await
                 .context("failed to remove invalidated shared pending proof")?;
             invalidated = true;
@@ -1736,6 +1738,8 @@ fn migrate_proof_artifact_schema(transaction: &rusqlite::Transaction<'_>) -> rus
             );
             ",
         )?;
+        // Legacy rows point at non-canonical local paths and have no verified content hash.
+        // Startup recovery republishes completed runtime-task proofs into the configured store.
         transaction.execute_batch("DROP TABLE proof_artifacts_legacy;")?;
     } else {
         transaction.execute_batch(
@@ -2277,6 +2281,7 @@ mod tests {
                 route,
                 proof_ref,
                 old_object.generation,
+                &old_object.content_hash,
             )
             .await?;
 

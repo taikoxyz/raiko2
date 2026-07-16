@@ -446,8 +446,7 @@ impl RuntimeObserver {
             "refusing to publish proof artifact without a proof payload"
         );
 
-        let proof_bytes =
-            serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
+        let proof_bytes = serde_json::to_vec(proof).context("failed to serialize proof output")?;
         let publication = self
             .runtime
             .publish_proof_artifact_bytes(
@@ -489,6 +488,8 @@ impl RuntimeObserver {
             .context("failed to clear pending proof publication")?;
 
         let mut proof_uris = HashMap::with_capacity(records.len());
+        // A shared queue worker may run on a replica that has no local runtime row. It must still
+        // publish the canonical artifact; the replica that owns the row reconciles from the store.
         let has_local_records = !records.is_empty();
         for record in records {
             let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
@@ -1232,8 +1233,15 @@ mod tests {
             self.inner.is_invalidated(key, content_hash).await
         }
 
-        async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()> {
-            self.inner.delete(key, generation).await
+        async fn delete(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            expected_content_hash: &str,
+        ) -> Result<()> {
+            self.inner
+                .delete(key, generation, expected_content_hash)
+                .await
         }
     }
 
@@ -1284,7 +1292,12 @@ mod tests {
             Ok(false)
         }
 
-        async fn delete(&self, _key: &ProofArtifactKey, _generation: Option<i64>) -> Result<()> {
+        async fn delete(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _expected_content_hash: &str,
+        ) -> Result<()> {
             Ok(())
         }
     }
@@ -1894,7 +1907,7 @@ mod tests {
         let route = pipeline.route();
         let request = proposal_request();
         let proof_ref = proposal_task_ref(pipeline, &request);
-        let bytes = serde_json::to_vec_pretty(&proof_fixture())?;
+        let bytes = serde_json::to_vec(&proof_fixture())?;
         let publication = runtime
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
@@ -1951,7 +1964,7 @@ mod tests {
             request: request.clone(),
         });
         let proof_ref = proposal_task_ref(pipeline, &request);
-        let bytes = serde_json::to_vec_pretty(&proof_fixture())?;
+        let bytes = serde_json::to_vec(&proof_fixture())?;
         let publication = runtime
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;

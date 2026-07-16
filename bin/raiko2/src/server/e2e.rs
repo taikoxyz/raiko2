@@ -177,7 +177,7 @@ async fn write_e2e_proof_artifact(
             pipeline_key,
             route.parse().expect("route"),
             proof_ref,
-            &serde_json::to_vec_pretty(proof).expect("serialize proof"),
+            &serde_json::to_vec(proof).expect("serialize proof"),
         )
         .await
         .expect("write proof artifact");
@@ -4261,7 +4261,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
-            proof_ids: vec![encoded_task_id],
+            proof_ids: vec![encoded_task_id.clone()],
             metadata: serde_json::to_value(metadata).expect("serialize metadata"),
             request_fingerprint: None,
         })
@@ -4274,19 +4274,21 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         .await
         .expect("read task")
         .expect("task exists");
-    let proof_uri = std::path::Path::new(&record.task_dir).join("proof.json");
-    tokio::fs::write(
-        &proof_uri,
-        serde_json::to_vec(&raiko2_primitives::Proof {
-            proof: Some("0xpersisted-proof".to_string()),
-            ..Default::default()
-        })
-        .expect("serialize proof"),
+    let proof = raiko2_primitives::Proof {
+        proof: Some("0xpersisted-proof".to_string()),
+        ..Default::default()
+    };
+    let proof_uri = write_e2e_proof_artifact(
+        &state,
+        "taiko_dev/ethereum",
+        &encoded_task_id,
+        record.pipeline_key,
+        &record.route.to_string(),
+        &proof,
     )
-    .await
-    .expect("write proof");
+    .await;
     record.runner_status = RunnerStatus::Completed;
-    record.proof_uri = Some(proof_uri.display().to_string());
+    record.proof_uri = Some(proof_uri);
     state
         .runtime
         .upsert_task(&record)

@@ -1114,6 +1114,11 @@ All API errors use the Hoodi-style envelope:
   non-empty `bucket` in production; `filesystem` stores artifacts below
   `<runtime.root>/cache/proofs` for local development and tests. `prefix` optionally prefixes GCS
   object names. Dual-write is not supported.
+- When upgrading from the legacy unscoped artifact index, keep completed task workdirs and their
+  `proof_uri` files available through the first successful restart. Legacy index rows do not carry
+  a verified content hash and are discarded; startup recovery republishes their proofs into the
+  configured canonical store. Drain proof work before the upgrade or accept recomputation if those
+  legacy files are unavailable.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and contains a non-null proof payload. Publication is create-only: an
   identical existing object is idempotent, while a different late object is discarded.

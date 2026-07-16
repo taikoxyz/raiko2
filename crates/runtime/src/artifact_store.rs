@@ -73,7 +73,12 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
     ) -> Result<Option<ProofArtifactPrefix>>;
     async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()>;
     async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool>;
-    async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()>;
+    async fn delete(
+        &self,
+        key: &ProofArtifactKey,
+        generation: Option<i64>,
+        expected_content_hash: &str,
+    ) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -90,8 +95,6 @@ impl FilesystemProofArtifactStore {
     /// Returns an error when the environment identifier is invalid or the root cannot be created.
     pub fn new(environment_id: String, root: PathBuf) -> Result<Self> {
         validate_environment_id(&environment_id)?;
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("failed to create proof artifact root {}", root.display()))?;
         let root = if root.is_absolute() {
             root
         } else {
@@ -99,6 +102,8 @@ impl FilesystemProofArtifactStore {
                 .context("failed to resolve current directory")?
                 .join(root)
         };
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("failed to create proof artifact root {}", root.display()))?;
         Ok(Self {
             environment_id,
             root,
@@ -121,6 +126,40 @@ impl FilesystemProofArtifactStore {
             .join(".invalidated")
             .join(safe_component(&key.proof_ref))
             .join(safe_component(content_hash))
+    }
+
+    fn lock_path(&self, key: &ProofArtifactKey) -> PathBuf {
+        self.path(key)
+            .parent()
+            .expect("proof artifact path always has a parent")
+            .join(".locks")
+            .join(format!("{}.lock", safe_component(&key.proof_ref)))
+    }
+
+    async fn lock_key(&self, key: &ProofArtifactKey) -> Result<std::fs::File> {
+        let path = self.lock_path(key);
+        let parent = path
+            .parent()
+            .with_context(|| format!("path {} has no parent", path.display()))?;
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .with_context(|| {
+                    format!("failed to open proof artifact lock {}", path.display())
+                })?;
+            file.lock()
+                .with_context(|| format!("failed to lock proof artifact {}", path.display()))?;
+            Ok(file)
+        })
+        .await
+        .context("proof artifact lock task failed")?
     }
 
     async fn load_path(&self, path: &Path) -> Result<Option<ProofArtifactObject>> {
@@ -163,6 +202,7 @@ impl ProofArtifactStore for FilesystemProofArtifactStore {
         fs::create_dir_all(parent)
             .await
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        let _lock = self.lock_key(key).await?;
 
         let temp_path = atomic_temp_path(&path);
         let write_result = async {
@@ -297,7 +337,20 @@ impl ProofArtifactStore for FilesystemProofArtifactStore {
         }
     }
 
-    async fn delete(&self, key: &ProofArtifactKey, _generation: Option<i64>) -> Result<()> {
+    async fn delete(
+        &self,
+        key: &ProofArtifactKey,
+        _generation: Option<i64>,
+        expected_content_hash: &str,
+    ) -> Result<()> {
+        let _lock = self.lock_key(key).await?;
+        let Some(current) = self.load_path(&self.path(key)).await? else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            current.content_hash == expected_content_hash,
+            "proof artifact content changed before delete"
+        );
         match fs::remove_file(self.path(key)).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -513,7 +566,12 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         }
     }
 
-    async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()> {
+    async fn delete(
+        &self,
+        key: &ProofArtifactKey,
+        generation: Option<i64>,
+        _expected_content_hash: &str,
+    ) -> Result<()> {
         let mut request = self
             .control
             .delete_object()
@@ -672,6 +730,45 @@ mod tests {
         assert!(store.get_prefix(&key(), 0).await.is_err());
 
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_delete_rejects_a_republished_generation() -> anyhow::Result<()> {
+        let root = unique_root();
+        let store = FilesystemProofArtifactStore::new("devnet-a".to_string(), root.clone())?;
+        let old = store.put_if_absent(&key(), b"old-proof").await?;
+        let old_hash = old.object().content_hash.clone();
+        store.delete(&key(), None, &old_hash).await?;
+
+        store.put_if_absent(&key(), b"new-proof").await?;
+        let error = store
+            .delete(&key(), None, &old_hash)
+            .await
+            .expect_err("stale deletion must not remove republished content");
+        assert!(error.to_string().contains("content changed before delete"));
+        assert_eq!(
+            store.get(&key()).await?.expect("new artifact").bytes,
+            b"new-proof"
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_root_is_resolved_before_creation() -> anyhow::Result<()> {
+        let relative = std::path::PathBuf::from(format!(
+            ".raiko2-artifact-store-relative-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let store = FilesystemProofArtifactStore::new("devnet-a".to_string(), relative)?;
+        assert!(store.root.is_absolute());
+        assert!(store.root.is_dir());
+        std::fs::remove_dir_all(&store.root)?;
         Ok(())
     }
 

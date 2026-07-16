@@ -16,10 +16,11 @@ use super::{
     build_external_aggregate_submission, build_submission_plan, cancel_registered_tasks,
     clear_prover_tasks, clear_task_publication_outboxes, collect_prover_status,
     handle_created_batch_task, handle_created_external_aggregate_task, handle_existing_batch_task,
-    handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
-    load_task_data, load_task_lookup, planned_external_aggregate_task, prover_type_label,
-    public_task_id_from_fingerprint, register_batch_task, register_external_aggregate_task,
-    remove_task_children, resolve_engine, zk_any_not_drawn_response,
+    handle_existing_external_aggregate_task, legacy_api_error_response,
+    legacy_batch_request_fingerprint, load_all_task_data, load_task_data, load_task_lookup,
+    planned_external_aggregate_task, prover_type_label, public_task_id_from_fingerprint,
+    register_batch_task, register_external_aggregate_task, remove_task_children, resolve_engine,
+    zk_any_not_drawn_response,
 };
 
 pub(crate) async fn request_batch_shasta_proof(
@@ -65,6 +66,26 @@ async fn request_batch_shasta_proof_inner(
     let request_fingerprint =
         batch_request_fingerprint(state.runtime.environment_id(), &submission)?;
     submission.public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
+    let legacy_request_fingerprint = legacy_batch_request_fingerprint(&submission)?;
+    if let Some(existing) = state
+        .runtime
+        .find_task_by_request_fingerprint(&legacy_request_fingerprint)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to find legacy runtime task: {err}")))?
+    {
+        resolve_engine(
+            &state,
+            &submission.pair.key,
+            submission.route.pipeline_key(),
+        )?;
+        return handle_existing_batch_task(
+            &state,
+            &submission,
+            existing,
+            Some(&request_fingerprint),
+        )
+        .await;
+    }
     let plan =
         build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
 
@@ -137,6 +158,16 @@ async fn request_aggregation_proof_inner(
         aggregation_ids = ?aggregation_ids,
         "received hoodi aggregate request"
     );
+
+    if let Some(existing) = state
+        .runtime
+        .find_task_by_request_fingerprint(&submission.legacy_request_fingerprint)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to find legacy runtime task: {err}")))?
+    {
+        return handle_existing_external_aggregate_task(&state, &engine, &submission, existing)
+            .await;
+    }
 
     match register_external_aggregate_task(&state, &submission, &aggregate).await? {
         TaskRegistrationOutcome::Existing(existing) => {

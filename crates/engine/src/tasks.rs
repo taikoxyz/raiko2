@@ -139,32 +139,78 @@ pub enum EngineTask {
         request: AggregationTaskRequest,
         source: AggregationSource,
     },
+    /// Queue payload wrapper identifying one logical publication lifecycle.
+    PublicationGeneration {
+        task: Box<EngineTask>,
+        publication_generation: String,
+    },
     /// Durable queue payload used after proving succeeds but artifact publication fails.
     PublishProof {
         task: Box<EngineTask>,
         proof: Box<Proof>,
+        #[serde(default = "legacy_publication_generation")]
+        publication_generation: String,
     },
+}
+
+fn legacy_publication_generation() -> String {
+    "legacy".to_string()
 }
 
 impl EngineTask {
     #[must_use]
     pub fn with_pending_publication(self, proof: Proof) -> Self {
         match self {
-            Self::PublishProof { task, .. } => Self::PublishProof {
+            Self::PublishProof {
+                task,
+                publication_generation,
+                ..
+            }
+            | Self::PublicationGeneration {
+                task,
+                publication_generation,
+            } => Self::PublishProof {
                 task,
                 proof: Box::new(proof),
+                publication_generation,
             },
-            task => Self::PublishProof {
-                task: Box::new(task),
-                proof: Box::new(proof),
-            },
+            task => {
+                let publication_generation = task.publication_generation().to_string();
+                Self::PublishProof {
+                    task: Box::new(task),
+                    proof: Box::new(proof),
+                    publication_generation,
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn publication_generation(&self) -> &str {
+        match self {
+            Self::PublicationGeneration {
+                publication_generation,
+                ..
+            }
+            | Self::PublishProof {
+                publication_generation,
+                ..
+            } => publication_generation,
+            Self::Proposal { .. }
+            | Self::Preflight { .. }
+            | Self::Validate { .. }
+            | Self::Encode { .. }
+            | Self::ProveProposal { .. }
+            | Self::Aggregate { .. } => "legacy",
         }
     }
 
     #[must_use]
     pub fn publication_source(&self) -> &Self {
         match self {
-            Self::PublishProof { task, .. } => task.publication_source(),
+            Self::PublicationGeneration { task, .. } | Self::PublishProof { task, .. } => {
+                task.publication_source()
+            }
             task => task,
         }
     }

@@ -88,6 +88,7 @@ struct PlannedProposalTask {
     task_id: EngineTaskId,
     task_ref: String,
     proposal: CanonicalProposal,
+    publication_generation: String,
 }
 
 #[derive(Clone)]
@@ -95,6 +96,7 @@ struct PlannedAggregateTask {
     request: AggregationTaskRequest,
     task_id: EngineTaskId,
     task_ref: String,
+    publication_generation: String,
 }
 
 #[derive(Clone)]
@@ -674,6 +676,7 @@ fn planned_external_aggregate_task(
         task_ref: aggregate_task_ref(submission.route.pipeline_key(), &submission.request),
         request: submission.request.clone(),
         task_id: submission.task_id.clone(),
+        publication_generation: uuid::Uuid::new_v4().to_string(),
     }
 }
 
@@ -710,7 +713,7 @@ async fn build_submission_plan(
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
 ) -> Result<SubmissionPlan, ApiError> {
-    let proposals = submission
+    let mut proposals = submission
         .proposals
         .iter()
         .cloned()
@@ -728,9 +731,17 @@ async fn build_submission_plan(
                 request,
                 task_id,
                 proposal,
+                publication_generation: uuid::Uuid::new_v4().to_string(),
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    for proposal in &mut proposals {
+        if let Some(generation) =
+            active_publication_generation(runtime, submission, &proposal.task_ref).await?
+        {
+            proposal.publication_generation = generation;
+        }
+    }
 
     let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
@@ -782,6 +793,7 @@ async fn build_submission_plan(
             task_ref: aggregate_task_ref(submission.route.pipeline_key(), &request),
             request,
             task_id,
+            publication_generation: uuid::Uuid::new_v4().to_string(),
         })
     } else {
         None
@@ -793,6 +805,39 @@ async fn build_submission_plan(
         aggregate,
         aggregate_inputs,
     })
+}
+
+async fn active_publication_generation(
+    runtime: &RuntimeManager,
+    submission: &CanonicalBatchSubmission,
+    proof_ref: &str,
+) -> Result<Option<String>, ApiError> {
+    let records = runtime
+        .find_tasks_by_task_ref(proof_ref)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to find shared proof task: {err}")))?;
+    for record in records {
+        if record.pipeline_key != submission.route.pipeline_key()
+            || record.route != submission.route.route
+            || !matches!(
+                record.runner_status,
+                RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+            )
+        {
+            continue;
+        }
+        let Ok(metadata) = serde_json::from_value::<TaskMetadata>(record.metadata) else {
+            continue;
+        };
+        if metadata.network_pair != submission.pair.key {
+            continue;
+        }
+        let generation = metadata.publication_generation(proof_ref);
+        if generation != "legacy" {
+            return Ok(Some(generation.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 const fn proposal_task_request(
@@ -924,6 +969,19 @@ fn build_task_metadata(
     proposals: &[PlannedProposalTask],
     aggregate: Option<&PlannedAggregateTask>,
 ) -> TaskMetadata {
+    let mut runtime = RuntimeMetadata::current();
+    for proposal in proposals {
+        runtime.publication_generations.insert(
+            proposal.task_ref.clone(),
+            proposal.publication_generation.clone(),
+        );
+    }
+    if let Some(aggregate) = aggregate {
+        runtime.publication_generations.insert(
+            aggregate.task_ref.clone(),
+            aggregate.publication_generation.clone(),
+        );
+    }
     TaskMetadata {
         network_pair: pair.key.clone(),
         network: params.network.to_string(),
@@ -948,7 +1006,7 @@ fn build_task_metadata(
         aggregate_task_id: aggregate.map(|task| task.task_ref.clone()),
         aggregate_request: aggregate.map(|task| task.request.clone()),
         aggregate_input_artifacts: Vec::new(),
-        runtime: RuntimeMetadata::current(),
+        runtime,
     }
 }
 
@@ -966,6 +1024,7 @@ async fn enqueue_submission_plan(
             .submit_proposal_proof_with_dependencies(
                 proposal.request.clone(),
                 previous.iter().cloned().collect(),
+                proposal.publication_generation.clone(),
             )
             .await
             .map_err(|err| {
@@ -984,6 +1043,7 @@ async fn enqueue_submission_plan(
             .submit_aggregation_proof_from_inputs(
                 aggregate.request.clone(),
                 plan.aggregate_inputs.clone(),
+                aggregate.publication_generation.clone(),
             )
             .await
             .map_err(|err| {
@@ -1278,6 +1338,7 @@ async fn reenqueue_existing_batch_task(
     .await?;
     let recovery_plan =
         with_existing_aggregate_request(recovery_plan, existing.pipeline_key, existing_metadata);
+    let recovery_plan = with_existing_publication_generations(recovery_plan, existing_metadata);
     enqueue_submission_plan(&engine, &recovery_plan)
         .await
         .map_err(|err| {
@@ -1303,8 +1364,15 @@ async fn reenqueue_existing_batch_aggregate_task(
         .aggregate_engine_task_id(existing.pipeline_key)
         .ok_or_else(|| ApiError::internal("existing batch task missing aggregate task id"))?;
     let inputs = existing_batch_aggregate_inputs(runtime, existing, existing_metadata).await?;
+    let publication_generation = existing_metadata
+        .aggregate_task_id
+        .as_deref()
+        .map_or("legacy", |proof_ref| {
+            existing_metadata.publication_generation(proof_ref)
+        })
+        .to_string();
     let actual_task_id = engine
-        .submit_aggregation_proof_from_inputs(request, inputs)
+        .submit_aggregation_proof_from_inputs(request, inputs, publication_generation)
         .await
         .map_err(|err| {
             ApiError::internal(format!(
@@ -1636,6 +1704,7 @@ pub(crate) async fn clear_task_publication_outboxes(
                     record.pipeline_key,
                     record.route,
                     &proof_ref,
+                    metadata.publication_generation(&proof_ref),
                 )
                 .await
         } else {
@@ -1645,6 +1714,7 @@ pub(crate) async fn clear_task_publication_outboxes(
                     record.pipeline_key,
                     record.route,
                     &proof_ref,
+                    metadata.publication_generation(&proof_ref),
                 )
                 .await
         };
@@ -1740,8 +1810,15 @@ async fn reenqueue_existing_external_aggregate_task(
             &existing_metadata.aggregate_input_artifacts,
         )
     };
+    let publication_generation = existing_metadata
+        .aggregate_task_id
+        .as_deref()
+        .map_or("legacy", |proof_ref| {
+            existing_metadata.publication_generation(proof_ref)
+        })
+        .to_string();
     let actual_task_id = engine
-        .submit_aggregation_proof_from_inputs(request, inputs)
+        .submit_aggregation_proof_from_inputs(request, inputs, publication_generation)
         .await
         .map_err(|err| {
             ApiError::internal(format!(
@@ -1798,7 +1875,11 @@ async fn handle_created_external_aggregate_task(
     );
     metadata.aggregate_input_artifacts = submission.input_artifacts.clone();
     let actual_task_id = engine
-        .submit_aggregation_proof_from_inputs(submission.request.clone(), submission.inputs.clone())
+        .submit_aggregation_proof_from_inputs(
+            submission.request.clone(),
+            submission.inputs.clone(),
+            aggregate.publication_generation.clone(),
+        )
         .await
         .map_err(|err| ApiError::internal(format!("failed to enqueue aggregation proof: {err}")));
     let actual_task_id = match actual_task_id {
@@ -3024,6 +3105,23 @@ fn with_existing_aggregate_request(
     plan
 }
 
+fn with_existing_publication_generations(
+    mut plan: SubmissionPlan,
+    metadata: &TaskMetadata,
+) -> SubmissionPlan {
+    for proposal in &mut plan.proposals {
+        proposal.publication_generation = metadata
+            .publication_generation(&proposal.task_ref)
+            .to_string();
+    }
+    if let Some(aggregate) = &mut plan.aggregate {
+        aggregate.publication_generation = metadata
+            .publication_generation(&aggregate.task_ref)
+            .to_string();
+    }
+    plan
+}
+
 fn resolve_engine(
     state: &AppState,
     network_pair: &str,
@@ -3493,6 +3591,7 @@ mod tests {
             &self,
             _request: ProposalTaskRequest,
             _dependencies: Vec<EngineTaskId>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected proposal submission") })
         }
@@ -3501,6 +3600,7 @@ mod tests {
             &self,
             _request: AggregationTaskRequest,
             _inputs: Vec<AggregateProofInput>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected aggregation input submission") })
         }
@@ -3537,6 +3637,7 @@ mod tests {
             &self,
             _request: ProposalTaskRequest,
             _dependencies: Vec<EngineTaskId>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async {
                 Err(TaskStoreError::backend(std::io::Error::other(
@@ -3549,6 +3650,7 @@ mod tests {
             &self,
             _request: AggregationTaskRequest,
             _inputs: Vec<AggregateProofInput>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async {
                 Err(TaskStoreError::backend(std::io::Error::other(
@@ -3585,6 +3687,7 @@ mod tests {
             &self,
             _request: ProposalTaskRequest,
             _dependencies: Vec<EngineTaskId>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected proposal submission") })
         }
@@ -3593,6 +3696,7 @@ mod tests {
             &self,
             _request: AggregationTaskRequest,
             _inputs: Vec<AggregateProofInput>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected aggregation input submission") })
         }
@@ -3643,6 +3747,7 @@ mod tests {
             &self,
             _request: ProposalTaskRequest,
             _dependencies: Vec<EngineTaskId>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected proposal submission") })
         }
@@ -3651,6 +3756,7 @@ mod tests {
             &self,
             _request: AggregationTaskRequest,
             _inputs: Vec<AggregateProofInput>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected aggregate submission") })
         }
@@ -3683,7 +3789,9 @@ mod tests {
     struct RecordingEngine {
         pipeline_key: PipelineKey,
         proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
+        proposal_generations: Mutex<Vec<String>>,
         aggregate_inputs: Mutex<Vec<AggregateProofInput>>,
+        aggregate_generations: Mutex<Vec<String>>,
         removed: Mutex<Vec<EngineTaskId>>,
     }
 
@@ -3692,7 +3800,9 @@ mod tests {
             Self {
                 pipeline_key,
                 proposals: Mutex::new(Vec::new()),
+                proposal_generations: Mutex::new(Vec::new()),
                 aggregate_inputs: Mutex::new(Vec::new()),
+                aggregate_generations: Mutex::new(Vec::new()),
                 removed: Mutex::new(Vec::new()),
             }
         }
@@ -3703,12 +3813,17 @@ mod tests {
             &self,
             request: ProposalTaskRequest,
             dependencies: Vec<EngineTaskId>,
+            publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async move {
                 self.proposals
                     .lock()
                     .expect("proposal submissions mutex")
                     .push((request.clone(), dependencies));
+                self.proposal_generations
+                    .lock()
+                    .expect("proposal generations mutex")
+                    .push(publication_generation);
                 Ok(proposal_task_id(self.pipeline_key, request))
             })
         }
@@ -3717,12 +3832,17 @@ mod tests {
             &self,
             request: AggregationTaskRequest,
             inputs: Vec<AggregateProofInput>,
+            publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async move {
                 *self
                     .aggregate_inputs
                     .lock()
                     .expect("aggregate inputs mutex") = inputs;
+                self.aggregate_generations
+                    .lock()
+                    .expect("aggregate generations mutex")
+                    .push(publication_generation);
                 Ok(EngineTaskId::new(EngineTaskKey::Aggregate {
                     pipeline: self.pipeline_key,
                     request,
@@ -5092,6 +5212,7 @@ mod tests {
                     pipeline,
                     route,
                     proof_ref,
+                    "legacy",
                     proof_ref.as_bytes(),
                 )
                 .await?;
@@ -5108,6 +5229,7 @@ mod tests {
                     pipeline,
                     route,
                     "shared-proposal",
+                    "legacy",
                 )
                 .await?
                 .is_some()
@@ -5123,6 +5245,7 @@ mod tests {
                         pipeline,
                         route,
                         proof_ref,
+                        "legacy",
                     )
                     .await?
                     .is_none(),
@@ -5141,6 +5264,7 @@ mod tests {
                     pipeline,
                     route,
                     "shared-proposal",
+                    "legacy",
                 )
                 .await?
                 .is_none()
@@ -5285,6 +5409,13 @@ mod tests {
         let single = build_submission_plan(&runtime, &single_submission, &single_fingerprint)
             .await
             .expect("single submission plan");
+        runtime
+            .register_task(
+                build_batch_task_registration(&single_submission, &single, &single_fingerprint)
+                    .expect("single task registration"),
+            )
+            .await
+            .expect("register single task");
         let aggregate_submission = canonical_submission(route, true);
         let aggregate_fingerprint = batch_request_fingerprint("local", &aggregate_submission)
             .expect("aggregate fingerprint");
@@ -5296,6 +5427,10 @@ mod tests {
         assert_eq!(single.proposals.len(), 1);
         assert_eq!(aggregate.proposals.len(), 1);
         assert_eq!(single.proposals[0].task_id, aggregate.proposals[0].task_id);
+        assert_eq!(
+            single.proposals[0].publication_generation,
+            aggregate.proposals[0].publication_generation
+        );
     }
 
     #[test]
@@ -5432,6 +5567,23 @@ mod tests {
         assert_eq!(proposals[0].0.proposal_id, 8);
         assert!(proposals[0].1.is_empty());
         drop(proposals);
+        assert_eq!(
+            recorder
+                .proposal_generations
+                .lock()
+                .expect("proposal generations")[0],
+            plan.proposals[1].publication_generation
+        );
+        assert_eq!(
+            recorder
+                .aggregate_generations
+                .lock()
+                .expect("aggregate generations")[0],
+            plan.aggregate
+                .as_ref()
+                .expect("aggregate plan")
+                .publication_generation
+        );
 
         let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
         assert_eq!(aggregate_inputs.len(), 2);

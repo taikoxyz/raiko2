@@ -130,7 +130,7 @@ fn should_notify_queue_task<I>(
     recovered_output: bool,
 ) -> bool {
     recovered_output
-        || !matches!(payload, EngineTask::Proposal { .. })
+        || !matches!(payload.publication_source(), EngineTask::Proposal { .. })
         || matches!(execution_result, Ok(EngineOutput::Proof(_)))
         || execution_result
             .as_ref()
@@ -155,12 +155,17 @@ fn log_execution_failure<I>(
 }
 
 fn proof_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
-    match &id.0 {
+    let publication_generation = task.publication_generation().to_string();
+    let source = match &id.0 {
         EngineTaskKey::Proposal { request, .. } => EngineTask::ProveProposal {
             request: request.clone(),
             input_task: id.clone(),
         },
         EngineTaskKey::Aggregate { .. } => task.publication_source().clone(),
+    };
+    EngineTask::PublicationGeneration {
+        task: Box::new(source),
+        publication_generation,
     }
 }
 
@@ -465,6 +470,25 @@ where
         request: ProposalTaskRequest,
         dependencies: Vec<EngineTaskId>,
     ) -> Result<EngineTaskId, TaskStoreError> {
+        self.submit_proposal_proof_with_dependencies_and_generation(
+            request,
+            dependencies,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+    }
+
+    /// Submits a proposal proof under a caller-provided publication generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot enqueue the proposal task.
+    pub async fn submit_proposal_proof_with_dependencies_and_generation(
+        &self,
+        request: ProposalTaskRequest,
+        dependencies: Vec<EngineTaskId>,
+        publication_generation: String,
+    ) -> Result<EngineTaskId, TaskStoreError> {
         let proposal_id = self.proposal_task_id(request.clone());
         self.inner
             .scheduler
@@ -472,7 +496,10 @@ where
                 proposal_id,
                 NewTask {
                     priority: PROPOSAL_TASK_PRIORITY,
-                    payload: EngineTask::Proposal { request },
+                    payload: EngineTask::PublicationGeneration {
+                        task: Box::new(EngineTask::Proposal { request }),
+                        publication_generation,
+                    },
                 },
                 dependencies,
                 self.externally_stateful_stage_execution_policy(),
@@ -488,6 +515,26 @@ where
         &self,
         request: AggregationTaskRequest,
         inputs: Vec<AggregateProofInput>,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        self.submit_aggregation_proof_from_inputs_and_generation(
+            request,
+            inputs,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+    }
+
+    /// Submits an aggregation proof under a caller-provided publication generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot enqueue the aggregation task or an input is
+    /// invalid.
+    pub async fn submit_aggregation_proof_from_inputs_and_generation(
+        &self,
+        request: AggregationTaskRequest,
+        inputs: Vec<AggregateProofInput>,
+        publication_generation: String,
     ) -> Result<EngineTaskId, TaskStoreError> {
         if inputs.is_empty() {
             return Err(TaskStoreError::corrupt_msg(
@@ -530,9 +577,12 @@ where
                 aggregate_id,
                 NewTask {
                     priority: AGGREGATION_TASK_PRIORITY,
-                    payload: EngineTask::Aggregate {
-                        request,
-                        source: AggregationSource::Inputs(inputs),
+                    payload: EngineTask::PublicationGeneration {
+                        task: Box::new(EngineTask::Aggregate {
+                            request,
+                            source: AggregationSource::Inputs(inputs),
+                        }),
+                        publication_generation,
                     },
                 },
                 proof_tasks,
@@ -698,7 +748,7 @@ where
             terminal_observer_task = proof_observer_task(&lease.id, &payload);
         }
         if let Some(observer) = &self.inner.observer
-            && !matches!(payload, EngineTask::Proposal { .. })
+            && !matches!(payload.publication_source(), EngineTask::Proposal { .. })
         {
             observer
                 .on_task_started(&lease.id, &terminal_observer_task, worker)
@@ -868,7 +918,7 @@ where
         else {
             return Ok(None);
         };
-        let stage = match task {
+        let stage = match task.publication_source() {
             EngineTask::Aggregate { .. } => PipelineStage::Aggregate,
             _ => PipelineStage::Prove,
         };
@@ -1182,6 +1232,10 @@ where
         task: EngineTask,
         worker: &str,
     ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
+        let task = match task {
+            EngineTask::PublicationGeneration { task, .. } => *task,
+            task => task,
+        };
         match task {
             EngineTask::Proposal { request } => {
                 self.execute_proposal(task_id, request, worker).await
@@ -1276,6 +1330,7 @@ where
                     stage, *proof,
                 ))))
             }
+            EngineTask::PublicationGeneration { .. } => unreachable!(),
         }
     }
 }
@@ -1331,7 +1386,7 @@ where
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -1363,6 +1418,7 @@ mod tests {
     struct PublicationFailingObserver {
         proof_successes: AtomicUsize,
         failures: usize,
+        publication_generations: Mutex<Vec<String>>,
     }
 
     impl PublicationFailingObserver {
@@ -1370,6 +1426,7 @@ mod tests {
             Self {
                 proof_successes: AtomicUsize::new(0),
                 failures,
+                publication_generations: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1379,10 +1436,14 @@ mod tests {
         async fn on_task_succeeded(
             &self,
             _id: &EngineTaskId,
-            _task: &EngineTask,
+            task: &EngineTask,
             success: &EngineTaskSuccess,
         ) -> Result<(), EngineObserverError> {
             if matches!(success, EngineTaskSuccess::Proof { .. }) {
+                self.publication_generations
+                    .lock()
+                    .expect("publication generations mutex")
+                    .push(task.publication_generation().to_string());
                 let attempt = self.proof_successes.fetch_add(1, Ordering::SeqCst);
                 if attempt < self.failures {
                     return Err(EngineObserverError::ProofPublication(
@@ -2114,6 +2175,13 @@ mod tests {
         assert!(matches!(view.state, TaskState::Succeeded { .. }));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 2);
+        let publication_generations = observer
+            .publication_generations
+            .lock()
+            .expect("publication generations mutex");
+        assert_eq!(publication_generations.len(), 2);
+        assert_eq!(publication_generations[0], publication_generations[1]);
+        assert_ne!(publication_generations[0], "legacy");
         Ok(())
     }
 

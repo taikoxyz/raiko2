@@ -98,6 +98,8 @@ pub(crate) struct RuntimeMetadata {
     pub(crate) proposals: BTreeMap<String, TaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate: Option<TaskRuntimeMetadata>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) publication_generations: BTreeMap<String, String>,
 }
 
 impl RuntimeMetadata {
@@ -169,6 +171,13 @@ pub(crate) struct TaskRuntimeMetadata {
 }
 
 impl TaskMetadata {
+    pub(crate) fn publication_generation(&self, proof_ref: &str) -> &str {
+        self.runtime
+            .publication_generations
+            .get(proof_ref)
+            .map_or("legacy", String::as_str)
+    }
+
     pub(crate) fn prover_type_str(&self) -> Option<String> {
         self.prover_type.map(|kind| kind.as_str().to_string())
     }

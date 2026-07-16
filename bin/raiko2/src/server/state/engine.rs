@@ -18,11 +18,13 @@ pub trait EngineHandle: Send + Sync {
         &self,
         request: ProposalTaskRequest,
         dependencies: Vec<EngineTaskId>,
+        publication_generation: String,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn submit_aggregation_proof_from_inputs(
         &self,
         request: AggregationTaskRequest,
         inputs: Vec<AggregateProofInput>,
+        publication_generation: String,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
@@ -117,10 +119,15 @@ where
         &self,
         request: ProposalTaskRequest,
         dependencies: Vec<EngineTaskId>,
+        publication_generation: String,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
         Box::pin(async move {
-            self.submit_proposal_proof_with_dependencies(request, dependencies)
-                .await
+            self.submit_proposal_proof_with_dependencies_and_generation(
+                request,
+                dependencies,
+                publication_generation,
+            )
+            .await
         })
     }
 
@@ -128,10 +135,15 @@ where
         &self,
         request: AggregationTaskRequest,
         inputs: Vec<AggregateProofInput>,
+        publication_generation: String,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
         Box::pin(async move {
-            self.submit_aggregation_proof_from_inputs(request, inputs)
-                .await
+            self.submit_aggregation_proof_from_inputs_and_generation(
+                request,
+                inputs,
+                publication_generation,
+            )
+            .await
         })
     }
 

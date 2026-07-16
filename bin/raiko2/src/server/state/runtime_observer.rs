@@ -165,7 +165,9 @@ impl RuntimeObserver {
             EngineTask::Encode { .. } => "encode",
             EngineTask::ProveProposal { .. } => "prove",
             EngineTask::Aggregate { .. } => "aggregate",
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -299,7 +301,9 @@ impl RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => false,
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         })
     }
 
@@ -351,7 +355,9 @@ impl RuntimeObserver {
             EngineTask::Encode { .. } => Some(ProposalStage::Encode),
             EngineTask::ProveProposal { .. } => Some(ProposalStage::Prove),
             EngineTask::Proposal { .. } | EngineTask::Aggregate { .. } => None,
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -472,6 +478,7 @@ impl RuntimeObserver {
     async fn publish_final_proof_artifact(
         &self,
         id: &EngineTaskId,
+        task: &EngineTask,
         stage: &str,
         proof: &raiko2_primitives::Proof,
     ) -> Result<Option<PublishedProofCommit>> {
@@ -560,6 +567,7 @@ impl RuntimeObserver {
                 id.0.pipeline_key(),
                 self.route,
                 &root_ref,
+                task.publication_generation(),
             )
             .await
             .context("failed to clear pending proof publication")?;
@@ -692,7 +700,10 @@ impl RuntimeObserver {
         stage: &'static str,
         proof: &raiko2_primitives::Proof,
     ) -> ProofCommitAttempt {
-        let publication = match self.publish_final_proof_artifact(id, stage, proof).await {
+        let publication = match self
+            .publish_final_proof_artifact(id, task, stage, proof)
+            .await
+        {
             Ok(Some(publication)) => publication,
             Ok(None) => return ProofCommitAttempt::Committed,
             Err(error) => return ProofCommitAttempt::Retryable(error),
@@ -799,7 +810,7 @@ impl EngineObserver for RuntimeObserver {
     async fn checkpoint_completed_proof(
         &self,
         id: &EngineTaskId,
-        _task: &EngineTask,
+        task: &EngineTask,
         proof: &raiko2_primitives::Proof,
     ) -> std::result::Result<(), EngineObserverError> {
         let proof_ref = Self::root_task_ref(id);
@@ -814,6 +825,7 @@ impl EngineObserver for RuntimeObserver {
                 id.0.pipeline_key(),
                 self.route,
                 &proof_ref,
+                task.publication_generation(),
                 &bytes,
             )
             .await
@@ -823,7 +835,7 @@ impl EngineObserver for RuntimeObserver {
     async fn load_completed_proof(
         &self,
         id: &EngineTaskId,
-        _task: &EngineTask,
+        task: &EngineTask,
     ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
         let pipeline_key = match id.0 {
             EngineTaskKey::Proposal { pipeline, .. }
@@ -849,6 +861,7 @@ impl EngineObserver for RuntimeObserver {
                     pipeline_key,
                     self.route,
                     &proof_ref,
+                    task.publication_generation(),
                 )
                 .await
                 .map_err(|error| error.to_string())?
@@ -966,7 +979,8 @@ impl EngineObserver for RuntimeObserver {
                                 | EngineTask::Validate { .. }
                                 | EngineTask::Encode { .. }
                                 | EngineTask::Proposal { .. } => {}
-                                EngineTask::PublishProof { .. } => unreachable!(),
+                                EngineTask::PublicationGeneration { .. }
+                                | EngineTask::PublishProof { .. } => unreachable!(),
                             }
                         }
                         ProverProgress::Sp1NetworkSubmission(submission) => {
@@ -985,7 +999,8 @@ impl EngineObserver for RuntimeObserver {
                                 | EngineTask::Validate { .. }
                                 | EngineTask::Encode { .. }
                                 | EngineTask::Proposal { .. } => {}
-                                EngineTask::PublishProof { .. } => unreachable!(),
+                                EngineTask::PublicationGeneration { .. }
+                                | EngineTask::PublishProof { .. } => unreachable!(),
                             }
                         }
                     }
@@ -1153,7 +1168,9 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
@@ -1172,7 +1189,9 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -1192,7 +1211,9 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
@@ -1204,7 +1225,9 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-            EngineTask::PublishProof { .. } => unreachable!(),
+            EngineTask::PublicationGeneration { .. } | EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }?;
 
         let now = now_secs();
@@ -1899,6 +1922,7 @@ mod tests {
                 pipeline,
                 route,
                 &proof_ref,
+                "legacy",
                 &serde_json::to_vec(&proof)?,
             )
             .await?;
@@ -2088,6 +2112,7 @@ mod tests {
                 pipeline,
                 route,
                 &proof_ref,
+                "legacy",
                 &serde_json::to_vec(&proof)?,
             )
             .await?;

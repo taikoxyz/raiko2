@@ -57,6 +57,7 @@ bincode.workspace = true
 
 # Utilities
 dotenvy = "0.15"
+uuid.workspace = true
 
 [features]
 default = ["local-provers"]

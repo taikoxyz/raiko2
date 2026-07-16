@@ -736,6 +736,7 @@ mod tests {
             &self,
             _request: ProposalTaskRequest,
             _dependencies: Vec<EngineTaskId>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected proposal submission") })
         }
@@ -744,6 +745,7 @@ mod tests {
             &self,
             _request: AggregationTaskRequest,
             _inputs: Vec<AggregateProofInput>,
+            _publication_generation: String,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected aggregation submission from inputs") })
         }

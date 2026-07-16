@@ -975,6 +975,7 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        publication_generation: &str,
         proof_bytes: &[u8],
     ) -> Result<()> {
         let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
@@ -984,9 +985,10 @@ impl RuntimeManager {
             route,
             proof_ref: proof_ref.to_string(),
         };
+        let removed_marker = pending_publication_removed_marker(publication_generation);
         if self
             .artifact_store
-            .is_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .is_invalidated(&pending_key, &removed_marker)
             .await
             .context("failed to check pending proof removal marker")?
         {
@@ -1002,9 +1004,13 @@ impl RuntimeManager {
             .put_if_absent(&pending_key, proof_bytes)
             .await
             .context("failed to checkpoint pending proof in shared artifact store")?;
+        anyhow::ensure!(
+            !matches!(pending, ProofArtifactPutResult::Conflict(_)),
+            "a different pending proof publication already exists for {proof_ref}"
+        );
         if self
             .artifact_store
-            .is_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .is_invalidated(&pending_key, &removed_marker)
             .await
             .context("failed to recheck pending proof removal marker")?
         {
@@ -1027,16 +1033,19 @@ impl RuntimeManager {
         let pipeline_key = pipeline_key.as_str().to_string();
         let route = route.to_string();
         let proof_ref = proof_ref.to_string();
+        let publication_generation = publication_generation.to_string();
         let updated_at = now_ts();
         conn.call(move |conn| {
             conn.execute(
                 r"
                 INSERT INTO proof_publication_outbox (
                     environment_id, network_pair, pipeline_key, route, proof_ref,
-                    proof_bytes, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    publication_generation, proof_bytes, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 ON CONFLICT(environment_id, network_pair, pipeline_key, route, proof_ref)
-                DO UPDATE SET proof_bytes = excluded.proof_bytes, updated_at = excluded.updated_at
+                DO UPDATE SET publication_generation = excluded.publication_generation,
+                              proof_bytes = excluded.proof_bytes,
+                              updated_at = excluded.updated_at
                 ",
                 params![
                     environment_id,
@@ -1044,6 +1053,7 @@ impl RuntimeManager {
                     pipeline_key,
                     route,
                     proof_ref,
+                    publication_generation,
                     proof_bytes,
                     updated_at
                 ],
@@ -1088,6 +1098,7 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        publication_generation: &str,
     ) -> Result<Option<Vec<u8>>> {
         let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
         let canonical_key = ProofArtifactKey {
@@ -1118,6 +1129,7 @@ impl RuntimeManager {
                         pipeline_key,
                         route,
                         proof_ref,
+                        publication_generation,
                     )
                     .await?;
                 return Ok(None);
@@ -1125,14 +1137,23 @@ impl RuntimeManager {
             return Ok(Some(object.bytes));
         }
         let local = self
-            .get_local_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
+            .get_local_pending_proof_publication(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                publication_generation,
+            )
             .await?;
         let Some(bytes) = local else {
             return Ok(None);
         };
         if self
             .artifact_store
-            .is_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .is_invalidated(
+                &pending_key,
+                &pending_publication_removed_marker(publication_generation),
+            )
             .await
             .context("failed to check pending proof removal marker")?
         {
@@ -1142,6 +1163,7 @@ impl RuntimeManager {
                     pipeline_key,
                     route,
                     proof_ref,
+                    publication_generation,
                 )
                 .await?;
             return Ok(None);
@@ -1159,6 +1181,7 @@ impl RuntimeManager {
                     pipeline_key,
                     route,
                     proof_ref,
+                    publication_generation,
                 )
                 .await?;
             return Ok(None);
@@ -1177,10 +1200,14 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        publication_generation: &str,
     ) -> Result<bool> {
         let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
         self.artifact_store
-            .mark_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .mark_invalidated(
+                &pending_key,
+                &pending_publication_removed_marker(publication_generation),
+            )
             .await
             .context("failed to mark pending proof publication removed")?;
         if let Some(object) = self
@@ -1194,8 +1221,14 @@ impl RuntimeManager {
                 .await
                 .context("failed to remove shared pending proof")?;
         }
-        self.remove_local_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
-            .await
+        self.remove_local_pending_proof_publication(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            publication_generation,
+        )
+        .await
     }
 
     /// Invalidates and removes a pending proof publication across replicas.
@@ -1209,6 +1242,7 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        publication_generation: &str,
     ) -> Result<bool> {
         let pending_key = pending_proof_artifact_key(network_pair, pipeline_key, route, proof_ref);
         let canonical_key = ProofArtifactKey {
@@ -1218,7 +1252,10 @@ impl RuntimeManager {
             proof_ref: proof_ref.to_string(),
         };
         self.artifact_store
-            .mark_invalidated(&pending_key, PENDING_PUBLICATION_REMOVED_MARKER)
+            .mark_invalidated(
+                &pending_key,
+                &pending_publication_removed_marker(publication_generation),
+            )
             .await
             .context("failed to mark pending proof publication removed")?;
         let mut invalidated = false;
@@ -1239,7 +1276,13 @@ impl RuntimeManager {
             invalidated = true;
         }
         if let Some(bytes) = self
-            .get_local_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
+            .get_local_pending_proof_publication(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                publication_generation,
+            )
             .await?
         {
             self.artifact_store
@@ -1249,7 +1292,13 @@ impl RuntimeManager {
             invalidated = true;
         }
         let removed = self
-            .remove_local_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
+            .remove_local_pending_proof_publication(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                publication_generation,
+            )
             .await?;
         Ok(invalidated || removed)
     }
@@ -1260,6 +1309,7 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        publication_generation: &str,
     ) -> Result<Option<Vec<u8>>> {
         let conn = self.connection().await?;
         let environment_id = self.environment_id().to_string();
@@ -1267,6 +1317,7 @@ impl RuntimeManager {
         let pipeline_key = pipeline_key.as_str().to_string();
         let route = route.to_string();
         let proof_ref = proof_ref.to_string();
+        let publication_generation = publication_generation.to_string();
         conn.call(move |conn| {
             Ok(conn
                 .query_row(
@@ -1274,9 +1325,16 @@ impl RuntimeManager {
                     SELECT proof_bytes
                     FROM proof_publication_outbox
                     WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
-                      AND route = ?4 AND proof_ref = ?5
+                      AND route = ?4 AND proof_ref = ?5 AND publication_generation = ?6
                     ",
-                    params![environment_id, network_pair, pipeline_key, route, proof_ref],
+                    params![
+                        environment_id,
+                        network_pair,
+                        pipeline_key,
+                        route,
+                        proof_ref,
+                        publication_generation
+                    ],
                     |row| row.get(0),
                 )
                 .optional()?)
@@ -1291,6 +1349,7 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        publication_generation: &str,
     ) -> Result<bool> {
         let conn = self.connection().await?;
         let environment_id = self.environment_id().to_string();
@@ -1298,14 +1357,22 @@ impl RuntimeManager {
         let pipeline_key = pipeline_key.as_str().to_string();
         let route = route.to_string();
         let proof_ref = proof_ref.to_string();
+        let publication_generation = publication_generation.to_string();
         conn.call(move |conn| {
             Ok(conn.execute(
                 r"
                 DELETE FROM proof_publication_outbox
                 WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
-                  AND route = ?4 AND proof_ref = ?5
+                  AND route = ?4 AND proof_ref = ?5 AND publication_generation = ?6
                 ",
-                params![environment_id, network_pair, pipeline_key, route, proof_ref],
+                params![
+                    environment_id,
+                    network_pair,
+                    pipeline_key,
+                    route,
+                    proof_ref,
+                    publication_generation
+                ],
             )? > 0)
         })
         .await
@@ -1808,6 +1875,7 @@ fn migrate_runtime_schema(
             pipeline_key TEXT NOT NULL,
             route TEXT NOT NULL,
             proof_ref TEXT NOT NULL,
+            publication_generation TEXT NOT NULL DEFAULT 'legacy',
             proof_bytes BLOB NOT NULL,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(environment_id, network_pair, pipeline_key, route, proof_ref)
@@ -1816,6 +1884,16 @@ fn migrate_runtime_schema(
         ON proof_publication_outbox(updated_at);
         ",
     )?;
+    if !table_column_exists(
+        &transaction,
+        "proof_publication_outbox",
+        "publication_generation",
+    )? {
+        transaction.execute(
+            "ALTER TABLE proof_publication_outbox ADD COLUMN publication_generation TEXT NOT NULL DEFAULT 'legacy'",
+            [],
+        )?;
+    }
     transaction.commit()
 }
 
@@ -2049,7 +2127,9 @@ fn pending_proof_artifact_key(
     }
 }
 
-const PENDING_PUBLICATION_REMOVED_MARKER: &str = "publication-removed";
+fn pending_publication_removed_marker(publication_generation: &str) -> String {
+    format!("publication-removed:{publication_generation}")
+}
 
 #[cfg(test)]
 mod tests {
@@ -2304,6 +2384,7 @@ mod tests {
                 pipeline,
                 route,
                 "proposal_0xpending",
+                "generation-a",
                 b"pending-proof",
             )
             .await?;
@@ -2314,6 +2395,7 @@ mod tests {
                     pipeline,
                     route,
                     "proposal_0xpending",
+                    "generation-a",
                 )
                 .await?
                 .is_some()
@@ -2325,6 +2407,7 @@ mod tests {
                 pipeline,
                 route,
                 "proposal_0xpending",
+                "generation-a",
             )
             .await?;
 
@@ -2335,6 +2418,7 @@ mod tests {
                     pipeline,
                     route,
                     "proposal_0xpending",
+                    "generation-a",
                 )
                 .await?
                 .is_none()
@@ -2363,6 +2447,7 @@ mod tests {
         let route = "sp1/network".parse::<PipelineRoute>().expect("route");
         let network_pair = "taiko_dev/ethereum";
         let proof_ref = "proposal_0xremoved";
+        let publication_generation = "generation-a";
 
         first
             .upsert_pending_proof_publication(
@@ -2370,6 +2455,7 @@ mod tests {
                 pipeline,
                 route,
                 proof_ref,
+                publication_generation,
                 b"pending-proof",
             )
             .await?;
@@ -2379,12 +2465,19 @@ mod tests {
                 pipeline,
                 route,
                 proof_ref,
+                publication_generation,
                 b"pending-proof",
             )
             .await?;
 
         first
-            .remove_pending_proof_publication(network_pair, pipeline, route, proof_ref)
+            .remove_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                publication_generation,
+            )
             .await?;
 
         let late_checkpoint = second
@@ -2393,6 +2486,7 @@ mod tests {
                 pipeline,
                 route,
                 proof_ref,
+                publication_generation,
                 b"late-proof",
             )
             .await;
@@ -2416,6 +2510,7 @@ mod tests {
                 pipeline,
                 route,
                 proof_ref,
+                publication_generation,
                 b"committed-proof",
             )
             .await
@@ -2423,11 +2518,103 @@ mod tests {
 
         assert!(
             second
-                .get_pending_proof_publication(network_pair, pipeline, route, proof_ref)
+                .get_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    publication_generation,
+                )
                 .await?
                 .is_none(),
             "a replica-local checkpoint survived deliberate shared removal"
         );
+        std::fs::remove_dir_all(artifact_root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_publication_generation_supersedes_removed_generation() -> anyhow::Result<()> {
+        let artifact_root = unique_root("raiko2-runtime-pending-generation-artifacts");
+        let store: Arc<dyn ProofArtifactStore> = Arc::new(FilesystemProofArtifactStore::new(
+            "shared-environment".to_string(),
+            artifact_root.clone(),
+        )?);
+        let runtime = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-pending-generation"),
+            store,
+        )?;
+        let pipeline = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let route = "sp1/network".parse::<PipelineRoute>().expect("route");
+        let network_pair = "taiko_dev/ethereum";
+        let proof_ref = "proposal_0xgeneration";
+
+        runtime
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                "generation-old",
+                b"old-proof",
+            )
+            .await?;
+        let old = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"old-proof")
+            .await?;
+        runtime
+            .remove_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                "generation-old",
+            )
+            .await?;
+        runtime
+            .mark_proof_artifact_invalidated(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                &old.object().content_hash,
+            )
+            .await?;
+        runtime
+            .delete_proof_artifact(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                old.object().generation,
+                &old.object().content_hash,
+            )
+            .await?;
+
+        runtime
+            .upsert_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                "generation-new",
+                b"new-proof",
+            )
+            .await?;
+        let new = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"new-proof")
+            .await?;
+        assert_eq!(new.object().bytes, b"new-proof");
+        runtime
+            .remove_pending_proof_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                "generation-new",
+            )
+            .await?;
+
         std::fs::remove_dir_all(artifact_root)?;
         Ok(())
     }

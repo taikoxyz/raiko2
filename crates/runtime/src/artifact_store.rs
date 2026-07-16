@@ -71,6 +71,8 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         key: &ProofArtifactKey,
         max_bytes: usize,
     ) -> Result<Option<ProofArtifactPrefix>>;
+    async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()>;
+    async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool>;
     async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()>;
 }
 
@@ -110,6 +112,15 @@ impl FilesystemProofArtifactStore {
             .join(safe_component(&key.route.to_string()))
             .join(safe_component(&key.network_pair))
             .join(format!("{}.json", safe_component(&key.proof_ref)))
+    }
+
+    fn invalidation_path(&self, key: &ProofArtifactKey, content_hash: &str) -> PathBuf {
+        self.path(key)
+            .parent()
+            .expect("proof artifact path always has a parent")
+            .join(".invalidated")
+            .join(safe_component(&key.proof_ref))
+            .join(safe_component(content_hash))
     }
 
     async fn load_path(&self, path: &Path) -> Result<Option<ProofArtifactObject>> {
@@ -245,6 +256,47 @@ impl ProofArtifactStore for FilesystemProofArtifactStore {
         }))
     }
 
+    async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()> {
+        let path = self.invalidation_path(key, content_hash);
+        let parent = path
+            .parent()
+            .with_context(|| format!("path {} has no parent", path.display()))?;
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => {
+                file.sync_all().await.with_context(|| {
+                    format!(
+                        "failed to sync proof invalidation marker {}",
+                        path.display()
+                    )
+                })?;
+                sync_directory(parent).await
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to create proof invalidation marker {}",
+                    path.display()
+                )
+            }),
+        }
+    }
+
+    async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool> {
+        match fs::metadata(self.invalidation_path(key, content_hash)).await {
+            Ok(metadata) => Ok(metadata.is_file()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("failed to read proof invalidation marker"),
+        }
+    }
+
     async fn delete(&self, key: &ProofArtifactKey, _generation: Option<i64>) -> Result<()> {
         match fs::remove_file(self.path(key)).await {
             Ok(()) => Ok(()),
@@ -307,6 +359,14 @@ impl GcsProofArtifactStore {
         } else {
             format!("{}/{suffix}", self.prefix)
         }
+    }
+
+    fn invalidation_object_name(&self, key: &ProofArtifactKey, content_hash: &str) -> String {
+        format!(
+            "{}.invalidated/{}",
+            self.object_name(key),
+            safe_component(content_hash)
+        )
     }
 
     async fn load_object(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
@@ -423,6 +483,34 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             generation: Some(generation),
             bytes,
         }))
+    }
+
+    async fn mark_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<()> {
+        let object_name = self.invalidation_object_name(key, content_hash);
+        let upload = self
+            .storage
+            .write_object(&self.bucket_resource, &object_name, bytes::Bytes::new())
+            .set_if_generation_match(0)
+            .send_buffered();
+        match Box::pin(upload).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.http_status_code() == Some(412) => Ok(()),
+            Err(error) => Err(error).context("failed to publish GCS proof invalidation marker"),
+        }
+    }
+
+    async fn is_invalidated(&self, key: &ProofArtifactKey, content_hash: &str) -> Result<bool> {
+        let object_name = self.invalidation_object_name(key, content_hash);
+        match self
+            .storage
+            .read_object(&self.bucket_resource, &object_name)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if error.http_status_code() == Some(404) => Ok(false),
+            Err(error) => Err(error).context("failed to read GCS proof invalidation marker"),
+        }
     }
 
     async fn delete(&self, key: &ProofArtifactKey, generation: Option<i64>) -> Result<()> {
@@ -548,6 +636,25 @@ mod tests {
         assert!(matches!(conflict, ProofArtifactPutResult::Conflict(_)));
         assert_eq!(store.get(&key()).await?.expect("artifact").bytes, b"first");
 
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filesystem_invalidation_marker_is_content_bound() -> anyhow::Result<()> {
+        let root = unique_root();
+        let store = FilesystemProofArtifactStore::new("devnet-a".to_string(), root.clone())?;
+        let publication = store.put_if_absent(&key(), b"proof").await?;
+        let content_hash = publication.object().content_hash.clone();
+
+        store.mark_invalidated(&key(), &content_hash).await?;
+
+        assert!(store.is_invalidated(&key(), &content_hash).await?);
+        assert!(
+            !store
+                .is_invalidated(&key(), "different-content-hash")
+                .await?
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

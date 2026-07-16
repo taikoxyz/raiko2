@@ -788,7 +788,18 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        content_hash: &str,
     ) -> Result<bool> {
+        let key = ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.to_string(),
+        };
+        self.artifact_store
+            .mark_invalidated(&key, content_hash)
+            .await
+            .context("failed to publish shared proof invalidation marker")?;
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
@@ -831,30 +842,160 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        content_hash: &str,
     ) -> Result<bool> {
+        let key = ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.to_string(),
+        };
         let conn = self.connection().await?;
         let network_pair = network_pair.to_string();
         let proof_ref = proof_ref.to_string();
         let pipeline_key = pipeline_key.as_str().to_string();
         let route = route.to_string();
         let environment_id = self.environment_id().to_string();
+        let locally_invalidated = conn
+            .call(move |conn| {
+                Ok(conn
+                    .query_row(
+                        r"
+                    SELECT invalidated_at IS NOT NULL
+                    FROM proof_artifacts
+                    WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
+                      AND route = ?4 AND proof_ref = ?5
+                    ",
+                        params![environment_id, network_pair, pipeline_key, route, proof_ref],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false))
+            })
+            .await
+            .context("failed to query proof artifact invalidation state")?;
+        if locally_invalidated {
+            return Ok(true);
+        }
+        self.artifact_store
+            .is_invalidated(&key, content_hash)
+            .await
+            .context("failed to query shared proof invalidation marker")
+    }
+
+    /// Checkpoints a completed proof before publication begins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the publication outbox cannot be updated.
+    pub async fn upsert_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        proof_bytes: &[u8],
+    ) -> Result<()> {
+        let conn = self.connection().await?;
+        let environment_id = self.environment_id().to_string();
+        let network_pair = network_pair.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
+        let proof_ref = proof_ref.to_string();
+        let proof_bytes = proof_bytes.to_vec();
+        let updated_at = now_ts();
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                INSERT INTO proof_publication_outbox (
+                    environment_id, network_pair, pipeline_key, route, proof_ref,
+                    proof_bytes, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(environment_id, network_pair, pipeline_key, route, proof_ref)
+                DO UPDATE SET proof_bytes = excluded.proof_bytes, updated_at = excluded.updated_at
+                ",
+                params![
+                    environment_id,
+                    network_pair,
+                    pipeline_key,
+                    route,
+                    proof_ref,
+                    proof_bytes,
+                    updated_at
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to checkpoint pending proof publication")
+    }
+
+    /// Loads a proof waiting to be published.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the publication outbox cannot be queried.
+    pub async fn get_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let conn = self.connection().await?;
+        let environment_id = self.environment_id().to_string();
+        let network_pair = network_pair.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
+        let proof_ref = proof_ref.to_string();
         conn.call(move |conn| {
             Ok(conn
                 .query_row(
                     r"
-                    SELECT invalidated_at IS NOT NULL
-                    FROM proof_artifacts
+                    SELECT proof_bytes
+                    FROM proof_publication_outbox
                     WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
                       AND route = ?4 AND proof_ref = ?5
                     ",
                     params![environment_id, network_pair, pipeline_key, route, proof_ref],
                     |row| row.get(0),
                 )
-                .optional()?
-                .unwrap_or(false))
+                .optional()?)
         })
         .await
-        .context("failed to query proof artifact invalidation state")
+        .context("failed to load pending proof publication")
+    }
+
+    /// Removes a proof from the publication outbox after durable publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the publication outbox cannot be updated.
+    pub async fn remove_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let environment_id = self.environment_id().to_string();
+        let network_pair = network_pair.to_string();
+        let pipeline_key = pipeline_key.as_str().to_string();
+        let route = route.to_string();
+        let proof_ref = proof_ref.to_string();
+        conn.call(move |conn| {
+            Ok(conn.execute(
+                r"
+                DELETE FROM proof_publication_outbox
+                WHERE environment_id = ?1 AND network_pair = ?2 AND pipeline_key = ?3
+                  AND route = ?4 AND proof_ref = ?5
+                ",
+                params![environment_id, network_pair, pipeline_key, route, proof_ref],
+            )? > 0)
+        })
+        .await
+        .context("failed to remove pending proof publication")
     }
 
     /// # Errors
@@ -1345,6 +1486,22 @@ fn migrate_runtime_schema(
         [],
     )?;
     migrate_proof_artifact_schema(&transaction)?;
+    transaction.execute_batch(
+        r"
+        CREATE TABLE IF NOT EXISTS proof_publication_outbox (
+            environment_id TEXT NOT NULL,
+            network_pair TEXT NOT NULL,
+            pipeline_key TEXT NOT NULL,
+            route TEXT NOT NULL,
+            proof_ref TEXT NOT NULL,
+            proof_bytes BLOB NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(environment_id, network_pair, pipeline_key, route, proof_ref)
+        );
+        CREATE INDEX IF NOT EXISTS proof_publication_outbox_updated_at_idx
+        ON proof_publication_outbox(updated_at);
+        ",
+    )?;
     transaction.commit()
 }
 
@@ -1565,8 +1722,9 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, FilesystemProofArtifactStore, ProofArtifactRegistration, RunnerStatus,
-        RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
+        ExpiredTaskCursor, FilesystemProofArtifactStore, ProofArtifactRegistration,
+        ProofArtifactStore, RunnerStatus, RuntimeManager, TaskRegistration,
+        TaskRegistrationOutcome,
     };
     use raiko2_pipeline::PipelineRoute;
     use rusqlite::OptionalExtension;
@@ -1698,6 +1856,7 @@ mod tests {
                     pipeline_key,
                     registration.route,
                     &registration.proof_ref,
+                    &registration.content_hash,
                 )
                 .await?
         );
@@ -1721,6 +1880,70 @@ mod tests {
         assert!(artifacts[0].invalidated_at.is_some());
 
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_invalidation_marker_is_visible_across_runtime_replicas() -> anyhow::Result<()> {
+        let artifact_root = unique_root("raiko2-runtime-shared-artifacts");
+        let store: Arc<dyn ProofArtifactStore> = Arc::new(FilesystemProofArtifactStore::new(
+            "shared-environment".to_string(),
+            artifact_root.clone(),
+        )?);
+        let first = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-replica-a"),
+            Arc::clone(&store),
+        )?;
+        let second = RuntimeManager::new_with_artifact_store(
+            unique_root("raiko2-runtime-replica-b"),
+            store,
+        )?;
+        let pipeline = raiko2_pipeline::PipelineKey::ShastaSp1;
+        let route = "sp1/network".parse::<PipelineRoute>().expect("route");
+        let publication = first
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                "proposal_0xabc",
+                b"proof",
+            )
+            .await?;
+        let object = publication.object();
+        first
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: "proposal_0xabc".to_string(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        first
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                "proposal_0xabc",
+                &object.content_hash,
+            )
+            .await?;
+
+        assert!(
+            second
+                .proof_artifact_is_invalidated(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    route,
+                    "proposal_0xabc",
+                    &object.content_hash,
+                )
+                .await?
+        );
+        assert!(second.list_proof_artifacts().await?.is_empty());
+        std::fs::remove_dir_all(artifact_root)?;
         Ok(())
     }
 

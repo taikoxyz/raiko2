@@ -175,6 +175,7 @@ async fn write_e2e_proof_artifact(
         .publish_proof_artifact_bytes(
             network_pair,
             pipeline_key,
+            route.parse().expect("route"),
             proof_ref,
             &serde_json::to_vec_pretty(proof).expect("serialize proof"),
         )
@@ -1073,6 +1074,7 @@ async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
             .get_proof_artifact(
                 &artifact.network_pair,
                 artifact.pipeline_key,
+                artifact.route,
                 &artifact.proof_ref,
             )
             .await
@@ -1137,7 +1139,12 @@ async fn e2e_v4_invalidate_artifacts_range_removes_all_root_refs() {
         assert!(
             state
                 .runtime
-                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, &proof_ref)
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                )
                 .await
                 .expect("get proof artifact")
                 .is_none(),
@@ -1190,7 +1197,12 @@ async fn e2e_v4_invalidate_artifacts_range_removes_aggregate_child_refs() {
         assert!(
             state
                 .runtime
-                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, &proof_ref)
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                )
                 .await
                 .expect("get proof artifact")
                 .is_none(),
@@ -1264,7 +1276,12 @@ async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root
         assert!(
             state
                 .runtime
-                .get_proof_artifact(&metadata.network_pair, record.pipeline_key, proof_ref)
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    proof_ref,
+                )
                 .await
                 .expect("get proof artifact")
                 .is_none(),

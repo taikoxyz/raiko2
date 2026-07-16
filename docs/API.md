@@ -1107,7 +1107,9 @@ All API errors use the Hoodi-style envelope:
 
 - `runtime.environment_id` is required and immutable for a deployment. It scopes request
   fingerprints, public task IDs, Redis queue namespaces, and proof artifacts, so identical
-  requests in different environments cannot share work or artifacts.
+  requests in different environments cannot share work or artifacts. Redis namespaces also
+  include the concrete execution route, preventing `sp1/local` and `sp1/network` workers from
+  consuming each other's queued payloads after a route change.
 - `runtime.artifact_store.backend` selects the single authoritative proof store. Use `gcs` with a
   non-empty `bucket` in production; `filesystem` stores artifacts below
   `<runtime.root>/cache/proofs` for local development and tests. `prefix` optionally prefixes GCS
@@ -1117,8 +1119,14 @@ All API errors use the Hoodi-style envelope:
   identical existing object is idempotent, while a different late object is discarded.
 - Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
   `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
-- If publication fails after proving, the completed proof is retained in the durable queue payload
-  and publication is retried with backoff; the prover is not run again for those retries.
+- Before the first publication attempt, a completed proof is atomically checkpointed into the
+  currently leased queue record as a publication-only payload and into the runtime publication
+  outbox. Publication retries and lease recovery consume those checkpoints without running the
+  prover again. Redis provides the cross-replica checkpoint; the SQLite outbox preserves the proof
+  across a process restart when the in-memory queue backend is used.
+- Invalidation writes a content-bound marker to the authoritative artifact store before deleting
+  the proof object. Every replica checks this shared marker during recovery and reconciliation, so
+  a failed delete cannot make a tombstoned proof reusable from another replica.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.

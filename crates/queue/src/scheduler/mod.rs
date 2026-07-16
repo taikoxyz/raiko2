@@ -324,6 +324,28 @@ where
             .await
     }
 
+    /// Atomically checkpoints a replacement payload while the caller still owns the lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
+    pub async fn checkpoint_payload(
+        &self,
+        lease: &TaskLease<P, Id>,
+        payload: P,
+        execution_policy: TaskExecutionPolicy,
+    ) -> Result<bool, TaskStoreError> {
+        self.store
+            .checkpoint_payload_if_running(
+                &lease.id,
+                &lease.worker,
+                lease.attempt,
+                payload,
+                execution_policy,
+            )
+            .await
+    }
+
     /// # Errors
     ///
     /// Returns `TaskStoreError` if the underlying store fails.
@@ -816,6 +838,32 @@ mod tests {
             Ok(())
         }
 
+        async fn checkpoint_payload_if_running(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+            payload: P,
+            execution_policy: TaskExecutionPolicy,
+        ) -> StoreResult<bool> {
+            let mut guard = self.inner.lock().await;
+            let Some(record) = guard.tasks.get_mut(id) else {
+                return Ok(false);
+            };
+            if !matches!(
+                &record.state,
+                TaskState::Running {
+                    worker: current_worker,
+                    attempt: current_attempt,
+                } if current_worker == worker && *current_attempt == attempt
+            ) {
+                return Ok(false);
+            }
+            record.payload = Some(payload);
+            record.execution_policy = execution_policy;
+            Ok(true)
+        }
+
         async fn schedule(&self, _id: TestTaskId, _not_before_ms: u64) -> StoreResult<()> {
             Ok(())
         }
@@ -947,6 +995,19 @@ mod tests {
 
         async fn put_payload(&self, id: &TestTaskId, payload: P) -> crate::StoreResult<()> {
             self.inner.put_payload(id, payload).await
+        }
+
+        async fn checkpoint_payload_if_running(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+            payload: P,
+            execution_policy: TaskExecutionPolicy,
+        ) -> crate::StoreResult<bool> {
+            self.inner
+                .checkpoint_payload_if_running(id, worker, attempt, payload, execution_policy)
+                .await
         }
 
         async fn renew_lease(
@@ -1569,6 +1630,49 @@ mod tests {
             .ok_or_else(|| TaskStoreError::corrupt_msg("expected requeued lease"))?;
         assert_eq!(lease2.id, id);
         assert_eq!(lease2.attempt, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpointed_payload_survives_lease_expiry() -> StoreResult<()> {
+        let store = MemoryStore::with_lease(Duration::from_millis(1));
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
+            store,
+            SchedulerConfig {
+                lease_duration: Duration::from_millis(1),
+                retry: RetryPolicy::None,
+            },
+        );
+        let id = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "prove",
+                },
+                vec![],
+            )
+            .await?;
+        let lease = sched
+            .next_ready("w1")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
+
+        assert!(
+            sched
+                .checkpoint_payload(&lease, "publish", lease.execution_policy.clone())
+                .await?
+        );
+        sched
+            .maintenance_tick_at(super::now_millis().saturating_add(10_000))
+            .await?;
+
+        let recovered = sched
+            .next_ready("w2")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected checkpointed lease"))?;
+        assert_eq!(recovered.id, id);
+        assert_eq!(recovered.payload, "publish");
         Ok(())
     }
 

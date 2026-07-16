@@ -844,6 +844,7 @@ async fn build_risc0_engine(
                     &config.runtime.environment_id,
                     pair,
                     PipelineKey::ShastaRisc0,
+                    PipelineKey::ShastaRisc0.route(),
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Risc0Output, EngineTaskKey>::connect(
@@ -915,6 +916,11 @@ async fn build_sp1_engine(
                     &config.runtime.environment_id,
                     pair,
                     PipelineKey::ShastaSp1,
+                    if config.prover.route().runner == RunnerKind::Network {
+                        PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
+                    } else {
+                        PipelineKey::ShastaSp1.route()
+                    },
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Sp1Output, EngineTaskKey>::connect(
@@ -984,6 +990,7 @@ async fn build_native_engine(
                     &config.runtime.environment_id,
                     pair,
                     PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, NativeOutput, EngineTaskKey>::connect(
@@ -1062,6 +1069,7 @@ async fn build_boundless_engine(
                     &config.runtime.environment_id,
                     pair,
                     PipelineKey::ShastaRisc0Network,
+                    PipelineKey::ShastaRisc0Network.route(),
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, BoundlessOutput, EngineTaskKey>::connect(
@@ -1137,6 +1145,7 @@ async fn build_remote_sgx_engine(
                     &config.runtime.environment_id,
                     pair,
                     pipeline_key,
+                    pipeline_key.route(),
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Gaiko2Output, EngineTaskKey>::connect(

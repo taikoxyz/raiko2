@@ -188,9 +188,15 @@ pub(crate) fn queue_namespace(
     environment_id: &str,
     pair: &ResolvedNetworkPair,
     key: PipelineKey,
+    route: raiko2_pipeline::PipelineRoute,
 ) -> String {
     let base = base.trim_end_matches('/');
-    format!("{}/{}/{}/{}", base, environment_id, pair.key, key.as_str())
+    let namespace = format!("{}/{}/{}/{}", base, environment_id, pair.key, key.as_str());
+    if route == key.route() {
+        namespace
+    } else {
+        format!("{namespace}/{route}")
+    }
 }
 
 #[cfg(test)]
@@ -283,14 +289,48 @@ mod tests {
     #[test]
     fn queue_namespace_isolates_environments() {
         let pair = resolved_pair("taiko_hoodi", "hoodi");
-        let first = queue_namespace("raiko2:queue", "staging", &pair, PipelineKey::ShastaSp1);
-        let second = queue_namespace("raiko2:queue", "production", &pair, PipelineKey::ShastaSp1);
+        let first = queue_namespace(
+            "raiko2:queue",
+            "staging",
+            &pair,
+            PipelineKey::ShastaSp1,
+            "sp1/local".parse().expect("route"),
+        );
+        let second = queue_namespace(
+            "raiko2:queue",
+            "production",
+            &pair,
+            PipelineKey::ShastaSp1,
+            "sp1/local".parse().expect("route"),
+        );
 
         assert_eq!(
             first,
             "raiko2:queue/staging/taiko_hoodi/hoodi/shasta-sp1-local"
         );
         assert_ne!(first, second);
+    }
+
+    #[cfg(feature = "redis-queue")]
+    #[test]
+    fn queue_namespace_isolates_sp1_execution_routes() {
+        let pair = resolved_pair("taiko_hoodi", "hoodi");
+        let local = queue_namespace(
+            "raiko2:queue",
+            "production",
+            &pair,
+            PipelineKey::ShastaSp1,
+            "sp1/local".parse().expect("local route"),
+        );
+        let network = queue_namespace(
+            "raiko2:queue",
+            "production",
+            &pair,
+            PipelineKey::ShastaSp1,
+            "sp1/network".parse().expect("network route"),
+        );
+
+        assert_ne!(local, network);
     }
 
     #[cfg(feature = "local-provers")]

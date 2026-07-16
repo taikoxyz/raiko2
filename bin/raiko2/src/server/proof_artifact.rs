@@ -15,13 +15,6 @@ pub(crate) async fn load_proof_artifact_material(
     route: PipelineRoute,
     proof_ref: &str,
 ) -> Result<Option<ProofArtifactMaterial>> {
-    if runtime
-        .proof_artifact_is_invalidated(network_pair, pipeline_key, route, proof_ref)
-        .await
-        .context("failed to check proof artifact invalidation state")?
-    {
-        return Ok(None);
-    }
     let object = match runtime
         .read_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref)
         .await
@@ -30,6 +23,19 @@ pub(crate) async fn load_proof_artifact_material(
         Ok(None) => return Ok(None),
         Err(err) => return Err(err).context("failed to read proof artifact"),
     };
+    if runtime
+        .proof_artifact_is_invalidated(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            &object.content_hash,
+        )
+        .await
+        .context("failed to check proof artifact invalidation state")?
+    {
+        return Ok(None);
+    }
 
     let proof: Proof = match serde_json::from_slice(&object.bytes) {
         Ok(proof) => proof,
@@ -60,6 +66,19 @@ pub(crate) async fn load_proof_artifact_material(
         .await
         .context("failed to load reconciled proof artifact registration")?
         .context("reconciled proof artifact registration is missing")?;
+    if runtime
+        .proof_artifact_is_invalidated(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            &object.content_hash,
+        )
+        .await
+        .context("failed to recheck proof artifact invalidation state")?
+    {
+        return Ok(None);
+    }
 
     Ok(Some(ProofArtifactMaterial { record, proof }))
 }

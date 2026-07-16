@@ -221,6 +221,7 @@ async fn invalidate_artifacts_inner(
                 !blocked_artifact_refs.contains(&ProofArtifactIdentity {
                     network_pair: artifact.network_pair.clone(),
                     pipeline_key: artifact.pipeline_key,
+                    route: artifact.route,
                     proof_ref: artifact.proof_ref.clone(),
                 })
             });
@@ -248,6 +249,7 @@ struct CandidateInvalidationTask {
 struct ProofArtifactIdentity {
     network_pair: String,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proof_ref: String,
 }
 
@@ -333,9 +335,14 @@ async fn collect_invalidation_task_candidates(
             data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
             continue;
         }
-        let root_artifact_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
-        let artifact_refs =
-            invalidation_artifact_refs(&metadata, record.pipeline_key, proposal_range);
+        let root_artifact_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
+        let artifact_refs = invalidation_artifact_refs(
+            &metadata,
+            record.pipeline_key,
+            record.route,
+            proposal_range,
+        );
         candidates
             .artifact_refs
             .extend(artifact_refs.iter().cloned());
@@ -386,6 +393,7 @@ fn proof_artifact_identities(
         .map(|artifact| ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
             pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         })
         .collect()
@@ -414,6 +422,7 @@ async fn extend_matched_artifacts_by_refs(
         let identity = ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
             pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         };
         if refs.contains(&identity) && seen_artifacts.insert(identity) {
@@ -427,6 +436,7 @@ async fn extend_matched_artifacts_by_refs(
 fn root_invalidation_artifact_refs(
     metadata: &TaskMetadata,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
 ) -> HashSet<ProofArtifactIdentity> {
     root_proof_artifact_refs(metadata, pipeline_key)
         .map(|root_refs| {
@@ -436,6 +446,7 @@ fn root_invalidation_artifact_refs(
                 .map(|proof_ref| ProofArtifactIdentity {
                     network_pair: metadata.network_pair.clone(),
                     pipeline_key,
+                    route,
                     proof_ref,
                 })
                 .collect()
@@ -446,9 +457,10 @@ fn root_invalidation_artifact_refs(
 fn invalidation_artifact_refs(
     metadata: &TaskMetadata,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proposal_range: Option<(u64, u64)>,
 ) -> HashSet<ProofArtifactIdentity> {
-    let mut refs = root_invalidation_artifact_refs(metadata, pipeline_key);
+    let mut refs = root_invalidation_artifact_refs(metadata, pipeline_key, route);
     for proposal in &metadata.proposals {
         if !proposal_matches_range(proposal.proposal_id, proposal_range) {
             continue;
@@ -459,6 +471,7 @@ fn invalidation_artifact_refs(
                 .map(|proof_ref| ProofArtifactIdentity {
                     network_pair: metadata.network_pair.clone(),
                     pipeline_key,
+                    route,
                     proof_ref,
                 }),
         );
@@ -501,6 +514,7 @@ async fn collect_invalidation_artifacts(
         if seen_artifacts.insert(ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
             pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         }) {
             data.artifacts.matched = data.artifacts.matched.saturating_add(1);
@@ -615,6 +629,7 @@ async fn remove_invalidated_artifacts(
                 artifact.pipeline_key,
                 artifact.route,
                 &artifact.proof_ref,
+                &artifact.content_hash,
             )
             .await
         {
@@ -773,6 +788,7 @@ fn artifact_matches_proposal_scope(
         || matched_task_artifact_refs.contains(&ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
             pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         })
 }
@@ -1612,6 +1628,22 @@ mod tests {
             Ok(None)
         }
 
+        async fn mark_invalidated(
+            &self,
+            _key: &ProofArtifactKey,
+            _content_hash: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn is_invalidated(
+            &self,
+            _key: &ProofArtifactKey,
+            _content_hash: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
         async fn delete(
             &self,
             _key: &ProofArtifactKey,
@@ -1723,8 +1755,10 @@ mod tests {
         record.runner_status = RuntimeTaskRunnerStatus::Completed;
         runtime.upsert_task(&record).await.expect("upsert task");
 
-        let artifact_refs = invalidation_artifact_refs(&metadata, record.pipeline_key, None);
-        let root_artifact_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
+        let artifact_refs =
+            invalidation_artifact_refs(&metadata, record.pipeline_key, record.route, None);
+        let root_artifact_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
         let expected_blocked_refs = artifact_refs
             .iter()
             .chain(root_artifact_refs.iter())
@@ -1792,7 +1826,8 @@ mod tests {
         record.runner_status = RuntimeTaskRunnerStatus::Completed;
         runtime.upsert_task(&record).await.expect("upsert task");
 
-        let root_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
+        let root_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
         let proof_ref = root_refs
             .iter()
             .next()
@@ -1938,6 +1973,74 @@ mod tests {
             .expect("load invalidated proof artifact")
             .is_none(),
             "tombstoned backing object was rediscovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_keeps_sp1_routes_distinct() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-sp1-routes"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let pipeline = PipelineKey::ShastaSp1;
+        let proof_ref = "proposal-shared-ref";
+        for route in [
+            "sp1/local".parse::<PipelineRoute>().expect("local route"),
+            "sp1/network"
+                .parse::<PipelineRoute>()
+                .expect("network route"),
+        ] {
+            let bytes = serde_json::to_vec(&Proof {
+                proof: Some("0xproof".to_string()),
+                ..Proof::default()
+            })
+            .expect("serialize proof");
+            let publication = runtime
+                .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, &bytes)
+                .await
+                .expect("publish proof artifact");
+            let object = publication.object();
+            runtime
+                .upsert_proof_artifact(ProofArtifactRegistration {
+                    network_pair: network_pair.to_string(),
+                    proof_ref: proof_ref.to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_uri: object.proof_uri.clone(),
+                    content_hash: object.content_hash.clone(),
+                    generation: object.generation,
+                })
+                .await
+                .expect("register proof artifact");
+        }
+        let mut data = wire::InvalidateArtifactsData::default();
+        let matched = collect_invalidation_artifacts(
+            &state,
+            &[pipeline],
+            None,
+            &HashSet::new(),
+            None,
+            &mut data,
+        )
+        .await
+        .expect("collect artifacts");
+
+        assert_eq!(matched.len(), 2);
+        assert_eq!(data.artifacts.matched, 2);
+        remove_invalidated_artifacts(&state, matched, &mut data).await;
+        assert_eq!(data.artifacts.removed, 2);
+        assert!(
+            runtime
+                .list_proof_artifacts()
+                .await
+                .expect("list")
+                .is_empty()
         );
     }
 

@@ -32,7 +32,7 @@ use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverPro
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
-    TaskState, TaskStoreError, TaskView, TaskViewState,
+    TaskLease, TaskState, TaskStoreError, TaskView, TaskViewState,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -131,6 +131,7 @@ fn should_notify_queue_task<I>(
 ) -> bool {
     recovered_output
         || !matches!(payload, EngineTask::Proposal { .. })
+        || matches!(execution_result, Ok(EngineOutput::Proof(_)))
         || execution_result
             .as_ref()
             .err()
@@ -143,6 +144,26 @@ fn should_notify_queue_task<I>(
             == Some(task_lease_lost_error().as_str())
 }
 
+fn log_execution_failure<I>(
+    worker: &str,
+    task: &EngineTask,
+    result: &Result<EngineOutput<I>, TaskExecutionError>,
+) {
+    if let Err(error) = result {
+        tracing::warn!(worker, task = ?task, %error, "engine task failed");
+    }
+}
+
+fn proof_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
+    match &id.0 {
+        EngineTaskKey::Proposal { request, .. } => EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: id.clone(),
+        },
+        EngineTaskKey::Aggregate { .. } => task.publication_source().clone(),
+    }
+}
+
 #[async_trait]
 pub trait EngineObserver: Send + Sync {
     async fn on_task_started(&self, _id: &EngineTaskId, _task: &EngineTask, _worker: &str) {}
@@ -153,6 +174,15 @@ pub trait EngineObserver: Send + Sync {
         _task: &EngineTask,
         _progress: &ProverProgress,
     ) {
+    }
+
+    async fn checkpoint_completed_proof(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _proof: &Proof,
+    ) -> Result<(), EngineObserverError> {
+        Ok(())
     }
 
     async fn on_task_succeeded(
@@ -556,6 +586,78 @@ where
         self.inner.scheduler.remove(id).await
     }
 
+    async fn checkpoint_completed_proof(
+        &self,
+        lease: &mut TaskLease<EngineTask, EngineTaskKey>,
+        payload: &EngineTask,
+        terminal_observer_task: &mut EngineTask,
+        execution_result: &mut Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+    ) -> Result<(), TaskStoreError> {
+        let Ok(EngineOutput::Proof(proof)) = execution_result else {
+            return Ok(());
+        };
+        *terminal_observer_task = proof_observer_task(&lease.id, payload);
+        let completed_proof = proof.output.clone();
+        let outbox_error = if let Some(observer) = &self.inner.observer {
+            observer
+                .checkpoint_completed_proof(&lease.id, terminal_observer_task, &completed_proof)
+                .await
+                .err()
+        } else {
+            None
+        };
+        let checkpoint_payload = payload
+            .clone()
+            .with_pending_publication(completed_proof.clone());
+        let checkpoint_policy = TaskExecutionPolicy {
+            retry: publication_retry_policy(),
+            ..lease.execution_policy.clone()
+        };
+        let checkpointed = self
+            .inner
+            .scheduler
+            .checkpoint_payload(lease, checkpoint_payload.clone(), checkpoint_policy.clone())
+            .await?;
+        if checkpointed {
+            lease.payload = checkpoint_payload;
+            lease.execution_policy = checkpoint_policy;
+        } else {
+            *execution_result = Err(task_lease_lost_error().into());
+        }
+        if checkpointed && let Some(error) = outbox_error {
+            *execution_result = Err(TaskExecutionError::ProofPublication {
+                error: error.to_string(),
+                proof: Box::new(completed_proof),
+            });
+        }
+        Ok(())
+    }
+
+    async fn notify_execution_success(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        execution_result: &mut Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+    ) {
+        let Ok(output) = execution_result else {
+            return;
+        };
+        let success = task_success_from_output(output);
+        if let Err(error) =
+            notify_stage_succeeded(self.inner.observer.as_ref(), id, task, &success).await
+        {
+            *execution_result = Err(match success {
+                EngineTaskSuccess::Proof { proof, .. } => TaskExecutionError::ProofPublication {
+                    error: error.to_string(),
+                    proof: Box::new(proof),
+                },
+                EngineTaskSuccess::GuestInput { .. } | EngineTaskSuccess::EncodedInput { .. } => {
+                    error.into()
+                }
+            });
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if the task store cannot lease or complete work.
@@ -594,10 +696,16 @@ where
             }
         });
 
+        let mut terminal_observer_task = payload.clone();
+        if matches!(payload, EngineTask::PublishProof { .. }) {
+            terminal_observer_task = proof_observer_task(&lease.id, &payload);
+        }
         if let Some(observer) = &self.inner.observer
             && !matches!(payload, EngineTask::Proposal { .. })
         {
-            observer.on_task_started(&lease.id, &payload, worker).await;
+            observer
+                .on_task_started(&lease.id, &terminal_observer_task, worker)
+                .await;
         }
 
         let (mut execution_result, recovered_output) =
@@ -610,28 +718,28 @@ where
                 ),
                 Err(error) => (Err(error), false),
             };
-        if let Err(err) = &execution_result {
-            tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
+        log_execution_failure(worker, &payload, &execution_result);
+        if let Err(error) = self
+            .checkpoint_completed_proof(
+                &mut lease,
+                &payload,
+                &mut terminal_observer_task,
+                &mut execution_result,
+            )
+            .await
+        {
+            renew_task.abort();
+            return Err(error);
         }
         let should_notify_queue_task =
             should_notify_queue_task(&payload, &execution_result, recovered_output);
-        if should_notify_queue_task && let Ok(output) = &execution_result {
-            let success = task_success_from_output(output);
-            if let Err(error) =
-                notify_stage_succeeded(self.inner.observer.as_ref(), &lease.id, &payload, &success)
-                    .await
-            {
-                execution_result = Err(match success {
-                    EngineTaskSuccess::Proof { proof, .. } => {
-                        TaskExecutionError::ProofPublication {
-                            error: error.to_string(),
-                            proof: Box::new(proof),
-                        }
-                    }
-                    EngineTaskSuccess::GuestInput { .. }
-                    | EngineTaskSuccess::EncodedInput { .. } => error.into(),
-                });
-            }
+        if should_notify_queue_task {
+            self.notify_execution_success(
+                &lease.id,
+                &terminal_observer_task,
+                &mut execution_result,
+            )
+            .await;
         }
         if let Err(TaskExecutionError::ProofPublication { proof, .. }) = &execution_result {
             lease.payload = payload.clone().with_pending_publication((**proof).clone());
@@ -651,7 +759,7 @@ where
             && let Some(error) = error.as_deref()
         {
             observer
-                .on_task_failed(&completed_id, &payload, error)
+                .on_task_failed(&completed_id, &terminal_observer_task, error)
                 .await;
         }
         Ok(true)
@@ -1065,20 +1173,6 @@ where
                 return Err(error.into());
             }
         };
-        notify_stage_succeeded(
-            self.inner.observer.as_ref(),
-            task_id,
-            &progress_task,
-            &EngineTaskSuccess::Proof {
-                stage: PipelineStage::Prove,
-                proof: proof.clone(),
-            },
-        )
-        .await
-        .map_err(|error| TaskExecutionError::ProofPublication {
-            error: error.to_string(),
-            proof: Box::new(proof.clone()),
-        })?;
         Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
             PipelineStage::Prove,
             proof,

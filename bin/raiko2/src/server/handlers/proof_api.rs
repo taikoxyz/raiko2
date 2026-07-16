@@ -1103,7 +1103,9 @@ async fn handle_existing_batch_task(
         if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
-        if existing.pipeline_key != submission.route.pipeline_key() {
+        if existing.pipeline_key != submission.route.pipeline_key()
+            || existing.route != submission.route.route
+        {
             return replace_existing_batch_task(
                 state,
                 submission,
@@ -4443,6 +4445,66 @@ mod tests {
             .expect("sgxgeth submissions");
         assert_eq!(sgxgeth_submissions.len(), 1);
         assert_eq!(sgxgeth_submissions[0].0.proposal_id, 7);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_sp1_local_record_is_replaced_after_network_route_change() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "stale-sp1-local-to-network",
+        ))?);
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaSp1));
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSp1,
+                recorder.clone() as Arc<dyn EngineHandle>,
+            )],
+        );
+        let requested_route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
+            PipelineKey::ShastaSp1,
+            ProofType::Sp1,
+        );
+        let mut submission = canonical_submission(requested_route, false);
+        submission.requested_proof_type = BatchProofType::Sp1;
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        let metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: false,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local);
+        record.request_fingerprint = Some(request_fingerprint);
+        runtime.upsert_task(&record).await?;
+
+        let response = handle_existing_batch_task(&state, &submission, record, None)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(!response_is_completed(&response));
+        let stored = runtime
+            .get_task(&submission.public_task_id)
+            .await?
+            .expect("replacement runtime task");
+        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSp1);
+        assert_eq!(stored.route, submission.route.route);
+        assert_eq!(recorder.proposals.lock().expect("submissions").len(), 1);
         Ok(())
     }
 

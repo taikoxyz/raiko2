@@ -160,6 +160,14 @@ where
         }
     }
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()>;
+    async fn checkpoint_payload_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        payload: P,
+        execution_policy: TaskExecutionPolicy,
+    ) -> StoreResult<bool>;
     async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()>;
     async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
     async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
@@ -683,6 +691,32 @@ where
         }
 
         Ok(())
+    }
+
+    async fn checkpoint_payload_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        payload: P,
+        execution_policy: TaskExecutionPolicy,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get_mut(id) else {
+            return Ok(false);
+        };
+        if !matches!(
+            &record.state,
+            TaskState::Running {
+                worker: current_worker,
+                attempt: current_attempt,
+            } if current_worker == worker && *current_attempt == attempt
+        ) {
+            return Ok(false);
+        }
+        record.payload = Some(payload);
+        record.execution_policy = execution_policy;
+        Ok(true)
     }
 
     async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool> {

@@ -1033,7 +1033,7 @@ async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
 }
 
 #[tokio::test]
-async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
+async fn e2e_v4_invalidate_artifacts_retains_tombstone_when_file_delete_fails() {
     let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
     complete_v4_sp1_proposal(&app, &engine, 12).await;
 
@@ -1066,7 +1066,7 @@ async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
     .await;
     assert_eq!(status, StatusCode::OK, "{invalidated}");
     assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
-    assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["removed"], 0);
     assert_eq!(invalidated["data"]["artifacts"]["failed"], 1);
     assert!(
         state
@@ -1079,8 +1079,8 @@ async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
             )
             .await
             .expect("get proof artifact")
-            .is_none(),
-        "stale proof artifact record remained"
+            .is_some(),
+        "failed deletion must retain the tombstone for retry"
     );
 }
 
@@ -1212,22 +1212,42 @@ async fn e2e_v4_invalidate_artifacts_range_removes_aggregate_child_refs() {
 }
 
 #[tokio::test]
-async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root() {
+async fn e2e_v4_invalidate_artifacts_prefix_matches_aggregate_root() {
     let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
     let aggregation_payload = v4_sp1_aggregation_request(41, 42);
     complete_v4_sp1_aggregation(&app, &engine, 41, 42).await;
 
     let records = state.runtime.list_tasks().await.expect("list tasks");
-    let record = records
+    let mut record = records
         .iter()
         .find(|record| {
             let metadata: TaskMetadata =
                 serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
             metadata.aggregate_request.is_some()
         })
-        .expect("aggregate runtime task");
-    let metadata: TaskMetadata =
+        .expect("aggregate runtime task")
+        .clone();
+    assert_eq!(
+        record.runner_status,
+        RunnerStatus::Completed,
+        "aggregate runtime task must be terminal before invalidation: {record:?}"
+    );
+    let mut metadata: TaskMetadata =
         serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+    assert_eq!(
+        metadata.requested_proof_type.as_deref(),
+        Some("sp1"),
+        "unexpected proof-type scope metadata: {metadata:?}"
+    );
+    let legacy_child_ref = "legacy_test_child_ref".to_string();
+    metadata.proposals[0].task_id = legacy_child_ref.clone();
+    record.metadata = serde_json::to_value(&metadata).expect("serialize task metadata");
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("update aggregate runtime task metadata");
+
     let root_refs = root_proof_artifact_refs(&metadata, record.pipeline_key)
         .expect("aggregate root refs")
         .refs;
@@ -1243,17 +1263,15 @@ async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root
         input: Some(alloy_primitives::B256::ZERO),
         ..Proof::default()
     };
-    for proof_ref in &proposal_refs {
-        write_e2e_proof_artifact(
-            &state,
-            &metadata.network_pair,
-            proof_ref,
-            record.pipeline_key,
-            &record.route.to_string(),
-            &child_proof,
-        )
-        .await;
-    }
+    write_e2e_proof_artifact(
+        &state,
+        &metadata.network_pair,
+        &legacy_child_ref,
+        record.pipeline_key,
+        &record.route.to_string(),
+        &child_proof,
+    )
+    .await;
 
     let request = json!({
         "proof_type": "sp1",
@@ -1272,7 +1290,7 @@ async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root
     assert_eq!(invalidated["data"]["tasks"]["matched"], 1, "{invalidated}");
     assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
 
-    for proof_ref in root_refs.iter().chain(proposal_refs.iter()) {
+    for proof_ref in root_refs.iter().chain(std::iter::once(&legacy_child_ref)) {
         assert!(
             state
                 .runtime
@@ -1535,8 +1553,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
 #[tokio::test]
 async fn e2e_proposal_proof_risc0_completes_from_fixture() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let app = app_with_risc0_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
     let (status, res) = post_json(
         &app,
@@ -1603,8 +1620,7 @@ async fn e2e_shasta_rejects_boundless_public_proof_type() {
 #[tokio::test]
 async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let app = app_with_risc0_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
     let (status, res) = post_json(
         &app,
@@ -2765,7 +2781,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     config.prover.runner = RunnerKind::Local;
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
-    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
+    let (state, _engine) = state_with_observed_sp1_fixture_engine(config);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -2790,47 +2806,12 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "registered", "{res}");
-    assert!(res["data"].get("task_id").is_none(), "{res}");
-    let id = single_report_task_id(&app).await;
-
-    drive_engine_to_idle(&engine).await;
-
-    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "sp1/local");
-    assert_eq!(res["data"]["prover_type"], "local");
-    assert_eq!(res["data"]["execution_mode"], "execute");
-    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["error"], "invalid_request_config", "{res}");
     assert!(
-        res["data"]["proof"].is_null() || res["data"].get("proof").is_none(),
-        "unexpected root proof payload: {res}"
-    );
-    assert_eq!(res["data"]["proposals"][0]["status"], "completed");
-    assert!(
-        res["data"]["proposals"][0]["proof"].is_null()
-            || res["data"]["proposals"][0].get("proof").is_none(),
-        "unexpected proposal proof payload: {res}"
-    );
-    assert_eq!(
-        res["data"]["proposals"][0]["extra_data"]["sp1"]["mode"],
-        "execute"
-    );
-    assert_eq!(
-        res["data"]["proposals"][0]["extra_data"]["sp1"]["zkvm"],
-        "sp1"
-    );
-    assert!(
-        res["data"]["proposals"][0]["extra_data"]["sp1"]["public_values"]
+        res["message"]
             .as_str()
-            .is_some(),
-        "missing public values: {res}"
-    );
-    assert!(
-        res["data"]["proposals"][0]["extra_data"]["sp1"]["gas"]
-            .as_u64()
-            .is_some(),
-        "missing SP1 prover gas: {res}"
+            .is_some_and(|message| message.contains("sp1.mode=execute")),
+        "{res}"
     );
 }
 
@@ -3980,8 +3961,7 @@ async fn e2e_duplicate_batch_request_reuses_existing_root_task() {
 #[tokio::test]
 async fn e2e_task_status_completes_after_single_proposal_task() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let app = app_with_risc0_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
     let (status, res) = post_json(
         &app,

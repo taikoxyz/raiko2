@@ -2480,15 +2480,15 @@ async fn load_proposal_statuses(
             record.error.as_deref(),
         );
         let mut proof_location = None;
-        let status = if let Some(material) = load_proof_artifact_material(
+        let proof_refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
+        let status = if let Some(material) = load_first_proof_artifact_material(
             runtime_manager,
             &metadata.network_pair,
             record.pipeline_key,
             record.route,
-            &proposal.task_id,
+            &proof_refs,
         )
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+        .await?
         {
             proof_location = Some(artifact_proof_location(&material.record));
             let proof = material.proof;
@@ -2554,16 +2554,15 @@ async fn load_aggregate_status(
         record.error.as_deref(),
     );
     let mut proof_location = None;
-    let status = if let Some(task_id) = metadata.aggregate_task_id.as_deref() {
-        if let Some(material) = load_proof_artifact_material(
+    let status = if let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
+        if let Some(material) = load_first_proof_artifact_material(
             runtime_manager,
             &metadata.network_pair,
             record.pipeline_key,
             record.route,
-            task_id,
+            &refs.refs,
         )
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+        .await?
         {
             proof_location = Some(artifact_proof_location(&material.record));
             let proof = material.proof;
@@ -2574,7 +2573,7 @@ async fn load_aggregate_status(
                 extra_data: proof.extra_data,
             }
         } else {
-            require_published_proof(status, task_id)
+            require_published_proof(status, &refs.refs[0])
         }
     } else {
         status
@@ -2599,6 +2598,27 @@ async fn load_aggregate_status(
         }),
         engine_state_present,
     ))
+}
+
+async fn load_first_proof_artifact_material(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_refs: &[String],
+) -> Result<Option<ProofArtifactMaterial>, ApiError> {
+    for proof_ref in proof_refs {
+        if let Some(material) =
+            load_proof_artifact_material(runtime, network_pair, pipeline_key, route, proof_ref)
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("failed to load proof artifact: {err}"))
+                })?
+        {
+            return Ok(Some(material));
+        }
+    }
+    Ok(None)
 }
 
 fn require_published_proof(status: EngineStatusView, proof_ref: &str) -> EngineStatusView {

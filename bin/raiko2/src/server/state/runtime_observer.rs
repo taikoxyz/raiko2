@@ -7,6 +7,7 @@ use raiko2_engine::{
 };
 use raiko2_pipeline::PipelineRoute;
 use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
+use raiko2_queue::encode_task_id;
 use raiko2_runtime::{
     ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
     RuntimeManager, RuntimeTaskRecord,
@@ -137,6 +138,25 @@ impl RuntimeObserver {
         }
     }
 
+    async fn find_root_records(&self, id: &EngineTaskId) -> Result<Vec<RuntimeTaskRecord>> {
+        let canonical_ref = Self::root_task_ref(id);
+        let legacy_ref = encode_task_id(id).context("failed to encode legacy task ref")?;
+        let mut records = self.runtime.find_tasks_by_task_ref(&canonical_ref).await?;
+        if legacy_ref != canonical_ref {
+            let legacy_records = self.runtime.find_tasks_by_task_ref(&legacy_ref).await?;
+            let mut seen = records
+                .iter()
+                .map(|record| record.task_id.clone())
+                .collect::<HashSet<_>>();
+            records.extend(
+                legacy_records
+                    .into_iter()
+                    .filter(|record| seen.insert(record.task_id.clone())),
+            );
+        }
+        Ok(records)
+    }
+
     fn stage_name(task: &EngineTask) -> &'static str {
         match task.publication_source() {
             EngineTask::Proposal { .. } => "proposal",
@@ -176,7 +196,7 @@ impl RuntimeObserver {
     {
         let _guard = self.root_updates.lock().await;
         let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         if records.is_empty() {
             anyhow::bail!("runtime task not registered for task ref {root_ref}");
         }
@@ -192,8 +212,7 @@ impl RuntimeObserver {
     }
 
     async fn load_root_record(&self, id: &EngineTaskId) -> Result<Option<RuntimeTaskRecord>> {
-        let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         Ok(self
             .matching_active_root_records(id, records)?
             .into_iter()
@@ -241,8 +260,7 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> Result<Option<RuntimeTaskRecord>> {
-        let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         let mut resumable_failed = None;
 
         for record in records {
@@ -458,7 +476,7 @@ impl RuntimeObserver {
         proof: &raiko2_primitives::Proof,
     ) -> Result<Option<PublishedProofCommit>> {
         let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         let records = self.matching_active_root_records(id, records)?;
         anyhow::ensure!(
             proof.proof.is_some(),

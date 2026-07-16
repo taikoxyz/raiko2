@@ -15,7 +15,7 @@ use raiko2_runtime::{
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::{
@@ -31,9 +31,11 @@ pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
     route: PipelineRoute,
-    started_stage_tasks: Arc<Mutex<HashSet<String>>>,
     root_updates: Arc<tokio::sync::Mutex<()>>,
 }
+
+static STARTED_STAGE_TASKS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TerminalRootPolicy {
@@ -123,7 +125,6 @@ impl RuntimeObserver {
             runtime,
             network_pair,
             route,
-            started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
             root_updates: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -405,12 +406,15 @@ impl RuntimeObserver {
     }
 
     fn mark_stage_started_for_metrics(&self, id: &EngineTaskId, task: &EngineTask) -> bool {
-        let task_id = Self::timing_key_for_task(id, task);
-        let mut started = self
-            .started_stage_tasks
+        let task_id = self.metric_tracking_key(&Self::timing_key_for_task(id, task));
+        let mut started = STARTED_STAGE_TASKS
             .lock()
             .expect("stage task telemetry mutex poisoned");
         started.insert(task_id)
+    }
+
+    fn metric_tracking_key(&self, task_id: &str) -> String {
+        format!("{}|{}|{task_id}", self.network_pair, self.route)
     }
 
     fn stage_duration_secs(
@@ -433,11 +437,10 @@ impl RuntimeObserver {
         failure_error: Option<&str>,
     ) {
         let should_decrement = {
-            let mut started = self
-                .started_stage_tasks
+            let mut started = STARTED_STAGE_TASKS
                 .lock()
                 .expect("stage task telemetry mutex poisoned");
-            started.remove(task_id)
+            started.remove(&self.metric_tracking_key(task_id))
         };
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {

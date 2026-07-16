@@ -29,8 +29,9 @@ use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     Sp1FixtureEngine, app_with_engine, app_with_observed_native_fixture_engine,
     app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
-    app_with_risc0_fixture_engine, base_config, native_fixture_engine_for_pipeline,
-    risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc,
+    app_with_risc0_fixture_engine, base_config, engine_observer,
+    native_fixture_engine_for_pipeline, risc0_fixture_engine, risc0_fixture_engine_with_observer,
+    sp1_fixture_engine, spawn_chain_id_rpc, state_with_observed_risc0_fixture_engine,
     state_with_observed_sp1_fixture_engine, unique_runtime_root,
 };
 use super::state::{AppState, StaticPipelineFactory};
@@ -1033,7 +1034,7 @@ async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
 }
 
 #[tokio::test]
-async fn e2e_v4_invalidate_artifacts_retains_tombstone_when_file_delete_fails() {
+async fn e2e_v4_invalidate_artifacts_cleans_record_when_file_delete_fails() {
     let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
     complete_v4_sp1_proposal(&app, &engine, 12).await;
 
@@ -1079,8 +1080,8 @@ async fn e2e_v4_invalidate_artifacts_retains_tombstone_when_file_delete_fails() 
             )
             .await
             .expect("get proof artifact")
-            .is_some(),
-        "failed deletion must retain the tombstone for retry"
+            .is_none(),
+        "stale proof artifact record remained"
     );
 }
 
@@ -1938,13 +1939,7 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
 #[tokio::test]
 async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
-        engine,
-    );
+    let (state, _engine) = state_with_observed_risc0_fixture_engine(config);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
     let payload = json!({
         "proposals": [{
@@ -1981,7 +1976,13 @@ async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart
         .await
         .expect("upsert task");
 
-    let restarted_engine = risc0_fixture_engine(json!({}));
+    let restarted_engine = risc0_fixture_engine_with_observer(
+        json!({}),
+        Some(engine_observer(
+            Arc::clone(&state.runtime),
+            PipelineKey::ShastaRisc0.route(),
+        )),
+    );
     let mut factory = StaticPipelineFactory::default();
     factory.insert(
         "taiko_dev/ethereum".to_string(),
@@ -2041,13 +2042,7 @@ async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
 #[tokio::test]
 async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_children() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
-        engine.clone(),
-    );
+    let (state, engine) = state_with_observed_risc0_fixture_engine(config);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
     let request_proposals = vec![json!({
         "proposal_id": 3,
@@ -2494,7 +2489,7 @@ async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "sp1/local");
     assert_eq!(res["data"]["prover_type"], "local");
-    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["status"], "completed", "{res}");
 }
 
 #[tokio::test]
@@ -3339,7 +3334,7 @@ async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "risc0/network");
     assert_eq!(res["data"]["prover_type"], "network");
-    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["status"], "completed", "{res}");
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
     assert_eq!(res["data"]["proof"], "0xfixture-risc0-aggregation");
 }

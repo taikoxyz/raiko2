@@ -532,7 +532,10 @@ const fn memory_scheduler_config() -> SchedulerConfig {
     }
 }
 
-fn engine_observer(runtime: Arc<RuntimeManager>, route: PipelineRoute) -> Arc<dyn EngineObserver> {
+pub(crate) fn engine_observer(
+    runtime: Arc<RuntimeManager>,
+    route: PipelineRoute,
+) -> Arc<dyn EngineObserver> {
     Arc::new(RuntimeObserver::new(
         runtime,
         "taiko_dev/ethereum".to_string(),
@@ -596,7 +599,7 @@ pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0Fi
 }
 
 #[cfg(test)]
-fn risc0_fixture_engine_with_observer(
+pub(crate) fn risc0_fixture_engine_with_observer(
     context_config: serde_json::Value,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
@@ -736,6 +739,14 @@ pub(crate) fn app_with_risc0_fixture_engine(config: Config, engine: Risc0Fixture
 pub(crate) fn app_with_observed_risc0_fixture_engine(
     config: Config,
 ) -> (Router, Risc0FixtureEngine) {
+    let (state, engine) = state_with_observed_risc0_fixture_engine(config);
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
+}
+
+#[cfg(test)]
+pub(crate) fn state_with_observed_risc0_fixture_engine(
+    config: Config,
+) -> (AppState, Risc0FixtureEngine) {
     let runtime = Arc::new(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-runtime"))
             .expect("runtime manager"),
@@ -751,7 +762,7 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router_with_legacy_v3_for_tests(state), engine)
+    (state, engine)
 }
 
 #[cfg(test)]

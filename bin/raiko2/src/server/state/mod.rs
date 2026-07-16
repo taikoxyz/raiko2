@@ -209,14 +209,24 @@ impl AppState {
 
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-        let state = Self::from_parts(config, pipelines, runtime);
+        Self::from_parts(config, pipelines, runtime)
+            .finish_initialization()
+            .await
+    }
+
+    async fn finish_initialization(self) -> Result<Self> {
+        if self.config.queue.backend == QueueBackend::Redis {
+            crate::server::handlers::migrate_legacy_queue_namespaces_on_startup(&self)
+                .await
+                .map_err(|err| anyhow::anyhow!(err.message))?;
+        }
         spawn_runtime_cleanup_loop(
-            Arc::clone(&state.config),
-            Arc::clone(&state.runtime),
-            Arc::clone(&state.pipelines),
+            Arc::clone(&self.config),
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.pipelines),
         );
 
-        Ok(state)
+        Ok(self)
     }
 
     pub(crate) fn from_parts(

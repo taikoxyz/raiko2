@@ -420,6 +420,36 @@ impl RuntimeManager {
         .map(|updated| updated > 0)
     }
 
+    /// Atomically updates one integer inside durable task metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON path is invalid or the task metadata cannot be stored.
+    pub async fn update_task_metadata_integer(
+        &self,
+        task_id: &str,
+        json_path: &str,
+        value: i64,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let task_id = task_id.to_string();
+        let json_path = json_path.to_string();
+        let updated_at = now_ts();
+        conn.call(move |conn| {
+            Ok(conn.execute(
+                r"
+                UPDATE runtime_tasks
+                SET metadata_json = json_set(metadata_json, ?2, ?3), updated_at = ?4
+                WHERE task_id = ?1
+                ",
+                params![task_id, json_path, value, updated_at],
+            )?)
+        })
+        .await
+        .context("failed to update runtime task metadata integer")
+        .map(|updated| updated > 0)
+    }
+
     /// # Errors
     ///
     /// Returns an error if the task record cannot be loaded.
@@ -3294,6 +3324,54 @@ mod tests {
             .await?
             .expect("task present");
         assert_eq!(record.task_id, "task-public");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metadata_integer_update_preserves_concurrent_fields() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-metadata-integer");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task-metadata-integer".to_string(),
+                pipeline_key: None,
+                route: "risc0/network"
+                    .parse::<PipelineRoute>()
+                    .expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(7),
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({
+                    "runtime": {
+                        "queue_namespace_version": 0,
+                        "last_event": "submission_registered"
+                    }
+                }),
+                request_fingerprint: None,
+            })
+            .await?;
+
+        assert!(
+            runtime
+                .update_task_metadata_integer(
+                    "task-metadata-integer",
+                    "$.runtime.queue_namespace_version",
+                    1,
+                )
+                .await?
+        );
+        let metadata = runtime
+            .get_task("task-metadata-integer")
+            .await?
+            .expect("runtime task")
+            .metadata;
+        assert_eq!(metadata["runtime"]["queue_namespace_version"], 1);
+        assert_eq!(metadata["runtime"]["last_event"], "submission_registered");
 
         std::fs::remove_dir_all(root)?;
         Ok(())

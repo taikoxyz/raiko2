@@ -15,6 +15,29 @@ pub(crate) async fn load_proof_artifact_material(
     route: PipelineRoute,
     proof_ref: &str,
 ) -> Result<Option<ProofArtifactMaterial>> {
+    load_proof_artifact_material_inner(runtime, network_pair, pipeline_key, route, proof_ref, true)
+        .await
+}
+
+pub(crate) async fn load_aggregate_input_artifact_material(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: &str,
+) -> Result<Option<ProofArtifactMaterial>> {
+    load_proof_artifact_material_inner(runtime, network_pair, pipeline_key, route, proof_ref, false)
+        .await
+}
+
+async fn load_proof_artifact_material_inner(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: &str,
+    require_proof_payload: bool,
+) -> Result<Option<ProofArtifactMaterial>> {
     let object = match runtime
         .read_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref)
         .await
@@ -45,7 +68,7 @@ pub(crate) async fn load_proof_artifact_material(
         }
     };
 
-    if proof.proof.is_none() {
+    if require_proof_payload && proof.proof.is_none() {
         anyhow::bail!("proof artifact {} has no proof payload", object.proof_uri);
     }
 

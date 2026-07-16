@@ -8,7 +8,7 @@ use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
 };
-use raiko2_queue::decode_task_id;
+use raiko2_queue::{TaskId, decode_task_id, encode_task_id};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -377,8 +377,15 @@ pub(crate) fn proposal_proof_artifact_refs(
     pipeline_key: PipelineKey,
     proposal: &ProposalTask,
 ) -> Vec<String> {
-    let mut refs = proposal
-        .request
+    let request = proposal.request.clone().or_else(|| {
+        proposal
+            .engine_task_id(pipeline_key)
+            .and_then(|task_id| match task_id.0 {
+                EngineTaskKey::Proposal { request, .. } => Some(request),
+                EngineTaskKey::Aggregate { .. } => None,
+            })
+    });
+    let mut refs = request
         .as_ref()
         .map(|request| vec![proposal_task_ref(pipeline_key, request)])
         .unwrap_or_default();
@@ -386,6 +393,28 @@ pub(crate) fn proposal_proof_artifact_refs(
         refs.push(proposal.task_id.clone());
     }
     refs
+}
+
+pub(crate) fn legacy_proposal_task_refs(
+    pipeline_key: PipelineKey,
+    request: &ProposalTaskRequest,
+) -> Vec<String> {
+    [
+        ProposalStage::Preflight,
+        ProposalStage::Validation,
+        ProposalStage::Encode,
+        ProposalStage::Prove,
+    ]
+    .into_iter()
+    .map(|stage| {
+        encode_task_id(&TaskId::new(LegacyEngineTaskKey::Proposal {
+            pipeline: pipeline_key,
+            request: request.clone(),
+            stage,
+        }))
+        .expect("legacy proposal task reference serialization should not fail")
+    })
+    .collect()
 }
 
 pub(crate) fn root_proof_artifact_refs(
@@ -478,7 +507,7 @@ fn decode_legacy_proposal_task_id(raw: &str) -> Option<EngineTaskId> {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[allow(dead_code)]
 enum LegacyEngineTaskKey {
     Proposal {

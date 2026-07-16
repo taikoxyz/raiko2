@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::{
-    TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
+    TaskMetadata, TaskRuntimeMetadata, legacy_proposal_task_refs, proposal_task_ref,
+    stage_task_ref_for_stage,
 };
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
@@ -142,12 +143,19 @@ impl RuntimeObserver {
         let canonical_ref = Self::root_task_ref(id);
         let legacy_ref = encode_task_id(id).context("failed to encode legacy task ref")?;
         let mut records = self.runtime.find_tasks_by_task_ref(&canonical_ref).await?;
-        if legacy_ref != canonical_ref {
+        let mut seen = records
+            .iter()
+            .map(|record| record.task_id.clone())
+            .collect::<HashSet<_>>();
+        let mut legacy_refs = vec![legacy_ref];
+        if let EngineTaskKey::Proposal { pipeline, request } = &id.0 {
+            legacy_refs.extend(legacy_proposal_task_refs(*pipeline, request));
+        }
+        legacy_refs.retain(|proof_ref| proof_ref != &canonical_ref);
+        legacy_refs.sort();
+        legacy_refs.dedup();
+        for legacy_ref in legacy_refs {
             let legacy_records = self.runtime.find_tasks_by_task_ref(&legacy_ref).await?;
-            let mut seen = records
-                .iter()
-                .map(|record| record.task_id.clone())
-                .collect::<HashSet<_>>();
             records.extend(
                 legacy_records
                     .into_iter()
@@ -1022,7 +1030,7 @@ impl EngineObserver for RuntimeObserver {
         &self,
         artifact: &ProofArtifactRef,
     ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
-        let material = crate::server::proof_artifact::load_proof_artifact_material(
+        let material = crate::server::proof_artifact::load_aggregate_input_artifact_material(
             &self.runtime,
             &artifact.network_pair,
             artifact.pipeline_key,
@@ -2558,6 +2566,74 @@ mod tests {
             Some("started:worker-a")
         );
         assert_eq!(other_metadata.runtime.last_event, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_finds_stage_bearing_legacy_proposal_record() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-legacy-stage-ref",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let legacy_ref = legacy_proposal_task_refs(pipeline, &request)
+            .pop()
+            .expect("prove stage ref");
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: vec![ProposalTask {
+                proposal_id: request.proposal_id,
+                checkpoint: None,
+                l1_inclusion_block_number: request.l1_inclusion_block_number,
+                l2_block_numbers: vec![request.proposal_id],
+                last_anchor_block_number: request.last_anchor_block_number,
+                task_id: legacy_ref.clone(),
+                request: None,
+            }],
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "legacy-stage-root".to_string(),
+                pipeline_key: Some(pipeline),
+                route: pipeline.route(),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(request.proposal_id),
+                proof_ids: vec![legacy_ref],
+                metadata: serde_json::to_value(&metadata)?,
+                request_fingerprint: None,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let records = observer.find_root_records(&task_id).await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].task_id, "legacy-stage-root");
+        assert_eq!(
+            crate::server::task_metadata::proposal_proof_artifact_refs(
+                pipeline,
+                &metadata.proposals[0],
+            )[0],
+            proposal_task_ref(pipeline, &request)
+        );
         Ok(())
     }
 

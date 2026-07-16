@@ -5,4 +5,4 @@ mod proof_route;
 #[path = "proof_types.rs"]
 mod proof_types;
 
-pub(crate) use proof_api::{v3, v4};
+pub(crate) use proof_api::{migrate_legacy_queue_namespaces_on_startup, v3, v4};

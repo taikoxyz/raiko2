@@ -650,7 +650,7 @@ fn safe_component(raw: &str) -> String {
                 component.push(char::from(byte));
             }
             _ => {
-                write!(&mut component, "%{byte:02x}").expect("writing to String should not fail");
+                write!(&mut component, "~{byte:02x}").expect("writing to String should not fail");
             }
         }
     }
@@ -661,6 +661,7 @@ fn safe_component(raw: &str) -> String {
 mod tests {
     use super::{
         FilesystemProofArtifactStore, ProofArtifactKey, ProofArtifactPutResult, ProofArtifactStore,
+        safe_component,
     };
     use raiko2_pipeline::PipelineKey;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -682,6 +683,14 @@ mod tests {
             route: PipelineKey::ShastaSp1.route(),
             proof_ref: "proposal_0xabc".to_string(),
         }
+    }
+
+    #[test]
+    fn gcs_object_components_do_not_contain_percent_escapes() {
+        let component = safe_component("risc0/network");
+
+        assert_eq!(component, "risc0~2fnetwork");
+        assert!(!component.contains('%'));
     }
 
     #[tokio::test]

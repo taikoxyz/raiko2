@@ -153,6 +153,7 @@ struct MemoryStoreInner {
     contents: HashMap<(ProofArtifactKey, String), Vec<u8>>,
     invalidations: HashSet<(ProofArtifactKey, Option<i64>, String)>,
     runtime_state: Option<RuntimeStateObject>,
+    namespace_owner: Option<NamespaceOwnerLease>,
 }
 
 #[derive(Clone, Debug)]
@@ -382,6 +383,84 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
         });
         Ok(Some(generation))
     }
+
+    async fn claim_namespace_owner(
+        &self,
+        owner_id: &str,
+        now_secs: u64,
+        lease_secs: u64,
+    ) -> Result<Option<NamespaceOwnerLease>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let epoch = if let Some(current) = inner.namespace_owner.as_ref() {
+            anyhow::ensure!(
+                current.owner_id == owner_id || current.expires_at_secs <= now_secs,
+                "runtime namespace is owned by {} until {}",
+                current.owner_id,
+                current.expires_at_secs
+            );
+            if current.owner_id == owner_id {
+                current.epoch
+            } else {
+                current.epoch.saturating_add(1)
+            }
+        } else {
+            1
+        };
+        let lease = NamespaceOwnerLease {
+            owner_id: owner_id.to_string(),
+            epoch,
+            expires_at_secs: now_secs.saturating_add(lease_secs),
+            generation: Some(Self::next_generation(&mut inner)),
+        };
+        inner.namespace_owner = Some(lease.clone());
+        Ok(Some(lease))
+    }
+
+    async fn renew_namespace_owner(
+        &self,
+        lease: &NamespaceOwnerLease,
+        now_secs: u64,
+        lease_secs: u64,
+    ) -> Result<Option<NamespaceOwnerLease>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let Some(current) = inner.namespace_owner.as_ref() else {
+            return Ok(None);
+        };
+        if current.owner_id != lease.owner_id || current.epoch != lease.epoch {
+            return Ok(None);
+        }
+        let renewed = NamespaceOwnerLease {
+            owner_id: lease.owner_id.clone(),
+            epoch: lease.epoch,
+            expires_at_secs: now_secs.saturating_add(lease_secs),
+            generation: Some(Self::next_generation(&mut inner)),
+        };
+        inner.namespace_owner = Some(renewed.clone());
+        Ok(Some(renewed))
+    }
+
+    async fn verify_namespace_owner(
+        &self,
+        lease: &NamespaceOwnerLease,
+        now_secs: u64,
+    ) -> Result<bool> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        Ok(inner.namespace_owner.as_ref().is_some_and(|current| {
+            current.owner_id == lease.owner_id
+                && current.epoch == lease.epoch
+                && current.generation == lease.generation
+                && current.expires_at_secs > now_secs
+        }))
+    }
 }
 
 pub fn validate_scope_component(name: &str, value: &str) -> Result<()> {
@@ -414,7 +493,9 @@ pub fn encode_component(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
             encoded.push(char::from(byte));
         } else {
-            write!(&mut encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            // GCS client URLs encode '/' but intentionally leave '%' untouched. Using percent
+            // escapes here would therefore make a literal `%2F` object name read as a slash.
+            write!(&mut encoded, "~{byte:02X}").expect("writing to String cannot fail");
         }
     }
     encoded
@@ -423,6 +504,7 @@ pub fn encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
     use raiko2_pipeline::PipelineKey;
 
     fn key() -> ProofArtifactKey {
@@ -433,6 +515,17 @@ mod tests {
             route: pipeline_key.route(),
             proof_ref: "proposal-1".to_string(),
         }
+    }
+
+    #[test]
+    fn component_encoding_is_gcs_url_safe_and_unambiguous() {
+        assert_eq!(encode_component("risc0/network"), "risc0~2Fnetwork");
+        assert_eq!(
+            encode_component("taiko_dev/taiko_dev_l1"),
+            "taiko_dev~2Ftaiko_dev_l1"
+        );
+        assert_eq!(encode_component("already~escaped"), "already~7Eescaped");
+        assert!(!encode_component("risc0/network").contains('%'));
     }
 
     #[tokio::test]
@@ -534,6 +627,32 @@ mod tests {
         let repaired = store.put_if_absent(&key, b"proof-a").await?;
         assert!(matches!(repaired, ProofArtifactPutResult::AlreadyExists(_)));
         assert_eq!(store.get(&key).await?, Some(first));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_namespace_owner_lease_supports_expiry_and_takeover() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-owner".into())?;
+        let first = store
+            .claim_namespace_owner("owner-a", 100, 10)
+            .await?
+            .context("first owner must receive a lease")?;
+
+        assert!(store.verify_namespace_owner(&first, 109).await?);
+        assert!(
+            store
+                .claim_namespace_owner("owner-b", 109, 10)
+                .await
+                .is_err()
+        );
+
+        let second = store
+            .claim_namespace_owner("owner-b", 110, 10)
+            .await?
+            .context("expired owner must be replaceable")?;
+        assert_eq!(second.epoch, first.epoch + 1);
+        assert!(!store.verify_namespace_owner(&first, 110).await?);
+        assert!(store.verify_namespace_owner(&second, 110).await?);
         Ok(())
     }
 }

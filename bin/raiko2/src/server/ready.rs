@@ -94,12 +94,20 @@ pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
         Err(err) => ReadyCheck::err(&err),
     };
 
+    readiness_response(reth, runtime, queue, prover)
+}
+
+const fn readiness_response(
+    reth: ReadyCheck,
+    runtime: ReadyCheck,
+    queue: ReadyCheck,
+    prover: ReadyCheck,
+) -> ReadyResponse {
     let status = if reth.ok && runtime.ok && queue.ok && prover.ok {
         "ok"
     } else {
         "error"
     };
-
     ReadyResponse {
         status,
         reth,
@@ -286,8 +294,8 @@ fn sp1_effective_pair_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        Sp1RemoteVerifyConfig, check_prover, requires_sp1_capability_check,
-        sp1_effective_pair_config,
+        ReadyCheck, Sp1RemoteVerifyConfig, check_prover, readiness_response,
+        requires_sp1_capability_check, sp1_effective_pair_config,
     };
     use crate::config::{Config, GuestSystem, RunnerKind};
 
@@ -350,5 +358,28 @@ mod tests {
 
         assert!(!requires_sp1_capability_check(&config));
         assert!(check_prover(&config).is_ok());
+    }
+
+    #[test]
+    fn readiness_rejects_unavailable_runtime_ownership_or_store() {
+        for error in [
+            anyhow::anyhow!("runtime namespace ownership is unavailable"),
+            anyhow::anyhow!("authoritative runtime store is unavailable")
+                .context("verify runtime readiness"),
+        ] {
+            let response = readiness_response(
+                ReadyCheck::ok(),
+                ReadyCheck::err(&error),
+                ReadyCheck::ok(),
+                ReadyCheck::ok(),
+            );
+
+            assert_eq!(response.status, "error");
+            assert!(!response.runtime.ok);
+            assert!(response.runtime.error.is_some());
+            assert!(response.reth.ok);
+            assert!(response.queue.ok);
+            assert!(response.prover.ok);
+        }
     }
 }

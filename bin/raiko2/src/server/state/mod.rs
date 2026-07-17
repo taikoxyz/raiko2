@@ -429,8 +429,7 @@ fn register_pair_pipelines(
                     registration.pair.key.clone(),
                     PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network),
                 )),
-            )
-            .await?;
+            )?;
             sp1_engine.start_workers_with_maintenance_interval(
                 registration.workers,
                 registration.maintenance_interval,
@@ -442,7 +441,7 @@ fn register_pair_pipelines(
             );
         }
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(not(feature = "host"), not(feature = "local-provers")))]

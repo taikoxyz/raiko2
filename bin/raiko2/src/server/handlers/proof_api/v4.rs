@@ -18,10 +18,10 @@ use super::{
     ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, TaskMetadata,
     authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
-    clear_task_publication_outboxes, collect_prover_status, handle_created_batch_task,
-    handle_existing_batch_task, is_terminal_runtime_status, load_task_data, parse_task_metadata,
-    proposal_proof_artifact_refs, register_batch_task, remove_task_children_if_unreferenced,
-    replace_existing_batch_task, resolve_engine, root_proof_artifact_refs,
+    collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
+    is_terminal_runtime_status, load_task_data, parse_task_metadata, proposal_proof_artifact_refs,
+    register_batch_task, remove_task_children_if_unreferenced, replace_existing_batch_task,
+    resolve_engine, root_proof_artifact_refs,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -199,12 +199,16 @@ async fn invalidate_artifacts_inner(
     )
     .await?;
     let matched_artifact_refs = proof_artifact_identities(&matched_artifacts);
-    let (matched_tasks, protected_artifact_refs) = select_invalidation_tasks(
+    let (mut matched_tasks, protected_artifact_refs) = select_invalidation_tasks(
         candidate_tasks,
         req.proof_prefix.as_deref(),
         &matched_artifact_refs,
         &mut data,
     );
+    for task in &mut matched_tasks {
+        task.outbox_refs_to_invalidate
+            .retain(|artifact_ref| !protected_artifact_refs.contains(artifact_ref));
+    }
     let root_artifact_refs = matched_tasks
         .iter()
         .flat_map(|task| task.root_artifact_refs.iter().cloned())
@@ -251,6 +255,7 @@ struct CandidateInvalidationTask {
     artifact_refs: HashSet<ProofArtifactIdentity>,
     root_artifact_refs: HashSet<ProofArtifactIdentity>,
     root_proof_matches_prefix: bool,
+    outbox_refs_to_invalidate: HashSet<ProofArtifactIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -375,6 +380,7 @@ async fn collect_invalidation_task_candidates(
             artifact_refs,
             root_artifact_refs,
             root_proof_matches_prefix,
+            outbox_refs_to_invalidate: HashSet::new(),
         });
     }
     Ok(candidates)
@@ -391,7 +397,7 @@ fn select_invalidation_tasks(
 ) {
     let mut matched = Vec::new();
     let mut protected_artifact_refs = candidates.protected_artifact_refs;
-    for task in candidates.records {
+    for mut task in candidates.records {
         let task_matches = if proof_prefix.is_none() {
             true
         } else {
@@ -402,6 +408,14 @@ fn select_invalidation_tasks(
                     .any(|artifact_ref| matched_artifact_refs.contains(artifact_ref))
         };
         if task_matches {
+            task.outbox_refs_to_invalidate = if proof_prefix.is_none() {
+                task.artifact_refs.clone()
+            } else {
+                task.artifact_refs
+                    .intersection(matched_artifact_refs)
+                    .cloned()
+                    .collect()
+            };
             data.tasks.matched = data.tasks.matched.saturating_add(1);
             matched.push(task);
         } else {
@@ -545,6 +559,7 @@ async fn collect_invalidation_artifacts(
     Ok(matched_artifacts)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn remove_invalidated_tasks(
     state: &AppState,
     matched_tasks: Vec<CandidateInvalidationTask>,
@@ -557,6 +572,7 @@ async fn remove_invalidated_tasks(
             metadata,
             artifact_refs,
             root_artifact_refs,
+            outbox_refs_to_invalidate,
             ..
         } = task;
         let log_context = invalidation_task_log_context(&metadata);
@@ -613,7 +629,8 @@ async fn remove_invalidated_tasks(
         }
 
         if let Err(err) =
-            clear_task_publication_outboxes(state.runtime.as_ref(), &record, &metadata, true).await
+            clear_matched_publication_outboxes(state.runtime.as_ref(), &outbox_refs_to_invalidate)
+                .await
         {
             data.tasks.failed = data.tasks.failed.saturating_add(1);
             tracing::warn!(
@@ -649,6 +666,29 @@ async fn remove_invalidated_tasks(
         }
     }
     blocked_artifact_refs
+}
+
+async fn clear_matched_publication_outboxes(
+    runtime: &RuntimeManager,
+    artifact_refs: &HashSet<ProofArtifactIdentity>,
+) -> Result<(), ApiError> {
+    for artifact_ref in artifact_refs {
+        runtime
+            .invalidate_pending_proof_publication(
+                &artifact_ref.network_pair,
+                artifact_ref.pipeline_key,
+                artifact_ref.route,
+                &artifact_ref.proof_ref,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to clear pending proof publication {}: {err}",
+                    artifact_ref.proof_ref
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 async fn remove_invalidated_artifacts(
@@ -803,6 +843,7 @@ async fn remove_late_terminal_tasks_for_artifact(
             artifact_refs,
             root_artifact_refs,
             root_proof_matches_prefix: true,
+            outbox_refs_to_invalidate: HashSet::from([artifact.clone()]),
         });
     }
     remove_invalidated_tasks(state, matched_tasks, data).await
@@ -1921,6 +1962,7 @@ mod tests {
             .chain(root_artifact_refs.iter())
             .cloned()
             .collect::<HashSet<_>>();
+        let outbox_refs_to_invalidate = artifact_refs.clone();
         let mut data = wire::InvalidateArtifactsData::default();
         let blocked_refs = remove_invalidated_tasks(
             &state,
@@ -1930,6 +1972,7 @@ mod tests {
                 artifact_refs,
                 root_artifact_refs,
                 root_proof_matches_prefix: false,
+                outbox_refs_to_invalidate,
             }],
             &mut data,
         )

@@ -104,8 +104,9 @@ jobs:
         with:
           shared-key: ci-rust
 
-      # Keep the main clippy lane on fast foundational crates plus preflight. The heavier
-      # prover/engine/server stack is covered by the manually dispatched rust-heavy workflow.
+      # Keep clippy on fast foundational crates plus preflight. The default
+      # test lanes below exercise backend-neutral engine core and the fixture
+      # server; full prover-stack checks remain in the manual heavy workflow.
       - name: clippy
         run: >
           cargo clippy
@@ -231,6 +232,12 @@ jobs:
           -p raiko2-queue
           -p raiko2-runtime
 
+      # The engine state-machine tests only need the backend-neutral core.
+      # Disabling default features avoids compiling the RISC0, SP1, and
+      # Boundless prover stacks in the PR gate.
+      - name: test engine core
+        run: cargo test -p raiko2-engine --no-default-features
+
   rust-test-xtask:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
@@ -276,8 +283,8 @@ jobs:
       - name: test fixture server feature
         run: cargo test -p raiko2 --bin raiko2 --features fixture-server
 
-  # Keep the prover/engine/server stack out of the default PR gate for now; those heavier lanes
-  # are covered by the manually dispatched rust-heavy workflow.
+  # Keep the full prover stack out of the default PR gate. Engine core and the
+  # fixture-server surface run above; backend-heavy lanes remain manual.
   rust:
     needs:
       - changes

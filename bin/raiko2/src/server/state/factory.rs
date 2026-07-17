@@ -63,11 +63,95 @@ impl PipelineFactory for StaticPipelineFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::state::{EngineQueueTaskView, EngineStatusView};
+    use raiko2_engine::{
+        AggregateProofInput, AggregationTaskRequest, EngineTaskId, ProposalTaskRequest,
+    };
+    use raiko2_queue::TaskStoreError;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    struct MaintenanceStateEngine {
+        ready: bool,
+    }
+
+    impl EngineHandle for MaintenanceStateEngine {
+        fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
+            self.ready
+        }
+
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected proposal submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregation submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected status lookup") })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected task state lookup") })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { panic!("unexpected cancellation") })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { panic!("unexpected removal") })
+        }
+    }
+
+    fn engine(ready: bool) -> Arc<dyn EngineHandle> {
+        Arc::new(MaintenanceStateEngine { ready })
+    }
 
     #[test]
     fn empty_factory_is_queue_ready() {
         let factory = StaticPipelineFactory::default();
 
         assert!(factory.queue_maintenance_ready(std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn factory_is_queue_ready_when_every_engine_has_a_fresh_tick() {
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert("pair-a", PipelineKey::ShastaNative, engine(true));
+        factory.insert("pair-a", PipelineKey::ShastaSp1, engine(true));
+
+        assert!(factory.queue_maintenance_ready(std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn factory_is_not_queue_ready_when_any_engine_has_no_fresh_tick() {
+        for (first_ready, second_ready) in [(false, true), (true, false), (false, false)] {
+            let mut factory = StaticPipelineFactory::default();
+            factory.insert("pair-a", PipelineKey::ShastaNative, engine(first_ready));
+            factory.insert("pair-a", PipelineKey::ShastaSp1, engine(second_ready));
+
+            assert!(
+                !factory.queue_maintenance_ready(std::time::Duration::from_secs(1)),
+                "factory unexpectedly ready for engine states ({first_ready}, {second_ready})"
+            );
+        }
     }
 }

@@ -21,18 +21,23 @@ pub use tasks::{
     ProverTaskConfig,
 };
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
-use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver};
+use raiko2_prover::{
+    NetworkProverBackend, PendingProofCheckpoint, Prover, ProverProgress, ProverProgressObserver,
+};
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
-    TaskState, TaskStoreError, TaskView, TaskViewState,
+    TaskLease, TaskState, TaskStoreError, TaskView, TaskViewState,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -58,6 +63,7 @@ where
     scheduler: Scheduler<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>,
     context: ProofContext,
     observer: Option<Arc<dyn EngineObserver>>,
+    last_maintenance_success_ms: AtomicU64,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +71,128 @@ pub enum EngineTaskSuccess {
     GuestInput { stage: PipelineStage },
     EncodedInput { stage: PipelineStage },
     Proof { stage: PipelineStage, proof: Proof },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineObserverError {
+    RuntimeSync(String),
+    ProofPublication(String),
+    ProofInvalidated(String),
+}
+
+impl std::fmt::Display for EngineObserverError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RuntimeSync(error)
+            | Self::ProofPublication(error)
+            | Self::ProofInvalidated(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for EngineObserverError {}
+
+#[derive(Debug)]
+enum TaskExecutionError {
+    Retryable(String),
+    ProofPublication { error: String, proof: Box<Proof> },
+    ProofInvalidated(String),
+}
+
+impl TaskExecutionError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Retryable(error)
+            | Self::ProofPublication { error, .. }
+            | Self::ProofInvalidated(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for TaskExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl From<String> for TaskExecutionError {
+    fn from(error: String) -> Self {
+        Self::Retryable(error)
+    }
+}
+
+impl From<EngineObserverError> for TaskExecutionError {
+    fn from(error: EngineObserverError) -> Self {
+        match error {
+            EngineObserverError::RuntimeSync(error)
+            | EngineObserverError::ProofPublication(error) => Self::Retryable(error),
+            EngineObserverError::ProofInvalidated(error) => Self::ProofInvalidated(error),
+        }
+    }
+}
+
+const fn publication_retry_policy() -> RetryPolicy {
+    RetryPolicy::Exponential {
+        max_attempts: u32::MAX,
+        base_delay: Duration::from_secs(1),
+        max_delay: Duration::from_secs(5 * 60),
+    }
+}
+
+fn apply_proof_completion_policy(
+    lease: &mut TaskLease<EngineTask, EngineTaskKey>,
+    payload: &EngineTask,
+    execution_result: &Result<EngineOutput<impl Sized>, TaskExecutionError>,
+) {
+    if let Err(TaskExecutionError::ProofPublication { proof, .. }) = execution_result {
+        lease.payload = payload.clone().with_pending_publication((**proof).clone());
+        lease.execution_policy.retry = publication_retry_policy();
+    } else if matches!(
+        execution_result,
+        Err(TaskExecutionError::ProofInvalidated(_))
+    ) {
+        lease.execution_policy.retry = RetryPolicy::None;
+    }
+}
+
+fn should_notify_queue_task<I>(
+    payload: &EngineTask,
+    execution_result: &Result<EngineOutput<I>, TaskExecutionError>,
+    recovered_output: bool,
+) -> bool {
+    recovered_output
+        || !matches!(payload.publication_source(), EngineTask::Proposal { .. })
+        || matches!(execution_result, Ok(EngineOutput::Proof(_)))
+        || execution_result
+            .as_ref()
+            .err()
+            .map(TaskExecutionError::message)
+            == Some(task_cancelled_error().as_str())
+        || execution_result
+            .as_ref()
+            .err()
+            .map(TaskExecutionError::message)
+            == Some(task_lease_lost_error().as_str())
+}
+
+fn log_execution_failure<I>(
+    worker: &str,
+    task: &EngineTask,
+    result: &Result<EngineOutput<I>, TaskExecutionError>,
+) {
+    if let Err(error) = result {
+        tracing::warn!(worker, task = ?task, %error, "engine task failed");
+    }
+}
+
+fn proof_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
+    match &id.0 {
+        EngineTaskKey::Proposal { request, .. } => EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: id.clone(),
+        },
+        EngineTaskKey::Aggregate { .. } => task.publication_source().clone(),
+    }
 }
 
 #[async_trait]
@@ -76,7 +204,17 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _progress: &ProverProgress,
-    ) {
+    ) -> Result<(), EngineObserverError> {
+        Ok(())
+    }
+
+    async fn checkpoint_completed_proof(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _proof: &Proof,
+    ) -> Result<(), EngineObserverError> {
+        Ok(())
     }
 
     async fn on_task_succeeded(
@@ -84,27 +222,36 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _success: &EngineTaskSuccess,
-    ) {
+    ) -> Result<(), EngineObserverError> {
+        Ok(())
     }
 
     async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {}
 
     async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
 
-    async fn load_sp1_network_request_id(
+    async fn load_pending_proof_checkpoint(
         &self,
         _id: &EngineTaskId,
         _task: &EngineTask,
-    ) -> Option<String> {
+        _backend: NetworkProverBackend,
+    ) -> Option<PendingProofCheckpoint> {
         None
     }
 
-    async fn load_boundless_submission(
+    async fn load_proof_artifact(
+        &self,
+        _artifact: &ProofArtifactRef,
+    ) -> Result<Option<raiko2_primitives::Proof>, String> {
+        Ok(None)
+    }
+
+    async fn load_completed_proof(
         &self,
         _id: &EngineTaskId,
         _task: &EngineTask,
-    ) -> Option<BoundlessSubmissionResume> {
-        None
+    ) -> Result<Option<Proof>, String> {
+        Ok(None)
     }
 }
 
@@ -124,10 +271,11 @@ async fn notify_stage_succeeded(
     id: &EngineTaskId,
     task: &EngineTask,
     success: &EngineTaskSuccess,
-) {
+) -> Result<(), EngineObserverError> {
     if let Some(observer) = observer {
-        observer.on_task_succeeded(id, task, success).await;
+        observer.on_task_succeeded(id, task, success).await?;
     }
+    Ok(())
 }
 
 async fn notify_stage_failed(
@@ -154,21 +302,19 @@ enum LeaseInterruption {
 
 #[async_trait]
 impl ProverProgressObserver for EngineProgressObserver {
-    async fn on_progress(&self, progress: &ProverProgress) {
+    async fn on_progress(&self, progress: &ProverProgress) -> raiko2_primitives::RaikoResult<()> {
         self.observer
             .on_task_progress(&self.task_id, &self.task, progress)
-            .await;
-    }
-
-    async fn load_sp1_network_request_id(&self) -> Option<String> {
-        self.observer
-            .load_sp1_network_request_id(&self.task_id, &self.task)
             .await
+            .map_err(|error| raiko2_primitives::RaikoError::Guest(error.to_string()))
     }
 
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {
+    async fn load_pending_proof_checkpoint(
+        &self,
+        backend: NetworkProverBackend,
+    ) -> Option<PendingProofCheckpoint> {
         self.observer
-            .load_boundless_submission(&self.task_id, &self.task)
+            .load_pending_proof_checkpoint(&self.task_id, &self.task, backend)
             .await
     }
 }
@@ -253,6 +399,7 @@ where
                 scheduler: Scheduler::with_config(store, scheduler_config),
                 context,
                 observer,
+                last_maintenance_success_ms: AtomicU64::new(0),
             }),
         }
     }
@@ -463,77 +610,230 @@ where
         self.inner.scheduler.remove(id).await
     }
 
+    /// Returns aggregate tasks that currently depend on a proposal task.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the task store cannot lease or complete work.
-    pub async fn run_one(&self, worker: &str) -> Result<bool, TaskStoreError> {
-        let Some(lease) = self.inner.scheduler.next_ready(worker).await? else {
-            return Ok(false);
-        };
+    /// Returns `TaskStoreError` when the scheduler cannot read dependency edges.
+    pub async fn dependents_of(
+        &self,
+        id: &EngineTaskId,
+    ) -> Result<Vec<EngineTaskId>, TaskStoreError> {
+        self.inner.scheduler.dependents_of(id).await
+    }
 
-        let payload = lease.payload.clone();
-        let renew_scheduler = self.inner.scheduler.clone();
-        let renew_lease = lease.clone();
+    async fn checkpoint_completed_proof(
+        &self,
+        lease: &mut TaskLease<EngineTask, EngineTaskKey>,
+        payload: &EngineTask,
+        terminal_observer_task: &mut EngineTask,
+        execution_result: &mut Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+    ) -> Result<(), TaskStoreError> {
+        let Ok(EngineOutput::Proof(proof)) = execution_result else {
+            return Ok(());
+        };
+        *terminal_observer_task = proof_observer_task(&lease.id, payload);
+        let completed_proof = proof.output.clone();
+        let checkpoint_payload = payload
+            .clone()
+            .with_pending_publication(completed_proof.clone());
+        let checkpoint_policy = TaskExecutionPolicy {
+            retry: publication_retry_policy(),
+            ..lease.execution_policy.clone()
+        };
+        let checkpointed = self
+            .inner
+            .scheduler
+            .checkpoint_payload(lease, checkpoint_payload.clone(), checkpoint_policy.clone())
+            .await?;
+        if checkpointed {
+            lease.payload = checkpoint_payload;
+            lease.execution_policy = checkpoint_policy;
+        } else {
+            *execution_result = Err(task_lease_lost_error().into());
+            return Ok(());
+        }
+        if let Some(observer) = &self.inner.observer
+            && let Err(error) = observer
+                .checkpoint_completed_proof(&lease.id, terminal_observer_task, &completed_proof)
+                .await
+        {
+            *execution_result = Err(TaskExecutionError::ProofPublication {
+                error: error.to_string(),
+                proof: Box::new(completed_proof),
+            });
+        }
+        Ok(())
+    }
+
+    async fn notify_execution_success(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        execution_result: &mut Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+    ) {
+        let Ok(output) = execution_result else {
+            return;
+        };
+        let success = task_success_from_output(output);
+        if let Err(error) =
+            notify_stage_succeeded(self.inner.observer.as_ref(), id, task, &success).await
+        {
+            *execution_result = Err(match (success, error) {
+                (EngineTaskSuccess::Proof { .. }, EngineObserverError::ProofInvalidated(error)) => {
+                    TaskExecutionError::ProofInvalidated(error)
+                }
+                (
+                    EngineTaskSuccess::Proof { proof, .. },
+                    EngineObserverError::ProofPublication(error)
+                    | EngineObserverError::RuntimeSync(error),
+                ) => TaskExecutionError::ProofPublication {
+                    error,
+                    proof: Box::new(proof),
+                },
+                (
+                    EngineTaskSuccess::GuestInput { .. } | EngineTaskSuccess::EncodedInput { .. },
+                    error,
+                ) => error.into(),
+            });
+        }
+    }
+
+    fn spawn_lease_renewal(
+        &self,
+        lease: &TaskLease<EngineTask, EngineTaskKey>,
+    ) -> tokio::task::JoinHandle<()> {
+        let scheduler = self.inner.scheduler.clone();
+        let lease = lease.clone();
         let renew_period = lease
             .execution_policy
             .lease_duration
             .checked_div(2)
             .unwrap_or_else(|| Duration::from_secs(1))
             .max(Duration::from_secs(1));
-        let renew_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut interval = tokio::time::interval(renew_period);
             interval.tick().await;
             loop {
                 interval.tick().await;
-                match renew_scheduler.renew_lease(&renew_lease).await {
+                match scheduler.renew_lease(&lease).await {
                     Ok(true) => {}
                     Ok(false) => break,
-                    Err(err) => {
+                    Err(error) => {
                         tracing::warn!(
-                            worker = %renew_lease.worker,
-                            task = ?renew_lease.id,
-                            error = %err,
+                            worker = %lease.worker,
+                            task = ?lease.id,
+                            %error,
                             "failed to renew task lease"
                         );
                         break;
                     }
                 }
             }
-        });
+        })
+    }
 
+    async fn fail_task_after_lease_loss(
+        &self,
+        lease: &TaskLease<EngineTask, EngineTaskKey>,
+        observer_task: &EngineTask,
+    ) -> Result<(), TaskStoreError> {
+        let error = task_lease_lost_error();
+        self.inner
+            .scheduler
+            .fail(lease.id.clone(), error.clone())
+            .await?;
+        if let Some(observer) = &self.inner.observer {
+            observer
+                .on_task_failed(&lease.id, observer_task, &error)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot lease or complete work.
+    pub async fn run_one(&self, worker: &str) -> Result<bool, TaskStoreError> {
+        let Some(mut lease) = self.inner.scheduler.next_ready(worker).await? else {
+            return Ok(false);
+        };
+
+        let payload = lease.payload.clone();
+        let renew_task = self.spawn_lease_renewal(&lease);
+
+        let mut terminal_observer_task = payload.clone();
+        if matches!(payload, EngineTask::PublishProof { .. }) {
+            terminal_observer_task = proof_observer_task(&lease.id, &payload);
+        }
         if let Some(observer) = &self.inner.observer
-            && !matches!(payload, EngineTask::Proposal { .. })
+            && !matches!(payload.publication_source(), EngineTask::Proposal { .. })
         {
-            observer.on_task_started(&lease.id, &payload, worker).await;
+            observer
+                .on_task_started(&lease.id, &terminal_observer_task, worker)
+                .await;
         }
 
-        let result = self
-            .execute_with_task_controls(&lease.id, &lease, payload.clone())
-            .await;
-        renew_task.abort();
-        if let Err(err) = &result {
-            tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
+        let (mut execution_result, recovered_output) =
+            match self.recover_completed_output(&lease.id, &payload).await {
+                Ok(Some(output)) => (Ok(output), true),
+                Ok(None) => (
+                    self.execute_with_task_controls(&lease.id, &lease, payload.clone())
+                        .await,
+                    false,
+                ),
+                Err(error) => (Err(error), false),
+            };
+        log_execution_failure(worker, &payload, &execution_result);
+        if let Err(error) = self
+            .checkpoint_completed_proof(
+                &mut lease,
+                &payload,
+                &mut terminal_observer_task,
+                &mut execution_result,
+            )
+            .await
+        {
+            renew_task.abort();
+            return Err(error);
         }
+        let lease_was_lost = execution_result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.message() == task_lease_lost_error());
+        if lease_was_lost {
+            renew_task.abort();
+            self.fail_task_after_lease_loss(&lease, &terminal_observer_task)
+                .await?;
+            return Ok(true);
+        }
+        let should_notify_queue_task =
+            should_notify_queue_task(&payload, &execution_result, recovered_output);
+        if should_notify_queue_task {
+            self.notify_execution_success(
+                &lease.id,
+                &terminal_observer_task,
+                &mut execution_result,
+            )
+            .await;
+        }
+        apply_proof_completion_policy(&mut lease, &payload, &execution_result);
+        let result = execution_result.map_err(|error| error.to_string());
         let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
-        let should_notify_queue_task = !matches!(payload, EngineTask::Proposal { .. })
-            || error.as_deref() == Some(task_cancelled_error().as_str())
-            || error.as_deref() == Some(task_lease_lost_error().as_str());
         let completed_id = lease.id.clone();
-        let completed = self.inner.scheduler.complete(lease, result).await?;
+        let completion = self.inner.scheduler.complete(lease, result).await;
+        renew_task.abort();
+        let completed = completion?;
         if completed
             && should_notify_queue_task
             && let Some(observer) = &self.inner.observer
+            && success.is_none()
+            && let Some(error) = error.as_deref()
         {
-            if let Some(success) = success.as_ref() {
-                observer
-                    .on_task_succeeded(&completed_id, &payload, success)
-                    .await;
-            } else if let Some(error) = error.as_deref() {
-                observer
-                    .on_task_failed(&completed_id, &payload, error)
-                    .await;
-            }
+            observer
+                .on_task_failed(&completed_id, &terminal_observer_task, error)
+                .await;
         }
         Ok(true)
     }
@@ -568,6 +868,16 @@ where
             ..WorkerConfig::default()
         };
         crate::worker::spawn_workers(self.clone(), &config);
+    }
+
+    #[must_use]
+    pub fn queue_maintenance_ready(&self, max_age: Duration) -> bool {
+        let last_success = self
+            .inner
+            .last_maintenance_success_ms
+            .load(Ordering::Acquire);
+        let max_age_ms = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
+        last_success != 0 && now_millis().saturating_sub(last_success) <= max_age_ms
     }
 
     async fn get_guest_input(
@@ -611,7 +921,7 @@ where
         task_id: &EngineTaskId,
         lease: &raiko2_queue::TaskLease<EngineTask, EngineTaskKey>,
         payload: EngineTask,
-    ) -> Result<EngineOutput<S::GuestInput>, String> {
+    ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         let execute = self.execute(task_id, payload, &lease.worker);
         let interrupted = self.wait_lease_interruption(&lease.id, &lease.worker, lease.attempt);
         tokio::pin!(execute);
@@ -621,12 +931,36 @@ where
             result = &mut execute => result,
             interruption = &mut interrupted => {
                 match interruption {
-                    Ok(LeaseInterruption::Cancelled) => Err(task_cancelled_error()),
-                    Ok(LeaseInterruption::Lost) => Err(task_lease_lost_error()),
-                    Err(err) => Err(err.to_string()),
+                    Ok(LeaseInterruption::Cancelled) => Err(task_cancelled_error().into()),
+                    Ok(LeaseInterruption::Lost) => Err(task_lease_lost_error().into()),
+                    Err(err) => Err(err.to_string().into()),
                 }
             }
         }
+    }
+
+    async fn recover_completed_output(
+        &self,
+        task_id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Result<Option<EngineOutput<S::GuestInput>>, TaskExecutionError> {
+        let Some(observer) = &self.inner.observer else {
+            return Ok(None);
+        };
+        let Some(proof) = observer
+            .load_completed_proof(task_id, task)
+            .await
+            .map_err(TaskExecutionError::from)?
+        else {
+            return Ok(None);
+        };
+        let stage = match task.publication_source() {
+            EngineTask::Aggregate { .. } => PipelineStage::Aggregate,
+            _ => PipelineStage::Prove,
+        };
+        Ok(Some(EngineOutput::Proof(Box::new(
+            PipelineStageResult::new(stage, proof),
+        ))))
     }
 
     async fn wait_lease_interruption(
@@ -693,18 +1027,15 @@ where
         &self,
         artifact: ProofArtifactRef,
     ) -> Result<raiko2_primitives::Proof, String> {
-        let bytes = tokio::fs::read(&artifact.proof_path).await.map_err(|err| {
-            format!(
-                "failed to read proof artifact {} for {}: {err}",
-                artifact.proof_path, artifact.proof_ref
-            )
-        })?;
-        serde_json::from_slice(&bytes).map_err(|err| {
-            format!(
-                "failed to parse proof artifact {} for {}: {err}",
-                artifact.proof_path, artifact.proof_ref
-            )
-        })
+        let observer = self
+            .inner
+            .observer
+            .as_ref()
+            .ok_or_else(|| "proof artifact resolver is not configured".to_string())?;
+        observer
+            .load_proof_artifact(&artifact)
+            .await?
+            .ok_or_else(|| format!("proof artifact {} is missing", artifact.proof_ref))
     }
 
     async fn resolve_aggregation_source(
@@ -734,25 +1065,27 @@ where
         worker: &str,
         stage: PipelineStage,
         execute: impl std::future::Future<Output = Result<PipelineStageResult<T>, String>>,
-    ) -> Result<PipelineStageResult<T>, String> {
+    ) -> Result<PipelineStageResult<T>, TaskExecutionError> {
         notify_stage_started(self.inner.observer.as_ref(), task_id, task, worker).await;
         match execute.await {
             Ok(output) => {
                 let success = match stage {
                     PipelineStage::Encode => EngineTaskSuccess::EncodedInput { stage },
                     PipelineStage::Prove | PipelineStage::Aggregate => {
-                        return Err("proof stages require proof output".to_string());
+                        return Err("proof stages require proof output".to_string().into());
                     }
                     PipelineStage::Preflight | PipelineStage::Validation => {
                         EngineTaskSuccess::GuestInput { stage }
                     }
                 };
-                notify_stage_succeeded(self.inner.observer.as_ref(), task_id, task, &success).await;
+                notify_stage_succeeded(self.inner.observer.as_ref(), task_id, task, &success)
+                    .await
+                    .map_err(TaskExecutionError::from)?;
                 Ok(output)
             }
             Err(error) => {
                 notify_stage_failed(self.inner.observer.as_ref(), task_id, task, &error).await;
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -762,7 +1095,7 @@ where
         task_id: &EngineTaskId,
         request: ProposalTaskRequest,
         worker: &str,
-    ) -> Result<EngineOutput<S::GuestInput>, String> {
+    ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         let ctx = self.context_for_proposal(&request);
         let pipeline = Pipeline::new(&self.inner.spec);
 
@@ -819,13 +1152,14 @@ where
                         stage: PipelineStage::Encode,
                     },
                 )
-                .await;
+                .await
+                .map_err(TaskExecutionError::from)?;
                 encoded
             }
             Err(error) => {
                 notify_stage_failed(self.inner.observer.as_ref(), task_id, &encode_task, &error)
                     .await;
-                return Err(error);
+                return Err(error.into());
             }
         };
 
@@ -878,7 +1212,7 @@ where
         input_task: EngineTaskId,
         encoded: EncodedGuestInput,
         worker: &str,
-    ) -> Result<EngineOutput<S::GuestInput>, String> {
+    ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         let progress_task = EngineTask::ProveProposal {
             request: request.clone(),
             input_task,
@@ -919,19 +1253,9 @@ where
                     &error,
                 )
                 .await;
-                return Err(error);
+                return Err(error.into());
             }
         };
-        notify_stage_succeeded(
-            self.inner.observer.as_ref(),
-            task_id,
-            &progress_task,
-            &EngineTaskSuccess::Proof {
-                stage: PipelineStage::Prove,
-                proof: proof.clone(),
-            },
-        )
-        .await;
         Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
             PipelineStage::Prove,
             proof,
@@ -943,7 +1267,7 @@ where
         task_id: &EngineTaskId,
         task: EngineTask,
         worker: &str,
-    ) -> Result<EngineOutput<S::GuestInput>, String> {
+    ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         match task {
             EngineTask::Proposal { request } => {
                 self.execute_proposal(task_id, request, worker).await
@@ -955,7 +1279,7 @@ where
                     .preflight(&ctx)
                     .await
                     .map(|input| EngineOutput::GuestInput(Box::new(input)))
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| TaskExecutionError::from(e.to_string()))
             }
             EngineTask::Validate {
                 request,
@@ -995,7 +1319,10 @@ where
             EngineTask::ProveProposal {
                 request,
                 input_task,
-            } => self.prove_proposal(task_id, request, input_task).await,
+            } => self
+                .prove_proposal(task_id, request, input_task)
+                .await
+                .map_err(TaskExecutionError::from),
             EngineTask::Aggregate { request, source } => {
                 let ctx = self.context_for_aggregation(&request);
                 let progress_task = EngineTask::Aggregate {
@@ -1024,6 +1351,15 @@ where
                 Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
                     PipelineStage::Aggregate,
                     proof,
+                ))))
+            }
+            EngineTask::PublishProof { proof, .. } => {
+                let stage = match &task_id.0 {
+                    EngineTaskKey::Proposal { .. } => PipelineStage::Prove,
+                    EngineTaskKey::Aggregate { .. } => PipelineStage::Aggregate,
+                };
+                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+                    stage, *proof,
                 ))))
             }
         }
@@ -1069,7 +1405,11 @@ where
             .maintenance_tick()
             .await
             .map(|_| ())
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?;
+        self.inner
+            .last_maintenance_success_ms
+            .store(now_millis(), Ordering::Release);
+        Ok(())
     }
 
     fn notifier(&self) -> Arc<tokio::sync::Notify> {
@@ -1077,9 +1417,24 @@ where
     }
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use alloy_primitives::Bytes;
     use raiko2_pipeline::{
@@ -1099,7 +1454,93 @@ mod tests {
         AggregateProofInput, AggregationTaskRequest, EngineOutput, ProofArtifactRef,
         ProposalTaskRequest, ProverTaskConfig,
     };
-    use crate::{Engine, EngineTaskId, EngineTaskKey, PROPOSAL_TASK_PRIORITY};
+    use crate::{
+        Engine, EngineObserver, EngineObserverError, EngineTask, EngineTaskId, EngineTaskKey,
+        EngineTaskSuccess, PROPOSAL_TASK_PRIORITY,
+    };
+
+    struct PublicationFailingObserver {
+        proof_successes: AtomicUsize,
+        failures: usize,
+    }
+
+    impl PublicationFailingObserver {
+        fn new(failures: usize) -> Self {
+            Self {
+                proof_successes: AtomicUsize::new(0),
+                failures,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for PublicationFailingObserver {
+        async fn on_task_succeeded(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            success: &EngineTaskSuccess,
+        ) -> Result<(), EngineObserverError> {
+            if matches!(success, EngineTaskSuccess::Proof { .. }) {
+                let attempt = self.proof_successes.fetch_add(1, Ordering::SeqCst);
+                if attempt < self.failures {
+                    return Err(EngineObserverError::ProofPublication(
+                        "injected failure".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct PublicationInvalidatingObserver;
+
+    #[async_trait::async_trait]
+    impl EngineObserver for PublicationInvalidatingObserver {
+        async fn on_task_succeeded(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            success: &EngineTaskSuccess,
+        ) -> Result<(), EngineObserverError> {
+            if matches!(success, EngineTaskSuccess::Proof { .. }) {
+                return Err(EngineObserverError::ProofInvalidated(
+                    "injected invalidation".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    struct RecoveringObserver {
+        proof_successes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for RecoveringObserver {
+        async fn load_completed_proof(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+        ) -> Result<Option<Proof>, String> {
+            Ok(Some(Proof {
+                proof: Some("recovered-proof".to_string()),
+                ..Proof::default()
+            }))
+        }
+
+        async fn on_task_succeeded(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            success: &EngineTaskSuccess,
+        ) -> Result<(), EngineObserverError> {
+            if matches!(success, EngineTaskSuccess::Proof { .. }) {
+                self.proof_successes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
 
     struct MockProver;
 
@@ -1149,6 +1590,47 @@ mod tests {
                 proof: Some("mock-agg-proof".to_string()),
                 ..Default::default()
             })
+        }
+    }
+
+    struct CountingProver {
+        proof_runs: Arc<AtomicUsize>,
+    }
+
+    impl GuestInputCodec<GuestInput> for CountingProver {
+        fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+            Ok(Bytes::from(input.taiko.proposal_id.to_le_bytes().to_vec()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Prover<TestBackend> for CountingProver {
+        type GuestInput = GuestInput;
+
+        fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+            GuestInputCodec::encode(self, input, config)
+        }
+
+        async fn prove_encoded(
+            &self,
+            _input: Bytes,
+            _config: &ProverConfig,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            self.proof_runs.fetch_add(1, Ordering::SeqCst);
+            Ok(Proof {
+                proof: Some("counted-proof".to_string()),
+                ..Proof::default()
+            })
+        }
+
+        async fn aggregate(
+            &self,
+            _input: AggregationGuestInput,
+            _config: &ProverConfig,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            Ok(Proof::default())
         }
     }
 
@@ -1378,8 +1860,9 @@ mod tests {
     fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
+            pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
             proof_ref: proof_ref.to_string(),
-            proof_path: format!("/tmp/{proof_ref}.json"),
         }
     }
 
@@ -1489,6 +1972,7 @@ mod tests {
                 request,
             })
         );
+        assert_eq!(engine.dependents_of(&first).await?, vec![aggregate_id]);
         Ok(())
     }
 
@@ -1710,6 +2194,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proof_publication_failure_retries_durable_output_without_reproving()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(PublicationFailingObserver::new(1));
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+            Some(observer.clone()),
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+
+        let view = engine
+            .get(job_id.clone())
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Retrying { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        engine.inner.scheduler.maintenance_tick().await?;
+        assert!(Box::pin(engine.run_one("w2")).await?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Succeeded { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidated_proof_publication_is_terminal() -> Result<(), Box<dyn std::error::Error>> {
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
+            Some(Arc::new(PublicationInvalidatingObserver)),
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Failed { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovered_proposal_output_is_finalized_through_observer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(RecoveringObserver {
+            proof_successes: AtomicUsize::new(0),
+        });
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
+            Some(observer.clone()),
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Succeeded { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn run_one_stops_running_task_after_cancel() -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(60),
@@ -1813,7 +2395,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.unwrap_err().to_string(),
             "preflight task did not produce preflight output"
         );
         Ok(())
@@ -1895,7 +2477,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err(),
+            result.unwrap_err().to_string(),
             "input task did not produce validated GuestInput"
         );
         Ok(())

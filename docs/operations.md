@@ -61,8 +61,8 @@ To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 - `sp1/local`
 - `sp1/network`
 
-Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`; Boundless
-does not need an extra feature flag in default builds.
+The queue is always in-process. Durable task state and remote-provider checkpoints use the
+configured namespaced GCS runtime store; Boundless does not need an extra feature flag.
 
 ## Hosted Aggregate Route
 
@@ -817,9 +817,14 @@ Full deployment and offer parameter examples live in
 Operator notes:
 
 - `raiko2` uploads guest ELFs and submits Boundless requests directly.
-- Runtime state and task workdirs are stored under `./data/runtime` by default.
-- `runtime.inactive_ttl_secs` controls automatic cleanup for terminal root tasks
-  (`completed`, `failed`, `cancelled`). `0` disables cleanup; the default is `7200` seconds.
+- Production runtime state, provider checkpoints, publication outboxes, and proof manifests are
+  stored in the configured GCS namespace. Publication proof bytes are separate immutable objects,
+  not fields in the runtime snapshot. There are no local task workdirs.
+- Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
+  proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must
+  remain available for as long as any active manifest references it. Generation-scoped
+  invalidation markers should be retained for at least 30 days; unreferenced content may use the
+  same retention window.
 - Proposal requests are sized by `prover.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`

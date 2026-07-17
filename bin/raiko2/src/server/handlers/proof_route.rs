@@ -168,10 +168,19 @@ fn sp1_runner_for_request(
         .sp1
         .resolve_request_config(prover_config.sp1.as_ref(), sp1_context)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    Ok(match effective_config.prover {
+    let runner = match effective_config.prover {
         Sp1ProverMode::Network => RunnerKind::Network,
         Sp1ProverMode::Mock | Sp1ProverMode::Local => RunnerKind::Local,
-    })
+    };
+    let configured_route = state.config.prover.sp1_route();
+    if runner != configured_route.runner {
+        return Err(ApiError::bad_request(format!(
+            "request-scoped sp1 prover route {} is unavailable; this server is configured for {}",
+            PipelineRoute::new(GuestSystem::Sp1, runner),
+            configured_route,
+        )));
+    }
+    Ok(runner)
 }
 
 pub(super) fn decide_batch_proof_type(
@@ -241,7 +250,9 @@ mod tests {
     use axum::http::StatusCode;
     use raiko2_engine::ProverTaskConfig;
     use raiko2_pipeline::PipelineKey;
-    use raiko2_prover::sp1_config::Sp1RequestContext;
+    use raiko2_prover::sp1_config::{
+        ProverMode as Sp1ProverMode, Sp1ConfigOverrides, Sp1RequestContext,
+    };
     use raiko2_runtime::RuntimeManager;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -307,6 +318,55 @@ mod tests {
             selection.proof_type(),
             raiko2_primitives::ProofType::SgxGeth
         );
+    }
+
+    #[test]
+    fn route_for_proof_type_uses_configured_sp1_network_route() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Local;
+        config.prover.sp1.prover = Sp1ProverMode::Network;
+        let state = test_state_with_config(config);
+
+        let selection = route_for_proof_type(
+            &state,
+            BatchProofType::Sp1,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect("configured SP1 network route");
+
+        assert_eq!(selection.route.to_string(), "sp1/network");
+    }
+
+    #[test]
+    fn route_for_proof_type_rejects_sp1_request_route_flip() {
+        for (configured, requested) in [
+            (Sp1ProverMode::Network, Sp1ProverMode::Local),
+            (Sp1ProverMode::Local, Sp1ProverMode::Network),
+        ] {
+            let mut config = Config::default();
+            config.prover.sp1.prover = configured;
+            let state = test_state_with_config(config);
+            let prover_config = ProverTaskConfig {
+                sp1: Some(Sp1ConfigOverrides {
+                    prover: Some(requested),
+                    ..Sp1ConfigOverrides::default()
+                }),
+                sp1_system: None,
+            };
+
+            let error = route_for_proof_type(
+                &state,
+                BatchProofType::Sp1,
+                &prover_config,
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect_err("request-level route flip must be rejected");
+
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(error.message.contains("request-scoped sp1 prover route"));
+        }
     }
 
     #[test]

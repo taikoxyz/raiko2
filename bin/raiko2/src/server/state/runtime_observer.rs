@@ -1,16 +1,21 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
-    EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
-    tasks::EngineTask,
+    EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
+    ProposalStage,
+    tasks::{EngineTask, ProofArtifactRef},
 };
-use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
-use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
+use raiko2_pipeline::PipelineRoute;
+use raiko2_prover::{
+    BoundlessSubmissionResume, NetworkProverBackend, PendingProofCheckpoint, ProverProgress,
+};
+use raiko2_runtime::{
+    ProofArtifactPublicationInvalidated, ProofArtifactPutResult, RunnerStatus, RuntimeManager,
+    RuntimeTaskRecord,
+};
 use std::collections::{HashMap, HashSet};
-#[cfg(test)]
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::{
     TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
@@ -18,28 +23,81 @@ use crate::server::task_metadata::{
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
 use raiko2_engine::ProverTaskConfig;
-#[cfg(test)]
-use raiko2_pipeline::PipelineRoute;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
-    started_stage_tasks: Arc<Mutex<HashSet<String>>>,
+    route: PipelineRoute,
+    root_updates: Arc<tokio::sync::Mutex<()>>,
 }
 
+static STARTED_STAGE_TASKS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FailedRootPolicy {
+enum TerminalRootPolicy {
     Exclude,
-    Include,
+    IncludeFailed,
+    IncludeCompleted,
+}
+
+struct PublishedProofCommit {
+    proof_uris: HashMap<String, String>,
+    root_ref: String,
+    content_hash: String,
+}
+
+enum ProofCommitAttempt {
+    Committed,
+    Retryable(anyhow::Error),
+    Invalidated(anyhow::Error),
+}
+
+#[derive(Clone, Copy)]
+enum PublicationFailureDisposition {
+    Retryable,
+    Invalidated,
+}
+
+#[derive(Debug)]
+struct ProofInvalidatedError(String);
+
+impl std::fmt::Display for ProofInvalidatedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProofInvalidatedError {}
+
+fn publication_observer_error(error: &anyhow::Error) -> EngineObserverError {
+    let message = format!("{error:#}");
+    if error.downcast_ref::<ProofInvalidatedError>().is_some()
+        || error
+            .downcast_ref::<ProofArtifactPublicationInvalidated>()
+            .is_some()
+        || error
+            .downcast_ref::<raiko2_runtime::PendingProofPublicationRemoved>()
+            .is_some()
+    {
+        EngineObserverError::ProofInvalidated(message)
+    } else {
+        EngineObserverError::ProofPublication(message)
+    }
 }
 
 impl RuntimeObserver {
-    pub(crate) fn new(runtime: Arc<RuntimeManager>, network_pair: String) -> Self {
+    pub(crate) fn new(
+        runtime: Arc<RuntimeManager>,
+        network_pair: String,
+        route: PipelineRoute,
+    ) -> Self {
         Self {
             runtime,
             network_pair,
-            started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
+            route,
+            root_updates: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -54,14 +112,22 @@ impl RuntimeObserver {
         }
     }
 
-    const fn stage_name(task: &EngineTask) -> &'static str {
-        match task {
+    async fn find_root_records(&self, id: &EngineTaskId) -> Result<Vec<RuntimeTaskRecord>> {
+        let canonical_ref = Self::root_task_ref(id);
+        self.runtime.find_tasks_by_task_ref(&canonical_ref).await
+    }
+
+    fn stage_name(task: &EngineTask) -> &'static str {
+        match task.publication_source() {
             EngineTask::Proposal { .. } => "proposal",
             EngineTask::Preflight { .. } => "preflight",
             EngineTask::Validate { .. } => "validation",
             EngineTask::Encode { .. } => "encode",
             EngineTask::ProveProposal { .. } => "prove",
             EngineTask::Aggregate { .. } => "aggregate",
+            EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -69,7 +135,7 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
-        self.update_root_records_with_policy(id, FailedRootPolicy::Exclude, mutator)
+        self.update_root_records_with_policy(id, TerminalRootPolicy::Exclude, mutator)
             .await
     }
 
@@ -77,25 +143,26 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
-        self.update_root_records_with_policy(id, FailedRootPolicy::Include, mutator)
+        self.update_root_records_with_policy(id, TerminalRootPolicy::IncludeFailed, mutator)
             .await
     }
 
     async fn update_root_records_with_policy<F>(
         &self,
         id: &EngineTaskId,
-        failed_policy: FailedRootPolicy,
+        terminal_policy: TerminalRootPolicy,
         mutator: F,
     ) -> Result<()>
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
+        let _guard = self.root_updates.lock().await;
         let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         if records.is_empty() {
             anyhow::bail!("runtime task not registered for task ref {root_ref}");
         }
-        let mut records = self.matching_root_records(id, records, failed_policy)?;
+        let mut records = self.matching_root_records(id, records, terminal_policy)?;
         let updated_at = now_ts();
         let observed_at_ms = now_ms();
         for record in &mut records {
@@ -107,8 +174,7 @@ impl RuntimeObserver {
     }
 
     async fn load_root_record(&self, id: &EngineTaskId) -> Result<Option<RuntimeTaskRecord>> {
-        let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         Ok(self
             .matching_active_root_records(id, records)?
             .into_iter()
@@ -120,22 +186,28 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         records: Vec<RuntimeTaskRecord>,
     ) -> Result<Vec<RuntimeTaskRecord>> {
-        self.matching_root_records(id, records, FailedRootPolicy::Exclude)
+        self.matching_root_records(id, records, TerminalRootPolicy::Exclude)
     }
 
     fn matching_root_records(
         &self,
         id: &EngineTaskId,
         records: Vec<RuntimeTaskRecord>,
-        failed_policy: FailedRootPolicy,
+        terminal_policy: TerminalRootPolicy,
     ) -> Result<Vec<RuntimeTaskRecord>> {
         records
             .into_iter()
             .filter_map(|record| match self.record_matches_observer(id, &record) {
                 Ok(true) if !is_terminal_status(record.runner_status) => Some(Ok(record)),
                 Ok(true)
-                    if failed_policy == FailedRootPolicy::Include
+                    if terminal_policy == TerminalRootPolicy::IncludeFailed
                         && record.runner_status == RunnerStatus::Failed =>
+                {
+                    Some(Ok(record))
+                }
+                Ok(true)
+                    if terminal_policy == TerminalRootPolicy::IncludeCompleted
+                        && record.runner_status == RunnerStatus::Completed =>
                 {
                     Some(Ok(record))
                 }
@@ -150,8 +222,7 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> Result<Option<RuntimeTaskRecord>> {
-        let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let records = self.find_root_records(id).await?;
         let mut resumable_failed = None;
 
         for record in records {
@@ -179,7 +250,7 @@ impl RuntimeObserver {
         let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata")?;
         let task_ref = Self::root_task_ref(id);
-        Ok(match task {
+        Ok(match task.publication_source() {
             EngineTask::ProveProposal { .. } => metadata
                 .proposal_runtime(&task_ref)
                 .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
@@ -190,6 +261,9 @@ impl RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => false,
+            EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         })
     }
 
@@ -199,6 +273,9 @@ impl RuntimeObserver {
         record: &RuntimeTaskRecord,
     ) -> Result<bool> {
         if record.pipeline_key != id.0.pipeline_key() {
+            return Ok(false);
+        }
+        if record.route != self.route {
             return Ok(false);
         }
         let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
@@ -231,13 +308,16 @@ impl RuntimeObserver {
         }
     }
 
-    const fn proposal_stage_from_task(task: &EngineTask) -> Option<ProposalStage> {
-        match task {
+    fn proposal_stage_from_task(task: &EngineTask) -> Option<ProposalStage> {
+        match task.publication_source() {
             EngineTask::Preflight { .. } => Some(ProposalStage::Preflight),
             EngineTask::Validate { .. } => Some(ProposalStage::Validation),
             EngineTask::Encode { .. } => Some(ProposalStage::Encode),
             EngineTask::ProveProposal { .. } => Some(ProposalStage::Prove),
             EngineTask::Proposal { .. } | EngineTask::Aggregate { .. } => None,
+            EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -277,12 +357,15 @@ impl RuntimeObserver {
     }
 
     fn mark_stage_started_for_metrics(&self, id: &EngineTaskId, task: &EngineTask) -> bool {
-        let task_id = Self::timing_key_for_task(id, task);
-        let mut started = self
-            .started_stage_tasks
+        let task_id = self.metric_tracking_key(&Self::timing_key_for_task(id, task));
+        let mut started = STARTED_STAGE_TASKS
             .lock()
             .expect("stage task telemetry mutex poisoned");
         started.insert(task_id)
+    }
+
+    fn metric_tracking_key(&self, task_id: &str) -> String {
+        format!("{}|{}|{task_id}", self.network_pair, self.route)
     }
 
     fn stage_duration_secs(
@@ -305,11 +388,10 @@ impl RuntimeObserver {
         failure_error: Option<&str>,
     ) {
         let should_decrement = {
-            let mut started = self
-                .started_stage_tasks
+            let mut started = STARTED_STAGE_TASKS
                 .lock()
                 .expect("stage task telemetry mutex poisoned");
-            started.remove(task_id)
+            started.remove(&self.metric_tracking_key(task_id))
         };
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
@@ -355,42 +437,61 @@ impl RuntimeObserver {
         }
     }
 
-    async fn write_final_proof_files(
+    async fn publish_final_proof_artifact(
         &self,
         id: &EngineTaskId,
+        _task: &EngineTask,
         stage: &str,
         proof: &raiko2_primitives::Proof,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<Option<PublishedProofCommit>> {
         let root_ref = Self::root_task_ref(id);
-        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
-        if records.is_empty() {
-            anyhow::bail!("runtime task not registered for task ref {root_ref}");
-        }
+        let records = self.find_root_records(id).await?;
         let records = self.matching_active_root_records(id, records)?;
-        let Some(first_record) = records.first() else {
-            return Ok(HashMap::new());
-        };
+        anyhow::ensure!(
+            proof.proof.is_some(),
+            "refusing to publish proof artifact without a proof payload"
+        );
+        if records.is_empty() {
+            self.runtime
+                .invalidate_pending_proof_publication(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &root_ref,
+                )
+                .await
+                .context("failed to invalidate detached proof publication")?;
+            return Err(ProofInvalidatedError(format!(
+                "proof task {root_ref} no longer has an active runtime owner"
+            ))
+            .into());
+        }
 
-        let proof_bytes =
-            serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
-        let proof_path = self
+        let proof_bytes = serde_json::to_vec(proof).context("failed to serialize proof output")?;
+        let publication = self
             .runtime
-            .write_proof_artifact_bytes(&self.network_pair, &root_ref, &proof_bytes)
+            .commit_proof_artifact_publication(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &root_ref,
+                &proof_bytes,
+            )
             .await
-            .context("failed to write proof artifact")?;
-        let proof_path = proof_path.display().to_string();
-        self.runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: self.network_pair.clone(),
-                proof_ref: root_ref,
-                pipeline_key: first_record.pipeline_key,
-                route: first_record.route,
-                proof_path: proof_path.clone(),
-            })
-            .await
-            .context("failed to register proof artifact")?;
+            .context("failed to commit proof artifact publication")?;
+        let artifact = publication.object();
+        if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
+            tracing::warn!(
+                task = ?id,
+                stage,
+                proof_uri = %artifact.proof_uri,
+                content_hash = %artifact.content_hash,
+                "discarding late proof because a different canonical artifact already exists"
+            );
+        }
+        let proof_uri = artifact.proof_uri.clone();
 
-        let mut proof_paths = HashMap::with_capacity(records.len());
+        let mut proof_uris = HashMap::with_capacity(records.len());
         for record in records {
             let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
                 .context("failed to parse task metadata")?;
@@ -400,38 +501,81 @@ impl RuntimeObserver {
                 continue;
             }
 
-            proof_paths.insert(record.task_id, proof_path.clone());
+            proof_uris.insert(record.task_id, proof_uri.clone());
         }
-        Ok(proof_paths)
+        Ok(Some(PublishedProofCommit {
+            proof_uris,
+            root_ref,
+            content_hash: artifact.content_hash.clone(),
+        }))
     }
 
-    async fn mark_proof_persistence_failed(
+    async fn mark_proof_publication_failed(
         &self,
         id: &EngineTaskId,
         stage: &'static str,
         message: &str,
+        disposition: PublicationFailureDisposition,
     ) {
         let message = message.to_string();
+        if matches!(disposition, PublicationFailureDisposition::Invalidated) {
+            let root_ref = Self::root_task_ref(id);
+            if let Err(error) = self
+                .runtime
+                .invalidate_pending_proof_publication(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &root_ref,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task = ?id,
+                    stage,
+                    %error,
+                    "failed to invalidate pending proof publication"
+                );
+            }
+        }
+        let terminal_policy = match disposition {
+            PublicationFailureDisposition::Retryable => TerminalRootPolicy::Exclude,
+            PublicationFailureDisposition::Invalidated => TerminalRootPolicy::IncludeCompleted,
+        };
         if let Err(sync_err) = self
-            .update_root_records(id, |record, updated_at, observed_at_ms| {
-                record.runner_status = RunnerStatus::Failed;
-                record.error = Some(message.clone());
-                let task_id = Self::timing_key_for_stage_name(id, stage);
-                update_task_metadata(record, |metadata| {
-                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some("failed".to_string());
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
+            .update_root_records_with_policy(
+                id,
+                terminal_policy,
+                |record, updated_at, observed_at_ms| {
+                    record.runner_status = match disposition {
+                        PublicationFailureDisposition::Retryable => RunnerStatus::Allocated,
+                        PublicationFailureDisposition::Invalidated => RunnerStatus::Cancelled,
+                    };
+                    record.proof_uri = None;
+                    record.error = Some(message.clone());
+                    let task_id = Self::timing_key_for_stage_name(id, stage);
+                    update_task_metadata(record, |metadata| {
+                        let (terminal, active_stage) = match disposition {
+                            PublicationFailureDisposition::Retryable => {
+                                ("failed", Some(stage.to_string()))
+                            }
+                            PublicationFailureDisposition::Invalidated => ("cancelled", None),
+                        };
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, terminal);
+                        metadata.runtime.active_stage = active_stage;
+                        metadata.runtime.last_event = Some(terminal.to_string());
+                    })?;
+                    record.updated_at = updated_at;
+                    Ok(())
+                },
+            )
             .await
         {
             tracing::warn!(
                 task = ?id,
                 stage,
                 error = %sync_err,
-                "failed to sync proof persistence failure"
+                "failed to sync proof publication failure"
             );
         }
     }
@@ -443,83 +587,173 @@ impl RuntimeObserver {
         stage: &'static str,
         finished_at_ms: i64,
         proof: &raiko2_primitives::Proof,
-    ) {
+    ) -> Result<()> {
         let task_id = Self::timing_key_for_task(id, task);
-        let proof_paths = match self.write_final_proof_files(id, stage, proof).await {
-            Ok(paths) => {
-                self.observe_stage_terminal_metrics(
-                    id,
-                    &task_id,
-                    stage,
-                    "completed",
-                    finished_at_ms,
-                    None,
-                )
-                .await;
-                paths
-            }
-            Err(err) => {
-                let message = format!("failed to persist proof output: {err}");
-                tracing::warn!(
-                    task = ?id,
-                    stage,
-                    error = %err,
-                    "failed to persist proof output"
-                );
-                self.observe_stage_terminal_metrics(
-                    id,
-                    &task_id,
-                    stage,
-                    "failed",
-                    finished_at_ms,
-                    Some(message.as_str()),
-                )
-                .await;
-                self.mark_proof_persistence_failed(id, stage, message.as_str())
+        let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
+        for attempt in 0..=publication_delays.len() {
+            match self.commit_proof_attempt(id, task, stage, proof).await {
+                ProofCommitAttempt::Committed => {
+                    self.observe_stage_terminal_metrics(
+                        id,
+                        &task_id,
+                        stage,
+                        "completed",
+                        finished_at_ms,
+                        None,
+                    )
                     .await;
-                return;
-            }
-        };
-
-        if let Err(err) = self
-            .update_root_records(id, move |record, updated_at, observed_at_ms| {
-                record.error = None;
-                let task_id = Self::timing_key_for_task(id, task);
-                let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-                    .context("failed to parse task metadata")?;
-                metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
-                let root_completed =
-                    Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
-                metadata.runtime.active_stage = Some(stage.to_string());
-                metadata.runtime.last_event = Some(
-                    if root_completed {
-                        "completed"
-                    } else {
-                        "stage_completed"
-                    }
-                    .to_string(),
-                );
-                record.metadata =
-                    serde_json::to_value(metadata).context("failed to serialize task metadata")?;
-                if root_completed {
-                    record.runner_status = RunnerStatus::Completed;
-                    record.proof_path = proof_paths.get(&record.task_id).cloned();
-                } else {
-                    record.runner_status = RunnerStatus::Allocated;
-                    record.proof_path = None;
+                    return Ok(());
                 }
-                record.updated_at = updated_at;
-                Ok(())
-            })
+                ProofCommitAttempt::Invalidated(error) => {
+                    let message = format!("failed to publish proof artifact: {error}");
+                    tracing::warn!(task = ?id, stage, error = %error, "proof invalidated during completion");
+                    self.observe_stage_terminal_metrics(
+                        id,
+                        &task_id,
+                        stage,
+                        "failed",
+                        finished_at_ms,
+                        Some(message.as_str()),
+                    )
+                    .await;
+                    self.mark_proof_publication_failed(
+                        id,
+                        stage,
+                        message.as_str(),
+                        PublicationFailureDisposition::Invalidated,
+                    )
+                    .await;
+                    return Err(ProofInvalidatedError(message).into());
+                }
+                ProofCommitAttempt::Retryable(error) if attempt < publication_delays.len() => {
+                    let delay = publication_delays[attempt];
+                    tracing::warn!(
+                        task = ?id,
+                        stage,
+                        publication_attempt = attempt + 1,
+                        delay_ms = delay.as_millis(),
+                        error = %error,
+                        "proof publication commit failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                ProofCommitAttempt::Retryable(error) => {
+                    let message = format!("failed to publish proof artifact: {error}");
+                    tracing::warn!(task = ?id, stage, error = %error, "failed to publish proof artifact");
+                    self.observe_stage_terminal_metrics(
+                        id,
+                        &task_id,
+                        stage,
+                        "failed",
+                        finished_at_ms,
+                        Some(message.as_str()),
+                    )
+                    .await;
+                    self.mark_proof_publication_failed(
+                        id,
+                        stage,
+                        message.as_str(),
+                        PublicationFailureDisposition::Retryable,
+                    )
+                    .await;
+                    anyhow::bail!(message);
+                }
+            }
+        }
+        unreachable!("publication retry loop always returns")
+    }
+
+    async fn commit_proof_attempt(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        stage: &'static str,
+        proof: &raiko2_primitives::Proof,
+    ) -> ProofCommitAttempt {
+        let publication = match self
+            .publish_final_proof_artifact(id, task, stage, proof)
             .await
         {
-            tracing::warn!(
-                task = ?id,
-                stage,
-                error = %err,
-                "failed to sync runtime task success"
-            );
+            Ok(Some(publication)) => publication,
+            Ok(None) => return ProofCommitAttempt::Committed,
+            Err(error) if error.downcast_ref::<ProofInvalidatedError>().is_some() => {
+                return ProofCommitAttempt::Invalidated(error);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<ProofArtifactPublicationInvalidated>()
+                    .is_some() =>
+            {
+                return ProofCommitAttempt::Invalidated(error);
+            }
+            Err(error) => return ProofCommitAttempt::Retryable(error),
+        };
+        if let Err(error) = self
+            .sync_proof_success(id, task, stage, publication.proof_uris)
+            .await
+        {
+            return ProofCommitAttempt::Retryable(error);
         }
+        match self
+            .runtime
+            .proof_artifact_is_invalidated(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &publication.root_ref,
+                &publication.content_hash,
+            )
+            .await
+            .context("failed to fence completed proof against invalidation")
+        {
+            Ok(false) => ProofCommitAttempt::Committed,
+            Ok(true) => ProofCommitAttempt::Invalidated(anyhow::anyhow!(
+                "canonical proof artifact {} was invalidated during completion",
+                publication.root_ref
+            )),
+            Err(error) => ProofCommitAttempt::Retryable(error),
+        }
+    }
+
+    async fn sync_proof_success(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        stage: &'static str,
+        proof_uris: HashMap<String, String>,
+    ) -> Result<()> {
+        self.update_root_records(id, move |record, updated_at, observed_at_ms| {
+            record.error = None;
+            let task_id = Self::timing_key_for_task(id, task);
+            let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+                .context("failed to parse task metadata")?;
+            metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
+            let root_completed =
+                Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
+            metadata.runtime.active_stage = Some(stage.to_string());
+            metadata.runtime.last_event = Some(
+                if root_completed {
+                    "completed"
+                } else {
+                    "stage_completed"
+                }
+                .to_string(),
+            );
+            record.metadata =
+                serde_json::to_value(metadata).context("failed to serialize task metadata")?;
+            if root_completed {
+                record.runner_status = RunnerStatus::Completed;
+                record.proof_uri = proof_uris.get(&record.task_id).cloned();
+            } else {
+                record.runner_status = RunnerStatus::Allocated;
+                record.proof_uri = None;
+            }
+            record.updated_at = updated_at;
+            Ok(())
+        })
+        .await
+        .context("failed to sync runtime task success")?;
+        Ok(())
     }
 
     fn root_completed_by_proof_success(
@@ -553,6 +787,77 @@ impl RuntimeObserver {
 
 #[async_trait]
 impl EngineObserver for RuntimeObserver {
+    async fn checkpoint_completed_proof(
+        &self,
+        id: &EngineTaskId,
+        _task: &EngineTask,
+        proof: &raiko2_primitives::Proof,
+    ) -> std::result::Result<(), EngineObserverError> {
+        let proof_ref = Self::root_task_ref(id);
+        let bytes = serde_json::to_vec(proof).map_err(|error| {
+            EngineObserverError::ProofPublication(format!(
+                "failed to serialize pending proof publication: {error}"
+            ))
+        })?;
+        self.runtime
+            .upsert_pending_proof_publication(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &proof_ref,
+                &bytes,
+            )
+            .await
+            .map_err(|error| publication_observer_error(&error))
+    }
+
+    async fn load_completed_proof(
+        &self,
+        id: &EngineTaskId,
+        _task: &EngineTask,
+    ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
+        let pipeline_key = match id.0 {
+            EngineTaskKey::Proposal { pipeline, .. }
+            | EngineTaskKey::Aggregate { pipeline, .. } => pipeline,
+        };
+        let proof_ref = Self::root_task_ref(id);
+        let material = crate::server::proof_artifact::load_proof_artifact_material(
+            &self.runtime,
+            &self.network_pair,
+            pipeline_key,
+            self.route,
+            &proof_ref,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let proof = if let Some(material) = material {
+            material.proof
+        } else {
+            let Some(bytes) = self
+                .runtime
+                .get_pending_proof_publication(
+                    &self.network_pair,
+                    pipeline_key,
+                    self.route,
+                    &proof_ref,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(None);
+            };
+            serde_json::from_slice(&bytes).map_err(|error| {
+                format!("invalid pending proof publication {proof_ref}: {error}")
+            })?
+        };
+        if proof.proof.is_none() {
+            return Err(format!(
+                "completed proof artifact {proof_ref} has no proof payload"
+            ));
+        }
+        Ok(Some(proof))
+    }
+
     async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
         let stage = Self::stage_name(task);
         let should_increment = self.mark_stage_started_for_metrics(id, task);
@@ -600,7 +905,7 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         progress: &ProverProgress,
-    ) {
+    ) -> std::result::Result<(), EngineObserverError> {
         let stage = Self::stage_name(task);
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
@@ -639,46 +944,71 @@ impl EngineObserver for RuntimeObserver {
                     metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some("submission_registered".to_string());
                     match progress {
-                        ProverProgress::BoundlessSubmission(submission) => match task {
-                            EngineTask::ProveProposal { .. } => {
-                                metadata.upsert_proposal_runtime(&task_id, submission, updated_at);
+                        ProverProgress::BoundlessSubmission(submission) => {
+                            match task.publication_source() {
+                                EngineTask::ProveProposal { .. } => {
+                                    metadata
+                                        .upsert_proposal_runtime(&task_id, submission, updated_at);
+                                }
+                                EngineTask::Aggregate { .. } => {
+                                    metadata.upsert_aggregate_runtime(submission, updated_at);
+                                }
+                                EngineTask::Preflight { .. }
+                                | EngineTask::Validate { .. }
+                                | EngineTask::Encode { .. }
+                                | EngineTask::Proposal { .. } => {}
+                                EngineTask::PublishProof { .. } => unreachable!(),
                             }
-                            EngineTask::Aggregate { .. } => {
-                                metadata.upsert_aggregate_runtime(submission, updated_at);
+                        }
+                        ProverProgress::Sp1NetworkSubmission(submission) => {
+                            match task.publication_source() {
+                                EngineTask::ProveProposal { .. } => {
+                                    metadata.upsert_proposal_sp1_network_runtime(
+                                        &task_id, submission, updated_at,
+                                    );
+                                }
+                                EngineTask::Aggregate { .. } => {
+                                    metadata.upsert_aggregate_sp1_network_runtime(
+                                        submission, updated_at,
+                                    );
+                                }
+                                EngineTask::Preflight { .. }
+                                | EngineTask::Validate { .. }
+                                | EngineTask::Encode { .. }
+                                | EngineTask::Proposal { .. } => {}
+                                EngineTask::PublishProof { .. } => unreachable!(),
                             }
-                            EngineTask::Preflight { .. }
-                            | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. }
-                            | EngineTask::Proposal { .. } => {}
-                        },
-                        ProverProgress::Sp1NetworkSubmission(submission) => match task {
-                            EngineTask::ProveProposal { .. } => {
-                                metadata.upsert_proposal_sp1_network_runtime(
-                                    &task_id, submission, updated_at,
-                                );
-                            }
-                            EngineTask::Aggregate { .. } => {
-                                metadata
-                                    .upsert_aggregate_sp1_network_runtime(submission, updated_at);
-                            }
-                            EngineTask::Preflight { .. }
-                            | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. }
-                            | EngineTask::Proposal { .. } => {}
-                        },
+                        }
                     }
                 })?;
                 record.updated_at = updated_at;
                 Ok(())
             })
             .await;
-        if let Err(err) = result {
+        result.map_err(|err| {
             tracing::warn!(
                 task = ?id,
                 error = %err,
                 "failed to sync runtime task progress"
             );
-        }
+            EngineObserverError::RuntimeSync(format!("failed to sync runtime task progress: {err}"))
+        })
+    }
+
+    async fn load_proof_artifact(
+        &self,
+        artifact: &ProofArtifactRef,
+    ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
+        let material = crate::server::proof_artifact::load_aggregate_input_artifact_material(
+            &self.runtime,
+            &artifact.network_pair,
+            artifact.pipeline_key,
+            artifact.route,
+            &artifact.proof_ref,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(material.map(|material| material.proof))
     }
 
     async fn on_task_succeeded(
@@ -686,15 +1016,16 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         success: &EngineTaskSuccess,
-    ) {
+    ) -> std::result::Result<(), EngineObserverError> {
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
         let task_id = Self::timing_key_for_task(id, task);
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
-                self.handle_proof_success(id, task, stage, finished_at_ms, proof)
-                    .await;
-                return;
+                return self
+                    .handle_proof_success(id, task, stage, finished_at_ms, proof)
+                    .await
+                    .map_err(|error| publication_observer_error(&error));
             }
             EngineTaskSuccess::GuestInput { stage } | EngineTaskSuccess::EncodedInput { stage } => {
                 self.observe_stage_terminal_metrics(
@@ -728,14 +1059,15 @@ impl EngineObserver for RuntimeObserver {
             }
         };
 
-        if let Err(err) = result {
+        result.map_err(|err| {
             tracing::warn!(
                 task = ?id,
                 stage,
                 error = %err,
                 "failed to sync runtime task success"
             );
-        }
+            EngineObserverError::RuntimeSync(format!("failed to sync runtime task success: {err}"))
+        })
     }
 
     async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
@@ -775,6 +1107,23 @@ impl EngineObserver for RuntimeObserver {
         let task_id = Self::timing_key_for_stage_name(id, stage);
         self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms, None)
             .await;
+        let root_ref = Self::root_task_ref(id);
+        if let Err(err) = self
+            .runtime
+            .invalidate_pending_proof_publication(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &root_ref,
+            )
+            .await
+        {
+            tracing::warn!(
+                task = ?id,
+                error = %err,
+                "failed to invalidate cancelled proof publication"
+            );
+        }
         if let Err(err) = self
             .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Cancelled;
@@ -797,14 +1146,16 @@ impl EngineObserver for RuntimeObserver {
         }
     }
 
-    async fn load_sp1_network_request_id(
+    async fn load_pending_proof_checkpoint(
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
-    ) -> Option<String> {
-        let record = match task {
+        backend: NetworkProverBackend,
+    ) -> Option<PendingProofCheckpoint> {
+        let source = task.publication_source();
+        let record = match source {
             EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, task)
+                .load_root_record_for_resume(id, source)
                 .await
                 .ok()
                 .flatten(),
@@ -812,73 +1163,66 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
+            EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
         let task_id = Self::root_task_ref(id);
-        match task {
-            EngineTask::ProveProposal { .. } => metadata
-                .proposal_runtime(&task_id)
-                .and_then(|runtime| runtime.provider_request_id.clone()),
-            // Proposal and aggregation must keep distinct SP1 network requests. Reusing the
-            // root-level request id causes aggregate=true flows to resume the proposal request
-            // instead of creating a new aggregation request.
-            EngineTask::Aggregate { .. } => metadata
-                .aggregate_runtime()
-                .and_then(|runtime| runtime.provider_request_id.clone()),
-            EngineTask::Preflight { .. }
-            | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => None,
-        }
-    }
-
-    async fn load_boundless_submission(
-        &self,
-        id: &EngineTaskId,
-        task: &EngineTask,
-    ) -> Option<BoundlessSubmissionResume> {
-        let record = match task {
-            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, task)
-                .await
-                .ok()
-                .flatten(),
-            EngineTask::Preflight { .. }
-            | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => None,
-        }?;
-
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
-        let task_id = Self::root_task_ref(id);
-        let runtime = match task {
+        let runtime = match source {
             EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
             EngineTask::Aggregate { .. } => metadata.aggregate_runtime(),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
+            EngineTask::PublishProof { .. } => {
+                unreachable!()
+            }
         }?;
-
-        let now = now_secs();
-        // Expired records must still reach the prover: it gives them one final market status
-        // read (an expired-but-fulfilled request still reports Fulfilled, recovering a proof
-        // that is already paid for) and otherwise counts the stored attempt against the rebid
-        // budget. Dropping them here would reset the budget and the price-escalation ladder on
-        // every restart after expiry.
-        let expires_at = runtime.expires_at?;
-
-        Some(BoundlessSubmissionResume {
-            provider_request_id: runtime.provider_request_id.clone()?,
-            remote_tx_hash: runtime.remote_tx_hash.clone(),
-            expires_at,
-            lock_expires_at: runtime.lock_expires_at.unwrap_or(0),
-            submitted_at: runtime.submitted_at.unwrap_or(now),
-            max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
-            max_price_wei: runtime.max_price_wei.clone(),
-            rebid_attempt: runtime.rebid_attempt.unwrap_or(0),
-        })
+        match backend {
+            NetworkProverBackend::Sp1 => {
+                #[derive(serde::Serialize)]
+                struct Sp1Resume<'a> {
+                    provider_request_id: &'a str,
+                }
+                PendingProofCheckpoint::from_payload(
+                    backend,
+                    std::num::NonZeroU32::new(runtime.rebid_attempt.unwrap_or(1).max(1))?,
+                    runtime.submitted_at.unwrap_or(0),
+                    runtime.expires_at.unwrap_or(0),
+                    0,
+                    &Sp1Resume {
+                        provider_request_id: runtime.provider_request_id.as_deref()?,
+                    },
+                )
+                .ok()
+            }
+            NetworkProverBackend::Boundless => {
+                let now = now_secs();
+                let expires_at = runtime.expires_at?;
+                let resume = BoundlessSubmissionResume {
+                    provider_request_id: runtime.provider_request_id.clone()?,
+                    remote_tx_hash: runtime.remote_tx_hash.clone(),
+                    expires_at,
+                    lock_expires_at: runtime.lock_expires_at.unwrap_or(0),
+                    submitted_at: runtime.submitted_at.unwrap_or(now),
+                    max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
+                    max_price_wei: runtime.max_price_wei.clone(),
+                    rebid_attempt: runtime.rebid_attempt.unwrap_or(0),
+                };
+                PendingProofCheckpoint::from_payload(
+                    backend,
+                    std::num::NonZeroU32::new(resume.rebid_attempt.max(1))?,
+                    resume.submitted_at,
+                    resume.expires_at,
+                    0,
+                    &resume,
+                )
+                .ok()
+            }
+        }
     }
 }
 
@@ -937,12 +1281,43 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+impl RuntimeObserver {
+    async fn load_sp1_network_request_id(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Sp1Resume {
+            provider_request_id: String,
+        }
+        self.load_pending_proof_checkpoint(id, task, NetworkProverBackend::Sp1)
+            .await?
+            .decode_payload::<Sp1Resume>()
+            .ok()
+            .map(|resume| resume.provider_request_id)
+    }
+
+    async fn load_boundless_submission(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Option<BoundlessSubmissionResume> {
+        self.load_pending_proof_checkpoint(id, task, NetworkProverBackend::Boundless)
+            .await?
+            .decode_payload()
+            .ok()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::task_metadata::{
         ProposalTask, RuntimeMetadata, aggregate_task_ref, proposal_task_ref, stage_task_ref,
     };
     use crate::server::telemetry;
+    use async_trait::async_trait;
     use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
@@ -950,7 +1325,160 @@ mod tests {
         BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
-    use raiko2_runtime::TaskRegistration;
+    use raiko2_runtime::{
+        MemoryProofArtifactStore, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
+        ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore, TaskRegistration,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Default)]
+    struct FailingArtifactStore {
+        attempts: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct InvalidatesDuringPublicationStore {
+        inner: MemoryProofArtifactStore,
+        checks: AtomicUsize,
+        block_on_check: usize,
+        recheck_entered: tokio::sync::Notify,
+        allow_recheck: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ProofArtifactStore for InvalidatesDuringPublicationStore {
+        fn environment(&self) -> &str {
+            self.inner.environment()
+        }
+
+        fn namespace(&self) -> &str {
+            self.inner.namespace()
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn put_if_absent(
+            &self,
+            key: &ProofArtifactKey,
+            bytes: &[u8],
+        ) -> Result<ProofArtifactPutResult> {
+            self.inner.put_if_absent(key, bytes).await
+        }
+
+        async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            self.inner.get(key).await
+        }
+
+        async fn get_prefix(
+            &self,
+            key: &ProofArtifactKey,
+            max_bytes: usize,
+        ) -> Result<Option<ProofArtifactPrefix>> {
+            self.inner.get_prefix(key, max_bytes).await
+        }
+
+        async fn mark_invalidated(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            content_hash: &str,
+        ) -> Result<()> {
+            self.inner
+                .mark_invalidated(key, generation, content_hash)
+                .await
+        }
+
+        async fn is_invalidated(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            content_hash: &str,
+        ) -> Result<bool> {
+            if self.checks.fetch_add(1, Ordering::SeqCst) == self.block_on_check {
+                self.recheck_entered.notify_one();
+                self.allow_recheck.notified().await;
+            }
+            self.inner
+                .is_invalidated(key, generation, content_hash)
+                .await
+        }
+
+        async fn delete(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            expected_content_hash: &str,
+        ) -> Result<()> {
+            self.inner
+                .delete(key, generation, expected_content_hash)
+                .await
+        }
+    }
+
+    #[async_trait]
+    impl ProofArtifactStore for FailingArtifactStore {
+        fn environment(&self) -> &str {
+            "test"
+        }
+
+        fn namespace(&self) -> &str {
+            "failure"
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn put_if_absent(
+            &self,
+            _key: &ProofArtifactKey,
+            _bytes: &[u8],
+        ) -> Result<ProofArtifactPutResult> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("injected publication failure")
+        }
+
+        async fn get(&self, _key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            Ok(None)
+        }
+
+        async fn get_prefix(
+            &self,
+            _key: &ProofArtifactKey,
+            _max_bytes: usize,
+        ) -> Result<Option<ProofArtifactPrefix>> {
+            Ok(None)
+        }
+
+        async fn mark_invalidated(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _content_hash: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn is_invalidated(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _content_hash: &str,
+        ) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn delete(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _expected_content_hash: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
 
     fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1104,7 +1632,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
         let future_expires_at = now_secs().saturating_add(3_600);
         observer
             .on_task_progress(
@@ -1129,7 +1661,8 @@ mod tests {
                     rebid_attempt: 3,
                 }),
             )
-            .await;
+            .await
+            .expect("persist Boundless submission progress");
 
         let record = runtime
             .get_task("task_public")
@@ -1297,7 +1830,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -1310,7 +1847,8 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let record = runtime
             .get_task("task_public_aggregate_pending")
@@ -1318,20 +1856,639 @@ mod tests {
             .expect("runtime task exists");
         let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         assert_eq!(record.runner_status, RunnerStatus::Allocated);
-        assert_eq!(record.proof_path, None);
+        assert_eq!(record.proof_uri, None);
         assert_eq!(
             metadata.runtime.last_event.as_deref(),
             Some("stage_completed")
         );
-        assert!(
-            !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
-            "proposal proof must not become the root proof for aggregate requests"
-        );
-        let artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
+        runtime
+            .get_proof_artifact(
+                "taiko_dev/ethereum",
+                pipeline,
+                pipeline.route(),
+                &proposal_ref,
+            )
             .await?
             .expect("proposal proof artifact");
-        assert!(tokio::fs::try_exists(Path::new(&artifact.proof_path)).await?);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &proposal_ref,
+                )
+                .await?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_rejects_publication_without_active_runtime_row() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-cross-replica-publication",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        let error = observer
+            .on_task_succeeded(
+                &task_id,
+                &EngineTask::ProveProposal {
+                    request,
+                    input_task: task_id.clone(),
+                },
+                &EngineTaskSuccess::Proof {
+                    stage: raiko2_pipeline::PipelineStage::Prove,
+                    proof: proof_fixture(),
+                },
+            )
+            .await
+            .expect_err("detached publication must be rejected");
+
+        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
+        assert!(runtime.list_tasks().await?.is_empty());
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref,)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_recovers_pending_publication_outbox() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-publication-outbox",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let proof = proof_fixture();
+        runtime
+            .upsert_pending_proof_publication(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &serde_json::to_vec(&proof)?,
+            )
+            .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        assert_eq!(
+            observer
+                .load_completed_proof(&task_id, &EngineTask::Proposal { request })
+                .await
+                .map_err(anyhow::Error::msg)?,
+            Some(proof)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidated_completion_cancels_the_publication() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-invalidated-completion-rollback",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_invalidated_completion",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Completed,
+        )
+        .await?;
+        let mut completed = runtime
+            .get_task("task_invalidated_completion")
+            .await?
+            .expect("completed runtime task");
+        completed.proof_uri = Some("memory://test/deleted-proof.json".to_string());
+        runtime.upsert_task(&completed).await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        observer
+            .mark_proof_publication_failed(
+                &task_id,
+                "prove",
+                "proof invalidated during completion",
+                PublicationFailureDisposition::Invalidated,
+            )
+            .await;
+
+        let rolled_back = runtime
+            .get_task("task_invalidated_completion")
+            .await?
+            .expect("rolled back runtime task");
+        assert_eq!(rolled_back.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(rolled_back.proof_uri, None);
+        assert_eq!(
+            rolled_back.error.as_deref(),
+            Some("proof invalidated during completion")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transient_success_sync_failure_stays_in_publication_retry_loop() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-sync-retry-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: MemoryProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 2,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-sync-retry"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_sync_retry",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+        let publication = tokio::spawn(async move {
+            observer
+                .on_task_succeeded(
+                    &task_id,
+                    &EngineTask::ProveProposal {
+                        request,
+                        input_task: task_id.clone(),
+                    },
+                    &EngineTaskSuccess::Proof {
+                        stage: raiko2_pipeline::PipelineStage::Prove,
+                        proof: proof_fixture(),
+                    },
+                )
+                .await
+        });
+
+        store.recheck_entered.notified().await;
+        let mut record = runtime
+            .get_task("task_sync_retry")
+            .await?
+            .expect("runtime task");
+        let valid_metadata = record.metadata.clone();
+        record.metadata = serde_json::json!({"invalid": true});
+        runtime.upsert_task(&record).await?;
+        store.allow_recheck.notify_one();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        record.metadata = valid_metadata;
+        runtime.upsert_task(&record).await?;
+
+        publication
+            .await?
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let completed = runtime
+            .get_task("task_sync_retry")
+            .await?
+            .expect("completed runtime task");
+        assert_eq!(completed.runner_status, RunnerStatus::Completed);
+        assert!(completed.proof_uri.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn publication_rechecks_shared_tombstone_before_clearing_outbox() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-publication-race-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: MemoryProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 1,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let first = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-publication-race-a"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let proof = proof_fixture();
+        register_observer_task(
+            first.as_ref(),
+            "task_publication_race",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        first
+            .upsert_pending_proof_publication(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &serde_json::to_vec(&proof)?,
+            )
+            .await?;
+        let observer =
+            RuntimeObserver::new(Arc::clone(&first), "taiko_dev/ethereum".to_string(), route);
+
+        let publication = tokio::spawn(async move {
+            observer
+                .on_task_succeeded(
+                    &task_id,
+                    &EngineTask::ProveProposal {
+                        request,
+                        input_task: task_id.clone(),
+                    },
+                    &EngineTaskSuccess::Proof {
+                        stage: raiko2_pipeline::PipelineStage::Prove,
+                        proof,
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), store.recheck_entered.notified())
+            .await
+            .with_context(|| {
+                format!(
+                    "publication never reached invalidation recheck; observed {} checks",
+                    store.checks.load(Ordering::SeqCst)
+                )
+            })?;
+        let canonical = first
+            .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .await?
+            .expect("published canonical artifact");
+        first
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &canonical.content_hash,
+            )
+            .await?;
+        store.allow_recheck.notify_one();
+        let error = publication
+            .await?
+            .expect_err("concurrent invalidation must reject publication");
+
+        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
+        assert!(
+            first
+                .get_pending_proof_publication("taiko_dev/ethereum", pipeline, route, &proof_ref,)
+                .await?
+                .is_none()
+        );
+        assert!(
+            first
+                .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_reconciliation_treats_concurrent_local_invalidation_as_cache_miss()
+    -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-reconcile-race-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: MemoryProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 0,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-reconcile-race"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let bytes = serde_json::to_vec(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object().clone();
+        let loading_runtime = Arc::clone(&runtime);
+        let loading_ref = proof_ref.clone();
+        let loading = tokio::spawn(async move {
+            crate::server::proof_artifact::load_proof_artifact_material(
+                &loading_runtime,
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &loading_ref,
+            )
+            .await
+        });
+        store.recheck_entered.notified().await;
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        runtime
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        store.allow_recheck.notify_one();
+
+        assert!(loading.await??.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_reconciliation_tolerates_concurrent_full_invalidation() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-full-invalidation-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: MemoryProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 1,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-full-invalidation"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = proposal_task_ref(pipeline, &proposal_request());
+        let bytes = serde_json::to_vec(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object().clone();
+        let loading_runtime = Arc::clone(&runtime);
+        let loading_ref = proof_ref.clone();
+        let loading = tokio::spawn(async move {
+            crate::server::proof_artifact::load_proof_artifact_material(
+                &loading_runtime,
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &loading_ref,
+            )
+            .await
+        });
+
+        store.recheck_entered.notified().await;
+        runtime
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        runtime
+            .delete_proof_artifact(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                object.generation,
+                &object.content_hash,
+            )
+            .await?;
+        runtime
+            .remove_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .await?;
+        store.allow_recheck.notify_one();
+
+        assert!(loading.await??.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn engine_artifact_loaders_honor_tombstones() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-tombstone-recovery",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let bytes = serde_json::to_vec(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        runtime
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+
+        assert!(
+            observer
+                .load_completed_proof(
+                    &task_id,
+                    &EngineTask::Proposal {
+                        request: request.clone(),
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        assert!(
+            observer
+                .load_proof_artifact(&ProofArtifactRef {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_ref,
+                })
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn engine_recovery_honors_tombstone_from_another_replica() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-shared-artifacts");
+        let store: Arc<dyn ProofArtifactStore> = Arc::new(MemoryProofArtifactStore::new(
+            "shared-environment".to_string(),
+            artifact_root
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        )?);
+        let first = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-replica-a"),
+            Arc::clone(&store),
+        )?);
+        let second = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-replica-b"),
+            store,
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let bytes = serde_json::to_vec(&proof_fixture())?;
+        let publication = first
+            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
+            .await?;
+        let object = publication.object();
+        first
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        first
+            .mark_proof_artifact_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        let observer =
+            RuntimeObserver::new(Arc::clone(&second), "taiko_dev/ethereum".to_string(), route);
+
+        assert!(
+            observer
+                .load_completed_proof(&task_id, &EngineTask::Proposal { request })
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        assert!(second.list_proof_artifacts().await?.is_empty());
         Ok(())
     }
 
@@ -1366,7 +2523,11 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -1379,7 +2540,8 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let cancelled = runtime
             .get_task("task_cancelled")
@@ -1387,9 +2549,9 @@ mod tests {
             .expect("cancelled task");
         let active = runtime.get_task("task_active").await?.expect("active task");
         assert_eq!(cancelled.runner_status, RunnerStatus::Cancelled);
-        assert_eq!(cancelled.proof_path, None);
+        assert_eq!(cancelled.proof_uri, None);
         assert_eq!(active.runner_status, RunnerStatus::Completed);
-        assert!(active.proof_path.is_some());
+        assert!(active.proof_uri.is_some());
         Ok(())
     }
 
@@ -1427,7 +2589,11 @@ mod tests {
         )
         .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         observer
             .on_task_started(&proposal_task_id, &task, "worker-a")
             .await;
@@ -1482,7 +2648,11 @@ mod tests {
         record.error = Some("transient preflight failure".to_string());
         runtime.upsert_task(&record).await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
+        );
         observer
             .on_task_started(&proposal_task_id, &task, "worker-a")
             .await;
@@ -1550,7 +2720,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_succeeded(
                 &first_task_id,
@@ -1563,24 +2737,31 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let record = runtime
             .get_task("task_public_multi_proposal")
             .await?
             .expect("runtime task exists");
         assert_eq!(record.runner_status, RunnerStatus::Allocated);
-        assert_eq!(record.proof_path, None);
-        assert!(
-            !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
-            "partial proposal proof must not be persisted as final root proof"
-        );
+        assert_eq!(record.proof_uri, None);
         let first_ref = proposal_task_ref(pipeline, &first_request);
-        let first_artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", &first_ref)
+        runtime
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, pipeline.route(), &first_ref)
             .await?
             .expect("first proposal proof artifact");
-        assert!(tokio::fs::try_exists(Path::new(&first_artifact.proof_path)).await?);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &first_ref,
+                )
+                .await?
+                .is_some()
+        );
 
         observer
             .on_task_succeeded(
@@ -1594,7 +2775,8 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         let record = runtime
             .get_task("task_public_multi_proposal")
@@ -1602,11 +2784,20 @@ mod tests {
             .expect("runtime task exists");
         let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         assert_eq!(record.runner_status, RunnerStatus::Completed);
-        assert!(record.proof_path.is_some());
+        assert!(record.proof_uri.is_some());
         assert_eq!(metadata.runtime.last_event.as_deref(), Some("completed"));
-        let proof_path = record.proof_path.expect("root proof path");
-        assert!(tokio::fs::try_exists(Path::new(&proof_path)).await?);
-        assert!(!tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?);
+        assert!(record.proof_uri.is_some());
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &RuntimeObserver::root_task_ref(&second_task_id),
+                )
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 
@@ -1656,7 +2847,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -1665,6 +2860,7 @@ mod tests {
                     input_task: proposal_task_id.clone(),
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    attempt: 1,
                     provider_request_id: "0xsp1".to_string(),
                     network_mode: Sp1NetworkMode::Reserved,
                     fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
@@ -1675,7 +2871,8 @@ mod tests {
                     auction_timeout_secs: Some(120),
                 }),
             )
-            .await;
+            .await
+            .expect("persist SP1 submission progress");
 
         let record = runtime
             .get_task("task_public_sp1")
@@ -1787,7 +2984,11 @@ mod tests {
             })
             .await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -1796,6 +2997,7 @@ mod tests {
                     input_task: proposal_task_id.clone(),
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    attempt: 1,
                     provider_request_id: "0xsp1-proposal".to_string(),
                     network_mode: Sp1NetworkMode::Reserved,
                     fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
@@ -1806,7 +3008,8 @@ mod tests {
                     auction_timeout_secs: Some(120),
                 }),
             )
-            .await;
+            .await
+            .expect("persist proposal SP1 submission progress");
 
         assert_eq!(
             observer
@@ -1886,7 +3089,11 @@ mod tests {
         record.provider_request_id = Some("0xsp1-proposal".to_string());
         runtime.upsert_task(&record).await?;
 
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
         assert_eq!(
             observer
                 .load_sp1_network_request_id(
@@ -1908,6 +3115,7 @@ mod tests {
                     source: raiko2_engine::AggregationSource::Inputs(vec![]),
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    attempt: 1,
                     provider_request_id: "0xsp1-aggregate".to_string(),
                     network_mode: Sp1NetworkMode::Reserved,
                     fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
@@ -1918,7 +3126,8 @@ mod tests {
                     auction_timeout_secs: Some(120),
                 }),
             )
-            .await;
+            .await
+            .expect("persist aggregate SP1 submission progress");
 
         assert_eq!(
             observer
@@ -1990,6 +3199,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "telemetry_restart/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
         );
         observer
             .on_task_failed(
@@ -2037,6 +3247,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "metrics_failure_kind/ethereum".to_string(),
+            PipelineKey::ShastaNative.route(),
         );
         observer
             .on_task_failed(
@@ -2062,9 +3273,11 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_observer_records_proof_persistence_failure_metrics() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-proof-persistence",
-        ))?);
+        let store = Arc::new(FailingArtifactStore::default());
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-proof-persistence"),
+            store.clone(),
+        )?);
         let pipeline = PipelineKey::ShastaNative;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -2083,16 +3296,12 @@ mod tests {
         )
         .await?;
 
-        let proof_path = runtime.proof_artifact_path(
-            network_pair,
-            &RuntimeObserver::root_task_ref(&proposal_task_id),
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            network_pair.to_string(),
+            PipelineKey::ShastaNative.route(),
         );
-        let artifact_dir = proof_path.parent().expect("proof artifact parent");
-        tokio::fs::create_dir_all(artifact_dir.parent().expect("proof artifact root")).await?;
-        tokio::fs::write(artifact_dir, b"not a directory").await?;
-
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string());
-        observer
+        let error = observer
             .on_task_succeeded(
                 &proposal_task_id,
                 &EngineTask::ProveProposal {
@@ -2104,18 +3313,24 @@ mod tests {
                     proof: proof_fixture(),
                 },
             )
-            .await;
+            .await
+            .expect_err("publication must fail");
+        assert!(
+            matches!(error, EngineObserverError::ProofPublication(_)),
+            "{error}"
+        );
+        assert_eq!(store.attempts.load(Ordering::SeqCst), 3);
 
         let record = runtime
             .get_task("task_proof_persistence_failure")
             .await?
             .expect("runtime task exists");
-        assert_eq!(record.runner_status, RunnerStatus::Failed);
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
         assert!(
             record
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("failed to persist proof output")),
+                .is_some_and(|error| error.contains("failed to publish proof artifact")),
             "{record:?}"
         );
 

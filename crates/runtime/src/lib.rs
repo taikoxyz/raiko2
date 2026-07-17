@@ -1,26 +1,60 @@
 #![allow(missing_docs)]
 #![allow(unreachable_pub)]
-#![allow(clippy::redundant_pub_crate)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "the runtime crate currently permits undocumented internal-facing public APIs"
+)]
+
+mod artifact_store;
+mod publication;
+
+pub use artifact_store::{
+    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactKey, ProofArtifactObject,
+    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, validate_scope_component,
+};
+pub use publication::ProofArtifactPublicationInvalidated;
 
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
-use std::fs as stdfs;
-use std::path::{Path, PathBuf};
-use std::process;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, RwLock};
 
-/// Runtime root managed by the host process.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+pub struct PendingProofPublicationRemoved {
+    proof_ref: String,
+}
+
+impl std::fmt::Display for PendingProofPublicationRemoved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "pending proof publication {} has been removed",
+            self.proof_ref
+        )
+    }
+}
+
+impl std::error::Error for PendingProofPublicationRemoved {}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct RuntimeState {
+    tasks: HashMap<String, RuntimeTaskRecord>,
+    artifacts: HashMap<String, ProofArtifactRecord>,
+}
+
+#[derive(Debug)]
 pub struct RuntimeManager {
-    root: PathBuf,
-    db_path: PathBuf,
-    conn: OnceCell<tokio_rusqlite::Connection>,
+    store: Arc<dyn ProofArtifactStore>,
+    state: RwLock<RuntimeState>,
+    generation: StdMutex<Option<i64>>,
+    mutation: Mutex<()>,
+    owner: Mutex<Option<artifact_store::NamespaceOwnerLease>>,
+    active: AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,307 +75,398 @@ pub struct ProofArtifactRegistration {
     pub proof_ref: String,
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
-    pub proof_path: String,
+    pub proof_uri: String,
+    pub content_hash: String,
+    pub generation: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProofArtifactRecord {
+    pub environment: String,
     pub network_pair: String,
     pub proof_ref: String,
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
-    pub proof_path: String,
+    pub proof_uri: String,
+    pub content_hash: String,
+    pub generation: Option<i64>,
+    pub invalidated_at: Option<i64>,
     pub updated_at: i64,
 }
 
 impl RuntimeManager {
-    /// # Errors
-    ///
-    /// Returns an error if the runtime layout cannot be created.
-    pub fn new(root: PathBuf) -> Result<Self> {
-        let manager = Self {
-            db_path: root.join("state").join("runtime.sqlite"),
-            root,
-            conn: OnceCell::new(),
+    pub fn new(test_root: impl AsRef<std::path::Path>) -> Result<Self> {
+        let namespace = format!(
+            "test-{}",
+            artifact_store::content_hash(test_root.as_ref().to_string_lossy().as_bytes())
+        );
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "local".to_string(),
+            namespace,
+        )?);
+        Self::with_store(store)
+    }
+
+    pub fn new_memory(environment: String, namespace: String) -> Result<Self> {
+        let store = Arc::new(MemoryProofArtifactStore::new(environment, namespace)?);
+        Self::with_store(store)
+    }
+
+    pub fn with_store(store: Arc<dyn ProofArtifactStore>) -> Result<Self> {
+        Ok(Self {
+            store,
+            state: RwLock::new(RuntimeState::default()),
+            generation: StdMutex::new(None),
+            mutation: Mutex::new(()),
+            owner: Mutex::new(None),
+            active: AtomicBool::new(true),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_artifact_store(
+        _test_identity: PathBuf,
+        store: Arc<dyn ProofArtifactStore>,
+    ) -> Result<Self> {
+        Self::with_store(store)
+    }
+
+    pub async fn acquire_namespace_owner(&self, lease_secs: u64) -> Result<()> {
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let lease = self
+            .store
+            .claim_namespace_owner(&owner_id, now_secs(), lease_secs)
+            .await?;
+        *self.owner.lock().await = lease;
+        self.active.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Renews GCS namespace ownership. `false` means another owner superseded this process.
+    pub async fn renew_namespace_owner(&self, lease_secs: u64) -> Result<bool> {
+        let mut owner = self.owner.lock().await;
+        let lease = owner.clone();
+        let Some(lease) = lease else {
+            self.active.store(true, Ordering::Release);
+            return Ok(true);
         };
-        manager.ensure_layout()?;
-        Ok(manager)
+        match self
+            .store
+            .renew_namespace_owner(&lease, now_secs(), lease_secs)
+            .await
+        {
+            Ok(Some(renewed)) => {
+                *owner = Some(renewed);
+                self.active.store(true, Ordering::Release);
+                Ok(true)
+            }
+            Ok(None) => {
+                self.active.store(false, Ordering::Release);
+                Ok(false)
+            }
+            Err(error) => {
+                self.active.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
     }
 
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the runtime layout cannot be created.
-    pub fn ensure_layout(&self) -> Result<()> {
-        for dir in [
-            self.root.join("state"),
-            self.root.join("tasks"),
-            self.root.join("images"),
-            self.root.join("cache"),
-            self.root.join("cache").join("proofs"),
-            self.root.join("tmp"),
-        ] {
-            stdfs::create_dir_all(&dir)
-                .with_context(|| format!("failed to create runtime directory {}", dir.display()))?;
+    /// Verifies that this process still owns its authoritative runtime namespace.
+    pub async fn check_readiness(&self) -> Result<()> {
+        self.ensure_active()?;
+        let owner = self.owner.lock().await;
+        if let Some(lease) = owner.as_ref()
+            && !self.store.verify_namespace_owner(lease, now_secs()).await?
+        {
+            self.active.store(false, Ordering::Release);
+            anyhow::bail!("runtime namespace ownership is unavailable");
         }
         Ok(())
     }
 
-    async fn connection(&self) -> Result<tokio_rusqlite::Connection> {
-        let db_path = self.db_path.clone();
-        let conn = self
-            .conn
-            .get_or_try_init(|| async move {
-                let conn = tokio_rusqlite::Connection::open(db_path)
-                    .await
-                    .context("failed to open runtime sqlite database")?;
-                conn.call(|conn| {
-                    conn.execute_batch(
-                        r"
-                        PRAGMA journal_mode = WAL;
-                        CREATE TABLE IF NOT EXISTS runtime_tasks (
-                            task_id TEXT PRIMARY KEY,
-                            pipeline_key TEXT NOT NULL,
-                            route TEXT NOT NULL,
-                            guest_system TEXT NOT NULL,
-                            runner TEXT NOT NULL,
-                            task_kind TEXT NOT NULL,
-                            proposal_id INTEGER,
-                            proof_ids_json TEXT,
-                            runner_status TEXT NOT NULL,
-                            task_dir TEXT NOT NULL,
-                            image_ref TEXT,
-                            provider_request_id TEXT,
-                            remote_tx_hash TEXT,
-                            proof_path TEXT,
-                            error TEXT,
-                            metadata_json TEXT,
-                            request_fingerprint TEXT,
-                            updated_at INTEGER NOT NULL
-                        );
-                        ",
-                    )?;
-                    migrate_runtime_schema(conn)?;
-                    Ok(())
-                })
-                .await
-                .context("failed to initialize runtime sqlite schema")?;
-                Ok::<_, anyhow::Error>(conn)
-            })
-            .await?;
-        Ok(conn.clone())
+    fn ensure_active(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.active.load(Ordering::Acquire),
+            "runtime namespace ownership is unavailable"
+        );
+        Ok(())
     }
 
-    #[must_use]
-    pub fn task_dir(&self, pipeline_key: PipelineKey, task_id: &str) -> PathBuf {
-        self.root
-            .join("tasks")
-            .join(pipeline_key.as_str())
-            .join(task_id)
+    pub async fn initialize(&self) -> Result<()> {
+        let Some(stored) = self.store.load_runtime_state().await? else {
+            return Ok(());
+        };
+        let state = serde_json::from_slice(&stored.bytes).context("decode runtime store state")?;
+        *self.state.write().await = state;
+        *self
+            .generation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))? = stored.generation;
+        Ok(())
     }
 
-    #[must_use]
-    pub fn proof_artifact_path(&self, network_pair: &str, proof_ref: &str) -> PathBuf {
-        self.root
-            .join("cache")
-            .join("proofs")
-            .join(safe_path_component(network_pair))
-            .join(format!("{}.json", safe_path_component(proof_ref)))
-    }
-
-    /// # Errors
+    /// Advances the durable state generation after acquiring namespace ownership.
     ///
-    /// Returns an error if the proof artifact cannot be atomically published.
-    pub async fn write_proof_artifact_bytes(
+    /// A previous owner may still have one state write in flight when its lease expires. Rewriting
+    /// the loaded snapshot with compare-and-swap invalidates that owner's cached generation before
+    /// this process admits recovered work.
+    pub async fn fence_namespace_owner(&self) -> Result<()> {
+        const MAX_ATTEMPTS: usize = 8;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.mutate(|_| Ok(())).await {
+                Ok(()) => return Ok(()),
+                Err(_) if attempt < MAX_ATTEMPTS => {
+                    self.initialize().await?;
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => {
+                    return Err(error).context("failed to fence runtime namespace ownership");
+                }
+            }
+        }
+        unreachable!("namespace fencing loop returns on every terminal branch")
+    }
+
+    #[must_use]
+    pub fn environment(&self) -> &str {
+        self.store.environment()
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        self.store.namespace()
+    }
+
+    #[must_use]
+    pub fn backend_name(&self) -> &'static str {
+        self.store.backend_name()
+    }
+
+    async fn mutate<T>(&self, update: impl FnOnce(&mut RuntimeState) -> Result<T>) -> Result<T> {
+        let _mutation = self.mutation.lock().await;
+        self.ensure_active()?;
+        let mut next = self.state.read().await.clone();
+        let output = update(&mut next)?;
+        let bytes = serde_json::to_vec(&next).context("encode runtime store state")?;
+        let expected_generation = *self
+            .generation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))?;
+        let generation = self
+            .store
+            .store_runtime_state(&bytes, expected_generation)
+            .await?;
+        *self.state.write().await = next;
+        *self
+            .generation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))? = generation;
+        Ok(output)
+    }
+
+    async fn fence_external_mutation(&self) -> Result<()> {
+        self.check_readiness().await?;
+        self.mutate(|_| Ok(())).await
+    }
+
+    fn artifact_key(
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> ProofArtifactKey {
+        ProofArtifactKey {
+            network_pair: network_pair.to_string(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.to_string(),
+        }
+    }
+
+    pub async fn publish_proof_artifact_bytes(
         &self,
         network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
         bytes: &[u8],
-    ) -> Result<PathBuf> {
-        let path = self.proof_artifact_path(network_pair, proof_ref);
-        write_file_atomic(&path, bytes).await?;
-        Ok(path)
+    ) -> Result<ProofArtifactPutResult> {
+        self.fence_external_mutation().await?;
+        self.store
+            .put_if_absent(
+                &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
+                bytes,
+            )
+            .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task workspace or metadata cannot be created.
+    pub async fn read_proof_artifact_bytes(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<Option<ProofArtifactObject>> {
+        self.store
+            .get(&Self::artifact_key(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+            ))
+            .await
+    }
+
+    pub async fn read_proof_artifact_prefix(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        max_bytes: usize,
+    ) -> Result<Option<ProofArtifactPrefix>> {
+        self.store
+            .get_prefix(
+                &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
+                max_bytes,
+            )
+            .await
+    }
+
+    pub async fn delete_proof_artifact(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        generation: Option<i64>,
+        expected_content_hash: &str,
+    ) -> Result<()> {
+        self.fence_external_mutation().await?;
+        self.store
+            .delete(
+                &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
+                generation,
+                expected_content_hash,
+            )
+            .await
+    }
+
+    pub const fn ensure_layout(&self) -> Result<()> {
+        Ok(())
+    }
+
     pub async fn register_task(&self, registration: TaskRegistration) -> Result<RuntimeTaskRecord> {
-        let record = self.build_task_record(&registration)?;
-        self.write_task_workspace(&registration).await?;
+        let record = build_task_record(&registration)?;
         self.upsert_task(&record).await?;
         Ok(record)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task cannot be inserted or loaded.
     pub async fn register_task_if_absent(
         &self,
         registration: TaskRegistration,
     ) -> Result<TaskRegistrationOutcome> {
-        let request_fingerprint = registration
+        let fingerprint = registration
             .request_fingerprint
-            .as_ref()
-            .context("request_fingerprint is required for idempotent registration")?;
-        let record = self.build_task_record(&registration)?;
-        if self.insert_task_if_absent(&record).await? {
-            if let Err(err) = self.write_task_workspace(&registration).await {
-                let _ = self.delete_task_row(&record.task_id).await;
-                let _ = remove_task_workspace(Path::new(&record.task_dir)).await;
-                return Err(err);
+            .as_deref()
+            .context("request_fingerprint is required for idempotent registration")?
+            .to_string();
+        let record = build_task_record(&registration)?;
+        self.mutate(move |state| {
+            if let Some(existing) = state.tasks.get(&record.task_id).cloned().or_else(|| {
+                state
+                    .tasks
+                    .values()
+                    .find(|task| task.request_fingerprint.as_deref() == Some(&fingerprint))
+                    .cloned()
+            }) {
+                return Ok(TaskRegistrationOutcome::Existing(existing));
             }
-            return Ok(TaskRegistrationOutcome::Created(record));
-        }
-
-        let existing = match self.get_task(&record.task_id).await? {
-            Some(existing) => existing,
-            None => self
-                .find_task_by_request_fingerprint(request_fingerprint)
-                .await?
-                .context("request fingerprint conflict without a matching runtime task")?,
-        };
-        Ok(TaskRegistrationOutcome::Existing(existing))
+            state.tasks.insert(record.task_id.clone(), record.clone());
+            Ok(TaskRegistrationOutcome::Created(record))
+        })
+        .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record cannot be stored.
     pub async fn upsert_task(&self, record: &RuntimeTaskRecord) -> Result<()> {
-        let conn = self.connection().await?;
-        let proof_ids_json =
-            serde_json::to_string(&record.proof_ids).context("serialize proof_ids")?;
-        let metadata_json =
-            serde_json::to_string(&record.metadata).context("serialize runtime metadata")?;
         let record = record.clone();
-        conn.call(move |conn| {
-            conn.execute(
-                r"
-                INSERT INTO runtime_tasks (
-                    task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                    proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                    remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                    updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-                ON CONFLICT(task_id) DO UPDATE SET
-                    pipeline_key = excluded.pipeline_key,
-                    route = excluded.route,
-                    guest_system = excluded.guest_system,
-                    runner = excluded.runner,
-                    task_kind = excluded.task_kind,
-                    proposal_id = excluded.proposal_id,
-                    proof_ids_json = excluded.proof_ids_json,
-                    runner_status = excluded.runner_status,
-                    task_dir = excluded.task_dir,
-                    image_ref = excluded.image_ref,
-                    provider_request_id = excluded.provider_request_id,
-                    remote_tx_hash = excluded.remote_tx_hash,
-                    proof_path = excluded.proof_path,
-                    error = excluded.error,
-                    metadata_json = excluded.metadata_json,
-                    request_fingerprint = excluded.request_fingerprint,
-                    updated_at = excluded.updated_at
-                ",
-                params![
-                    record.task_id,
-                    record.pipeline_key.as_str(),
-                    record.route.to_string(),
-                    record.route.guest_system.to_string(),
-                    record.route.runner.to_string(),
-                    record.task_kind,
-                    record.proposal_id,
-                    proof_ids_json,
-                    record.runner_status.as_str(),
-                    record.task_dir,
-                    record.image_ref,
-                    record.provider_request_id,
-                    record.remote_tx_hash,
-                    record.proof_path,
-                    record.error,
-                    metadata_json,
-                    record.request_fingerprint,
-                    record.updated_at,
-                ],
-            )?;
+        self.mutate(move |state| {
+            if let Some(fingerprint) = record.request_fingerprint.as_deref()
+                && state.tasks.values().any(|task| {
+                    task.task_id != record.task_id
+                        && task.request_fingerprint.as_deref() == Some(fingerprint)
+                })
+            {
+                anyhow::bail!("request fingerprint already belongs to another task");
+            }
+            state.tasks.insert(record.task_id.clone(), record);
             Ok(())
         })
         .await
-        .context("failed to upsert runtime task")?;
-        Ok(())
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record cannot be loaded.
-    pub async fn get_task(&self, task_id: &str) -> Result<Option<RuntimeTaskRecord>> {
-        let conn = self.connection().await?;
+    pub async fn update_task_metadata(
+        &self,
+        task_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<bool> {
         let task_id = task_id.to_string();
-        let row = conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    r"
-                    SELECT
-                        task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                        proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                        updated_at
-                    FROM runtime_tasks
-                    WHERE task_id = ?1
-                    ",
-                )?;
-                let mut rows = stmt.query(params![task_id])?;
-                let Some(row) = rows.next()? else {
-                    return Ok(None);
-                };
-                Ok(Some(runtime_task_record_from_row(row)?))
-            })
-            .await
-            .context("failed to query runtime task")?;
-        Ok(row)
+        let metadata = metadata.clone();
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(false);
+            };
+            task.metadata = metadata;
+            task.updated_at = now_ts();
+            Ok(true)
+        })
+        .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record cannot be loaded.
+    pub async fn update_task_metadata_integer(
+        &self,
+        task_id: &str,
+        json_path: &str,
+        value: i64,
+    ) -> Result<bool> {
+        let task_id = task_id.to_string();
+        let field = json_path
+            .strip_prefix("$.")
+            .context("metadata path must start with '$.'")?
+            .split('.')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(false);
+            };
+            set_json_integer(&mut task.metadata, &field, value)?;
+            task.updated_at = now_ts();
+            Ok(true)
+        })
+        .await
+    }
+
+    pub async fn get_task(&self, task_id: &str) -> Result<Option<RuntimeTaskRecord>> {
+        Ok(self.state.read().await.tasks.get(task_id).cloned())
+    }
+
     pub async fn find_task_by_request_fingerprint(
         &self,
-        request_fingerprint: &str,
+        fingerprint: &str,
     ) -> Result<Option<RuntimeTaskRecord>> {
-        let conn = self.connection().await?;
-        let request_fingerprint = request_fingerprint.to_string();
-        let row = conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    r"
-                    SELECT
-                        task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                        proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                        updated_at
-                    FROM runtime_tasks
-                    WHERE request_fingerprint = ?1
-                    ORDER BY updated_at DESC, task_id ASC
-                    LIMIT 1
-                    ",
-                )?;
-                let mut rows = stmt.query(params![request_fingerprint])?;
-                let Some(row) = rows.next()? else {
-                    return Ok(None);
-                };
-                Ok(Some(runtime_task_record_from_row(row)?))
-            })
+        Ok(self
+            .state
+            .read()
             .await
-            .context("failed to query runtime task by request fingerprint")?;
-        Ok(row)
+            .tasks
+            .values()
+            .filter(|task| task.request_fingerprint.as_deref() == Some(fingerprint))
+            .max_by_key(|task| (task.updated_at, std::cmp::Reverse(task.task_id.clone())))
+            .cloned())
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record cannot be loaded.
     pub async fn find_task_by_engine_task_id(
         &self,
         engine_task_id: &str,
@@ -349,9 +474,6 @@ impl RuntimeManager {
         self.find_task_by_task_ref(engine_task_id).await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record cannot be loaded.
     pub async fn find_task_by_task_ref(&self, task_ref: &str) -> Result<Option<RuntimeTaskRecord>> {
         Ok(self
             .find_tasks_by_task_ref(task_ref)
@@ -360,9 +482,6 @@ impl RuntimeManager {
             .next())
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the matching task records cannot be loaded.
     pub async fn find_tasks_by_engine_task_id(
         &self,
         engine_task_id: &str,
@@ -370,69 +489,74 @@ impl RuntimeManager {
         self.find_tasks_by_task_ref(engine_task_id).await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the matching task records cannot be loaded.
     pub async fn find_tasks_by_task_ref(&self, task_ref: &str) -> Result<Vec<RuntimeTaskRecord>> {
-        let conn = self.connection().await?;
-        let task_ref = task_ref.to_string();
-        let tasks = conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    r"
-                    SELECT
-                        task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                        proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                        updated_at
-                    FROM runtime_tasks
-                    WHERE task_id = ?1
-                        OR EXISTS (
-                            SELECT 1
-                            FROM json_each(runtime_tasks.proof_ids_json)
-                            WHERE json_each.value = ?1
-                        )
-                        OR json_extract(metadata_json, '$.aggregate_task_id') = ?1
-                    ORDER BY updated_at DESC, task_id ASC
-                    ",
-                )?;
-                let mut rows = stmt.query(params![task_ref])?;
-                let mut matches = Vec::new();
-                while let Some(row) = rows.next()? {
-                    matches.push(runtime_task_record_from_row(row)?);
-                }
-                Ok(matches)
-            })
+        let mut tasks = self
+            .state
+            .read()
             .await
-            .context("failed to query runtime task by task reference")?;
+            .tasks
+            .values()
+            .filter(|task| {
+                task.task_id == task_ref
+                    || task.proof_ids.iter().any(|id| id == task_ref)
+                    || task
+                        .metadata
+                        .get("aggregate_task_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(task_ref)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
         Ok(tasks)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record cannot be updated.
     pub async fn sync_status(
         &self,
         task_id: &str,
         runner_status: RunnerStatus,
         error: Option<String>,
-        proof_path: Option<String>,
+        proof_uri: Option<String>,
     ) -> Result<()> {
-        let Some(mut record) = self.get_task(task_id).await? else {
-            return Ok(());
-        };
-        record.runner_status = runner_status;
-        record.error = error;
-        if proof_path.is_some() {
-            record.proof_path = proof_path;
-        }
-        record.updated_at = now_ts();
-        self.upsert_task(&record).await
+        let task_id = task_id.to_string();
+        self.mutate(move |state| {
+            if let Some(task) = state.tasks.get_mut(&task_id) {
+                task.runner_status = runner_status;
+                task.error = error;
+                if proof_uri.is_some() {
+                    task.proof_uri = proof_uri;
+                }
+                task.updated_at = now_ts();
+            }
+            Ok(())
+        })
+        .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the conditional runtime task cancellation cannot be persisted.
+    pub async fn complete_nonterminal_task(&self, task_id: &str, proof_uri: &str) -> Result<bool> {
+        let task_id = task_id.to_string();
+        let proof_uri = proof_uri.to_string();
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(false);
+            };
+            if task.runner_status.is_terminal() {
+                return Ok(false);
+            }
+            task.runner_status = RunnerStatus::Completed;
+            task.proof_uri = Some(proof_uri);
+            task.error = None;
+            task.updated_at = now_ts();
+            Ok(true)
+        })
+        .await
+    }
+
     pub async fn cancel_nonterminal_task(
         &self,
         task_id: &str,
@@ -442,9 +566,6 @@ impl RuntimeManager {
             .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the stale runtime task cancellation cannot be persisted.
     pub async fn cancel_nonterminal_task_if_stale(
         &self,
         task_id: &str,
@@ -461,477 +582,390 @@ impl RuntimeManager {
         error: Option<String>,
         updated_at_or_before: Option<i64>,
     ) -> Result<bool> {
-        let conn = self.connection().await?;
         let task_id = task_id.to_string();
-        let updated_at = now_ts();
-        let runner_status = RunnerStatus::Cancelled.as_str();
-        let updated = conn
-            .call(move |conn| {
-                if let Some(updated_at_or_before) = updated_at_or_before {
-                    Ok(conn.execute(
-                        r"
-                        UPDATE runtime_tasks
-                        SET runner_status = ?1,
-                            error = ?2,
-                            updated_at = ?3
-                        WHERE task_id = ?4
-                          AND runner_status IN ('allocated', 'running')
-                          AND updated_at <= ?5
-                        ",
-                        params![
-                            runner_status,
-                            error,
-                            updated_at,
-                            task_id,
-                            updated_at_or_before
-                        ],
-                    )?)
-                } else {
-                    Ok(conn.execute(
-                        r"
-                        UPDATE runtime_tasks
-                        SET runner_status = ?1,
-                            error = ?2,
-                            updated_at = ?3
-                        WHERE task_id = ?4
-                          AND runner_status IN ('allocated', 'running')
-                        ",
-                        params![runner_status, error, updated_at, task_id],
-                    )?)
-                }
-            })
-            .await
-            .context("failed cancel non-terminal runtime task")?;
-
-        Ok(updated > 0)
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(false);
+            };
+            if task.runner_status.is_terminal()
+                || updated_at_or_before.is_some_and(|cutoff| task.updated_at > cutoff)
+            {
+                return Ok(false);
+            }
+            task.runner_status = RunnerStatus::Cancelled;
+            task.error = error;
+            task.updated_at = now_ts();
+            Ok(true)
+        })
+        .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the proof artifact record cannot be stored.
     pub async fn upsert_proof_artifact(
         &self,
         registration: ProofArtifactRegistration,
     ) -> Result<()> {
-        let conn = self.connection().await?;
-        let updated_at = now_ts();
-        conn.call(move |conn| {
-            conn.execute(
-                r"
-                INSERT INTO proof_artifacts (
-                    network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
-                    pipeline_key = excluded.pipeline_key,
-                    route = excluded.route,
-                    proof_path = excluded.proof_path,
-                    updated_at = excluded.updated_at
-                ",
-                params![
-                    registration.network_pair,
-                    registration.proof_ref,
-                    registration.pipeline_key.as_str(),
-                    registration.route.to_string(),
-                    registration.proof_path,
-                    updated_at,
-                ],
-            )?;
+        let key = artifact_record_key(
+            &registration.network_pair,
+            registration.pipeline_key,
+            registration.route,
+            &registration.proof_ref,
+        );
+        let record = ProofArtifactRecord {
+            environment: self.environment().to_string(),
+            network_pair: registration.network_pair,
+            proof_ref: registration.proof_ref,
+            pipeline_key: registration.pipeline_key,
+            route: registration.route,
+            proof_uri: registration.proof_uri,
+            content_hash: registration.content_hash,
+            generation: registration.generation,
+            invalidated_at: None,
+            updated_at: now_ts(),
+        };
+        self.mutate(move |state| {
+            if let Some(existing) = state.artifacts.get(&key)
+                && existing.invalidated_at.is_some()
+                && existing.content_hash == record.content_hash
+                && existing.generation == record.generation
+            {
+                return Ok(());
+            }
+            state.artifacts.insert(key, record);
             Ok(())
         })
         .await
-        .context("failed to upsert proof artifact")?;
-        Ok(())
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the proof artifact record cannot be loaded.
     pub async fn get_proof_artifact(
         &self,
         network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactRecord>> {
-        let conn = self.connection().await?;
-        let network_pair = network_pair.to_string();
-        let proof_ref = proof_ref.to_string();
-        let artifact = conn
-            .call(move |conn| {
-                Ok(conn
-                    .query_row(
-                        r"
-                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                    FROM proof_artifacts
-                    WHERE network_pair = ?1 AND proof_ref = ?2
-                    ",
-                        params![network_pair, proof_ref],
-                        proof_artifact_record_from_row,
-                    )
-                    .optional()?)
-            })
-            .await
-            .context("failed to query proof artifact")?;
-        Ok(artifact)
+        Ok(self
+            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .filter(|record| record.invalidated_at.is_none()))
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if proof artifact records cannot be listed.
+    pub async fn get_proof_artifact_including_invalidated(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<Option<ProofArtifactRecord>> {
+        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        Ok(self.state.read().await.artifacts.get(&key).cloned())
+    }
+
     pub async fn list_proof_artifacts(&self) -> Result<Vec<ProofArtifactRecord>> {
-        let conn = self.connection().await?;
-        let artifacts = conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    r"
-                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                    FROM proof_artifacts
-                    ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
-                    ",
-                )?;
-                let mut rows = stmt.query([])?;
-                let mut artifacts = Vec::new();
-                while let Some(row) = rows.next()? {
-                    artifacts.push(proof_artifact_record_from_row(row)?);
-                }
-                Ok(artifacts)
-            })
+        let mut artifacts = self
+            .state
+            .read()
             .await
-            .context("failed to list proof artifacts")?;
+            .artifacts
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        artifacts.sort_by_key(|record| {
+            (
+                record.updated_at,
+                record.network_pair.clone(),
+                record.proof_ref.clone(),
+            )
+        });
         Ok(artifacts)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the proof artifact record cannot be removed.
     pub async fn remove_proof_artifact(
         &self,
         network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<Option<ProofArtifactRecord>> {
-        let conn = self.connection().await?;
-        let network_pair = network_pair.to_string();
-        let proof_ref = proof_ref.to_string();
-        let artifact = conn
-            .call(move |conn| {
-                let artifact = conn
-                    .query_row(
-                        r"
-                        SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                        FROM proof_artifacts
-                        WHERE network_pair = ?1 AND proof_ref = ?2
-                        ",
-                        params![network_pair, proof_ref],
-                        proof_artifact_record_from_row,
-                    )
-                    .optional()?;
-                if artifact.is_some() {
-                    conn.execute(
-                        "DELETE FROM proof_artifacts WHERE network_pair = ?1 AND proof_ref = ?2",
-                        params![network_pair, proof_ref],
-                    )?;
-                }
-                Ok(artifact)
-            })
+        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        self.mutate(move |state| Ok(state.artifacts.remove(&key)))
             .await
-            .context("failed to remove proof artifact")?;
-        Ok(artifact)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if runtime task records cannot be loaded.
-    pub async fn list_tasks(&self) -> Result<Vec<RuntimeTaskRecord>> {
-        let conn = self.connection().await?;
-        let tasks = conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    r"
-                    SELECT
-                        task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                        proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                        remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                        updated_at
-                    FROM runtime_tasks
-                    ORDER BY updated_at DESC, task_id ASC
-                    ",
-                )?;
-                let mut rows = stmt.query([])?;
-                let mut tasks = Vec::new();
-                while let Some(row) = rows.next()? {
-                    tasks.push(runtime_task_record_from_row(row)?);
-                }
-                Ok(tasks)
-            })
-            .await
-            .context("failed to list runtime tasks")?;
-        Ok(tasks)
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if expired runtime task records cannot be loaded.
-    pub async fn list_expired_terminal_tasks(
+    pub async fn mark_proof_artifact_invalidated(
         &self,
-        now_ts: i64,
-        ttl_secs: u64,
-        after: Option<&ExpiredTaskCursor>,
-        limit: usize,
-    ) -> Result<Vec<RuntimeTaskRecord>> {
-        if ttl_secs == 0 || limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let conn = self.connection().await?;
-        let ttl_secs = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
-        let cutoff = now_ts.saturating_sub(ttl_secs);
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let after = after.cloned();
-        let tasks = conn
-            .call(move |conn| {
-                let mut stmt = if after.is_some() {
-                    conn.prepare(
-                        r"
-                        SELECT
-                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                            updated_at
-                        FROM runtime_tasks
-                        WHERE runner_status IN ('completed', 'failed', 'cancelled')
-                            AND updated_at <= ?1
-                            AND (updated_at > ?2 OR (updated_at = ?2 AND task_id > ?3))
-                        ORDER BY updated_at ASC, task_id ASC
-                        LIMIT ?4
-                        ",
-                    )?
-                } else {
-                    conn.prepare(
-                        r"
-                        SELECT
-                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                            updated_at
-                        FROM runtime_tasks
-                        WHERE runner_status IN ('completed', 'failed', 'cancelled')
-                            AND updated_at <= ?1
-                        ORDER BY updated_at ASC, task_id ASC
-                        LIMIT ?2
-                        ",
-                    )?
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        content_hash: &str,
+    ) -> Result<bool> {
+        self.check_readiness().await?;
+        let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        let expected_content_hash = content_hash.to_string();
+        let invalidated_generation = self
+            .mutate(move |state| {
+                let Some(record) = state.artifacts.get_mut(&key) else {
+                    return Ok(None);
                 };
-                let mut rows = if let Some(after) = after {
-                    stmt.query(params![cutoff, after.updated_at, after.task_id, limit])?
-                } else {
-                    stmt.query(params![cutoff, limit])?
-                };
-                let mut tasks = Vec::new();
-                while let Some(row) = rows.next()? {
-                    tasks.push(runtime_task_record_from_row(row)?);
+                if record.content_hash != expected_content_hash {
+                    return Ok(None);
                 }
-                Ok(tasks)
+                record.invalidated_at.get_or_insert_with(now_ts);
+                record.updated_at = now_ts();
+                Ok(Some(record.generation))
             })
-            .await
-            .context("failed to list expired terminal runtime tasks")?;
-        Ok(tasks)
+            .await?;
+        if let Some(generation) = invalidated_generation {
+            self.store
+                .mark_invalidated(&object_key, generation, content_hash)
+                .await?;
+            self.store
+                .delete(&object_key, generation, content_hash)
+                .await?;
+        }
+        Ok(invalidated_generation.is_some())
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if stale non-terminal runtime task records cannot be loaded.
-    pub async fn list_stale_nonterminal_tasks(
+    pub async fn proof_artifact_is_invalidated(
         &self,
-        now_ts: i64,
-        ttl_secs: u64,
-        after: Option<&ExpiredTaskCursor>,
-        limit: usize,
-    ) -> Result<Vec<RuntimeTaskRecord>> {
-        if ttl_secs == 0 || limit == 0 {
-            return Ok(Vec::new());
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        content_hash: &str,
+    ) -> Result<bool> {
+        let local_record = self
+            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
+            .await?;
+        let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let generation = match self.store.get(&object_key).await? {
+            Some(object) if object.content_hash == content_hash => object.generation,
+            Some(_) => return Ok(false),
+            None => {
+                return Ok(local_record.is_some_and(|record| {
+                    record.content_hash == content_hash && record.invalidated_at.is_some()
+                }));
+            }
+        };
+        if local_record.as_ref().is_some_and(|record| {
+            record.content_hash == content_hash
+                && record.generation == generation
+                && record.invalidated_at.is_some()
+        }) {
+            return Ok(true);
         }
-
-        let conn = self.connection().await?;
-        let ttl_secs = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
-        let cutoff = now_ts.saturating_sub(ttl_secs);
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let after = after.cloned();
-        let tasks = conn
-            .call(move |conn| {
-                let mut stmt = if after.is_some() {
-                    conn.prepare(
-                        r"
-                        SELECT
-                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                            updated_at
-                        FROM runtime_tasks
-                        WHERE runner_status IN ('allocated', 'running')
-                          AND updated_at <= ?1
-                          AND (updated_at > ?2 OR (updated_at = ?2 AND task_id > ?3))
-                        ORDER BY updated_at ASC, task_id ASC
-                        LIMIT ?4
-                        ",
-                    )?
-                } else {
-                    conn.prepare(
-                        r"
-                        SELECT
-                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                            updated_at
-                        FROM runtime_tasks
-                        WHERE runner_status IN ('allocated', 'running')
-                          AND updated_at <= ?1
-                        ORDER BY updated_at ASC, task_id ASC
-                        LIMIT ?2
-                        ",
-                    )?
-                };
-                let mut rows = if let Some(after) = after {
-                    stmt.query(params![cutoff, after.updated_at, after.task_id, limit])?
-                } else {
-                    stmt.query(params![cutoff, limit])?
-                };
-                let mut tasks = Vec::new();
-                while let Some(row) = rows.next()? {
-                    tasks.push(runtime_task_record_from_row(row)?);
-                }
-                Ok(tasks)
-            })
+        self.store
+            .is_invalidated(&object_key, generation, content_hash)
             .await
-            .context("failed to list stale non-terminal runtime tasks")?;
-        Ok(tasks)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task record or workspace cannot be deleted.
-    pub async fn remove_task(&self, task_id: &str) -> Result<bool> {
-        let Some(record) = self.get_task(task_id).await? else {
+    pub async fn upsert_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        proof_bytes: &[u8],
+    ) -> Result<()> {
+        self.fence_external_mutation().await?;
+        let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        match self.store.put_if_absent(&key, proof_bytes).await? {
+            ProofArtifactPutResult::Created(_) | ProofArtifactPutResult::AlreadyExists(_) => Ok(()),
+            ProofArtifactPutResult::Conflict(_) => {
+                anyhow::bail!("different pending proof already exists")
+            }
+        }
+    }
+
+    pub async fn get_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        Ok(self.store.get(&key).await?.map(|object| object.bytes))
+    }
+
+    pub async fn remove_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        self.remove_local_pending(network_pair, pipeline_key, route, proof_ref)
+            .await
+    }
+
+    pub(crate) async fn remove_committed_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        self.remove_local_pending(network_pair, pipeline_key, route, proof_ref)
+            .await
+    }
+
+    async fn remove_local_pending(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        self.fence_external_mutation().await?;
+        let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let Some(object) = self.store.get(&key).await? else {
             return Ok(false);
         };
-
-        let conn = self.connection().await?;
-        let task_id = task_id.to_string();
-        conn.call(move |conn| {
-            conn.execute(
-                "DELETE FROM runtime_tasks WHERE task_id = ?1",
-                params![task_id],
-            )?;
-            Ok(())
-        })
-        .await
-        .context("failed to delete runtime task")?;
-
-        let task_dir = PathBuf::from(&record.task_dir);
-        remove_task_workspace(&task_dir).await?;
-
+        self.store
+            .delete(&key, object.generation, &object.content_hash)
+            .await?;
         Ok(true)
     }
 
-    fn build_task_record(&self, registration: &TaskRegistration) -> Result<RuntimeTaskRecord> {
-        let pipeline_key = task_registration_pipeline_key(registration)?;
-        let task_dir = self.task_dir(pipeline_key, &registration.task_id);
-        Ok(RuntimeTaskRecord {
-            task_id: registration.task_id.clone(),
-            pipeline_key,
-            route: registration.route,
-            task_kind: registration.task_kind.clone(),
-            proposal_id: registration.proposal_id,
-            proof_ids: registration.proof_ids.clone(),
-            runner_status: RunnerStatus::Allocated,
-            task_dir: task_dir.display().to_string(),
-            image_ref: None,
-            provider_request_id: None,
-            remote_tx_hash: None,
-            proof_path: None,
-            error: None,
-            metadata: registration.metadata.clone(),
-            request_fingerprint: registration.request_fingerprint.clone(),
-            updated_at: now_ts(),
-        })
-    }
-
-    async fn write_task_workspace(&self, registration: &TaskRegistration) -> Result<()> {
-        let pipeline_key = task_registration_pipeline_key(registration)?;
-        let task_dir = self.task_dir(pipeline_key, &registration.task_id);
-        fs::create_dir_all(task_dir.join("logs"))
-            .await
-            .with_context(|| format!("failed to create task workspace {}", task_dir.display()))?;
-        fs::write(
-            task_dir.join("request.json"),
-            serde_json::to_vec_pretty(registration).context("serialize task registration")?,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to write {}",
-                task_dir.join("request.json").display()
-            )
-        })?;
-        Ok(())
-    }
-
-    async fn insert_task_if_absent(&self, record: &RuntimeTaskRecord) -> Result<bool> {
-        let conn = self.connection().await?;
-        let proof_ids_json =
-            serde_json::to_string(&record.proof_ids).context("serialize proof_ids")?;
-        let metadata_json =
-            serde_json::to_string(&record.metadata).context("serialize runtime metadata")?;
-        let record = record.clone();
-        let inserted = conn
-            .call(move |conn| {
-            let inserted = conn.execute(
-                r"
-                INSERT OR IGNORE INTO runtime_tasks (
-                    task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                    proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                    remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
-                    updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-                ",
-                params![
-                    record.task_id,
-                    record.pipeline_key.as_str(),
-                    record.route.to_string(),
-                    record.route.guest_system.to_string(),
-                    record.route.runner.to_string(),
-                    record.task_kind,
-                    record.proposal_id,
-                    proof_ids_json,
-                    record.runner_status.as_str(),
-                    record.task_dir,
-                    record.image_ref,
-                    record.provider_request_id,
-                    record.remote_tx_hash,
-                    record.proof_path,
-                    record.error,
-                    metadata_json,
-                    record.request_fingerprint,
-                    record.updated_at,
-                ],
-            )?;
-            Ok(inserted == 1)
+    pub async fn invalidate_pending_proof_publication(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        // Advance the authoritative state generation before touching the shared tombstone. A
+        // superseded process cannot pass this CAS fence, and a new owner inherits every operation
+        // that did pass it.
+        self.fence_external_mutation().await?;
+        let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let canonical = self.store.get(&object_key).await?;
+        if let Some(object) = canonical.as_ref() {
+            self.upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
             })
-            .await
-            .context("failed to insert runtime task")?;
-        Ok(inserted)
+            .await?;
+            self.mark_proof_artifact_invalidated(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                &object.content_hash,
+            )
+            .await?;
+        }
+        let pending = self
+            .get_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
+            .await?;
+        let removed = self
+            .remove_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
+            .await?;
+        Ok(removed || pending.is_some() || canonical.is_some())
     }
 
-    async fn delete_task_row(&self, task_id: &str) -> Result<()> {
-        let conn = self.connection().await?;
+    fn pending_artifact_key(
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> ProofArtifactKey {
+        Self::artifact_key(
+            network_pair,
+            pipeline_key,
+            route,
+            &format!("__pending__:{proof_ref}"),
+        )
+    }
+
+    pub async fn list_tasks(&self) -> Result<Vec<RuntimeTaskRecord>> {
+        let mut tasks = self
+            .state
+            .read()
+            .await
+            .tasks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
+        Ok(tasks)
+    }
+
+    pub async fn list_expired_terminal_tasks(
+        &self,
+        now: i64,
+        ttl_secs: u64,
+        after: Option<&ExpiredTaskCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
+        self.list_tasks_matching(now, ttl_secs, after, limit, true)
+            .await
+    }
+
+    pub async fn list_stale_nonterminal_tasks(
+        &self,
+        now: i64,
+        ttl_secs: u64,
+        after: Option<&ExpiredTaskCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
+        self.list_tasks_matching(now, ttl_secs, after, limit, false)
+            .await
+    }
+
+    async fn list_tasks_matching(
+        &self,
+        now: i64,
+        ttl_secs: u64,
+        after: Option<&ExpiredTaskCursor>,
+        limit: usize,
+        terminal: bool,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
+        if ttl_secs == 0 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let cutoff = now.saturating_sub(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
+        let mut tasks = self
+            .state
+            .read()
+            .await
+            .tasks
+            .values()
+            .filter(|task| {
+                task.runner_status.is_terminal() == terminal
+                    && task.updated_at <= cutoff
+                    && after.is_none_or(|cursor| {
+                        (task.updated_at, task.task_id.as_str())
+                            > (cursor.updated_at, cursor.task_id.as_str())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
+        tasks.truncate(limit);
+        Ok(tasks)
+    }
+
+    pub async fn remove_task(&self, task_id: &str) -> Result<bool> {
         let task_id = task_id.to_string();
-        conn.call(move |conn| {
-            conn.execute(
-                "DELETE FROM runtime_tasks WHERE task_id = ?1",
-                params![task_id],
-            )?;
-            Ok(())
-        })
-        .await
-        .context("failed to delete runtime task row")?;
-        Ok(())
+        self.mutate(move |state| Ok(state.tasks.remove(&task_id).is_some()))
+            .await
     }
 }
 
@@ -960,259 +994,15 @@ pub struct RuntimeTaskRecord {
     pub proposal_id: Option<u64>,
     pub proof_ids: Vec<String>,
     pub runner_status: RunnerStatus,
-    pub task_dir: String,
     pub image_ref: Option<String>,
     pub provider_request_id: Option<String>,
     pub remote_tx_hash: Option<String>,
-    pub proof_path: Option<String>,
+    pub proof_uri: Option<String>,
     pub error: Option<String>,
     pub metadata: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_fingerprint: Option<String>,
     pub updated_at: i64,
-}
-
-fn task_registration_pipeline_key(registration: &TaskRegistration) -> Result<PipelineKey> {
-    let pipeline_key = if let Some(pipeline_key) = registration.pipeline_key {
-        pipeline_key
-    } else {
-        registration
-            .route
-            .pipeline_key()
-            .map_err(anyhow::Error::msg)?
-    };
-    if !pipeline_key_matches_route(pipeline_key, registration.route) {
-        anyhow::bail!(
-            "pipeline_key '{}' does not match route '{}'",
-            pipeline_key.as_str(),
-            registration.route
-        );
-    }
-    Ok(pipeline_key)
-}
-
-fn pipeline_key_matches_route(pipeline_key: PipelineKey, route: PipelineRoute) -> bool {
-    match (pipeline_key, route) {
-        (
-            PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth,
-            PipelineRoute {
-                guest_system: raiko2_pipeline::GuestSystem::Sgx,
-                runner: raiko2_pipeline::RunnerKind::Remote,
-            },
-        ) => true,
-        _ => route.pipeline_key() == Ok(pipeline_key),
-    }
-}
-
-fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTaskRecord> {
-    let proof_ids_json: String = row.get(7)?;
-    let metadata_json: String = row.get(15)?;
-    let pipeline_key_raw: String = row.get(1)?;
-    let route_raw: String = row.get(2)?;
-    let guest_system_raw: String = row.get(3)?;
-    let runner_raw: String = row.get(4)?;
-    let pipeline_key = pipeline_key_raw.parse::<PipelineKey>().map_err(|err| {
-        invalid_runtime_task_row(
-            1,
-            format!("invalid pipeline_key '{pipeline_key_raw}': {err}"),
-        )
-    })?;
-    let route = route_raw.parse::<PipelineRoute>().map_err(|err| {
-        invalid_runtime_task_row(2, format!("invalid route '{route_raw}': {err}"))
-    })?;
-    if !pipeline_key_matches_route(pipeline_key, route) {
-        return Err(invalid_runtime_task_row(
-            1,
-            format!("pipeline_key '{pipeline_key_raw}' does not match route '{route_raw}'"),
-        ));
-    }
-    if guest_system_raw != route.guest_system.to_string() {
-        return Err(invalid_runtime_task_row(
-            3,
-            format!("guest_system '{guest_system_raw}' does not match route '{route_raw}'"),
-        ));
-    }
-    if runner_raw != route.runner.to_string() {
-        return Err(invalid_runtime_task_row(
-            4,
-            format!("runner '{runner_raw}' does not match route '{route_raw}'"),
-        ));
-    }
-    Ok(RuntimeTaskRecord {
-        task_id: row.get(0)?,
-        pipeline_key,
-        route,
-        task_kind: row.get(5)?,
-        proposal_id: row.get(6)?,
-        proof_ids: serde_json::from_str(&proof_ids_json).unwrap_or_default(),
-        runner_status: RunnerStatus::from_db(row.get::<_, String>(8)?.as_str()),
-        task_dir: row.get(9)?,
-        image_ref: row.get(10)?,
-        provider_request_id: row.get(11)?,
-        remote_tx_hash: row.get(12)?,
-        proof_path: row.get(13)?,
-        error: row.get(14)?,
-        metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
-        request_fingerprint: row.get(16)?,
-        updated_at: row.get(17)?,
-    })
-}
-
-fn proof_artifact_record_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<ProofArtifactRecord> {
-    let pipeline_key_raw: String = row.get(2)?;
-    let route_raw: String = row.get(3)?;
-    let pipeline_key = pipeline_key_raw.parse::<PipelineKey>().map_err(|err| {
-        invalid_runtime_task_row(
-            2,
-            format!("invalid pipeline_key '{pipeline_key_raw}': {err}"),
-        )
-    })?;
-    let route = route_raw.parse::<PipelineRoute>().map_err(|err| {
-        invalid_runtime_task_row(3, format!("invalid route '{route_raw}': {err}"))
-    })?;
-    Ok(ProofArtifactRecord {
-        network_pair: row.get(0)?,
-        proof_ref: row.get(1)?,
-        pipeline_key,
-        route,
-        proof_path: row.get(4)?,
-        updated_at: row.get(5)?,
-    })
-}
-
-fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let request_fingerprint_exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name = 'request_fingerprint' LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if request_fingerprint_exists.is_none() {
-        conn.execute(
-            "ALTER TABLE runtime_tasks ADD COLUMN request_fingerprint TEXT",
-            [],
-        )?;
-    }
-    conn.execute(
-        r"
-        CREATE UNIQUE INDEX IF NOT EXISTS runtime_tasks_request_fingerprint_uq
-        ON runtime_tasks(request_fingerprint)
-        WHERE request_fingerprint IS NOT NULL
-        ",
-        [],
-    )?;
-    conn.execute(
-        r"
-        CREATE INDEX IF NOT EXISTS runtime_tasks_status_updated_at_idx
-        ON runtime_tasks(runner_status, updated_at, task_id)
-        ",
-        [],
-    )?;
-    conn.execute_batch(
-        r"
-        CREATE TABLE IF NOT EXISTS proof_artifacts (
-            network_pair TEXT NOT NULL,
-            proof_ref TEXT NOT NULL,
-            pipeline_key TEXT NOT NULL,
-            route TEXT NOT NULL,
-            proof_path TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(network_pair, proof_ref)
-        );
-        CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx
-        ON proof_artifacts(updated_at);
-        ",
-    )?;
-    Ok(())
-}
-
-async fn remove_task_workspace(task_dir: &Path) -> Result<()> {
-    if fs::try_exists(task_dir).await? {
-        fs::remove_dir_all(task_dir)
-            .await
-            .with_context(|| format!("failed to remove task workspace {}", task_dir.display()))?;
-    }
-    Ok(())
-}
-
-async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("path {} has no parent", path.display()))?;
-    fs::create_dir_all(parent)
-        .await
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-
-    let temp_path = atomic_temp_path(path);
-    let result = async {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .await
-            .with_context(|| format!("failed to create temp file {}", temp_path.display()))?;
-        file.write_all(bytes)
-            .await
-            .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("failed to sync temp file {}", temp_path.display()))?;
-        drop(file);
-        fs::rename(&temp_path, path).await.with_context(|| {
-            format!(
-                "failed to publish temp file {} to {}",
-                temp_path.display(),
-                path.display()
-            )
-        })?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path).await;
-    }
-    result
-}
-
-fn atomic_temp_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact");
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    path.with_file_name(format!(".{file_name}.tmp.{}.{}", process::id(), unique))
-}
-
-fn safe_path_component(raw: &str) -> String {
-    let mut component = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                component.push(char::from(byte));
-            }
-            _ => {
-                write!(&mut component, "%{byte:02x}").expect("writing to String should not fail");
-            }
-        }
-    }
-    component
-}
-
-fn invalid_runtime_task_row(column: usize, message: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        column,
-        rusqlite::types::Type::Text,
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            message,
-        )),
-    )
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1229,24 +1019,104 @@ impl RunnerStatus {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            RunnerStatus::Allocated => "allocated",
-            RunnerStatus::Running => "running",
-            RunnerStatus::Completed => "completed",
-            RunnerStatus::Failed => "failed",
-            RunnerStatus::Cancelled => "cancelled",
+            Self::Allocated => "allocated",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     #[must_use]
-    pub fn from_db(raw: &str) -> Self {
-        match raw {
-            "running" => Self::Running,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Allocated,
-        }
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+}
+
+impl std::fmt::Display for RunnerStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecord> {
+    let pipeline_key = registration.pipeline_key.map_or_else(
+        || {
+            registration
+                .route
+                .pipeline_key()
+                .map_err(anyhow::Error::msg)
+        },
+        Ok,
+    )?;
+    anyhow::ensure!(
+        pipeline_key_matches_route(pipeline_key, registration.route),
+        "pipeline_key '{}' does not match route '{}'",
+        pipeline_key.as_str(),
+        registration.route
+    );
+    Ok(RuntimeTaskRecord {
+        task_id: registration.task_id.clone(),
+        pipeline_key,
+        route: registration.route,
+        task_kind: registration.task_kind.clone(),
+        proposal_id: registration.proposal_id,
+        proof_ids: registration.proof_ids.clone(),
+        runner_status: RunnerStatus::Allocated,
+        image_ref: None,
+        provider_request_id: None,
+        remote_tx_hash: None,
+        proof_uri: None,
+        error: None,
+        metadata: registration.metadata.clone(),
+        request_fingerprint: registration.request_fingerprint.clone(),
+        updated_at: now_ts(),
+    })
+}
+
+fn pipeline_key_matches_route(pipeline_key: PipelineKey, route: PipelineRoute) -> bool {
+    matches!(
+        (pipeline_key, route),
+        (
+            PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth,
+            PipelineRoute {
+                guest_system: raiko2_pipeline::GuestSystem::Sgx,
+                runner: raiko2_pipeline::RunnerKind::Remote,
+            }
+        )
+    ) || route.pipeline_key() == Ok(pipeline_key)
+}
+
+fn artifact_record_key(
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: &str,
+) -> String {
+    format!(
+        "{network_pair}|{}|{route}|{proof_ref}",
+        pipeline_key.as_str()
+    )
+}
+
+fn set_json_integer(value: &mut serde_json::Value, fields: &[String], integer: i64) -> Result<()> {
+    let Some((head, tail)) = fields.split_first() else {
+        anyhow::bail!("metadata path must contain a field");
+    };
+    if tail.is_empty() {
+        let object = value
+            .as_object_mut()
+            .context("metadata path parent is not an object")?;
+        object.insert(head.clone(), integer.into());
+        return Ok(());
+    }
+    let object = value
+        .as_object_mut()
+        .context("metadata path parent is not an object")?;
+    let child = object
+        .entry(head.clone())
+        .or_insert_with(|| serde_json::json!({}));
+    set_json_integer(child, tail, integer)
 }
 
 fn now_ts() -> i64 {
@@ -1257,681 +1127,203 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        ExpiredTaskCursor, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
-        TaskRegistration, TaskRegistrationOutcome,
-    };
-    use raiko2_pipeline::PipelineRoute;
-    use rusqlite::OptionalExtension;
-    use std::path::Path;
-    use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unique_root(prefix: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ))
-    }
+    use super::*;
 
     #[tokio::test]
-    async fn runtime_manager_registers_and_loads_task() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-test");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
+    async fn memory_runtime_deduplicates_request_fingerprint() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "one".into())?;
         let registration = TaskRegistration {
-            task_id: "task-1".to_string(),
-            pipeline_key: None,
-            route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
-            task_kind: "proposal".to_string(),
-            proposal_id: Some(7),
+            task_id: "task-a".into(),
+            pipeline_key: Some(PipelineKey::ShastaNative),
+            route: PipelineKey::ShastaNative.route(),
+            task_kind: "proposal".into(),
+            proposal_id: Some(1),
             proof_ids: Vec::new(),
-            metadata: serde_json::json!({"proposal_id": 7}),
-            request_fingerprint: None,
+            metadata: serde_json::json!({}),
+            request_fingerprint: Some("same".into()),
         };
-        runtime.register_task(registration).await?;
-
-        let task = runtime.get_task("task-1").await?.expect("task present");
-        assert_eq!(task.runner_status, RunnerStatus::Allocated);
-        assert_eq!(task.proposal_id, Some(7));
-        assert!(Path::new(&task.task_dir).exists());
-        std::fs::remove_dir_all(root)?;
+        assert!(matches!(
+            runtime
+                .register_task_if_absent(registration.clone())
+                .await?,
+            TaskRegistrationOutcome::Created(_)
+        ));
+        assert!(matches!(
+            runtime
+                .register_task_if_absent(TaskRegistration {
+                    task_id: "task-b".into(),
+                    ..registration
+                })
+                .await?,
+            TaskRegistrationOutcome::Existing(_)
+        ));
         Ok(())
     }
 
     #[tokio::test]
-    async fn runtime_manager_persists_proof_artifact_paths() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-proof-artifact");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-        let proof_path = runtime.proof_artifact_path("taiko_dev/ethereum", "proposal_0xabc");
-        runtime
+    async fn namespace_fence_rejects_writes_from_previous_generation() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "shared".into(),
+        )?);
+        let first = RuntimeManager::with_store(store.clone())?;
+        first.initialize().await?;
+        first.fence_namespace_owner().await?;
+
+        let second = RuntimeManager::with_store(store)?;
+        second.initialize().await?;
+        second.fence_namespace_owner().await?;
+
+        let error = first
+            .register_task(TaskRegistration {
+                task_id: "stale-owner-task".into(),
+                pipeline_key: Some(PipelineKey::ShastaNative),
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                proposal_id: Some(1),
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: None,
+            })
+            .await
+            .expect_err("the previous state generation must be fenced");
+
+        assert!(error.to_string().contains("generation changed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cannot_publish_invalidation_marker() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "shared-invalidation".into(),
+        )?);
+        let first = RuntimeManager::with_store(store.clone())?;
+        first.initialize().await?;
+        first.fence_namespace_owner().await?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-stale-invalidation";
+        let publication = first
+            .publish_proof_artifact_bytes(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                br#"{"proof":"0x01"}"#,
+            )
+            .await?;
+        let artifact = publication.object();
+        first
             .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: "proposal_0xabc".to_string(),
-                pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
-                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
-                proof_path: proof_path.display().to_string(),
+                network_pair: "l1-l2".into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await?;
 
-        let artifact = runtime
-            .get_proof_artifact("taiko_dev/ethereum", "proposal_0xabc")
-            .await?
-            .expect("proof artifact");
-        assert_eq!(artifact.proof_path, proof_path.display().to_string());
-        assert_eq!(artifact.network_pair, "taiko_dev/ethereum");
-        assert_eq!(artifact.proof_ref, "proposal_0xabc");
+        let second = RuntimeManager::with_store(store.clone())?;
+        second.initialize().await?;
+        second.fence_namespace_owner().await?;
 
-        std::fs::remove_dir_all(root)?;
+        first
+            .mark_proof_artifact_invalidated(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &artifact.content_hash,
+            )
+            .await
+            .expect_err("stale runtime generation must fail before tombstone publication");
+        assert!(
+            !store
+                .is_invalidated(
+                    &RuntimeManager::artifact_key("l1-l2", pipeline, route, proof_ref),
+                    artifact.generation,
+                    &artifact.content_hash,
+                )
+                .await?
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn runtime_manager_finds_task_by_engine_task_id() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-engine-lookup");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-        runtime
+    async fn inactive_runtime_is_not_ready() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "inactive".into())?;
+        runtime.active.store(false, Ordering::Release);
+        assert!(runtime.check_readiness().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_proof_is_durable_without_expanding_runtime_state() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "pending-proof".into(),
+        )?);
+        let first = RuntimeManager::with_store(store.clone())?;
+        first
             .register_task(TaskRegistration {
-                task_id: "task-public".to_string(),
-                pipeline_key: None,
-                route: "risc0/network"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
-                task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(7),
-                proof_ids: vec!["proposal-proof-task".to_string()],
-                metadata: serde_json::json!({
-                    "aggregate_task_id": "aggregate-proof-task",
-                }),
+                task_id: "task-a".into(),
+                pipeline_key: Some(PipelineKey::ShastaSp1),
+                route: PipelineKey::ShastaSp1.route(),
+                task_kind: "proposal".into(),
+                proposal_id: Some(1),
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({}),
                 request_fingerprint: None,
             })
             .await?;
 
-        let proposal = runtime
-            .find_task_by_engine_task_id("proposal-proof-task")
-            .await?
-            .expect("proposal proof lookup");
-        assert_eq!(proposal.task_id, "task-public");
-
-        let aggregate = runtime
-            .find_task_by_engine_task_id("aggregate-proof-task")
-            .await?
-            .expect("aggregate proof lookup");
-        assert_eq!(aggregate.task_id, "task-public");
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_lists_all_tasks_by_engine_task_id() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-engine-lookup-all");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-        for task_id in ["task-public-a", "task-public-b"] {
-            runtime
-                .register_task(TaskRegistration {
-                    task_id: task_id.to_string(),
-                    pipeline_key: None,
-                    route: "risc0/network"
-                        .parse::<PipelineRoute>()
-                        .expect("parse route"),
-                    task_kind: "hoodi_batch".to_string(),
-                    proposal_id: Some(7),
-                    proof_ids: vec!["shared-proposal-proof-task".to_string()],
-                    metadata: serde_json::json!({
-                        "aggregate_task_id": "shared-aggregate-proof-task",
-                    }),
-                    request_fingerprint: None,
-                })
-                .await?;
-        }
-
-        let shared = runtime
-            .find_tasks_by_engine_task_id("shared-proposal-proof-task")
-            .await?;
-        assert_eq!(shared.len(), 2);
-        let mut task_ids = shared
-            .iter()
-            .map(|record| record.task_id.as_str())
-            .collect::<Vec<_>>();
-        task_ids.sort_unstable();
-        assert_eq!(task_ids, vec!["task-public-a", "task-public-b"]);
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_rejects_inconsistent_route_identity() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-invalid-route");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-        let conn = runtime.connection().await?;
-        conn.call(|conn| {
-            conn.execute(
-                r"
-                INSERT INTO runtime_tasks (
-                    task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
-                    proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
-                    remote_tx_hash, proof_path, error, metadata_json, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-                ",
-                rusqlite::params![
-                    "task-invalid",
-                    "shasta-native-local",
-                    "risc0/local",
-                    "native",
-                    "local",
-                    "hoodi_batch",
-                    Option::<u64>::None,
-                    "[]",
-                    "allocated",
-                    "/tmp/runtime-task",
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    "{}",
-                    1_i64,
-                ],
-            )?;
-            Ok(())
-        })
-        .await?;
-
-        let err = runtime
-            .get_task("task-invalid")
-            .await
-            .expect_err("mismatched runtime row should fail");
-        assert!(
-            err.chain().any(|source| source
-                .to_string()
-                .contains("does not match route 'risc0/local'")),
-            "{err:?}"
-        );
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_lists_only_expired_terminal_tasks() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-expired");
-        let runtime = RuntimeManager::new(root.clone())?;
-        for task_id in ["completed-task", "running-task", "cancelled-task"] {
-            runtime
-                .register_task(TaskRegistration {
-                    task_id: task_id.to_string(),
-                    pipeline_key: None,
-                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
-                    task_kind: "hoodi_batch".to_string(),
-                    proposal_id: Some(7),
-                    proof_ids: Vec::new(),
-                    metadata: serde_json::json!({}),
-                    request_fingerprint: None,
-                })
-                .await?;
-        }
-
-        for (task_id, status, updated_at) in [
-            ("completed-task", RunnerStatus::Completed, 10_i64),
-            ("running-task", RunnerStatus::Running, 10_i64),
-            ("cancelled-task", RunnerStatus::Cancelled, 20_i64),
-        ] {
-            let mut record = runtime.get_task(task_id).await?.expect("task present");
-            record.runner_status = status;
-            record.updated_at = updated_at;
-            runtime.upsert_task(&record).await?;
-        }
-
-        let expired = runtime
-            .list_expired_terminal_tasks(7_220, 7_200, None, 8)
-            .await?;
-
-        assert_eq!(expired.len(), 2);
-        assert_eq!(expired[0].task_id, "completed-task");
-        assert_eq!(expired[1].task_id, "cancelled-task");
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_lists_only_stale_nonterminal_tasks() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-stale-nonterminal");
-        let runtime = RuntimeManager::new(root.clone())?;
-        for task_id in [
-            "allocated-task",
-            "running-task",
-            "fresh-task",
-            "failed-task",
-        ] {
-            runtime
-                .register_task(TaskRegistration {
-                    task_id: task_id.to_string(),
-                    pipeline_key: None,
-                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
-                    task_kind: "hoodi_batch".to_string(),
-                    proposal_id: Some(7),
-                    proof_ids: Vec::new(),
-                    metadata: serde_json::json!({}),
-                    request_fingerprint: None,
-                })
-                .await?;
-        }
-
-        for (task_id, status, updated_at) in [
-            ("allocated-task", RunnerStatus::Allocated, 10_i64),
-            ("running-task", RunnerStatus::Running, 20_i64),
-            ("fresh-task", RunnerStatus::Running, 40_i64),
-            ("failed-task", RunnerStatus::Failed, 10_i64),
-        ] {
-            let mut record = runtime.get_task(task_id).await?.expect("task present");
-            record.runner_status = status;
-            record.updated_at = updated_at;
-            runtime.upsert_task(&record).await?;
-        }
-
-        let stale = runtime
-            .list_stale_nonterminal_tasks(7_230, 7_200, None, 8)
-            .await?;
-        assert_eq!(stale.len(), 2);
-        assert_eq!(stale[0].task_id, "allocated-task");
-        assert_eq!(stale[1].task_id, "running-task");
-
-        let after = ExpiredTaskCursor {
-            updated_at: stale[0].updated_at,
-            task_id: stale[0].task_id.clone(),
-        };
-        let stale_after = runtime
-            .list_stale_nonterminal_tasks(7_230, 7_200, Some(&after), 8)
-            .await?;
-        assert_eq!(stale_after.len(), 1);
-        assert_eq!(stale_after[0].task_id, "running-task");
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_cancels_only_matching_nonterminal_task() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-cancel-stale-nonterminal");
-        let runtime = RuntimeManager::new(root.clone())?;
-        for (task_id, status, updated_at) in [
-            ("stale-running", RunnerStatus::Running, 10_i64),
-            ("fresh-running", RunnerStatus::Running, 30_i64),
-            ("failed-task", RunnerStatus::Failed, 10_i64),
-        ] {
-            runtime
-                .register_task(TaskRegistration {
-                    task_id: task_id.to_string(),
-                    pipeline_key: None,
-                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
-                    task_kind: "hoodi_batch".to_string(),
-                    proposal_id: Some(7),
-                    proof_ids: Vec::new(),
-                    metadata: serde_json::json!({}),
-                    request_fingerprint: None,
-                })
-                .await?;
-            let mut record = runtime.get_task(task_id).await?.expect("task present");
-            record.runner_status = status;
-            record.updated_at = updated_at;
-            runtime.upsert_task(&record).await?;
-        }
-
-        assert!(
-            runtime
-                .cancel_nonterminal_task_if_stale("stale-running", 20, Some("stale".to_string()))
-                .await?
-        );
-        assert!(
-            !runtime
-                .cancel_nonterminal_task_if_stale("fresh-running", 20, None)
-                .await?
-        );
-        assert!(
-            !runtime
-                .cancel_nonterminal_task_if_stale("failed-task", 20, None)
-                .await?
-        );
-
-        let stale = runtime
-            .get_task("stale-running")
-            .await?
-            .expect("stale task");
-        assert_eq!(stale.runner_status, RunnerStatus::Cancelled);
-        assert_eq!(stale.error.as_deref(), Some("stale"));
-        let fresh = runtime
-            .get_task("fresh-running")
-            .await?
-            .expect("fresh task");
-        assert_eq!(fresh.runner_status, RunnerStatus::Running);
-        let failed = runtime.get_task("failed-task").await?.expect("failed task");
-        assert_eq!(failed.runner_status, RunnerStatus::Failed);
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_pages_expired_terminal_tasks_after_cursor() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-expired-page");
-        let runtime = RuntimeManager::new(root.clone())?;
-        for (task_id, status, updated_at) in [
-            ("task-a", RunnerStatus::Completed, 10_i64),
-            ("task-b", RunnerStatus::Failed, 20_i64),
-            ("task-c", RunnerStatus::Cancelled, 30_i64),
-        ] {
-            runtime
-                .register_task(TaskRegistration {
-                    task_id: task_id.to_string(),
-                    pipeline_key: None,
-                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
-                    task_kind: "hoodi_batch".to_string(),
-                    proposal_id: Some(7),
-                    proof_ids: Vec::new(),
-                    metadata: serde_json::json!({}),
-                    request_fingerprint: None,
-                })
-                .await?;
-            let mut record = runtime.get_task(task_id).await?.expect("task present");
-            record.runner_status = status;
-            record.updated_at = updated_at;
-            runtime.upsert_task(&record).await?;
-        }
-
-        let expired = runtime
-            .list_expired_terminal_tasks(
-                7_230,
-                7_200,
-                Some(&ExpiredTaskCursor {
-                    updated_at: 20,
-                    task_id: "task-b".to_string(),
-                }),
-                8,
+        let proof = b"pending-proof-payload-not-runtime-state";
+        first
+            .upsert_pending_proof_publication(
+                "l1-l2",
+                PipelineKey::ShastaSp1,
+                PipelineKey::ShastaSp1.route(),
+                "proposal-1",
+                proof,
             )
             .await?;
 
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].task_id, "task-c");
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_migrates_request_fingerprint_column() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-migration");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        tokio::fs::create_dir_all(root.join("state")).await?;
-        let conn =
-            tokio_rusqlite::Connection::open(root.join("state").join("runtime.sqlite")).await?;
-        conn.call(|conn| {
-            conn.execute_batch(
-                r"
-                CREATE TABLE runtime_tasks (
-                    task_id TEXT PRIMARY KEY,
-                    pipeline_key TEXT NOT NULL,
-                    route TEXT NOT NULL,
-                    guest_system TEXT NOT NULL,
-                    runner TEXT NOT NULL,
-                    task_kind TEXT NOT NULL,
-                    proposal_id INTEGER,
-                    proof_ids_json TEXT,
-                    runner_status TEXT NOT NULL,
-                    task_dir TEXT NOT NULL,
-                    image_ref TEXT,
-                    provider_request_id TEXT,
-                    remote_tx_hash TEXT,
-                    proof_path TEXT,
-                    error TEXT,
-                    metadata_json TEXT,
-                    updated_at INTEGER NOT NULL
-                );
-                ",
-            )?;
-            Ok(())
-        })
-        .await?;
-        drop(conn);
-
-        let runtime = RuntimeManager::new(root.clone())?;
-        let _ = runtime.list_tasks().await?;
-
-        let conn =
-            tokio_rusqlite::Connection::open(root.join("state").join("runtime.sqlite")).await?;
-        let (request_fingerprint_exists, index_exists): (Option<i64>, Option<i64>) = conn
-            .call(|conn| {
-                let request_fingerprint_exists = conn
-                    .query_row(
-                        "SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name = 'request_fingerprint' LIMIT 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let index_exists = conn
-                    .query_row(
-                        "SELECT 1 FROM pragma_index_list('runtime_tasks') WHERE name = 'runtime_tasks_request_fingerprint_uq' LIMIT 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                Ok((request_fingerprint_exists, index_exists))
-            })
-            .await?;
-        assert_eq!(request_fingerprint_exists, Some(1));
-        assert_eq!(index_exists, Some(1));
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_finds_task_by_request_fingerprint() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-fingerprint-lookup");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-        runtime
-            .register_task(TaskRegistration {
-                task_id: "task-public".to_string(),
-                pipeline_key: None,
-                route: "risc0/network"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
-                task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(7),
-                proof_ids: vec!["proposal-proof-task".to_string()],
-                metadata: serde_json::json!({}),
-                request_fingerprint: Some("0xfingerprint".to_string()),
-            })
-            .await?;
-
-        let record = runtime
-            .find_task_by_request_fingerprint("0xfingerprint")
+        let runtime_state = store
+            .load_runtime_state()
             .await?
-            .expect("task present");
-        assert_eq!(record.task_id, "task-public");
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_register_task_if_absent_reuses_existing_task() -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-fingerprint-idempotent");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-
-        let created = runtime
-            .register_task_if_absent(TaskRegistration {
-                task_id: "task-created".to_string(),
-                pipeline_key: None,
-                route: "risc0/network"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
-                task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(7),
-                proof_ids: vec!["proposal-proof-task".to_string()],
-                metadata: serde_json::json!({}),
-                request_fingerprint: Some("0xfingerprint".to_string()),
-            })
-            .await?;
-        let TaskRegistrationOutcome::Created(created) = created else {
-            panic!("first registration should create a task");
-        };
-
-        let existing = runtime
-            .register_task_if_absent(TaskRegistration {
-                task_id: "task-duplicate".to_string(),
-                pipeline_key: None,
-                route: "risc0/network"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
-                task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(7),
-                proof_ids: vec!["proposal-proof-task".to_string()],
-                metadata: serde_json::json!({}),
-                request_fingerprint: Some("0xfingerprint".to_string()),
-            })
-            .await?;
-        let TaskRegistrationOutcome::Existing(existing) = existing else {
-            panic!("duplicate registration should reuse the existing task");
-        };
-
-        assert_eq!(existing.task_id, created.task_id);
-        assert_eq!(runtime.list_tasks().await?.len(), 1);
-
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_register_task_if_absent_returns_existing_task_id_conflict()
-    -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-task-id-conflict");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = RuntimeManager::new(root.clone())?;
-
-        let created = runtime
-            .register_task_if_absent(TaskRegistration {
-                task_id: "task-shared".to_string(),
-                pipeline_key: None,
-                route: "risc0/network"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
-                task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(7),
-                proof_ids: vec!["proposal-proof-task".to_string()],
-                metadata: serde_json::json!({}),
-                request_fingerprint: Some("0xfingerprint-a".to_string()),
-            })
-            .await?;
-        let TaskRegistrationOutcome::Created(created) = created else {
-            panic!("first registration should create a task");
-        };
-
-        let existing = runtime
-            .register_task_if_absent(TaskRegistration {
-                task_id: "task-shared".to_string(),
-                pipeline_key: None,
-                route: "risc0/network"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
-                task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(8),
-                proof_ids: vec!["other-proposal-proof-task".to_string()],
-                metadata: serde_json::json!({}),
-                request_fingerprint: Some("0xfingerprint-b".to_string()),
-            })
-            .await?;
-        let TaskRegistrationOutcome::Existing(existing) = existing else {
-            panic!("task id conflict should return the existing task");
-        };
-
-        assert_eq!(existing.task_id, created.task_id);
-        assert_eq!(
-            existing.request_fingerprint.as_deref(),
-            Some("0xfingerprint-a")
+            .context("runtime state should have been stored")?;
+        assert!(
+            !runtime_state
+                .bytes
+                .windows(proof.len())
+                .any(|window| window == proof)
         );
-        assert_eq!(runtime.list_tasks().await?.len(), 1);
 
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_manager_register_task_if_absent_is_safe_under_concurrency()
-    -> anyhow::Result<()> {
-        let root = unique_root("raiko2-runtime-fingerprint-concurrent");
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        let runtime = Arc::new(RuntimeManager::new(root.clone())?);
-        let mut handles = Vec::new();
-
-        for index in 0..8 {
-            let runtime = Arc::clone(&runtime);
-            handles.push(tokio::spawn(async move {
-                runtime
-                    .register_task_if_absent(TaskRegistration {
-                        task_id: format!("task-{index}"),
-                        pipeline_key: None,
-                        route: "risc0/network"
-                            .parse::<PipelineRoute>()
-                            .expect("parse route"),
-                        task_kind: "hoodi_batch".to_string(),
-                        proposal_id: Some(7),
-                        proof_ids: vec!["proposal-proof-task".to_string()],
-                        metadata: serde_json::json!({}),
-                        request_fingerprint: Some("0xfingerprint".to_string()),
-                    })
-                    .await
-            }));
-        }
-
-        let mut task_ids = Vec::new();
-        for handle in handles {
-            let outcome = handle.await.expect("join task")?;
-            let task_id = match outcome {
-                TaskRegistrationOutcome::Created(record)
-                | TaskRegistrationOutcome::Existing(record) => record.task_id,
-            };
-            task_ids.push(task_id);
-        }
-
-        let first_task_id = task_ids.first().cloned().expect("at least one task id");
-        assert!(task_ids.iter().all(|task_id| task_id == &first_task_id));
-        assert_eq!(runtime.list_tasks().await?.len(), 1);
-
-        std::fs::remove_dir_all(root)?;
+        let recovered = RuntimeManager::with_store(store)?;
+        recovered.initialize().await?;
+        assert_eq!(
+            recovered
+                .get_pending_proof_publication(
+                    "l1-l2",
+                    PipelineKey::ShastaSp1,
+                    PipelineKey::ShastaSp1.route(),
+                    "proposal-1",
+                )
+                .await?,
+            Some(proof.to_vec())
+        );
         Ok(())
     }
 }

@@ -57,6 +57,7 @@ bincode.workspace = true
 
 # Utilities
 dotenvy = "0.15"
+uuid.workspace = true
 
 [features]
 default = ["local-provers"]
@@ -67,7 +68,6 @@ local-provers = [
     "raiko2-prover/risc0",
 ]
 fixture-server = ["local-provers"]
-redis-queue = ["raiko2-queue/redis"]
 
 [dev-dependencies]
 tower.workspace = true

@@ -1,7 +1,9 @@
 use crate::config::Config;
 use crate::server::state::PipelineFactory;
 use crate::server::state::{EngineHandle, EngineQueueTaskState};
-use crate::server::task_metadata::TaskMetadata;
+use crate::server::task_metadata::{
+    TaskMetadata, proposal_proof_artifact_refs, root_proof_artifact_refs,
+};
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
@@ -47,10 +49,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
 ) {
-    if config.runtime.inactive_ttl_secs == 0 {
-        return;
-    }
-
+    const TERMINAL_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
     tokio::spawn(async move {
         let mut orphan_cursor = None;
         let mut terminal_cursor = None;
@@ -59,7 +58,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
             run_runtime_cleanup_pass(
                 Arc::clone(&runtime),
                 Arc::clone(&pipelines),
-                config.runtime.inactive_ttl_secs,
+                TERMINAL_TASK_TTL_SECS,
                 &mut orphan_cursor,
                 &mut terminal_cursor,
             )
@@ -76,7 +75,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
                 run_runtime_cleanup_pass(
                     Arc::clone(&runtime),
                     Arc::clone(&pipelines),
-                    config.runtime.inactive_ttl_secs,
+                    TERMINAL_TASK_TTL_SECS,
                     &mut orphan_cursor,
                     &mut terminal_cursor,
                 )
@@ -172,6 +171,13 @@ async fn cancel_orphaned_runtime_tasks(
             }
         };
 
+        if reconcile_runtime_task_from_artifacts(runtime, &record, &metadata)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+
         if metadata.has_remote_submission_progress() {
             continue;
         }
@@ -249,6 +255,70 @@ async fn has_active_queue_task(
     Ok(false)
 }
 
+pub(crate) async fn reconcile_runtime_task_from_artifacts(
+    runtime: &RuntimeManager,
+    record: &RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> Result<Option<String>> {
+    if !matches!(
+        record.runner_status,
+        RunnerStatus::Allocated | RunnerStatus::Running
+    ) {
+        return Ok(None);
+    }
+
+    let proof_uri = if let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key)
+    {
+        load_first_artifact_uri(runtime, record, metadata, &root_refs.refs).await?
+    } else {
+        let mut final_uri = None;
+        for proposal in &metadata.proposals {
+            let refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
+            let Some(uri) = load_first_artifact_uri(runtime, record, metadata, &refs).await? else {
+                return Ok(None);
+            };
+            final_uri = Some(uri);
+        }
+        final_uri
+    };
+    let Some(proof_uri) = proof_uri else {
+        return Ok(None);
+    };
+    if runtime
+        .complete_nonterminal_task(&record.task_id, &proof_uri)
+        .await?
+    {
+        return Ok(Some(proof_uri));
+    }
+
+    let current = runtime.get_task(&record.task_id).await?;
+    Ok(current
+        .filter(|current| current.runner_status == RunnerStatus::Completed)
+        .and_then(|current| current.proof_uri))
+}
+
+async fn load_first_artifact_uri(
+    runtime: &RuntimeManager,
+    record: &RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+    proof_refs: &[String],
+) -> Result<Option<String>> {
+    for proof_ref in proof_refs {
+        if let Some(material) = crate::server::proof_artifact::load_proof_artifact_material(
+            runtime,
+            &metadata.network_pair,
+            record.pipeline_key,
+            record.route,
+            proof_ref,
+        )
+        .await?
+        {
+            return Ok(Some(material.record.proof_uri));
+        }
+    }
+    Ok(None)
+}
+
 fn metadata_queue_task_ids(
     metadata: &TaskMetadata,
     pipeline_key: PipelineKey,
@@ -276,6 +346,9 @@ pub(crate) async fn cancel_registered_tasks(
     let mut errors = Vec::new();
 
     for proposal in &metadata.proposals {
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
         if has_other_live_task_reference(
             runtime,
             public_task_id,
@@ -283,12 +356,10 @@ pub(crate) async fn cancel_registered_tasks(
             &metadata.network_pair,
         )
         .await?
+            || proposal_has_other_shared_dependent(engine, &task_id, metadata, pipeline_key).await?
         {
             continue;
         }
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
         for stage_task_id in proposal_task_chain_ids(&task_id) {
             if let Err(err) = engine.cancel(stage_task_id.clone()).await {
                 let encoded = encode_task_id(&stage_task_id)
@@ -347,6 +418,27 @@ pub(crate) async fn has_other_task_reference(
         }
     }
     Ok(false)
+}
+
+async fn proposal_has_other_shared_dependent(
+    engine: &Arc<dyn EngineHandle>,
+    proposal_task_id: &EngineTaskId,
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Result<bool> {
+    let owned_dependents = metadata
+        .proposals
+        .iter()
+        .filter_map(|proposal| proposal.engine_task_id(pipeline_key))
+        .chain(metadata.aggregate_engine_task_id(pipeline_key))
+        .collect::<HashSet<_>>();
+    let dependents = engine
+        .dependents_of(proposal_task_id.clone())
+        .await
+        .map_err(|err| task_store_error_to_anyhow(&err))?;
+    Ok(dependents
+        .iter()
+        .any(|dependent| !owned_dependents.contains(dependent)))
 }
 
 pub(crate) async fn has_other_live_task_reference(
@@ -431,6 +523,7 @@ pub(crate) async fn remove_task_children_if_unreferenced(
             &metadata.network_pair,
         )
         .await?
+            || proposal_has_other_shared_dependent(engine, &task_id, metadata, pipeline_key).await?
         {
             outcome.skipped_shared_children += stage_task_ids.len();
             continue;
@@ -551,7 +644,7 @@ mod tests {
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
     };
     use crate::server::task_metadata::{
-        ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
+        ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
     };
     use anyhow::{Context, Result};
     use raiko2_engine::{
@@ -829,6 +922,66 @@ mod tests {
         let active = runtime.get_task("active-root").await?.expect("active root");
         assert_eq!(active.runner_status, RunnerStatus::Running);
         assert!(engine.cancelled().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_cleanup_persists_artifact_completion_before_orphan_cancellation() -> Result<()>
+    {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "orphaned-artifact-complete",
+        ))?);
+        let encoded_proposal_ref = encoded_proposal_task_id(15)?;
+        let engine = Arc::new(MockEngine::with_queue_tasks(HashSet::from([
+            encoded_proposal_ref.clone(),
+        ])));
+        let factory = Arc::new(build_factory(engine));
+        let stale = now_ts().saturating_sub(7_201);
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "artifact-complete-root",
+            &encoded_proposal_ref,
+            RunnerStatus::Running,
+            stale,
+        )
+        .await?;
+        let metadata = metadata_for_task(&encoded_proposal_ref);
+        let proof_ref = proposal_task_ref(
+            PipelineKey::ShastaRisc0,
+            metadata.proposals[0]
+                .request
+                .as_ref()
+                .expect("proposal request"),
+        );
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaRisc0,
+                PipelineKey::ShastaRisc0.route(),
+                &proof_ref,
+                br#"{"proof":"0xcomplete"}"#,
+            )
+            .await?;
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+
+        assert_eq!(stats.orphaned_cancelled, 0);
+        let record = runtime
+            .get_task("artifact-complete-root")
+            .await?
+            .expect("artifact-complete root");
+        assert_eq!(record.runner_status, RunnerStatus::Completed);
+        assert!(record.proof_uri.is_some());
         Ok(())
     }
 

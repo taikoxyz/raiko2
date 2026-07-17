@@ -32,6 +32,7 @@ pub mod boundless;
 pub mod boundless_config;
 pub mod gaiko2;
 pub mod native;
+mod pending_recovery;
 pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;
@@ -40,6 +41,9 @@ mod risc0_aggregation;
 #[cfg(feature = "sp1")]
 pub mod sp1;
 pub mod sp1_config;
+pub use pending_recovery::{
+    NetworkProverBackend, PendingProofCheckpoint, PendingProofRecoveryError,
+};
 pub use sp1_config::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
@@ -132,13 +136,12 @@ pub enum ProverProgress {
 
 #[async_trait::async_trait]
 pub trait ProverProgressObserver: Send + Sync {
-    async fn on_progress(&self, progress: &ProverProgress);
+    async fn on_progress(&self, progress: &ProverProgress) -> RaikoResult<()>;
 
-    async fn load_sp1_network_request_id(&self) -> Option<String> {
-        None
-    }
-
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {
+    async fn load_pending_proof_checkpoint(
+        &self,
+        _backend: NetworkProverBackend,
+    ) -> Option<PendingProofCheckpoint> {
         None
     }
 }

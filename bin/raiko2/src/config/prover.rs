@@ -46,6 +46,15 @@ impl ProverConfig {
     }
 
     #[must_use]
+    pub const fn sp1_route(&self) -> PipelineRoute {
+        let runner = match self.sp1.prover {
+            Sp1ProverMode::Network => RunnerKind::Network,
+            Sp1ProverMode::Mock | Sp1ProverMode::Local => RunnerKind::Local,
+        };
+        PipelineRoute::new(GuestSystem::Sp1, runner)
+    }
+
+    #[must_use]
     pub const fn is_remote_sgx_route(&self) -> bool {
         matches!(
             self.route(),

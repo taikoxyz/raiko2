@@ -7,18 +7,12 @@ license.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = []
-redis = ["dep:redis"]
-
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
 async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
 base64.workspace = true
 bincode.workspace = true
-redis = { version = "1.0.1", optional = true, features = ["tokio-comp"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-testcontainers = "0.26.0"

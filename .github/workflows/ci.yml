@@ -273,6 +273,9 @@ jobs:
       - name: test xtask register image
         run: cargo test -p xtask register_image
 
+      - name: test fixture server feature
+        run: cargo test -p raiko2 --bin raiko2 --features fixture-server
+
   # Keep the prover/engine/server stack out of the default PR gate for now; those heavier lanes
   # are covered by the manually dispatched rust-heavy workflow.
   rust:

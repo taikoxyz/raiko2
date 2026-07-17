@@ -52,8 +52,16 @@ initial_backoff_ms = 1000
 compute_units_per_second = 1000
 
 [runtime]
-root = "./data/runtime"
-inactive_ttl_secs = 7200
+environment = "devnet"
+namespace = "raiko2-devnet-a"
+
+[runtime.store]
+# Use GCS in production. Memory is an explicit, ephemeral emergency mode; there is no failover.
+backend = "memory"
+prefix = "raiko2/runtime/v1"
+# bucket = "my-raiko2-runtime"
+owner_heartbeat_secs = 15
+owner_lease_secs = 60
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
 # Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.
@@ -89,6 +97,8 @@ cycle_limit = 1000000000000
 # proposal_cycle_limit = 1000000000000
 # aggregation_cycle_limit = 1000000000000
 timeout_secs = 7200
+# Operator-owned ceiling; request-scoped overrides may lower but never raise this value.
+network_request_max_attempts = 3
 # rpc_url = "https://rpc.production.succinct.xyz"
 
 [prover.boundless]
@@ -203,8 +213,5 @@ timeout_ms_per_mcycle = 6000
 # absolute_max_price_per_mcycle = "0.0000032"
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 6
 maintenance_interval_ms = 200
-# redis_url = "redis://localhost:6379/"

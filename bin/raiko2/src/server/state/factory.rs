@@ -14,6 +14,10 @@ pub struct PipelineBindingKey {
 /// Pipeline factory for resolving engines.
 pub trait PipelineFactory: Send + Sync {
     fn get(&self, network_pair: &str, key: PipelineKey) -> Option<Arc<dyn EngineHandle>>;
+
+    fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
+        true
+    }
 }
 
 #[derive(Default)]
@@ -47,5 +51,13 @@ impl PipelineFactory for StaticPipelineFactory {
                 pipeline: key,
             })
             .cloned()
+    }
+
+    fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {
+        !self.engines.is_empty()
+            && self
+                .engines
+                .values()
+                .all(|engine| engine.queue_maintenance_ready(max_age))
     }
 }

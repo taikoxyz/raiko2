@@ -81,18 +81,6 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_RPC_RETRY_CU_PER_SECOND")]
     pub rpc_retry_cu_per_second: Option<u64>,
 
-    /// Queue backend (memory, redis)
-    #[arg(long, env = "RAIKO2_QUEUE_BACKEND")]
-    pub queue_backend: Option<String>,
-
-    /// Redis URL for queue backend (e.g. <redis://localhost:6379/>)
-    #[arg(long, env = "RAIKO2_REDIS_URL")]
-    pub redis_url: Option<String>,
-
-    /// Queue namespace/prefix for Redis keys
-    #[arg(long, env = "RAIKO2_QUEUE_NAMESPACE")]
-    pub queue_namespace: Option<String>,
-
     /// Number of queue worker loops
     #[arg(long, env = "RAIKO2_QUEUE_WORKERS")]
     pub queue_workers: Option<usize>,

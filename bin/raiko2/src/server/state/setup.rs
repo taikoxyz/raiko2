@@ -86,13 +86,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 #[allow(clippy::missing_const_for_fn)]
 #[cfg(feature = "host")]
 pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
-    SchedulerConfig {
-        lease_duration: task_lease_duration(config),
-        retry: RetryPolicy::Fixed {
-            max_attempts: 21,
-            delay: Duration::from_secs(5 * 60),
-        },
-    }
+    scheduler_config(config)
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -179,15 +173,6 @@ pub(crate) const fn remote_sgx_prover_config(
     }
 }
 
-#[cfg(feature = "redis-queue")]
-use raiko2_pipeline::PipelineKey;
-
-#[cfg(feature = "redis-queue")]
-pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: PipelineKey) -> String {
-    let base = base.trim_end_matches('/');
-    format!("{}/{}/{}", base, pair.key, key.as_str())
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "local-provers")]
@@ -272,15 +257,9 @@ mod tests {
 
     #[cfg(feature = "local-provers")]
     #[test]
-    fn sp1_scheduler_retries_twenty_times_every_five_minutes() {
+    fn sp1_scheduler_disables_queue_retry() {
         let scheduler = sp1_scheduler_config(&Config::default());
-        assert_eq!(
-            scheduler.retry,
-            RetryPolicy::Fixed {
-                max_attempts: 21,
-                delay: Duration::from_secs(5 * 60),
-            }
-        );
+        assert_eq!(scheduler.retry, RetryPolicy::None);
     }
 
     #[test]

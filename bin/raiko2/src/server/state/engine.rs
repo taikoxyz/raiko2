@@ -14,6 +14,9 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Engine abstraction used by the HTTP server.
 pub trait EngineHandle: Send + Sync {
+    fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
+        true
+    }
     fn submit_proposal_proof_with_dependencies(
         &self,
         request: ProposalTaskRequest,
@@ -32,6 +35,12 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
+    fn dependents_of(
+        &self,
+        _id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Vec<EngineTaskId>, TaskStoreError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
 }
@@ -113,6 +122,10 @@ where
     S::Backend: raiko2_pipeline::ProverBackend + 'static,
     S::Provider: raiko2_provider::Provider + 'static,
 {
+    fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {
+        Engine::queue_maintenance_ready(self, max_age)
+    }
+
     fn submit_proposal_proof_with_dependencies(
         &self,
         request: ProposalTaskRequest,
@@ -161,6 +174,13 @@ where
 
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
+    }
+
+    fn dependents_of(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Vec<EngineTaskId>, TaskStoreError>> {
+        Box::pin(async move { self.dependents_of(&id).await })
     }
 
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {

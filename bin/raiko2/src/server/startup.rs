@@ -1,5 +1,5 @@
 use super::net;
-use crate::config::{Config, NetworkPairConfig, QueueBackend};
+use crate::config::{Config, NetworkPairConfig};
 use serde::Serialize;
 use tracing::info;
 use url::Url;
@@ -9,7 +9,9 @@ pub(crate) struct StartupSummary {
     listen: String,
     route: String,
     pairs: Vec<String>,
-    runtime_root: String,
+    environment: String,
+    namespace: String,
+    runtime_store: String,
     queue_backend: String,
     queue_workers: usize,
     json_logs: bool,
@@ -41,8 +43,14 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
             .iter()
             .map(NetworkPairConfig::key)
             .collect(),
-        runtime_root: config.runtime.root.display().to_string(),
-        queue_backend: queue_backend_name(config.queue.backend).to_string(),
+        environment: config.runtime.environment.clone(),
+        namespace: config.runtime.namespace.clone(),
+        runtime_store: match config.runtime.store.backend {
+            crate::config::RuntimeStoreBackend::Memory => "memory",
+            crate::config::RuntimeStoreBackend::Gcs => "gcs",
+        }
+        .to_string(),
+        queue_backend: "memory".to_string(),
         queue_workers: config.queue.workers,
         json_logs,
         remote_sgx_base_url,
@@ -73,7 +81,9 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             listen = %summary.listen,
             route = %summary.route,
             pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
+            environment = %summary.environment,
+            namespace = %summary.namespace,
+            runtime_store = %summary.runtime_store,
             queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
@@ -86,7 +96,9 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             listen = %summary.listen,
             route = %summary.route,
             pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
+            environment = %summary.environment,
+            namespace = %summary.namespace,
+            runtime_store = %summary.runtime_store,
             queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
@@ -98,7 +110,9 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             listen = %summary.listen,
             route = %summary.route,
             pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
+            environment = %summary.environment,
+            namespace = %summary.namespace,
+            runtime_store = %summary.runtime_store,
             queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
@@ -110,20 +124,15 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             listen = %summary.listen,
             route = %summary.route,
             pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
+            environment = %summary.environment,
+            namespace = %summary.namespace,
+            runtime_store = %summary.runtime_store,
             queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
             "{}",
             message
         ),
-    }
-}
-
-const fn queue_backend_name(backend: QueueBackend) -> &'static str {
-    match backend {
-        QueueBackend::Memory => "memory",
-        QueueBackend::Redis => "redis",
     }
 }
 
@@ -149,11 +158,8 @@ fn sanitize_url_for_log(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::build_startup_summary;
-    use crate::config::{
-        Config, GuestSystem, QueueBackend, RunnerKind, ServerAclFeature, ServerAclKey,
-    };
+    use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
     use serde_json::Value;
-    use std::path::PathBuf;
 
     fn summary_json(config: &Config, json_logs: bool) -> Value {
         serde_json::to_value(build_startup_summary(config, json_logs)).expect("serialize summary")
@@ -174,8 +180,8 @@ mod tests {
         }];
         config.prover.guest_system = GuestSystem::Native;
         config.prover.runner = RunnerKind::Local;
-        config.runtime.root = PathBuf::from("/tmp/raiko2-runtime");
-        config.queue.backend = QueueBackend::Memory;
+        config.runtime.environment = "test".to_string();
+        config.runtime.namespace = "raiko2-test".to_string();
         config.queue.workers = 9;
         config.rpc.pairs[0].network = "taiko_hoodi".to_string();
         config.rpc.pairs[0].l1_network = "hoodi".to_string();
@@ -189,7 +195,9 @@ mod tests {
         assert_eq!(summary["listen"], "127.0.0.1:8088");
         assert_eq!(summary["route"], "native/local");
         assert_eq!(summary["pairs"], serde_json::json!(["taiko_hoodi/hoodi"]));
-        assert_eq!(summary["runtime_root"], "/tmp/raiko2-runtime");
+        assert_eq!(summary["environment"], "test");
+        assert_eq!(summary["namespace"], "raiko2-test");
+        assert_eq!(summary["runtime_store"], "memory");
         assert_eq!(summary["queue_backend"], "memory");
         assert_eq!(summary["queue_workers"], 9);
         assert_eq!(summary["json_logs"], false);

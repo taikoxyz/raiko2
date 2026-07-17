@@ -21,3 +21,27 @@ The process of rebuilding and exporting guest artifacts when guest source, toolc
 
 ### Guest Fingerprint
 A reproducible digest of the inputs that decide whether a guest refresh can skip rebuilding. It is a build-cache decision aid, not a proof digest or verifier identity.
+
+## Runtime And Proof Lifecycle
+
+### Environment
+The business and deployment boundary, such as `devnet` or `mainnet`. It scopes request identity and
+storage, but does not identify a concrete server instance.
+
+### Runtime Namespace
+The immutable ownership boundary for one raiko2 instance. A GCS-backed namespace has one renewable
+owner lease, and both environment and namespace participate in task fingerprints and object names.
+
+### Stage Lease
+The in-memory scheduler ownership of one executable stage. It remains held through provider
+execution, proof checkpointing, durable artifact publication, and terminal runtime synchronization.
+Losing it while the process is running fails the stage.
+
+### Pending Network Proof
+A Boundless or SP1 provider request that has been durably checkpointed but has not reached a final
+proof outcome. Restart recovery resumes the recorded provider request and its attempt budget instead
+of submitting a duplicate request.
+
+### Proof Manifest
+A create-only pointer from a logical proof reference to an immutable content-hash object. Identical
+publication is idempotent; different bytes cannot replace the selected proof.

@@ -8,7 +8,6 @@ use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
 };
-use raiko2_queue::decode_task_id;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -58,7 +57,6 @@ pub(crate) struct TaskMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AggregateInputProofArtifact {
     pub(crate) proof_ref: String,
-    pub(crate) proof_path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +95,12 @@ pub(crate) struct RuntimeMetadata {
     pub(crate) proposals: BTreeMap<String, TaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate: Option<TaskRuntimeMetadata>,
+}
+
+impl RuntimeMetadata {
+    pub(crate) fn current() -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,19 +201,12 @@ impl TaskMetadata {
         &self,
         pipeline_key: PipelineKey,
     ) -> Option<EngineTaskId> {
-        self.aggregate_request
-            .clone()
-            .map(|request| {
-                EngineTaskId::new(EngineTaskKey::Aggregate {
-                    pipeline: pipeline_key,
-                    request,
-                })
+        self.aggregate_request.clone().map(|request| {
+            EngineTaskId::new(EngineTaskKey::Aggregate {
+                pipeline: pipeline_key,
+                request,
             })
-            .or_else(|| {
-                self.aggregate_task_id
-                    .as_deref()
-                    .and_then(decode_legacy_aggregate_task_id)
-            })
+        })
     }
 
     pub(crate) fn upsert_proposal_runtime(
@@ -306,15 +303,12 @@ impl TaskMetadata {
 
 impl ProposalTask {
     pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> Option<EngineTaskId> {
-        self.request
-            .clone()
-            .map(|request| {
-                EngineTaskId::new(EngineTaskKey::Proposal {
-                    pipeline: pipeline_key,
-                    request,
-                })
+        self.request.clone().map(|request| {
+            EngineTaskId::new(EngineTaskKey::Proposal {
+                pipeline: pipeline_key,
+                request,
             })
-            .or_else(|| decode_legacy_proposal_task_id(&self.task_id))
+        })
     }
 }
 
@@ -356,15 +350,11 @@ pub(crate) fn proposal_proof_artifact_refs(
     pipeline_key: PipelineKey,
     proposal: &ProposalTask,
 ) -> Vec<String> {
-    let mut refs = proposal
+    proposal
         .request
         .as_ref()
         .map(|request| vec![proposal_task_ref(pipeline_key, request)])
-        .unwrap_or_default();
-    if !refs.contains(&proposal.task_id) {
-        refs.push(proposal.task_id.clone());
-    }
-    refs
+        .unwrap_or_default()
 }
 
 pub(crate) fn root_proof_artifact_refs(
@@ -372,20 +362,8 @@ pub(crate) fn root_proof_artifact_refs(
     pipeline_key: PipelineKey,
 ) -> Option<ProofArtifactRefs> {
     if let Some(request) = metadata.aggregate_request.as_ref() {
-        let mut refs = vec![aggregate_task_ref(pipeline_key, request)];
-        if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref()
-            && !refs.contains(legacy_ref)
-        {
-            refs.push(legacy_ref.clone());
-        }
         return Some(ProofArtifactRefs {
-            refs,
-            kind: ProofArtifactKind::Aggregate,
-        });
-    }
-    if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref() {
-        return Some(ProofArtifactRefs {
-            refs: vec![legacy_ref.clone()],
+            refs: vec![aggregate_task_ref(pipeline_key, request)],
             kind: ProofArtifactKind::Aggregate,
         });
     }
@@ -396,6 +374,23 @@ pub(crate) fn root_proof_artifact_refs(
         }),
         _ => None,
     }
+}
+
+pub(crate) fn publication_proof_artifact_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Vec<String> {
+    let mut refs = root_proof_artifact_refs(metadata, pipeline_key)
+        .map(|root| root.refs)
+        .unwrap_or_default();
+    for proposal in &metadata.proposals {
+        for proof_ref in proposal_proof_artifact_refs(pipeline_key, proposal) {
+            if !refs.contains(&proof_ref) {
+                refs.push(proof_ref);
+            }
+        }
+    }
+    refs
 }
 
 pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
@@ -414,49 +409,6 @@ pub(crate) fn stage_task_ref_for_stage(task_id: &EngineTaskId, stage: ProposalSt
         }
         EngineTaskKey::Aggregate { pipeline, request } => aggregate_task_ref(*pipeline, request),
     }
-}
-
-fn decode_legacy_proposal_task_id(raw: &str) -> Option<EngineTaskId> {
-    if let Ok(task_id) = decode_task_id::<EngineTaskKey>(raw) {
-        return match task_id.0 {
-            EngineTaskKey::Proposal { pipeline, request } => {
-                Some(EngineTaskId::new(EngineTaskKey::Proposal {
-                    pipeline,
-                    request,
-                }))
-            }
-            EngineTaskKey::Aggregate { .. } => None,
-        };
-    }
-
-    match decode_task_id::<LegacyEngineTaskKey>(raw).ok()?.0 {
-        LegacyEngineTaskKey::Proposal {
-            pipeline, request, ..
-        } => Some(EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request,
-        })),
-        LegacyEngineTaskKey::Aggregate { .. } => None,
-    }
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-enum LegacyEngineTaskKey {
-    Proposal {
-        pipeline: PipelineKey,
-        request: ProposalTaskRequest,
-        stage: ProposalStage,
-    },
-    Aggregate {
-        pipeline: PipelineKey,
-        request: AggregationTaskRequest,
-    },
-}
-
-fn decode_legacy_aggregate_task_id(raw: &str) -> Option<EngineTaskId> {
-    let task_id = decode_task_id::<EngineTaskKey>(raw).ok()?;
-    matches!(task_id.0, EngineTaskKey::Aggregate { .. }).then_some(task_id)
 }
 
 fn stable_task_ref<T>(kind: &str, pipeline_key: PipelineKey, request: &T) -> String
@@ -554,6 +506,11 @@ impl TaskRuntimeMetadata {
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
     ) {
+        if self.provider_request_id.as_deref() != Some(&progress.provider_request_id) {
+            let submitted_at = u64::try_from(updated_at).unwrap_or_default();
+            self.submitted_at = Some(submitted_at);
+            self.expires_at = Some(submitted_at.saturating_add(progress.timeout_secs));
+        }
         self.updated_at = updated_at;
         self.provider_request_id = Some(progress.provider_request_id.clone());
         self.sp1_network_mode = Some(progress.network_mode);
@@ -561,6 +518,7 @@ impl TaskRuntimeMetadata {
         self.sp1_skip_simulation = Some(progress.skip_simulation);
         self.sp1_cycle_limit = Some(progress.cycle_limit);
         self.sp1_timeout_secs = Some(progress.timeout_secs);
+        self.rebid_attempt = Some(progress.attempt);
         self.sp1_max_price_per_pgu = progress.max_price_per_pgu;
         self.sp1_auction_timeout_secs = progress.auction_timeout_secs;
     }

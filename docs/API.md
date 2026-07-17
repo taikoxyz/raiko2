@@ -58,8 +58,9 @@ GET /health
 GET /ready
 ```
 
-Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the configured
-queue backend, and the hosted proving capabilities exposed by the endpoint.
+Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, current ownership
+of the authoritative runtime namespace, the in-memory queue, and the hosted proving capabilities
+exposed by the endpoint. Loss of the GCS owner lease returns HTTP `503` until ownership is restored.
 
 ## Metrics
 
@@ -359,13 +360,13 @@ Response:
         "last_anchor_block_number": 199,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json"
+        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_mainnet%2Fethereum/proposal_.../content/<sha256>.proof.json"
       }
     ],
     "aggregate": null,
     "proof": "0x...",
     "proof_ref": "proposal:...",
-    "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json",
+    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_mainnet%2Fethereum/proposal_.../content/<sha256>.proof.json",
     "error": null
   }
 }
@@ -378,7 +379,7 @@ Response fields:
 | `data.task_id` | string | Opaque root task ID. |
 | `data.route` | string | Resolved route, such as `sp1/network` or `risc0/network`. |
 | `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
-| `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
+| `data.execution_mode` | string/null | SP1 execution mode. Proof API tasks use `prove`; `execute` requests are rejected. |
 | `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
 | `data.network` | string | Server-configured L2 network. |
 | `data.l1_network` | string | Server-configured L1 network. |
@@ -389,7 +390,7 @@ Response fields:
 | `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
 | `data.proof` | string/null | Final root proof hex string when completed. |
 | `data.proof_ref` | string/null | Stable persisted proof reference. |
-| `data.proof_path` | string/null | Persisted proof artifact path. |
+| `data.proof_uri` | string/null | Backend-neutral persisted proof URI (`memory://` or `gs://`). |
 | `data.error` | string/null | Terminal error detail when failed. |
 
 Validation:
@@ -597,6 +598,8 @@ Scope:
 - If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
   are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
   are linked to a matched runtime task.
+- If deleting a backing proof object fails, `failed` is incremented and the artifact remains
+  tombstoned for a later invalidation retry. Tombstoned artifacts are not eligible for proof reuse.
 
 Validation:
 
@@ -699,9 +702,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.
-- `sp1.mode=execute` is only valid when `proof_type=sp1`.
-- `sp1.mode=execute` requires `aggregate=false`.
-- `sp1.mode=execute` does not support `sp1.prover=network`.
+- `sp1.mode=execute` is rejected by the proof API because successful proof tasks must publish a
+  non-null proof artifact before reaching `Completed`.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires the selected `(network, l1_network)` pair
   to declare `sp1_verifier_rpc_url` and `sp1_verifier_address` in server config.
@@ -898,7 +900,7 @@ x-api-key: <server.acl.keys[].key with allow=["admin"]>
 Requires an ACL key that allows `admin`.
 
 Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
-directories. Reusable proof artifacts under `cache/proofs/...` are retained.
+directories. Reusable proof artifacts in the configured artifact store are retained.
 
 ### Response
 
@@ -952,8 +954,8 @@ under the original `zk_any` request for this operator view.
 ```
 
 `orphaned` counts non-terminal runtime records without active local queue execution and without
-remote submission progress. The runtime cleanup pass cancels stale orphaned records after
-`runtime.inactive_ttl_secs`.
+remote submission progress. The runtime cleanup pass cancels stale orphaned records after the
+seven-day runtime retention window.
 `clean=true` means there are no matching non-terminal queue tasks in `pending`, `ready`,
 `retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.
@@ -1033,7 +1035,7 @@ Returns the root-task view derived from the original batch request.
         "last_anchor_block_number": 41,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_path": "cache/proofs/taiko_hoodi_hoodi/proposal_....json"
+        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_hoodi%2Fhoodi/proposal_.../content/<sha256>.proof.json"
       }
     ],
     "aggregate": {
@@ -1041,11 +1043,11 @@ Returns the root-task view derived from the original batch request.
       "status": "completed",
       "proof": "0x...",
       "proof_ref": "aggregate:...",
-      "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+      "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_hoodi%2Fhoodi/aggregate_.../content/<sha256>.proof.json"
     },
     "proof": "0x...",
     "proof_ref": "aggregate:...",
-    "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_hoodi%2Fhoodi/aggregate_.../content/<sha256>.proof.json"
   }
 }
 ```
@@ -1057,24 +1059,20 @@ Returns the root-task view derived from the original batch request.
 - `data.prover_type` is present for zkVM proof types and reports the effective prover mode:
   `mock`, `local`, or `network`. For RISC0, the network mode is currently backed by Boundless.
 - `data.execution_mode` is present for SP1 tasks and distinguishes `prove` from `execute`.
-- `data.runtime.runner_status` is the persisted root runtime lifecycle stored in `runtime.sqlite`:
+- `data.runtime.runner_status` is the root runtime lifecycle stored by the configured runtime store:
   `allocated`, `running`, `completed`, `failed`, or `cancelled`.
 - `data.status` is the proof-oriented root status shown to API clients:
   `pending`, `proving`, `completed`, `failed`, or `cancelled`.
-- `proof_ref` and `proof_path`, when present, point at the persisted proof artifact for the
+- `proof_ref` and `proof_uri`, when present, point at the persisted proof artifact for the
   resolved concrete route. For `zk_any` requests these fields use the selected `sp1` or `risc0`
   artifact key, never `zk_any`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
-- Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
-  `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
-  Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
-  stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
-- When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
-  execute report under `proposals[].extra_data.sp1`. When present,
-  `proposals[].extra_data.sp1.gas` is SP1 prover gas from `ExecutionReport::gas()`, not EVM gas.
+- Terminal root tasks and remote inputs use a seven-day retention policy. Published proof and
+  program objects use a thirty-day retention policy, while active manifests must not have a bucket
+  age rule. Active root tasks are never removed by runtime cleanup.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1107,6 +1105,33 @@ All API errors use the Hoodi-style envelope:
 
 ## Configuration Notes
 
+- `runtime.environment` is the business/deployment boundary. `runtime.namespace` is the immutable
+  single-instance ownership boundary. Both scope request fingerprints, public task IDs, runtime
+  records, provider checkpoints, and proof artifacts.
+- `runtime.store.backend` selects the single authoritative runtime store. Use `gcs` with a non-empty
+  `bucket` in production. `memory` is an explicit ephemeral emergency mode; switching backends is
+  an operator action and there is no automatic failover, merge, writeback, or compatibility import.
+- GCS object names start with `<prefix>/<environment>/<namespace>/`. A namespace owner record
+  prevents two live instances from mutating the same runtime state.
+- Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
+  pointer. Runtime snapshots and owner leases use `*.runtime.json` and `*.owner.json`; the suffixes
+  allow operations to apply 7-day runtime retention and 30-day proof/manifest/tombstone retention
+  without a bucket-wide age rule.
+- A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
+  registered, readable, and contains a non-null proof payload. Publication is create-only: an
+  identical existing object is idempotent, while a different late object is discarded.
+- Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
+  `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
+- Before the first publication attempt, a completed proof is checkpointed in the authoritative
+  runtime store. Pending proof bytes use a separate immutable artifact and manifest rather than
+  being embedded in the runtime snapshot, so state updates do not rewrite large proofs.
+  Invalidation and recovery see the same outbox after restart, and publication retries consume the
+  checkpoint without running the prover again.
+- Invalidation writes a content-bound marker to the authoritative artifact store before deleting
+  the proof object or pending publication. Recovery checks this marker during
+  reconciliation, and publication finalization, so a failed delete or concurrent registration
+  cannot make a tombstoned proof reusable. Local tombstones apply only to their recorded content
+  hash, allowing a later generation with different content at the same key.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.
@@ -1174,6 +1199,10 @@ All API errors use the Hoodi-style envelope:
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
+- `prover.sp1.network_request_max_attempts` bounds the full SP1 network lifecycle, including a
+  request resumed after restart. Exhausting the budget fails the task instead of submitting
+  requests indefinitely. A request-scoped `prover_args.sp1.network_request_max_attempts` may lower
+  this operator-owned cap but cannot raise it.
 - `rpc.client.timeout_ms` defaults to `600000` to tolerate slow preflight witness and
   `eth_getProof` RPC calls. It controls provider RPC calls, not remote prover request deadlines.
 - `preflight.verify_checkpoint_l2_rpcs` is an optional map from `rpc.pairs[*].network` to a

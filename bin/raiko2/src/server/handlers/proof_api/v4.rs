@@ -7,10 +7,9 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineKey, PipelineRoute};
+use raiko2_runtime::RuntimeManager;
 use std::{collections::HashSet, sync::Arc};
-use tokio::fs;
-use tokio::io::AsyncReadExt;
 
 use super::super::proof_types::v4 as wire;
 use super::{
@@ -19,10 +18,10 @@ use super::{
     ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, TaskMetadata,
     authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
-    collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
-    is_terminal_runtime_status, load_task_data, parse_task_metadata, proposal_proof_artifact_refs,
-    register_batch_task, remove_task_children_if_unreferenced, replace_existing_batch_task,
-    resolve_engine, root_proof_artifact_refs,
+    clear_task_publication_outboxes, collect_prover_status, handle_created_batch_task,
+    handle_existing_batch_task, is_terminal_runtime_status, load_task_data, parse_task_metadata,
+    proposal_proof_artifact_refs, register_batch_task, remove_task_children_if_unreferenced,
+    replace_existing_batch_task, resolve_engine, root_proof_artifact_refs,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -50,10 +49,15 @@ pub(crate) async fn request_proposal_proof(
     validate_proof_request_shape(&req)?;
     let (proposal_id_start, proposal_id_end) = proposal_id_range(&req.proposals)?;
     let mut submission = proposal_submission(&state, &req)?;
-    let request_fingerprint = proposal_request_fingerprint(&submission);
+    let request_fingerprint = proposal_request_fingerprint(
+        state.runtime.environment(),
+        state.runtime.namespace(),
+        &submission,
+    )
+    .map_err(Error::from_api_error)?;
     submission.public_task_id = request_fingerprint.public_task_id();
-    submit_submission(&state, &submission, request_fingerprint.as_str()).await?;
-    let data = load_task_data(&state, &submission.public_task_id)
+    let task_id = submit_submission(&state, &submission, request_fingerprint.as_str()).await?;
+    let data = load_task_data(&state, &task_id)
         .await
         .map_err(Error::from_api_error)?;
     Ok(Json(wire::TaskResponse {
@@ -220,6 +224,8 @@ async fn invalidate_artifacts_inner(
             matched_artifacts.retain(|artifact| {
                 !blocked_artifact_refs.contains(&ProofArtifactIdentity {
                     network_pair: artifact.network_pair.clone(),
+                    pipeline_key: artifact.pipeline_key,
+                    route: artifact.route,
                     proof_ref: artifact.proof_ref.clone(),
                 })
             });
@@ -246,6 +252,8 @@ struct CandidateInvalidationTask {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProofArtifactIdentity {
     network_pair: String,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proof_ref: String,
 }
 
@@ -331,13 +339,20 @@ async fn collect_invalidation_task_candidates(
             data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
             continue;
         }
-        let root_artifact_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
-        let artifact_refs =
-            invalidation_artifact_refs(&metadata, record.pipeline_key, proposal_range);
+        let root_artifact_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
+        let artifact_refs = invalidation_artifact_refs(
+            &metadata,
+            record.pipeline_key,
+            record.route,
+            proposal_range,
+        );
         candidates
             .artifact_refs
             .extend(artifact_refs.iter().cloned());
-        let root_proof_matches_prefix = task_matches_proof_prefix(&record, proof_prefix).await;
+        let root_proof_matches_prefix =
+            task_matches_proof_prefix(state.runtime.as_ref(), &record, &metadata, proof_prefix)
+                .await;
         candidates.records.push(CandidateInvalidationTask {
             record,
             metadata,
@@ -381,6 +396,8 @@ fn proof_artifact_identities(
         .iter()
         .map(|artifact| ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         })
         .collect()
@@ -408,6 +425,8 @@ async fn extend_matched_artifacts_by_refs(
         }
         let identity = ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         };
         if refs.contains(&identity) && seen_artifacts.insert(identity) {
@@ -421,6 +440,7 @@ async fn extend_matched_artifacts_by_refs(
 fn root_invalidation_artifact_refs(
     metadata: &TaskMetadata,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
 ) -> HashSet<ProofArtifactIdentity> {
     root_proof_artifact_refs(metadata, pipeline_key)
         .map(|root_refs| {
@@ -429,6 +449,8 @@ fn root_invalidation_artifact_refs(
                 .into_iter()
                 .map(|proof_ref| ProofArtifactIdentity {
                     network_pair: metadata.network_pair.clone(),
+                    pipeline_key,
+                    route,
                     proof_ref,
                 })
                 .collect()
@@ -439,9 +461,10 @@ fn root_invalidation_artifact_refs(
 fn invalidation_artifact_refs(
     metadata: &TaskMetadata,
     pipeline_key: PipelineKey,
+    route: PipelineRoute,
     proposal_range: Option<(u64, u64)>,
 ) -> HashSet<ProofArtifactIdentity> {
-    let mut refs = root_invalidation_artifact_refs(metadata, pipeline_key);
+    let mut refs = root_invalidation_artifact_refs(metadata, pipeline_key, route);
     for proposal in &metadata.proposals {
         if !proposal_matches_range(proposal.proposal_id, proposal_range) {
             continue;
@@ -451,6 +474,8 @@ fn invalidation_artifact_refs(
                 .into_iter()
                 .map(|proof_ref| ProofArtifactIdentity {
                     network_pair: metadata.network_pair.clone(),
+                    pipeline_key,
+                    route,
                     proof_ref,
                 }),
         );
@@ -487,10 +512,15 @@ async fn collect_invalidation_artifacts(
         if !artifact_matches_proposal_scope(&artifact, proposal_range, matched_task_artifact_refs) {
             continue;
         }
-        if !artifact_matches_proof_prefix(&artifact, proof_prefix).await {
+        if !artifact_matches_proof_prefix(state.runtime.as_ref(), &artifact, proof_prefix).await {
             continue;
         }
-        if seen_artifacts.insert((artifact.network_pair.clone(), artifact.proof_ref.clone())) {
+        if seen_artifacts.insert(ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
+            proof_ref: artifact.proof_ref.clone(),
+        }) {
             data.artifacts.matched = data.artifacts.matched.saturating_add(1);
             matched_artifacts.push(artifact);
         }
@@ -565,6 +595,20 @@ async fn remove_invalidated_tasks(
             continue;
         }
 
+        if let Err(err) =
+            clear_task_publication_outboxes(state.runtime.as_ref(), &record, &metadata, true).await
+        {
+            data.tasks.failed = data.tasks.failed.saturating_add(1);
+            tracing::warn!(
+                task_id = %record.task_id,
+                error = %err.message,
+                "failed to invalidate pending proof publication"
+            );
+            blocked_artifact_refs.extend(artifact_refs);
+            blocked_artifact_refs.extend(root_artifact_refs);
+            continue;
+        }
+
         match state.runtime.remove_task(&record.task_id).await {
             Ok(true) => data.tasks.removed = data.tasks.removed.saturating_add(1),
             Ok(false) => {}
@@ -590,53 +634,85 @@ async fn remove_invalidated_tasks(
     blocked_artifact_refs
 }
 
-enum ProofArtifactFileRemoval {
-    Removed,
-    Missing,
-    Failed,
-}
-
 async fn remove_invalidated_artifacts(
     state: &AppState,
     matched_artifacts: Vec<raiko2_runtime::ProofArtifactRecord>,
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
-        let file_removal = match fs::remove_file(&artifact.proof_path).await {
-            Ok(()) => ProofArtifactFileRemoval::Removed,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                ProofArtifactFileRemoval::Missing
-            }
+        match state
+            .runtime
+            .mark_proof_artifact_invalidated(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                artifact.route,
+                &artifact.proof_ref,
+                &artifact.content_hash,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => continue,
             Err(err) => {
                 data.artifacts.failed = data.artifacts.failed.saturating_add(1);
                 tracing::warn!(
                     network_pair = %artifact.network_pair,
                     proof_ref = %artifact.proof_ref,
-                    proof_path = %artifact.proof_path,
                     error = %err,
-                    "failed to remove invalidated proof artifact file; removing cache record"
+                    "failed to mark proof artifact invalidated"
                 );
-                ProofArtifactFileRemoval::Failed
+                continue;
             }
+        }
+
+        let identity = ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
+            proof_ref: artifact.proof_ref.clone(),
         };
+        let blocked_artifact_refs =
+            remove_late_terminal_tasks_for_artifact(state, &identity, data).await;
+        if blocked_artifact_refs.contains(&identity) {
+            continue;
+        }
+
+        if let Err(err) = state
+            .runtime
+            .delete_proof_artifact(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                artifact.route,
+                &artifact.proof_ref,
+                artifact.generation,
+                &artifact.content_hash,
+            )
+            .await
+        {
+            data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+            tracing::warn!(
+                network_pair = %artifact.network_pair,
+                proof_ref = %artifact.proof_ref,
+                proof_uri = %artifact.proof_uri,
+                error = %err,
+                "failed to remove invalidated proof artifact; retaining tombstone for retry"
+            );
+            continue;
+        }
+
         match state
             .runtime
-            .remove_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+            .remove_proof_artifact(
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                artifact.route,
+                &artifact.proof_ref,
+            )
             .await
         {
             Ok(Some(_record)) => {
                 data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                match file_removal {
-                    ProofArtifactFileRemoval::Removed => {
-                        data.artifacts.files_removed =
-                            data.artifacts.files_removed.saturating_add(1);
-                    }
-                    ProofArtifactFileRemoval::Missing => {
-                        data.artifacts.files_missing =
-                            data.artifacts.files_missing.saturating_add(1);
-                    }
-                    ProofArtifactFileRemoval::Failed => {}
-                }
+                data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
             }
             Ok(None) => {}
             Err(err) => {
@@ -650,6 +726,69 @@ async fn remove_invalidated_artifacts(
             }
         }
     }
+}
+
+async fn remove_late_terminal_tasks_for_artifact(
+    state: &AppState,
+    artifact: &ProofArtifactIdentity,
+    data: &mut wire::InvalidateArtifactsData,
+) -> HashSet<ProofArtifactIdentity> {
+    let records = match state
+        .runtime
+        .find_tasks_by_task_ref(&artifact.proof_ref)
+        .await
+    {
+        Ok(records) => records,
+        Err(err) => {
+            data.tasks.failed = data.tasks.failed.saturating_add(1);
+            tracing::warn!(
+                proof_ref = %artifact.proof_ref,
+                error = %err,
+                "failed to recheck terminal tasks after proof invalidation"
+            );
+            return HashSet::from([artifact.clone()]);
+        }
+    };
+    let mut matched_tasks = Vec::new();
+    for record in records {
+        if !is_terminal_runtime_status(record.runner_status)
+            || record.pipeline_key != artifact.pipeline_key
+            || record.route != artifact.route
+        {
+            continue;
+        }
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                data.tasks.invalid_metadata = data.tasks.invalid_metadata.saturating_add(1);
+                tracing::warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping late invalidation task with invalid metadata"
+                );
+                return HashSet::from([artifact.clone()]);
+            }
+        };
+        if metadata.network_pair != artifact.network_pair {
+            continue;
+        }
+        let root_artifact_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
+        let artifact_refs =
+            invalidation_artifact_refs(&metadata, record.pipeline_key, record.route, None);
+        if !artifact_refs.contains(artifact) {
+            continue;
+        }
+        data.tasks.matched = data.tasks.matched.saturating_add(1);
+        matched_tasks.push(CandidateInvalidationTask {
+            record,
+            metadata,
+            artifact_refs,
+            root_artifact_refs,
+            root_proof_matches_prefix: true,
+        });
+    }
+    remove_invalidated_tasks(state, matched_tasks, data).await
 }
 
 fn validate_invalidate_artifacts_request(
@@ -706,16 +845,32 @@ fn metadata_matches_proposal_range(metadata: &TaskMetadata, range: Option<(u64, 
 }
 
 async fn task_matches_proof_prefix(
+    runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
     proof_prefix: Option<&str>,
 ) -> bool {
     let Some(prefix) = proof_prefix else {
         return true;
     };
-    let Some(path) = record.proof_path.as_deref() else {
+    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return false;
     };
-    proof_file_starts_with(path, prefix).await
+    for proof_ref in root_refs.refs {
+        if proof_artifact_starts_with(
+            runtime,
+            &metadata.network_pair,
+            record.pipeline_key,
+            record.route,
+            &proof_ref,
+            prefix,
+        )
+        .await
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn artifact_matches_proposal_scope(
@@ -726,48 +881,67 @@ fn artifact_matches_proposal_scope(
     proposal_range.is_none()
         || matched_task_artifact_refs.contains(&ProofArtifactIdentity {
             network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
             proof_ref: artifact.proof_ref.clone(),
         })
 }
 
 async fn artifact_matches_proof_prefix(
+    runtime: &RuntimeManager,
     artifact: &raiko2_runtime::ProofArtifactRecord,
     proof_prefix: Option<&str>,
 ) -> bool {
     match proof_prefix {
-        Some(prefix) => proof_file_starts_with(&artifact.proof_path, prefix).await,
+        Some(prefix) => {
+            proof_artifact_starts_with(
+                runtime,
+                &artifact.network_pair,
+                artifact.pipeline_key,
+                artifact.route,
+                &artifact.proof_ref,
+                prefix,
+            )
+            .await
+        }
         None => true,
     }
 }
 
-async fn proof_file_starts_with(path: &str, prefix: &str) -> bool {
-    let file = match fs::File::open(path).await {
-        Ok(file) => file,
+async fn proof_artifact_starts_with(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: &str,
+    prefix: &str,
+) -> bool {
+    let object = match runtime
+        .read_proof_artifact_prefix(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            PROOF_PREFIX_SCAN_LIMIT,
+        )
+        .await
+    {
+        Ok(Some(object)) => object,
+        Ok(None) => return false,
         Err(err) => {
             tracing::warn!(
-                proof_path = %path,
+                proof_ref,
                 error = %err,
-                "failed to open proof artifact for prefix match"
+                "failed to read proof artifact for prefix match"
             );
             return false;
         }
     };
-    let mut bytes = Vec::with_capacity(PROOF_PREFIX_SCAN_LIMIT.min(8 * 1024));
-    let mut reader = file.take(PROOF_PREFIX_SCAN_LIMIT as u64);
-    if let Err(err) = reader.read_to_end(&mut bytes).await {
-        tracing::warn!(
-            proof_path = %path,
-            scan_limit = PROOF_PREFIX_SCAN_LIMIT,
-            error = %err,
-            "failed to read proof artifact prefix window"
-        );
-        return false;
-    }
-    match proof_json_prefix_starts_with(&bytes, prefix) {
+    match proof_json_prefix_starts_with(&object.bytes, prefix) {
         Ok(matches) => matches,
         Err(err) => {
             tracing::warn!(
-                proof_path = %path,
+                proof_ref,
                 scan_limit = PROOF_PREFIX_SCAN_LIMIT,
                 error = %err,
                 "failed to inspect proof artifact prefix"
@@ -1281,12 +1455,28 @@ fn proposal_submission(
 }
 
 struct ProposalIdentity<'a> {
+    environment: &'a str,
+    namespace: &'a str,
     submission: &'a CanonicalBatchSubmission,
+    prover_config_json: String,
 }
 
 impl<'a> ProposalIdentity<'a> {
-    const fn new(submission: &'a CanonicalBatchSubmission) -> Self {
-        Self { submission }
+    fn new(
+        environment: &'a str,
+        namespace: &'a str,
+        submission: &'a CanonicalBatchSubmission,
+    ) -> Result<Self, ApiError> {
+        let prover_config_json =
+            serde_json::to_string(&submission.prover_config).map_err(|err| {
+                ApiError::internal(format!("failed to serialize prover config identity: {err}"))
+            })?;
+        Ok(Self {
+            environment,
+            namespace,
+            submission,
+            prover_config_json,
+        })
     }
 }
 
@@ -1295,9 +1485,18 @@ impl RequestIdentity for ProposalIdentity<'_> {
 
     fn write_identity(&self, sink: &mut FingerprintSink) {
         let submission = self.submission;
-        // Only client-supplied request data belongs in the idempotency key. `route` and
-        // `prover_type` are server-derived and must not affect poll-by-re-POST behavior.
+        sink.str("environment", self.environment);
+        sink.str("namespace", self.namespace);
         sink.str("network_pair", &submission.pair.key);
+        sink.str("route", &submission.route.route.to_string());
+        sink.str("proof_type", &submission.route.proof_type().to_string());
+        sink.opt_str(
+            "prover_type",
+            submission
+                .prover_type
+                .map(crate::server::task_metadata::ProverType::as_str),
+        );
+        sink.str("prover_config", &self.prover_config_json);
         sink.str(
             "requested_proof_type",
             submission.requested_proof_type.as_str(),
@@ -1346,15 +1545,19 @@ impl RequestIdentity for ProposalIdentity<'_> {
     }
 }
 
-fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> RequestFingerprint {
-    ProposalIdentity::new(submission).fingerprint()
+fn proposal_request_fingerprint(
+    environment: &str,
+    namespace: &str,
+    submission: &CanonicalBatchSubmission,
+) -> Result<RequestFingerprint, ApiError> {
+    Ok(ProposalIdentity::new(environment, namespace, submission)?.fingerprint())
 }
 
 async fn submit_submission(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
-) -> Result<(), Error> {
+) -> Result<String, Error> {
     // Deterministic v4 task IDs are reusable only when the normalized request fingerprint matches.
     if let Some(existing) = state
         .runtime
@@ -1392,7 +1595,7 @@ async fn submit_submission(
                 )
                 .await
                 .map_err(Error::from_api_error)?;
-                return Ok(());
+                return Ok(submission.public_task_id.clone());
             }
             return Err(Error::request_conflict(
                 "same proof task id was submitted with different proof input",
@@ -1401,7 +1604,7 @@ async fn submit_submission(
         handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
             .await
             .map_err(Error::from_api_error)?;
-        return Ok(());
+        return Ok(submission.public_task_id.clone());
     }
 
     ensure_engine_available(
@@ -1433,7 +1636,7 @@ async fn submit_submission(
                 .map_err(Error::from_api_error)?;
         }
     }
-    Ok(())
+    Ok(submission.public_task_id.clone())
 }
 
 fn ensure_engine_available(
@@ -1478,6 +1681,7 @@ mod tests {
     use super::super::{AggregateStatus, ProposalStatus, RootRuntime, RuntimeRunnerStatus};
     use super::*;
     use crate::config::Config;
+    use crate::server::proof_artifact::load_proof_artifact_material;
     use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
     use crate::server::task_metadata::ProposalTask;
     use raiko2_engine::{
@@ -1488,7 +1692,8 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_queue::TaskStoreError;
     use raiko2_runtime::{
-        ProofArtifactRegistration, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
+        ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration,
+        ProofArtifactStore, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
         TaskRegistration,
     };
     use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
@@ -1496,6 +1701,79 @@ mod tests {
     type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
     struct RemoveFailEngine;
+
+    #[derive(Debug)]
+    struct DeleteFailArtifactStore;
+
+    #[async_trait::async_trait]
+    impl ProofArtifactStore for DeleteFailArtifactStore {
+        fn environment(&self) -> &str {
+            "test"
+        }
+
+        fn namespace(&self) -> &str {
+            "delete-failure"
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn put_if_absent(
+            &self,
+            _key: &ProofArtifactKey,
+            _bytes: &[u8],
+        ) -> anyhow::Result<ProofArtifactPutResult> {
+            panic!("unexpected proof artifact publication")
+        }
+
+        async fn get(&self, key: &ProofArtifactKey) -> anyhow::Result<Option<ProofArtifactObject>> {
+            Ok(Some(ProofArtifactObject {
+                proof_uri: format!("delete-fails://{}", key.proof_ref),
+                content_hash: "content-hash".to_string(),
+                generation: Some(7),
+                bytes: serde_json::to_vec(&Proof {
+                    proof: Some("0xproof".to_string()),
+                    ..Proof::default()
+                })?,
+            }))
+        }
+
+        async fn get_prefix(
+            &self,
+            _key: &ProofArtifactKey,
+            _max_bytes: usize,
+        ) -> anyhow::Result<Option<raiko2_runtime::ProofArtifactPrefix>> {
+            Ok(None)
+        }
+
+        async fn mark_invalidated(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _content_hash: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn is_invalidated(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _content_hash: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn delete(
+            &self,
+            _key: &ProofArtifactKey,
+            _generation: Option<i64>,
+            _expected_content_hash: &str,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("injected artifact deletion failure")
+        }
+    }
 
     impl EngineHandle for RemoveFailEngine {
         fn submit_proposal_proof_with_dependencies(
@@ -1599,8 +1877,10 @@ mod tests {
         record.runner_status = RuntimeTaskRunnerStatus::Completed;
         runtime.upsert_task(&record).await.expect("upsert task");
 
-        let artifact_refs = invalidation_artifact_refs(&metadata, record.pipeline_key, None);
-        let root_artifact_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
+        let artifact_refs =
+            invalidation_artifact_refs(&metadata, record.pipeline_key, record.route, None);
+        let root_artifact_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
         let expected_blocked_refs = artifact_refs
             .iter()
             .chain(root_artifact_refs.iter())
@@ -1668,34 +1948,39 @@ mod tests {
         record.runner_status = RuntimeTaskRunnerStatus::Completed;
         runtime.upsert_task(&record).await.expect("upsert task");
 
-        let root_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
+        let root_refs =
+            root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
         let proof_ref = root_refs
             .iter()
             .next()
             .expect("root proof ref")
             .proof_ref
             .clone();
-        let proof_path = runtime.proof_artifact_path(&metadata.network_pair, &proof_ref);
-        tokio::fs::create_dir_all(proof_path.parent().expect("proof dir"))
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                &proof_ref,
+                serde_json::to_vec(&Proof {
+                    proof: Some("0xroot".to_string()),
+                    ..Proof::default()
+                })
+                .expect("serialize proof")
+                .as_slice(),
+            )
             .await
-            .expect("create proof dir");
-        tokio::fs::write(
-            &proof_path,
-            serde_json::to_vec(&Proof {
-                proof: Some("0xroot".to_string()),
-                ..Proof::default()
-            })
-            .expect("serialize proof"),
-        )
-        .await
-        .expect("write proof artifact");
+            .expect("write proof artifact");
+        let artifact = publication.object();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: metadata.network_pair.clone(),
                 proof_ref: proof_ref.clone(),
                 pipeline_key: record.pipeline_key,
                 route: record.route,
-                proof_path: proof_path.display().to_string(),
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
             })
             .await
             .expect("register proof artifact");
@@ -1727,11 +2012,255 @@ mod tests {
         );
         assert!(
             runtime
-                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                )
                 .await
                 .expect("get proof artifact")
                 .is_some(),
             "proof artifact record was removed while task cleanup failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_invalidated_artifacts_keeps_retryable_record_when_backing_delete_fails() {
+        let runtime = Arc::new(
+            RuntimeManager::new_with_artifact_store(
+                test_runtime_root("invalidate-backing-delete-fails"),
+                Arc::new(DeleteFailArtifactStore),
+            )
+            .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let pipeline_key = PipelineKey::ShastaSp1;
+        let proof_ref = "proposal-delete-failure";
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key,
+                route: pipeline_key.route(),
+                proof_uri: format!("delete-fails://{proof_ref}"),
+                content_hash: "content-hash".to_string(),
+                generation: Some(7),
+            })
+            .await
+            .expect("register proof artifact");
+        let artifact = runtime
+            .get_proof_artifact(network_pair, pipeline_key, pipeline_key.route(), proof_ref)
+            .await
+            .expect("get proof artifact")
+            .expect("proof artifact record");
+        let mut data = wire::InvalidateArtifactsData::default();
+        data.artifacts.matched = 1;
+
+        remove_invalidated_artifacts(&state, vec![artifact], &mut data).await;
+
+        assert_eq!(data.artifacts.matched, 1);
+        assert_eq!(data.artifacts.removed, 0);
+        assert_eq!(data.artifacts.files_removed, 0);
+        assert_eq!(data.artifacts.failed, 1);
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, pipeline_key, pipeline_key.route(), proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "invalidated proof artifact remained active after backing delete failed"
+        );
+        let retryable = runtime
+            .list_proof_artifacts()
+            .await
+            .expect("list retryable proof artifacts");
+        assert_eq!(retryable.len(), 1);
+        assert_eq!(retryable[0].proof_ref, proof_ref);
+        assert!(retryable[0].invalidated_at.is_some());
+        assert!(
+            load_proof_artifact_material(
+                runtime.as_ref(),
+                network_pair,
+                pipeline_key,
+                pipeline_key.route(),
+                proof_ref,
+            )
+            .await
+            .expect("load invalidated proof artifact")
+            .is_none(),
+            "tombstoned backing object was rediscovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_rechecks_root_that_completed_after_candidate_snapshot() {
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_dev/taiko_dev_l1",
+            PipelineKey::ShastaSp1,
+            Arc::new(RemoveFailEngine),
+        );
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-late-terminal-root"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        );
+        let metadata = task_log_metadata_with_requests(&[57], false);
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = root_invalidation_artifact_refs(&metadata, pipeline, route)
+            .into_iter()
+            .next()
+            .expect("root artifact ref")
+            .proof_ref;
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &metadata.network_pair,
+                pipeline,
+                route,
+                &proof_ref,
+                &serde_json::to_vec(&Proof {
+                    proof: Some("0xlate".to_string()),
+                    ..Proof::default()
+                })
+                .expect("serialize proof"),
+            )
+            .await
+            .expect("publish proof artifact");
+        let object = publication.object();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: metadata.network_pair.clone(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await
+            .expect("register proof artifact");
+        let artifact = runtime
+            .get_proof_artifact(&metadata.network_pair, pipeline, route, &proof_ref)
+            .await
+            .expect("get proof artifact")
+            .expect("proof artifact record");
+
+        // The artifact candidate was captured while the root was non-terminal. It completes
+        // before deletion starts, so the post-marker task lookup must discover it.
+        let mut record = runtime
+            .register_task(TaskRegistration {
+                task_id: "task_late_terminal_root".to_string(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "hoodi_proposal".to_string(),
+                proposal_id: Some(57),
+                proof_ids: vec![proof_ref.clone()],
+                metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+                request_fingerprint: None,
+            })
+            .await
+            .expect("register runtime task");
+        record.runner_status = RuntimeTaskRunnerStatus::Completed;
+        runtime.upsert_task(&record).await.expect("complete task");
+
+        let mut data = wire::InvalidateArtifactsData::default();
+        data.artifacts.matched = 1;
+        remove_invalidated_artifacts(&state, vec![artifact], &mut data).await;
+
+        assert_eq!(data.tasks.matched, 1);
+        assert_eq!(data.tasks.failed, 1);
+        assert_eq!(data.artifacts.removed, 0);
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &metadata.network_pair,
+                    pipeline,
+                    route,
+                    &proof_ref,
+                )
+                .await
+                .expect("get tombstoned artifact")
+                .is_some(),
+            "artifact deletion proceeded after late root cleanup failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_keeps_sp1_routes_distinct() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-sp1-routes"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let pipeline = PipelineKey::ShastaSp1;
+        let proof_ref = "proposal-shared-ref";
+        for route in [
+            "sp1/local".parse::<PipelineRoute>().expect("local route"),
+            "sp1/network"
+                .parse::<PipelineRoute>()
+                .expect("network route"),
+        ] {
+            let bytes = serde_json::to_vec(&Proof {
+                proof: Some("0xproof".to_string()),
+                ..Proof::default()
+            })
+            .expect("serialize proof");
+            let publication = runtime
+                .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, &bytes)
+                .await
+                .expect("publish proof artifact");
+            let object = publication.object();
+            runtime
+                .upsert_proof_artifact(ProofArtifactRegistration {
+                    network_pair: network_pair.to_string(),
+                    proof_ref: proof_ref.to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_uri: object.proof_uri.clone(),
+                    content_hash: object.content_hash.clone(),
+                    generation: object.generation,
+                })
+                .await
+                .expect("register proof artifact");
+        }
+        let mut data = wire::InvalidateArtifactsData::default();
+        let matched = collect_invalidation_artifacts(
+            &state,
+            &[pipeline],
+            None,
+            &HashSet::new(),
+            None,
+            &mut data,
+        )
+        .await
+        .expect("collect artifacts");
+
+        assert_eq!(matched.len(), 2);
+        assert_eq!(data.artifacts.matched, 2);
+        remove_invalidated_artifacts(&state, matched, &mut data).await;
+        assert_eq!(data.artifacts.removed, 2);
+        assert!(
+            runtime
+                .list_proof_artifacts()
+                .await
+                .expect("list")
+                .is_empty()
         );
     }
 
@@ -1799,26 +2328,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proof_file_starts_with_matches_bounded_prefix_window() {
+    async fn proof_artifact_starts_with_matches_bounded_prefix_window() {
         let root = test_runtime_root("proof-prefix-window");
-        tokio::fs::create_dir_all(&root)
-            .await
-            .expect("create temp dir");
-        let path = root.join("proof.json");
+        let runtime = RuntimeManager::new(root).expect("runtime manager");
         let proof = format!("0x{}", "aa".repeat(PROOF_PREFIX_SCAN_LIMIT));
-        tokio::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&Proof {
-                proof: Some(proof),
-                ..Proof::default()
-            })
-            .expect("serialize proof"),
-        )
-        .await
-        .expect("write proof file");
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaSp1,
+                PipelineKey::ShastaSp1.route(),
+                "proof-ref",
+                &serde_json::to_vec_pretty(&Proof {
+                    proof: Some(proof),
+                    ..Proof::default()
+                })
+                .expect("serialize proof"),
+            )
+            .await
+            .expect("write proof artifact");
 
         assert!(
-            proof_file_starts_with(path.to_str().expect("utf8 path"), "0xAAAA").await,
+            proof_artifact_starts_with(
+                &runtime,
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaSp1,
+                PipelineKey::ShastaSp1.route(),
+                "proof-ref",
+                "0xAAAA",
+            )
+            .await,
             "proof prefix did not match"
         );
     }
@@ -2087,7 +2625,7 @@ mod tests {
                 last_anchor_block_number: 19,
                 proof: Some("0xproposal".to_string()),
                 proof_ref: Some("proposal-ref".to_string()),
-                proof_path: Some("proposal-path".to_string()),
+                proof_uri: Some("proposal-path".to_string()),
                 error: None,
                 runtime: None,
                 extra_data: None,
@@ -2097,14 +2635,14 @@ mod tests {
                 status: ProofStatus::Completed,
                 proof: Some("0xaggregate".to_string()),
                 proof_ref: Some("aggregate-ref".to_string()),
-                proof_path: Some("aggregate-path".to_string()),
+                proof_uri: Some("aggregate-path".to_string()),
                 error: None,
                 runtime: None,
                 extra_data: None,
             }),
             proof: Some("0xroot".to_string()),
             proof_ref: Some("root-ref".to_string()),
-            proof_path: Some("root-path".to_string()),
+            proof_uri: Some("root-path".to_string()),
             error: None,
         };
 
@@ -2185,7 +2723,10 @@ mod tests {
 pub(super) fn proposal_request_fingerprint_for_test(
     submission: &CanonicalBatchSubmission,
 ) -> Result<String, Error> {
-    Ok(proposal_request_fingerprint(submission)
-        .as_str()
-        .to_string())
+    Ok(
+        proposal_request_fingerprint("test", "raiko2-test", submission)
+            .map_err(Error::from_api_error)?
+            .as_str()
+            .to_string(),
+    )
 }

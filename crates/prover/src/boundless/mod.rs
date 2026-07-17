@@ -1118,7 +1118,7 @@ async fn publish_boundless_progress(
     offchain: bool,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
-) {
+) -> RaikoResult<()> {
     if let Some(observer) = observer {
         observer
             .on_progress(&ProverProgress::BoundlessSubmission(
@@ -1138,8 +1138,9 @@ async fn publish_boundless_progress(
                     rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
                 },
             ))
-            .await;
+            .await?;
     }
+    Ok(())
 }
 
 impl TryFrom<BoundlessSubmissionResume> for Submission {
@@ -1784,7 +1785,7 @@ impl BoundlessProver {
             quoted_mcycles_count,
             evaluated_mcycles_count,
         )
-        .await;
+        .await?;
 
         match call.send().await {
             Ok(pending_tx) => {
@@ -1798,7 +1799,7 @@ impl BoundlessProver {
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
                 )
-                .await;
+                .await?;
             }
             Err(error) => {
                 tracing::warn!(
@@ -1845,7 +1846,7 @@ impl BoundlessProver {
                 context.quoted_mcycles_count,
                 context.evaluated_mcycles_count,
             )
-            .await;
+            .await?;
             return Ok(submission);
         }
 
@@ -2225,8 +2226,11 @@ impl BoundlessProver {
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
             observer
-                .load_boundless_submission()
+                .load_pending_proof_checkpoint(crate::NetworkProverBackend::Boundless)
                 .await
+                .map(|checkpoint| checkpoint.decode_payload::<BoundlessSubmissionResume>())
+                .transpose()
+                .map_err(|error| RaikoError::Guest(error.to_string()))?
                 .map(Submission::try_from)
                 .transpose()?
         } else {
@@ -2269,7 +2273,7 @@ impl BoundlessProver {
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
                 )
-                .await;
+                .await?;
                 submission
             } else {
                 if exceeds_submission_budget(attempt, self.config.rebid_max_attempts) {

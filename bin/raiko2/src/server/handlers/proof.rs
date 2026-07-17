@@ -5,4 +5,4 @@ mod proof_route;
 #[path = "proof_types.rs"]
 mod proof_types;
 
-pub(crate) use proof_api::{v3, v4};
+pub(crate) use proof_api::{recover_pending_runtime_tasks, v3, v4};

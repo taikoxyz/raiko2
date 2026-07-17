@@ -11,9 +11,9 @@ pub type StoreResult<T> = Result<T, TaskStoreError>;
 
 #[derive(Debug)]
 pub enum TaskStoreError {
-    /// Underlying storage/backend failure (e.g. Redis unavailable, network errors, timeouts).
+    /// Underlying storage/backend failure.
     Backend(Box<dyn Error + Send + Sync>),
-    /// Data is missing or cannot be decoded (e.g. schema mismatch, corrupt payload).
+    /// Data is missing or cannot be decoded.
     CorruptData(Box<dyn Error + Send + Sync>),
 }
 
@@ -160,6 +160,17 @@ where
         }
     }
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()>;
+    async fn get_payload(&self, _id: &TaskId<Id>) -> StoreResult<Option<P>> {
+        Ok(None)
+    }
+    async fn checkpoint_payload_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        payload: P,
+        execution_policy: TaskExecutionPolicy,
+    ) -> StoreResult<bool>;
     async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()>;
     async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
     async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
@@ -683,6 +694,37 @@ where
         }
 
         Ok(())
+    }
+
+    async fn get_payload(&self, id: &TaskId<Id>) -> StoreResult<Option<P>> {
+        let g = self.inner.lock().await;
+        Ok(g.tasks.get(id).and_then(|record| record.payload.clone()))
+    }
+
+    async fn checkpoint_payload_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        payload: P,
+        execution_policy: TaskExecutionPolicy,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get_mut(id) else {
+            return Ok(false);
+        };
+        if !matches!(
+            &record.state,
+            TaskState::Running {
+                worker: current_worker,
+                attempt: current_attempt,
+            } if current_worker == worker && *current_attempt == attempt
+        ) {
+            return Ok(false);
+        }
+        record.payload = Some(payload);
+        record.execution_policy = execution_policy;
+        Ok(true)
     }
 
     async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool> {

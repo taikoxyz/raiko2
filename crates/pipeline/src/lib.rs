@@ -94,7 +94,7 @@ impl FromStr for PipelineKey {
 }
 
 /// Guest execution system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GuestSystem {
     #[default]
@@ -137,7 +137,7 @@ impl FromStr for GuestSystem {
 }
 
 /// Prover runner implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RunnerKind {
     #[default]
@@ -177,7 +177,7 @@ impl FromStr for RunnerKind {
 }
 
 /// Canonical route for a proving request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct PipelineRoute {
     pub guest_system: GuestSystem,
     pub runner: RunnerKind,

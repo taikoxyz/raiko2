@@ -8747,6 +8747,7 @@ dependencies = [
  "bytes",
  "google-cloud-storage",
  "raiko2-pipeline",
+ "raiko2-primitives",
  "rusqlite",
  "rustls",
  "serde",

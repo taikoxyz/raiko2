@@ -490,12 +490,6 @@ impl RuntimeObserver {
             .context("failed to commit proof artifact publication")?;
         let artifact = publication.object();
         if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
-            let canonical = serde_json::from_slice::<raiko2_primitives::Proof>(&artifact.bytes)
-                .context("conflicting canonical proof artifact is invalid")?;
-            anyhow::ensure!(
-                canonical.proof.is_some(),
-                "conflicting canonical proof artifact has no proof payload"
-            );
             tracing::warn!(
                 task = ?id,
                 stage,

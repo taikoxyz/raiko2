@@ -2,7 +2,7 @@
 
 [![CI status](https://img.shields.io/github/actions/workflow/status/taikoxyz/raiko2/ci.yml?branch=main&label=CI)](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml)
 
-Home / [Docs](docs/README.md) / [API](docs/API.md) /
+Home / [Docs](docs/README.md) / [Architecture](docs/architecture.md) / [API](docs/API.md) /
 [Development](docs/development.md) / [Operations](docs/operations.md) /
 [Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
@@ -50,6 +50,9 @@ otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally w
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
 
 ## Core Flow
+
+The complete runtime, ownership, publication, and recovery design is documented in
+[Architecture](docs/architecture.md).
 
 1. `Preflight` resolves canonical Shasta inputs from L1 and L2 RPC.
 2. `Validation` checks request invariants and witness-derived data.

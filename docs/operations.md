@@ -965,8 +965,13 @@ the proxy. If `l2_witness_rpc` is unset, the server falls back to `l2_rpc`.
 
 - `GET /health`: basic process health
 - `GET /metrics`: Prometheus text-format key service metrics
-- `GET /ready`: configured L1/L2 RPC chain-ID readiness, queue readiness, and prerequisite checks
-  for the hosted proving capabilities exposed by the endpoint
+- `GET /ready`: configured L1/L2 RPC chain-ID readiness, authoritative runtime ownership and store
+  access, recent queue-maintenance success, and prerequisite checks for the hosted proving
+  capabilities exposed by the endpoint. Queue maintenance is stale after
+  `max(3 * queue.maintenance_interval_ms, 1000ms)`.
+
+The response reports separate `reth`, `runtime`, `queue`, and `prover` checks. See
+[Architecture](architecture.md#readiness) for the traffic-gating flow and ownership behavior.
 
 The hosted server exports a minimal Prometheus surface focused on request intake and proving-stage
 health:

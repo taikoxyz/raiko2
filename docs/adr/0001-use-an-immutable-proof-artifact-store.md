@@ -15,6 +15,12 @@ necessarily deterministic and replacing a completed task's artifact would break 
 Each proof payload is stored under its content hash, and a create-only manifest selects the
 canonical payload for the logical proof reference.
 
+Invalidation targets the selected manifest generation and content hash rather than banning content
+globally. The manifest is removed with a generation precondition, so an identical later proof may
+create a new generation without reactivating the invalidated publication. See
+[Architecture](../architecture.md#proof-artifact-storage) for the complete object layout and
+publication, cancellation, and recovery flows.
+
 ## Consequences
 
 - A task becomes `Completed` only after its artifact is durable and registered as caller-readable.
@@ -22,6 +28,8 @@ canonical payload for the logical proof reference.
   discarded without overwriting the canonical artifact or regressing task state.
 - Publication retries do not rerun proving. Recovery discovers a previously uploaded artifact by its
   deterministic key and completes registration before considering recomputation.
+- Cancellation records a generation-scoped invalidation marker and conditionally removes only the
+  selected manifest generation; immutable content may remain for retention and later deduplication.
 - Each process selects one authoritative store backend. Automatic failover and dual-write are unsupported.
 - Public and persisted artifact locations use the backend-neutral `proof_uri` field (`gs://` in
   production) instead of treating cloud object URIs as filesystem paths.

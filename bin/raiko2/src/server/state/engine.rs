@@ -43,6 +43,9 @@ pub trait EngineHandle: Send + Sync {
     }
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +177,10 @@ where
 
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
+    }
+
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { self.shutdown_workers().await })
     }
 
     fn dependents_of(

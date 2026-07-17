@@ -1774,9 +1774,9 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_queue::TaskStoreError;
     use raiko2_runtime::{
-        ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration,
-        ProofArtifactStore, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
-        TaskRegistration,
+        NamespaceOwnerLease, ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult,
+        ProofArtifactRegistration, ProofArtifactStore, RunnerStatus as RuntimeTaskRunnerStatus,
+        RuntimeManager, RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
     };
     use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
 
@@ -1856,6 +1856,61 @@ mod tests {
             _expected_content_hash: &str,
         ) -> anyhow::Result<()> {
             anyhow::bail!("injected artifact deletion failure")
+        }
+
+        async fn load_runtime_state(&self) -> anyhow::Result<Option<RuntimeStateObject>> {
+            Ok(None)
+        }
+
+        async fn store_runtime_state(
+            &self,
+            _bytes: &[u8],
+            expected_generation: Option<i64>,
+        ) -> anyhow::Result<RuntimeStateWriteResult> {
+            Ok(RuntimeStateWriteResult::Stored {
+                generation: Some(expected_generation.unwrap_or(0).saturating_add(1)),
+            })
+        }
+
+        async fn claim_namespace_owner(
+            &self,
+            owner_id: &str,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> anyhow::Result<Option<NamespaceOwnerLease>> {
+            Ok(Some(NamespaceOwnerLease {
+                owner_id: owner_id.to_string(),
+                epoch: 1,
+                expires_at_secs: now_secs.saturating_add(lease_secs),
+                generation: Some(1),
+            }))
+        }
+
+        async fn renew_namespace_owner(
+            &self,
+            lease: &NamespaceOwnerLease,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> anyhow::Result<Option<NamespaceOwnerLease>> {
+            Ok(Some(NamespaceOwnerLease {
+                expires_at_secs: now_secs.saturating_add(lease_secs),
+                ..lease.clone()
+            }))
+        }
+
+        async fn verify_namespace_owner(
+            &self,
+            _lease: &NamespaceOwnerLease,
+            _now_secs: u64,
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        async fn release_namespace_owner(
+            &self,
+            _lease: &NamespaceOwnerLease,
+        ) -> anyhow::Result<bool> {
+            Ok(true)
         }
     }
 

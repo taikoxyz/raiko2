@@ -1,5 +1,7 @@
 use raiko2_pipeline::PipelineKey;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use super::engine::EngineHandle;
@@ -17,6 +19,10 @@ pub trait PipelineFactory: Send + Sync {
 
     fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
         true
+    }
+
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
     }
 }
 
@@ -57,6 +63,14 @@ impl PipelineFactory for StaticPipelineFactory {
         self.engines
             .values()
             .all(|engine| engine.queue_maintenance_ready(max_age))
+    }
+
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            for engine in self.engines.values() {
+                engine.shutdown().await;
+            }
+        })
     }
 }
 

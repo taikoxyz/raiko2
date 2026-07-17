@@ -42,8 +42,10 @@ enum TerminalRootPolicy {
     IncludeCompleted,
 }
 
+#[derive(Clone)]
 struct PublishedProofCommit {
     proof_uris: HashMap<String, String>,
+    synchronized_roots: HashSet<String>,
     root_ref: String,
     content_hash: String,
 }
@@ -51,7 +53,10 @@ struct PublishedProofCommit {
 enum ProofCommitAttempt {
     Committed,
     Retryable(anyhow::Error),
-    Invalidated(anyhow::Error),
+    Invalidated {
+        error: anyhow::Error,
+        publication: Option<PublishedProofCommit>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +175,26 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
+        self.update_root_records_with_policy_filter_count(
+            id,
+            terminal_policy,
+            |record, updated_at, observed_at_ms| {
+                mutator(record, updated_at, observed_at_ms)?;
+                Ok(true)
+            },
+        )
+        .await
+    }
+
+    async fn update_root_records_with_policy_filter_count<F>(
+        &self,
+        id: &EngineTaskId,
+        terminal_policy: TerminalRootPolicy,
+        mutator: F,
+    ) -> Result<usize>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<bool>,
+    {
         let _guard = self.root_updates.lock().await;
         let root_ref = Self::root_task_ref(id);
         let records = self.find_root_records(id).await?;
@@ -179,11 +204,14 @@ impl RuntimeObserver {
         let mut records = self.matching_root_records(id, records, terminal_policy)?;
         let updated_at = now_ts();
         let observed_at_ms = now_ms();
-        let updated_records = records.len();
+        let mut updated_records = 0;
         for record in &mut records {
-            mutator(record, updated_at, observed_at_ms)?;
+            if !mutator(record, updated_at, observed_at_ms)? {
+                continue;
+            }
             record.updated_at = updated_at;
             self.runtime.upsert_task(record).await?;
+            updated_records += 1;
         }
         Ok(updated_records)
     }
@@ -524,6 +552,7 @@ impl RuntimeObserver {
         }
         Ok(Some(PublishedProofCommit {
             proof_uris,
+            synchronized_roots: HashSet::new(),
             root_ref,
             content_hash: artifact.content_hash.clone(),
         }))
@@ -535,6 +564,7 @@ impl RuntimeObserver {
         stage: &'static str,
         message: &str,
         disposition: PublicationFailureDisposition,
+        publication: Option<&PublishedProofCommit>,
     ) {
         let message = message.to_string();
         if matches!(disposition, PublicationFailureDisposition::Invalidated) {
@@ -566,6 +596,13 @@ impl RuntimeObserver {
                 id,
                 terminal_policy,
                 |record, updated_at, observed_at_ms| {
+                    if record.runner_status == RunnerStatus::Completed
+                        && publication.is_none_or(|publication| {
+                            !publication.synchronized_roots.contains(&record.task_id)
+                        })
+                    {
+                        return Ok(());
+                    }
                     record.runner_status = match disposition {
                         PublicationFailureDisposition::Retryable => RunnerStatus::Allocated,
                         PublicationFailureDisposition::Invalidated => RunnerStatus::Cancelled,
@@ -623,7 +660,7 @@ impl RuntimeObserver {
                     .await;
                     return Ok(());
                 }
-                ProofCommitAttempt::Invalidated(error) => {
+                ProofCommitAttempt::Invalidated { error, publication } => {
                     let message = format!("failed to publish proof artifact: {error}");
                     tracing::warn!(task = ?id, stage, error = %error, "proof invalidated during completion");
                     self.observe_stage_terminal_metrics(
@@ -640,6 +677,7 @@ impl RuntimeObserver {
                         stage,
                         message.as_str(),
                         PublicationFailureDisposition::Invalidated,
+                        publication.as_ref(),
                     )
                     .await;
                     return Err(ProofInvalidatedError(message).into());
@@ -673,6 +711,7 @@ impl RuntimeObserver {
                         stage,
                         message.as_str(),
                         PublicationFailureDisposition::Retryable,
+                        None,
                     )
                     .await;
                     anyhow::bail!(message);
@@ -689,26 +728,32 @@ impl RuntimeObserver {
         stage: &'static str,
         proof: &raiko2_primitives::Proof,
     ) -> ProofCommitAttempt {
-        let publication = match self
+        let mut publication = match self
             .publish_final_proof_artifact(id, task, stage, proof)
             .await
         {
             Ok(Some(publication)) => publication,
             Ok(None) => return ProofCommitAttempt::Committed,
             Err(error) if error.downcast_ref::<ProofInvalidatedError>().is_some() => {
-                return ProofCommitAttempt::Invalidated(error);
+                return ProofCommitAttempt::Invalidated {
+                    error,
+                    publication: None,
+                };
             }
             Err(error)
                 if error
                     .downcast_ref::<ProofArtifactPublicationInvalidated>()
                     .is_some() =>
             {
-                return ProofCommitAttempt::Invalidated(error);
+                return ProofCommitAttempt::Invalidated {
+                    error,
+                    publication: None,
+                };
             }
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
-        let updated_roots = match self
-            .sync_proof_success(id, task, stage, publication.proof_uris)
+        let (updated_roots, synchronized_roots) = match self
+            .sync_proof_success(id, task, stage, &publication.proof_uris)
             .await
         {
             Ok(updated_roots) => updated_roots,
@@ -726,13 +771,17 @@ impl RuntimeObserver {
                 .await
                 .context("failed to invalidate proof publication without an active runtime owner");
             return match invalidation {
-                Ok(_) => ProofCommitAttempt::Invalidated(anyhow::anyhow!(
-                    "proof task {} no longer has an active runtime owner",
-                    publication.root_ref
-                )),
+                Ok(_) => ProofCommitAttempt::Invalidated {
+                    error: anyhow::anyhow!(
+                        "proof task {} no longer has an active runtime owner",
+                        publication.root_ref
+                    ),
+                    publication: Some(publication),
+                },
                 Err(error) => ProofCommitAttempt::Retryable(error),
             };
         }
+        publication.synchronized_roots = synchronized_roots;
         match self
             .runtime
             .proof_artifact_is_invalidated(
@@ -746,10 +795,13 @@ impl RuntimeObserver {
             .context("failed to fence completed proof against invalidation")
         {
             Ok(false) => ProofCommitAttempt::Committed,
-            Ok(true) => ProofCommitAttempt::Invalidated(anyhow::anyhow!(
-                "canonical proof artifact {} was invalidated during completion",
-                publication.root_ref
-            )),
+            Ok(true) => ProofCommitAttempt::Invalidated {
+                error: anyhow::anyhow!(
+                    "canonical proof artifact {} was invalidated during completion",
+                    publication.root_ref
+                ),
+                publication: Some(publication),
+            },
             Err(error) => ProofCommitAttempt::Retryable(error),
         }
     }
@@ -759,13 +811,14 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         stage: &'static str,
-        proof_uris: HashMap<String, String>,
-    ) -> Result<usize> {
+        proof_uris: &HashMap<String, String>,
+    ) -> Result<(usize, HashSet<String>)> {
+        let synchronized_roots = Mutex::new(HashSet::new());
         let updated_roots = self
-            .update_root_records_with_policy_count(
+            .update_root_records_with_policy_filter_count(
                 id,
                 TerminalRootPolicy::IncludeCompleted,
-                move |record, updated_at, observed_at_ms| {
+                |record, updated_at, observed_at_ms| {
                     record.error = None;
                     let task_id = Self::timing_key_for_task(id, task);
                     let mut metadata: TaskMetadata =
@@ -774,6 +827,11 @@ impl RuntimeObserver {
                     metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
                     let root_completed =
                         Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
+                    if record.runner_status == RunnerStatus::Completed
+                        && (!root_completed || record.proof_uri.is_some())
+                    {
+                        return Ok(root_completed);
+                    }
                     metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some(
                         if root_completed {
@@ -786,6 +844,10 @@ impl RuntimeObserver {
                     record.metadata = serde_json::to_value(metadata)
                         .context("failed to serialize task metadata")?;
                     if root_completed {
+                        synchronized_roots
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
+                            .insert(record.task_id.clone());
                         record.runner_status = RunnerStatus::Completed;
                         record.proof_uri = proof_uris.get(&record.task_id).cloned();
                     } else {
@@ -793,12 +855,16 @@ impl RuntimeObserver {
                         record.proof_uri = None;
                     }
                     record.updated_at = updated_at;
-                    Ok(())
+                    Ok(true)
                 },
             )
             .await
             .context("failed to sync runtime task success")?;
-        Ok(updated_roots)
+        let synchronized_roots = synchronized_roots
+            .lock()
+            .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
+            .clone();
+        Ok((updated_roots, synchronized_roots))
     }
 
     fn root_completed_by_proof_success(
@@ -1153,15 +1219,47 @@ impl EngineObserver for RuntimeObserver {
         self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms, None)
             .await;
         let root_ref = Self::root_task_ref(id);
-        if let Err(err) = self
-            .runtime
-            .invalidate_pending_proof_publication(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                &root_ref,
-            )
-            .await
+        let completed_root_exists = match self.find_root_records(id).await {
+            Ok(records) => {
+                let mut completed_root_exists = false;
+                for record in records {
+                    if record.runner_status != RunnerStatus::Completed {
+                        continue;
+                    }
+                    match self.record_matches_observer(id, &record) {
+                        Ok(matches) => completed_root_exists |= matches,
+                        Err(error) => {
+                            tracing::warn!(
+                                task = ?id,
+                                runtime_task_id = record.task_id,
+                                %error,
+                                "skipping cancellation invalidation because a completed root could not be classified"
+                            );
+                            completed_root_exists = true;
+                        }
+                    }
+                }
+                completed_root_exists
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task = ?id,
+                    %error,
+                    "skipping cancellation invalidation because runtime roots could not be read"
+                );
+                true
+            }
+        };
+        if !completed_root_exists
+            && let Err(err) = self
+                .runtime
+                .invalidate_pending_proof_publication(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &root_ref,
+                )
+                .await
         {
             tracing::warn!(
                 task = ?id,
@@ -1371,8 +1469,9 @@ mod tests {
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
     use raiko2_runtime::{
-        MemoryProofArtifactStore, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-        ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore, TaskRegistration,
+        MemoryProofArtifactStore, NamespaceOwnerLease, ProofArtifactKey, ProofArtifactObject,
+        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore,
+        RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1467,6 +1566,54 @@ mod tests {
                 .delete(key, generation, expected_content_hash)
                 .await
         }
+
+        async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
+            self.inner.load_runtime_state().await
+        }
+
+        async fn store_runtime_state(
+            &self,
+            bytes: &[u8],
+            expected_generation: Option<i64>,
+        ) -> Result<RuntimeStateWriteResult> {
+            self.inner
+                .store_runtime_state(bytes, expected_generation)
+                .await
+        }
+
+        async fn claim_namespace_owner(
+            &self,
+            owner_id: &str,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> Result<Option<NamespaceOwnerLease>> {
+            self.inner
+                .claim_namespace_owner(owner_id, now_secs, lease_secs)
+                .await
+        }
+
+        async fn renew_namespace_owner(
+            &self,
+            lease: &NamespaceOwnerLease,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> Result<Option<NamespaceOwnerLease>> {
+            self.inner
+                .renew_namespace_owner(lease, now_secs, lease_secs)
+                .await
+        }
+
+        async fn verify_namespace_owner(
+            &self,
+            lease: &NamespaceOwnerLease,
+            now_secs: u64,
+        ) -> Result<bool> {
+            self.inner.verify_namespace_owner(lease, now_secs).await
+        }
+
+        async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
+            self.inner.release_namespace_owner(lease).await
+        }
     }
 
     #[async_trait]
@@ -1539,6 +1686,54 @@ mod tests {
                 .delete(key, generation, expected_content_hash)
                 .await
         }
+
+        async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
+            self.inner.load_runtime_state().await
+        }
+
+        async fn store_runtime_state(
+            &self,
+            bytes: &[u8],
+            expected_generation: Option<i64>,
+        ) -> Result<RuntimeStateWriteResult> {
+            self.inner
+                .store_runtime_state(bytes, expected_generation)
+                .await
+        }
+
+        async fn claim_namespace_owner(
+            &self,
+            owner_id: &str,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> Result<Option<NamespaceOwnerLease>> {
+            self.inner
+                .claim_namespace_owner(owner_id, now_secs, lease_secs)
+                .await
+        }
+
+        async fn renew_namespace_owner(
+            &self,
+            lease: &NamespaceOwnerLease,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> Result<Option<NamespaceOwnerLease>> {
+            self.inner
+                .renew_namespace_owner(lease, now_secs, lease_secs)
+                .await
+        }
+
+        async fn verify_namespace_owner(
+            &self,
+            lease: &NamespaceOwnerLease,
+            now_secs: u64,
+        ) -> Result<bool> {
+            self.inner.verify_namespace_owner(lease, now_secs).await
+        }
+
+        async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
+            self.inner.release_namespace_owner(lease).await
+        }
     }
 
     #[async_trait]
@@ -1601,6 +1796,58 @@ mod tests {
             _expected_content_hash: &str,
         ) -> Result<()> {
             Ok(())
+        }
+
+        async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
+            Ok(None)
+        }
+
+        async fn store_runtime_state(
+            &self,
+            _bytes: &[u8],
+            expected_generation: Option<i64>,
+        ) -> Result<RuntimeStateWriteResult> {
+            Ok(RuntimeStateWriteResult::Stored {
+                generation: Some(expected_generation.unwrap_or(0).saturating_add(1)),
+            })
+        }
+
+        async fn claim_namespace_owner(
+            &self,
+            owner_id: &str,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> Result<Option<NamespaceOwnerLease>> {
+            Ok(Some(NamespaceOwnerLease {
+                owner_id: owner_id.to_string(),
+                epoch: 1,
+                expires_at_secs: now_secs.saturating_add(lease_secs),
+                generation: Some(1),
+            }))
+        }
+
+        async fn renew_namespace_owner(
+            &self,
+            lease: &NamespaceOwnerLease,
+            now_secs: u64,
+            lease_secs: u64,
+        ) -> Result<Option<NamespaceOwnerLease>> {
+            Ok(Some(NamespaceOwnerLease {
+                expires_at_secs: now_secs.saturating_add(lease_secs),
+                ..lease.clone()
+            }))
+        }
+
+        async fn verify_namespace_owner(
+            &self,
+            _lease: &NamespaceOwnerLease,
+            _now_secs: u64,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn release_namespace_owner(&self, _lease: &NamespaceOwnerLease) -> Result<bool> {
+            Ok(true)
         }
     }
 
@@ -2105,7 +2352,7 @@ mod tests {
                     .into_owned(),
             )?,
             checks: AtomicUsize::new(0),
-            block_on_check: 1,
+            block_on_check: 0,
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });

@@ -1554,7 +1554,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), ApiError>> + 'a,
 {
-    reset_runtime_task_to_allocated(state, &existing.task_id).await?;
+    reset_runtime_task_to_allocated(state, &existing.task_id, existing.runner_status).await?;
     if let Err(err) = reenqueue().await {
         restore_runtime_task_status(state, existing, &err).await;
         return Err(err);
@@ -1562,14 +1562,24 @@ where
     Ok(())
 }
 
-async fn reset_runtime_task_to_allocated(state: &AppState, task_id: &str) -> Result<(), ApiError> {
-    state
+async fn reset_runtime_task_to_allocated(
+    state: &AppState,
+    task_id: &str,
+    expected_status: RuntimeRunnerStatus,
+) -> Result<(), ApiError> {
+    let reopened = state
         .runtime
-        .sync_status(task_id, RuntimeRunnerStatus::Allocated, None, None)
+        .reopen_task_for_recovery(task_id, expected_status)
         .await
         .map_err(|err| {
             ApiError::internal(format!("failed to reset recovered task {task_id}: {err}"))
-        })
+        })?;
+    if !reopened {
+        return Err(ApiError::internal(format!(
+            "task {task_id} is no longer eligible for failed-task recovery"
+        )));
+    }
+    Ok(())
 }
 
 async fn restore_runtime_task_status(
@@ -1811,10 +1821,17 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
         };
         match result {
             Ok(()) => {
-                state
-                    .runtime
-                    .sync_status(&record.task_id, RuntimeRunnerStatus::Allocated, None, None)
-                    .await?;
+                if record.runner_status == RuntimeRunnerStatus::Failed {
+                    state
+                        .runtime
+                        .reopen_task_for_recovery(&record.task_id, record.runner_status)
+                        .await?;
+                } else {
+                    state
+                        .runtime
+                        .sync_status(&record.task_id, RuntimeRunnerStatus::Allocated, None, None)
+                        .await?;
+                }
                 recovered += 1;
             }
             Err(error) => {

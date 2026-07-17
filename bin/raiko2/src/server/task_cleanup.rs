@@ -48,7 +48,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     config: Arc<Config>,
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
-) {
+) -> tokio::task::JoinHandle<()> {
     const TERMINAL_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
     tokio::spawn(async move {
         let mut orphan_cursor = None;
@@ -82,7 +82,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
                 .await,
             );
         }
-    });
+    })
 }
 
 pub(crate) async fn run_runtime_cleanup_pass(
@@ -457,7 +457,7 @@ pub(crate) async fn has_other_live_task_reference(
         if record.task_id != public_task_id
             && matches!(
                 record.runner_status,
-                RunnerStatus::Allocated | RunnerStatus::Running
+                RunnerStatus::Allocated | RunnerStatus::Running | RunnerStatus::Completed
             )
             && record_matches_network_pair(&record, network_pair)?
         {
@@ -1166,7 +1166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_registered_tasks_ignores_terminal_roots_for_live_shared_children() -> Result<()>
+    async fn cancel_registered_tasks_preserves_children_referenced_by_completed_roots() -> Result<()>
     {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("cancel-shared"))?);
         let engine = Arc::new(MockEngine::default());
@@ -1199,13 +1199,7 @@ mod tests {
         )
         .await?;
 
-        let prove_task_id =
-            decode_task_id::<EngineTaskKey>(&proposal_task_id).expect("decode prove task id");
-        let expected = proposal_task_chain_ids(&prove_task_id)
-            .into_iter()
-            .map(|task_id| encode_task_id(&task_id).expect("encode stage task id"))
-            .collect::<Vec<_>>();
-        assert_eq!(engine.cancelled(), expected);
+        assert!(engine.cancelled().is_empty());
         Ok(())
     }
 

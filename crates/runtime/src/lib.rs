@@ -9,8 +9,9 @@ mod artifact_store;
 mod publication;
 
 pub use artifact_store::{
-    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactKey, ProofArtifactObject,
-    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, validate_scope_component,
+    GcsProofArtifactStore, MemoryProofArtifactStore, NamespaceOwnerLease, ProofArtifactKey,
+    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore,
+    RuntimeStateObject, RuntimeStateWriteResult, validate_scope_component,
 };
 pub use publication::ProofArtifactPublicationInvalidated;
 
@@ -19,7 +20,7 @@ use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
@@ -54,7 +55,29 @@ pub struct RuntimeManager {
     generation: StdMutex<Option<i64>>,
     mutation: Mutex<()>,
     owner: Mutex<Option<artifact_store::NamespaceOwnerLease>>,
-    active: AtomicBool,
+    authority: AtomicU8,
+    state_coherent: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum RuntimeAuthorityState {
+    Active = 0,
+    Unknown = 1,
+    Lost = 2,
+    Draining = 3,
+}
+
+impl RuntimeAuthorityState {
+    fn load(value: &AtomicU8) -> Self {
+        match value.load(Ordering::Acquire) {
+            0 => Self::Active,
+            1 => Self::Unknown,
+            2 => Self::Lost,
+            3 => Self::Draining,
+            _ => unreachable!("runtime authority state is always written from the enum"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +142,8 @@ impl RuntimeManager {
             generation: StdMutex::new(None),
             mutation: Mutex::new(()),
             owner: Mutex::new(None),
-            active: AtomicBool::new(true),
+            authority: AtomicU8::new(RuntimeAuthorityState::Active as u8),
+            state_coherent: AtomicBool::new(true),
         })
     }
 
@@ -136,9 +160,11 @@ impl RuntimeManager {
         let lease = self
             .store
             .claim_namespace_owner(&owner_id, now_secs(), lease_secs)
-            .await?;
-        *self.owner.lock().await = lease;
-        self.active.store(true, Ordering::Release);
+            .await?
+            .context("runtime namespace ownership was not acquired")?;
+        *self.owner.lock().await = Some(lease);
+        self.authority
+            .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
         Ok(())
     }
 
@@ -147,7 +173,8 @@ impl RuntimeManager {
         let mut owner = self.owner.lock().await;
         let lease = owner.clone();
         let Some(lease) = lease else {
-            self.active.store(true, Ordering::Release);
+            self.authority
+                .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
             return Ok(true);
         };
         match self
@@ -157,59 +184,98 @@ impl RuntimeManager {
         {
             Ok(Some(renewed)) => {
                 *owner = Some(renewed);
-                self.active.store(true, Ordering::Release);
+                self.authority
+                    .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
                 Ok(true)
             }
             Ok(None) => {
-                self.active.store(false, Ordering::Release);
+                self.authority
+                    .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
                 Ok(false)
             }
             Err(error) => {
-                self.active.store(false, Ordering::Release);
+                self.authority
+                    .store(RuntimeAuthorityState::Unknown as u8, Ordering::Release);
                 Err(error)
             }
         }
     }
 
+    /// Stops admissions and conditionally releases the namespace lease held by this process.
+    pub async fn release_namespace_owner(&self) -> Result<bool> {
+        self.authority
+            .store(RuntimeAuthorityState::Draining as u8, Ordering::Release);
+        let _mutation = self.mutation.lock().await;
+        let lease = self.owner.lock().await.clone();
+        let Some(lease) = lease else {
+            return Ok(true);
+        };
+        let released = self.store.release_namespace_owner(&lease).await?;
+        if released {
+            *self.owner.lock().await = None;
+        } else {
+            self.authority
+                .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
+        }
+        Ok(released)
+    }
+
+    pub fn begin_draining(&self) {
+        self.authority
+            .store(RuntimeAuthorityState::Draining as u8, Ordering::Release);
+    }
+
     /// Verifies that this process still owns its authoritative runtime namespace.
     pub async fn check_readiness(&self) -> Result<()> {
-        self.ensure_active()?;
-        let owner = self.owner.lock().await;
-        if let Some(lease) = owner.as_ref() {
+        anyhow::ensure!(
+            !matches!(
+                RuntimeAuthorityState::load(&self.authority),
+                RuntimeAuthorityState::Lost | RuntimeAuthorityState::Draining
+            ),
+            "runtime namespace ownership is unavailable"
+        );
+        let lease = self.owner.lock().await.clone();
+        if let Some(lease) = lease.as_ref() {
             let verified = match self.store.verify_namespace_owner(lease, now_secs()).await {
                 Ok(verified) => verified,
                 Err(error) => {
-                    self.active.store(false, Ordering::Release);
+                    self.authority
+                        .store(RuntimeAuthorityState::Unknown as u8, Ordering::Release);
                     return Err(error);
                 }
             };
             if !verified {
-                self.active.store(false, Ordering::Release);
+                self.authority
+                    .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
                 anyhow::bail!("runtime namespace ownership is unavailable");
             }
+        }
+        self.authority
+            .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
+        if !self.state_coherent.load(Ordering::Acquire) {
+            let _mutation = self.mutation.lock().await;
+            self.reload_authoritative_state()
+                .await
+                .context("runtime state generation is not coherent with the authoritative store")?;
         }
         Ok(())
     }
 
     fn ensure_active(&self) -> Result<()> {
         anyhow::ensure!(
-            self.active.load(Ordering::Acquire),
+            RuntimeAuthorityState::load(&self.authority) == RuntimeAuthorityState::Active,
             "runtime namespace ownership is unavailable"
+        );
+        anyhow::ensure!(
+            self.state_coherent.load(Ordering::Acquire),
+            "runtime state generation is not coherent with the authoritative store"
         );
         Ok(())
     }
 
     pub async fn initialize(&self) -> Result<()> {
-        let Some(stored) = self.store.load_runtime_state().await? else {
-            return Ok(());
-        };
-        let state = serde_json::from_slice(&stored.bytes).context("decode runtime store state")?;
-        *self.state.write().await = state;
-        *self
-            .generation
-            .lock()
-            .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))? = stored.generation;
-        Ok(())
+        let _mutation = self.mutation.lock().await;
+        self.reload_authoritative_state().await
     }
 
     /// Advances the durable state generation after acquiring namespace ownership.
@@ -250,26 +316,148 @@ impl RuntimeManager {
         self.store.backend_name()
     }
 
-    async fn mutate<T>(&self, update: impl FnOnce(&mut RuntimeState) -> Result<T>) -> Result<T> {
+    async fn mutate<T>(&self, update: impl Fn(&mut RuntimeState) -> Result<T>) -> Result<T> {
+        const MAX_ATTEMPTS: usize = 3;
+
         let _mutation = self.mutation.lock().await;
-        self.ensure_active()?;
-        let mut next = self.state.read().await.clone();
-        let output = update(&mut next)?;
-        let bytes = serde_json::to_vec(&next).context("encode runtime store state")?;
-        let expected_generation = *self
-            .generation
+        let mut last_error = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            self.ensure_active()?;
+            let current = self.state.read().await.clone();
+            let current_bytes =
+                serde_json::to_vec(&current).context("encode runtime store state")?;
+            let expected_generation = self.current_generation()?;
+            let mut next = current.clone();
+            let output = update(&mut next)?;
+            let next_bytes = serde_json::to_vec(&next).context("encode runtime store state")?;
+
+            match self
+                .store
+                .store_runtime_state(&next_bytes, expected_generation)
+                .await
+            {
+                Ok(RuntimeStateWriteResult::Stored { generation }) => {
+                    self.install_runtime_state(next, generation).await?;
+                    return Ok(output);
+                }
+                Ok(RuntimeStateWriteResult::Conflict(observed)) => {
+                    self.verify_authority_after_write_conflict().await?;
+                    if let Some(observed) = observed.as_ref()
+                        && observed.bytes == next_bytes
+                    {
+                        self.install_runtime_state(next, observed.generation)
+                            .await?;
+                        return Ok(output);
+                    }
+                    self.install_runtime_state_object(observed).await?;
+                    last_error = Some(anyhow::anyhow!(
+                        "runtime state generation changed during mutation"
+                    ));
+                }
+                Err(write_error) => {
+                    let observed = match self.store.load_runtime_state().await {
+                        Ok(observed) => observed,
+                        Err(read_error) => {
+                            self.state_coherent.store(false, Ordering::Release);
+                            return Err(write_error).context(format!(
+                                "runtime state write outcome is unknown and read-back failed: {read_error:#}"
+                            ));
+                        }
+                    };
+                    self.verify_authority_after_write_conflict().await?;
+                    if let Some(observed) = observed.as_ref()
+                        && observed.bytes == next_bytes
+                    {
+                        self.install_runtime_state(next, observed.generation)
+                            .await?;
+                        return Ok(output);
+                    }
+                    let remote_matches_current = match observed.as_ref() {
+                        Some(observed) => {
+                            observed.bytes == current_bytes
+                                && observed.generation == expected_generation
+                        }
+                        None => expected_generation.is_none(),
+                    };
+                    self.install_runtime_state_object(observed).await?;
+                    last_error = Some(if remote_matches_current {
+                        write_error.context("runtime state write failed before commit")
+                    } else {
+                        write_error.context(
+                            "runtime state write outcome conflicted with authoritative read-back",
+                        )
+                    });
+                }
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                tokio::task::yield_now().await;
+            }
+        }
+        self.state_coherent.store(false, Ordering::Release);
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("runtime state mutation failed")))
+    }
+
+    fn current_generation(&self) -> Result<Option<i64>> {
+        self.generation
             .lock()
-            .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))?;
-        let generation = self
-            .store
-            .store_runtime_state(&bytes, expected_generation)
-            .await?;
-        *self.state.write().await = next;
+            .map(|generation| *generation)
+            .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))
+    }
+
+    async fn install_runtime_state(
+        &self,
+        state: RuntimeState,
+        generation: Option<i64>,
+    ) -> Result<()> {
+        *self.state.write().await = state;
         *self
             .generation
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))? = generation;
-        Ok(output)
+        self.state_coherent.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn install_runtime_state_object(&self, stored: Option<RuntimeStateObject>) -> Result<()> {
+        match stored {
+            Some(stored) => {
+                let state = serde_json::from_slice(&stored.bytes)
+                    .context("decode authoritative runtime store state")?;
+                self.install_runtime_state(state, stored.generation).await
+            }
+            None => {
+                self.install_runtime_state(RuntimeState::default(), None)
+                    .await
+            }
+        }
+    }
+
+    async fn reload_authoritative_state(&self) -> Result<()> {
+        let stored = self.store.load_runtime_state().await?;
+        self.install_runtime_state_object(stored).await
+    }
+
+    async fn verify_authority_after_write_conflict(&self) -> Result<()> {
+        let lease = self.owner.lock().await.clone();
+        let Some(lease) = lease.as_ref() else {
+            anyhow::bail!(
+                "runtime state generation changed without an active namespace owner lease"
+            );
+        };
+        match self.store.verify_namespace_owner(lease, now_secs()).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.authority
+                    .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
+                anyhow::bail!("runtime namespace ownership is unavailable")
+            }
+            Err(error) => {
+                self.authority
+                    .store(RuntimeAuthorityState::Unknown as u8, Ordering::Release);
+                Err(error)
+            }
+        }
     }
 
     async fn fence_external_mutation(&self) -> Result<()> {
@@ -391,7 +579,7 @@ impl RuntimeManager {
                 return Ok(TaskRegistrationOutcome::Existing(existing));
             }
             state.tasks.insert(record.task_id.clone(), record.clone());
-            Ok(TaskRegistrationOutcome::Created(record))
+            Ok(TaskRegistrationOutcome::Created(record.clone()))
         })
         .await
     }
@@ -407,7 +595,7 @@ impl RuntimeManager {
             {
                 anyhow::bail!("request fingerprint already belongs to another task");
             }
-            state.tasks.insert(record.task_id.clone(), record);
+            state.tasks.insert(record.task_id.clone(), record.clone());
             Ok(())
         })
         .await
@@ -424,7 +612,7 @@ impl RuntimeManager {
             let Some(task) = state.tasks.get_mut(&task_id) else {
                 return Ok(false);
             };
-            task.metadata = metadata;
+            task.metadata = metadata.clone();
             task.updated_at = now_ts();
             Ok(true)
         })
@@ -533,10 +721,13 @@ impl RuntimeManager {
         let task_id = task_id.to_string();
         self.mutate(move |state| {
             if let Some(task) = state.tasks.get_mut(&task_id) {
+                if task.runner_status.is_terminal() {
+                    return Ok(());
+                }
                 task.runner_status = runner_status;
-                task.error = error;
+                task.error.clone_from(&error);
                 if proof_uri.is_some() {
-                    task.proof_uri = proof_uri;
+                    task.proof_uri.clone_from(&proof_uri);
                 }
                 task.updated_at = now_ts();
             }
@@ -556,7 +747,28 @@ impl RuntimeManager {
                 return Ok(false);
             }
             task.runner_status = RunnerStatus::Completed;
-            task.proof_uri = Some(proof_uri);
+            task.proof_uri = Some(proof_uri.clone());
+            task.error = None;
+            task.updated_at = now_ts();
+            Ok(true)
+        })
+        .await
+    }
+
+    pub async fn reopen_task_for_recovery(
+        &self,
+        task_id: &str,
+        expected_status: RunnerStatus,
+    ) -> Result<bool> {
+        let task_id = task_id.to_string();
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(false);
+            };
+            if task.runner_status != expected_status {
+                return Ok(false);
+            }
+            task.runner_status = RunnerStatus::Allocated;
             task.error = None;
             task.updated_at = now_ts();
             Ok(true)
@@ -600,7 +812,7 @@ impl RuntimeManager {
                 return Ok(false);
             }
             task.runner_status = RunnerStatus::Cancelled;
-            task.error = error;
+            task.error.clone_from(&error);
             task.updated_at = now_ts();
             Ok(true)
         })
@@ -637,7 +849,7 @@ impl RuntimeManager {
             {
                 return Ok(());
             }
-            state.artifacts.insert(key, record);
+            state.artifacts.insert(key.clone(), record.clone());
             Ok(())
         })
         .await
@@ -1290,8 +1502,48 @@ mod tests {
     #[tokio::test]
     async fn inactive_runtime_is_not_ready() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "inactive".into())?;
-        runtime.active.store(false, Ordering::Release);
+        runtime
+            .authority
+            .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
         assert!(runtime.check_readiness().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generic_status_sync_cannot_reopen_terminal_task() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "terminal-guard".into())?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "completed-task".into(),
+                pipeline_key: Some(PipelineKey::ShastaNative),
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                proposal_id: Some(1),
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: None,
+            })
+            .await?;
+        runtime
+            .complete_nonterminal_task("completed-task", "memory://proof")
+            .await?;
+
+        runtime
+            .sync_status(
+                "completed-task",
+                RunnerStatus::Allocated,
+                Some("late retry".into()),
+                None,
+            )
+            .await?;
+
+        let record = runtime
+            .get_task("completed-task")
+            .await?
+            .expect("registered task");
+        assert_eq!(record.runner_status, RunnerStatus::Completed);
+        assert_eq!(record.proof_uri.as_deref(), Some("memory://proof"));
+        assert_eq!(record.error, None);
         Ok(())
     }
 

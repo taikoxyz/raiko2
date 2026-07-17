@@ -56,6 +56,12 @@ pub struct RuntimeStateObject {
     pub generation: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeStateWriteResult {
+    Stored { generation: Option<i64> },
+    Conflict(Option<RuntimeStateObject>),
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct NamespaceOwnerLease {
     pub owner_id: String,
@@ -100,43 +106,35 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         expected_content_hash: &str,
     ) -> Result<()>;
 
-    async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
-        Ok(None)
-    }
+    async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>>;
 
     async fn store_runtime_state(
         &self,
-        _bytes: &[u8],
-        _expected_generation: Option<i64>,
-    ) -> Result<Option<i64>> {
-        Ok(None)
-    }
+        bytes: &[u8],
+        expected_generation: Option<i64>,
+    ) -> Result<RuntimeStateWriteResult>;
 
     async fn claim_namespace_owner(
         &self,
-        _owner_id: &str,
-        _now_secs: u64,
-        _lease_secs: u64,
-    ) -> Result<Option<NamespaceOwnerLease>> {
-        Ok(None)
-    }
+        owner_id: &str,
+        now_secs: u64,
+        lease_secs: u64,
+    ) -> Result<Option<NamespaceOwnerLease>>;
 
     async fn renew_namespace_owner(
         &self,
         lease: &NamespaceOwnerLease,
-        _now_secs: u64,
-        _lease_secs: u64,
-    ) -> Result<Option<NamespaceOwnerLease>> {
-        Ok(Some(lease.clone()))
-    }
+        now_secs: u64,
+        lease_secs: u64,
+    ) -> Result<Option<NamespaceOwnerLease>>;
 
     async fn verify_namespace_owner(
         &self,
-        _lease: &NamespaceOwnerLease,
-        _now_secs: u64,
-    ) -> Result<bool> {
-        Ok(true)
-    }
+        lease: &NamespaceOwnerLease,
+        now_secs: u64,
+    ) -> Result<bool>;
+
+    async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool>;
 }
 
 #[derive(Debug)]
@@ -363,25 +361,29 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
         &self,
         bytes: &[u8],
         expected_generation: Option<i64>,
-    ) -> Result<Option<i64>> {
+    ) -> Result<RuntimeStateWriteResult> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        anyhow::ensure!(
-            inner
-                .runtime_state
-                .as_ref()
-                .and_then(|state| state.generation)
-                == expected_generation,
-            "runtime state generation changed"
-        );
+        if inner
+            .runtime_state
+            .as_ref()
+            .and_then(|state| state.generation)
+            != expected_generation
+        {
+            return Ok(RuntimeStateWriteResult::Conflict(
+                inner.runtime_state.clone(),
+            ));
+        }
         let generation = Self::next_generation(&mut inner);
         inner.runtime_state = Some(RuntimeStateObject {
             bytes: bytes.to_vec(),
             generation: Some(generation),
         });
-        Ok(Some(generation))
+        Ok(RuntimeStateWriteResult::Stored {
+            generation: Some(generation),
+        })
     }
 
     async fn claim_namespace_owner(
@@ -460,6 +462,24 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
                 && current.generation == lease.generation
                 && current.expires_at_secs > now_secs
         }))
+    }
+
+    async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let Some(current) = inner.namespace_owner.as_ref() else {
+            return Ok(false);
+        };
+        if current.owner_id != lease.owner_id
+            || current.epoch != lease.epoch
+            || current.generation != lease.generation
+        {
+            return Ok(false);
+        }
+        inner.namespace_owner = None;
+        Ok(true)
     }
 }
 

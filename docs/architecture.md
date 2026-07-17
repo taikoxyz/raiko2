@@ -23,6 +23,9 @@ The architecture is organized around these invariants:
    identical bytes under a new manifest generation without reactivating the invalidated generation.
 6. Remote request identifiers are resumable only after their submission checkpoint is durably stored.
    Request-level SP1 retry configuration may lower, but never raise, the operator limit.
+7. One running instance owns one namespace. Namespaces are isolated persistence domains and never
+   share tasks, artifacts, checkpoints, or invalidation markers. Multiple roots inside the same
+   namespace may reference the same canonical proof artifact.
 
 ## System Architecture
 
@@ -135,7 +138,7 @@ Startup orders ownership before recovery:
 
 ```mermaid
 flowchart TD
-  Start([Process start]) --> Build[Build stores and pipeline engines]
+  Start([Process start]) --> Build[Build runtime store and prover clients]
   Build --> Claim[Claim namespace owner]
   Claim --> Heartbeat[Start cancellable owner heartbeat]
   Heartbeat --> Load[Load authoritative runtime state]
@@ -156,7 +159,28 @@ fence. If renewal or verification fails, `RuntimeManager` becomes inactive. Late
 artifact writes, invalidations, and request admissions fail closed until ownership is valid again.
 
 Memory mode deliberately has no distributed owner object. It is an explicit ephemeral, single-process
-backend for local development and controlled emergency operation, not an automatic GCS fallback.
+backend accepted only for `development`, `local`, and `test`, not an automatic GCS fallback.
+
+Runtime authority is an explicit state machine:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Active: owner acquired and state loaded
+  Active --> Unknown: renewal or verification transport error
+  Unknown --> Active: authoritative verification succeeds
+  Active --> Lost: owner record proves another owner
+  Unknown --> Lost: authoritative verification proves ownership loss
+  Active --> Draining: graceful shutdown begins
+  Unknown --> Draining: graceful shutdown begins
+  Lost --> [*]
+  Draining --> [*]: workers stop and lease is conditionally released
+```
+
+`Unknown`, `Lost`, and `Draining` reject mutations and make readiness fail. A transient verification
+error is recoverable: a later readiness check re-verifies the authoritative owner and reloads runtime
+state when a previous write outcome was ambiguous. Proven ownership loss is permanent for that
+process. Graceful shutdown stops and joins engine workers and maintenance tasks before conditionally
+deleting the exact owner lease.
 
 ## Proof Artifact Storage
 
@@ -317,13 +341,43 @@ sequenceDiagram
 
 A newly returned provider request ID is never treated as resumable before checkpoint persistence.
 Legacy SP1 checkpoints whose deadline is zero or absent reuse the full configured timeout while
-retaining their request ID and attempt. The effective SP1 request attempt limit is:
+retaining their request ID and attempt. An expired SP1 checkpoint performs a status read against the
+recorded request before any replacement can be submitted, allowing an already-paid fulfillment to be
+recovered. Boundless never changes to a fresh request ID after an ambiguous reused-ID submission
+failure. The effective SP1 request attempt limit is:
 
 ```text
 min(operator network_request_max_attempts, non-zero request override)
 ```
 
 Without an override, the operator value is used. A request cannot raise the configured cost ceiling.
+
+## Deployment And Migration
+
+Production deployments use `backend = "gcs"`. Each deployment instance receives a unique namespace;
+there is no supported active/active sharing of one namespace and no data sharing across namespaces.
+A rolling replacement therefore uses a drain handoff rather than concurrent writers:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Old as Old instance
+  participant GCS as Namespace store
+  participant New as New instance
+
+  Old->>Old: Stop HTTP admissions and drain requests
+  Old->>Old: Stop and join workers and maintenance
+  Old->>GCS: Conditionally release exact owner lease
+  New->>GCS: Claim namespace owner
+  New->>GCS: Load and fence authoritative runtime state
+  New->>New: Restore artifacts and recover non-terminal roots
+  New->>New: Become ready
+```
+
+Backend or namespace changes are hard cuts. Drain the old instance, retain its namespace for rollback,
+and start the new instance against the selected namespace. There is no SQLite importer, dual-write,
+automatic merge, or compatibility migration. The execution queue is intentionally in-process and is
+rebuilt from authoritative runtime state; Redis queue persistence is not part of this architecture.
 
 ## Readiness
 

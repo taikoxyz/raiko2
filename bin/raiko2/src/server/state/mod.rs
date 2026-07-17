@@ -103,6 +103,7 @@ pub struct AppState {
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
     pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
     namespace_owner_heartbeat: Option<Arc<NamespaceOwnerHeartbeat>>,
+    background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Debug)]
@@ -241,13 +242,14 @@ impl AppState {
 
             let config = Arc::new(config);
             let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-            let mut state = Self::from_parts(config, pipelines, runtime);
+            let mut state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
             state.namespace_owner_heartbeat = Some(Arc::clone(&heartbeat));
             state.finish_initialization().await
         }
         .await;
         if startup.is_err() {
             heartbeat.stop().await;
+            let _ = runtime.release_namespace_owner().await;
         }
         startup
     }
@@ -260,11 +262,15 @@ impl AppState {
                 "recovered pending runtime tasks into the memory queue"
             );
         }
-        spawn_runtime_cleanup_loop(
+        let cleanup = spawn_runtime_cleanup_loop(
             Arc::clone(&self.config),
             Arc::clone(&self.runtime),
             Arc::clone(&self.pipelines),
         );
+        self.background_tasks
+            .lock()
+            .expect("background task lock poisoned")
+            .push(cleanup);
 
         Ok(self)
     }
@@ -282,6 +288,27 @@ impl AppState {
             zk_any_sampler,
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
             namespace_owner_heartbeat: None,
+            background_tasks: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.pipelines.shutdown().await;
+        let handles = self
+            .background_tasks
+            .lock()
+            .map(|mut handles| handles.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+        if let Some(heartbeat) = &self.namespace_owner_heartbeat {
+            heartbeat.stop().await;
+        }
+        self.runtime.begin_draining();
+        if let Err(error) = self.runtime.release_namespace_owner().await {
+            tracing::warn!(%error, "failed to release runtime namespace ownership");
         }
     }
 }

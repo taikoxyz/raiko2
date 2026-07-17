@@ -1726,7 +1726,7 @@ impl BoundlessProver {
         // Sign the request before reserving on the balance gate: signing is independent of the
         // deposit value, so there's no reason to hold a reservation across it. The chain id query
         // and signing both retry transient RPC errors, so a hiccup here does not abort the reused-id
-        // submission and rotate to a fresh id. `get_chain_id` caches the value inside the SDK's
+        // submission. `get_chain_id` caches the value inside the SDK's
         // market service after the first fetch, and the `Client` is reused across proofs, so this
         // is effectively a single query per process despite the per-submission call.
         let chain_id =
@@ -2240,8 +2240,8 @@ impl BoundlessProver {
         let mut last_retry_reason: Option<String> = None;
         // Market request id shared by rebid rungs of this proof task. The market keys locks and
         // paid fulfillments on the id, so reusing it across rebids makes paying for more than one
-        // rung impossible by construction. `None` mints a fresh id (first attempt, or after the
-        // previous id became unusable).
+        // rung impossible by construction. `None` mints a fresh id only for the first attempt or
+        // after the provider has definitively terminalized the previous request.
         let mut reuse_request_id: Option<U256> = None;
         // Per-proof input-upload cache: the guest env is uploaded once and reused across rebids,
         // refreshed only when its presigned URL nears expiry.
@@ -2288,11 +2288,10 @@ impl BoundlessProver {
                         self.config.rebid_max_attempts,
                     )));
                 }
-                // `input_cache` is threaded by `&mut` so the reused-id attempt and the fresh-id
-                // fallback below share a single per-proof input upload. The context is built inline
-                // (rather than via a closure) because it borrows `&mut input_cache`, whose lifetime
-                // a closure returning the borrow cannot name.
-                let first = Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                // Once an id has been assigned, an RPC failure may have happened after the market
+                // accepted the request. Keep retrying that id on the next engine attempt instead of
+                // opening a second payable request under a fresh id.
+                Box::pin(self.submit_fresh_request(FreshSubmissionContext {
                     client,
                     input: &input,
                     elf,
@@ -2308,41 +2307,7 @@ impl BoundlessProver {
                     input_cache: &mut input_cache,
                     reuse_request_id,
                 }))
-                .await;
-                match first {
-                    Ok(submission) => submission,
-                    Err(error) => {
-                        // Id reuse is best-effort: an order stream or RPC may refuse a same-id
-                        // resubmission. Fall back to a fresh id (the pre-reuse behavior, which
-                        // re-opens the double-pay window for this rung) instead of failing the
-                        // proof.
-                        let Some(previous_request_id) = reuse_request_id.take() else {
-                            return Err(error);
-                        };
-                        tracing::warn!(
-                            previous_request_id = format!("0x{previous_request_id:x}"),
-                            error = %error,
-                            "Boundless rebid under the reused request id failed; retrying once with a fresh id"
-                        );
-                        Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                            client,
-                            input: &input,
-                            elf,
-                            program: &program,
-                            offer_spec,
-                            journal: &journal,
-                            image_ref: &image_ref,
-                            deployment: &deployment,
-                            observer: observer.as_ref(),
-                            quoted_mcycles_count,
-                            evaluated_mcycles_count,
-                            attempt,
-                            input_cache: &mut input_cache,
-                            reuse_request_id: None,
-                        }))
-                        .await?
-                    }
-                }
+                .await?
             };
 
             tracing::info!(
@@ -3530,7 +3495,7 @@ mod tests {
         assert_eq!(abort.action, NoLockTimeoutAction::Abort);
 
         // Within the payable window the overall poll timeout must not fire: a timeout-triggered
-        // resubmission could reopen the double-pay window through the fresh-id fallback.
+        // replacement could reopen the double-pay window under another request id.
         assert!(defer_poll_timeout_while_payable(
             1_000, 10_000, 20_000, abort, 9_999
         ));

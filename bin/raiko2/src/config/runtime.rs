@@ -68,6 +68,11 @@ impl RuntimeConfig {
                 if self.store.bucket.is_some() {
                     bail!("runtime.store.bucket is only valid for backend=gcs");
                 }
+                if !matches!(self.environment.as_str(), "development" | "local" | "test") {
+                    bail!(
+                        "runtime.store.backend=memory is only supported for development, local, or test environments"
+                    );
+                }
             }
             RuntimeStoreBackend::Gcs => {
                 if self
@@ -128,8 +133,29 @@ mod tests {
         let config = RuntimeConfig {
             environment: "devnet".into(),
             namespace: "raiko2-devnet-a".into(),
-            ..RuntimeConfig::default()
+            store: RuntimeStoreConfig {
+                backend: RuntimeStoreBackend::Gcs,
+                bucket: Some("runtime-state".into()),
+                ..RuntimeStoreConfig::default()
+            },
         };
         config.validate().expect("valid runtime scope");
+    }
+
+    #[test]
+    fn memory_store_is_rejected_for_deployed_environments() {
+        let config = RuntimeConfig {
+            environment: "mainnet".into(),
+            namespace: "raiko2-mainnet".into(),
+            ..RuntimeConfig::default()
+        };
+
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("backend=memory")
+        );
     }
 }

@@ -1,5 +1,5 @@
     #[tokio::test]
-    async fn invalidated_publication_cancels_active_and_completed_roots() -> Result<()> {
+    async fn invalidated_publication_preserves_completed_roots_without_exact_commit() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-invalidated-completion-rollback",
         ))?);
@@ -40,10 +40,11 @@
                 "prove",
                 "proof invalidated during completion",
                 PublicationFailureDisposition::Invalidated,
+                None,
             )
             .await;
 
-        for task_id in ["task_allocated", "task_running", "task_completed"] {
+        for task_id in ["task_allocated", "task_running"] {
             let invalidated = runtime.get_task(task_id).await?.expect("invalidated task");
             assert_eq!(
                 invalidated.runner_status,
@@ -60,12 +61,152 @@
         for (task_id, status) in [
             ("task_cancelled", RunnerStatus::Cancelled),
             ("task_failed", RunnerStatus::Failed),
+            ("task_completed", RunnerStatus::Completed),
         ] {
             let terminal = runtime.get_task(task_id).await?.expect("terminal task");
             assert_eq!(terminal.runner_status, status, "{task_id}");
             assert_eq!(terminal.proof_uri, None, "{task_id}");
             assert_eq!(terminal.error, None, "{task_id}");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidated_publication_rolls_back_only_completed_root_with_exact_proof_uri()
+    -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-exact-completion-rollback",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        for root_id in ["task_exact", "task_other"] {
+            register_observer_task(
+                runtime.as_ref(),
+                root_id,
+                "taiko_dev/ethereum",
+                pipeline,
+                &request,
+                RunnerStatus::Completed,
+            )
+            .await?;
+        }
+        for (root_id, proof_uri) in [
+            ("task_exact", "memory://canonical-proof"),
+            ("task_other", "memory://older-proof"),
+        ] {
+            let mut record = runtime.get_task(root_id).await?.expect("runtime root");
+            record.proof_uri = Some(proof_uri.into());
+            runtime.upsert_task(&record).await?;
+        }
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let publication = PublishedProofCommit {
+            proof_uris: std::collections::HashMap::from([
+                ("task_exact".into(), "memory://canonical-proof".into()),
+                ("task_other".into(), "memory://canonical-proof".into()),
+            ]),
+            synchronized_roots: std::collections::HashSet::from(["task_exact".into()]),
+            root_ref: "proposal".into(),
+            content_hash: "hash".into(),
+        };
+
+        observer
+            .mark_proof_publication_failed(
+                &task_id,
+                "prove",
+                "canonical proof invalidated",
+                PublicationFailureDisposition::Invalidated,
+                Some(&publication),
+            )
+            .await;
+
+        let exact = runtime.get_task("task_exact").await?.expect("exact root");
+        assert_eq!(exact.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(exact.proof_uri, None);
+        let other = runtime.get_task("task_other").await?.expect("other root");
+        assert_eq!(other.runner_status, RunnerStatus::Completed);
+        assert_eq!(other.proof_uri.as_deref(), Some("memory://older-proof"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_artifact_referenced_by_completed_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-cancel-shared-completed",
+        ))?);
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        for (root_id, status) in [
+            ("task_running", RunnerStatus::Running),
+            ("task_completed", RunnerStatus::Completed),
+        ] {
+            register_observer_task(
+                runtime.as_ref(),
+                root_id,
+                network_pair,
+                pipeline,
+                &request,
+                status,
+            )
+            .await?;
+        }
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let proof_bytes = serde_json::to_vec(&proof_fixture())?;
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline,
+                route,
+                &proof_ref,
+                &proof_bytes,
+            )
+            .await?;
+        let artifact = publication.object();
+        let mut completed = runtime
+            .get_task("task_completed")
+            .await?
+            .expect("completed root");
+        completed.proof_uri = Some(artifact.proof_uri.clone());
+        runtime.upsert_task(&completed).await?;
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.into(), route);
+
+        observer.on_task_cancelled(&task_id).await;
+
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(network_pair, pipeline, route, &proof_ref)
+                .await?
+                .is_some()
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_completed")
+                .await?
+                .expect("completed root")
+                .runner_status,
+            RunnerStatus::Completed
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_running")
+                .await?
+                .expect("cancelled root")
+                .runner_status,
+            RunnerStatus::Cancelled
+        );
         Ok(())
     }
 
@@ -188,6 +329,7 @@
                 "prove",
                 "transient artifact store failure",
                 PublicationFailureDisposition::Retryable,
+                None,
             )
             .await;
 

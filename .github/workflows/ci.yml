@@ -238,6 +238,36 @@ jobs:
       - name: test engine core
         run: cargo test -p raiko2-engine --no-default-features
 
+  rust-test-prover:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+        with:
+          toolchain: "1.94.0"
+
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        with:
+          shared-key: ci-rust
+
+      - name: test prover recovery and retry policies
+        run: cargo test -p raiko2-prover --lib
+
   rust-test-xtask:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
@@ -283,8 +313,6 @@ jobs:
       - name: test fixture server feature
         run: cargo test -p raiko2 --bin raiko2 --features fixture-server
 
-  # Keep the full prover stack out of the default PR gate. Engine core and the
-  # fixture-server surface run above; backend-heavy lanes remain manual.
   rust:
     needs:
       - changes
@@ -293,6 +321,7 @@ jobs:
       - rust-test-foundation
       - rust-test-pipeline
       - rust-test-runtime
+      - rust-test-prover
       - rust-test-xtask
     if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
@@ -306,6 +335,7 @@ jobs:
           TEST_FOUNDATION_RESULT: ${{ needs.rust-test-foundation.result }}
           TEST_PIPELINE_RESULT: ${{ needs.rust-test-pipeline.result }}
           TEST_RUNTIME_RESULT: ${{ needs.rust-test-runtime.result }}
+          TEST_PROVER_RESULT: ${{ needs.rust-test-prover.result }}
           TEST_XTASK_RESULT: ${{ needs.rust-test-xtask.result }}
         run: |
           test "${TEST_XTASK_RESULT}" = "success"
@@ -315,4 +345,5 @@ jobs:
             test "${TEST_FOUNDATION_RESULT}" = "success"
             test "${TEST_PIPELINE_RESULT}" = "success"
             test "${TEST_RUNTIME_RESULT}" = "success"
+            test "${TEST_PROVER_RESULT}" = "success"
           fi

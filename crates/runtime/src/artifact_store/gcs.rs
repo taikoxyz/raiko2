@@ -1,7 +1,7 @@
 use super::{
     NamespaceOwnerLease, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-    ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject, content_hash, encode_component,
-    validate_scope_component,
+    ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject, RuntimeStateWriteResult,
+    content_hash, encode_component, validate_scope_component,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -386,17 +386,24 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         &self,
         bytes: &[u8],
         expected_generation: Option<i64>,
-    ) -> Result<Option<i64>> {
+    ) -> Result<RuntimeStateWriteResult> {
         let mut upload = self.storage.write_object(
             &self.bucket_resource,
             self.runtime_state_name(),
             bytes::Bytes::copy_from_slice(bytes),
         );
         upload = upload.set_if_generation_match(expected_generation.unwrap_or(0));
-        let object = Box::pin(upload.send_buffered())
-            .await
-            .context("failed to persist GCS runtime state; owner may have changed")?;
-        Ok(Some(object.generation))
+        match Box::pin(upload.send_buffered()).await {
+            Ok(object) => Ok(RuntimeStateWriteResult::Stored {
+                generation: Some(object.generation),
+            }),
+            Err(error) if error.http_status_code() == Some(412) => Ok(
+                RuntimeStateWriteResult::Conflict(self.load_runtime_state().await?),
+            ),
+            Err(error) => {
+                Err(error).context("failed to persist GCS runtime state; outcome is unknown")
+            }
+        }
     }
 
     async fn claim_namespace_owner(
@@ -405,45 +412,94 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         now_secs: u64,
         lease_secs: u64,
     ) -> Result<Option<NamespaceOwnerLease>> {
+        const MAX_ATTEMPTS: usize = 3;
         let name = self.owner_name();
-        let current = self
-            .read_named(&name, format!("gs://{}/{}", self.bucket_id, name))
-            .await?;
-        let (epoch, expected_generation) = if let Some(current) = current {
-            let lease: NamespaceOwnerLease = serde_json::from_slice(&current.bytes)
-                .context("invalid GCS namespace owner record")?;
-            anyhow::ensure!(
-                lease.owner_id == owner_id || lease.expires_at_secs <= now_secs,
-                "runtime namespace is owned by {} until {}",
-                lease.owner_id,
-                lease.expires_at_secs
-            );
-            let epoch = if lease.owner_id == owner_id {
-                lease.epoch
+        for attempt in 1..=MAX_ATTEMPTS {
+            let current = self
+                .read_named(&name, format!("gs://{}/{}", self.bucket_id, name))
+                .await?;
+            let (epoch, expected_generation) = if let Some(current) = current {
+                let lease: NamespaceOwnerLease = serde_json::from_slice(&current.bytes)
+                    .context("invalid GCS namespace owner record")?;
+                anyhow::ensure!(
+                    lease.owner_id == owner_id || lease.expires_at_secs <= now_secs,
+                    "runtime namespace is owned by {} until {}",
+                    lease.owner_id,
+                    lease.expires_at_secs
+                );
+                let epoch = if lease.owner_id == owner_id {
+                    lease.epoch
+                } else {
+                    lease.epoch.saturating_add(1)
+                };
+                (epoch, current.generation)
             } else {
-                lease.epoch.saturating_add(1)
+                (1, None)
             };
-            (epoch, current.generation)
-        } else {
-            (1, None)
-        };
-        let mut lease = NamespaceOwnerLease {
-            owner_id: owner_id.to_string(),
-            epoch,
-            expires_at_secs: now_secs.saturating_add(lease_secs),
-            generation: None,
-        };
-        let bytes = serde_json::to_vec(&lease).context("serialize namespace owner")?;
-        let object = Box::pin(
-            self.storage
-                .write_object(&self.bucket_resource, &name, bytes::Bytes::from(bytes))
-                .set_if_generation_match(expected_generation.unwrap_or(0))
-                .send_buffered(),
-        )
-        .await
-        .context("failed to claim GCS namespace owner")?;
-        lease.generation = Some(object.generation);
-        Ok(Some(lease))
+            let lease = NamespaceOwnerLease {
+                owner_id: owner_id.to_string(),
+                epoch,
+                expires_at_secs: now_secs.saturating_add(lease_secs),
+                generation: None,
+            };
+            let bytes = serde_json::to_vec(&lease).context("serialize namespace owner")?;
+            match Box::pin(
+                self.storage
+                    .write_object(&self.bucket_resource, &name, bytes::Bytes::from(bytes))
+                    .set_if_generation_match(expected_generation.unwrap_or(0))
+                    .send_buffered(),
+            )
+            .await
+            {
+                Ok(object) => {
+                    return Ok(Some(NamespaceOwnerLease {
+                        generation: Some(object.generation),
+                        ..lease
+                    }));
+                }
+                Err(error) if error.http_status_code() == Some(412) => {
+                    let observed = self
+                        .read_named(&name, format!("gs://{}/{}", self.bucket_id, name))
+                        .await?;
+                    if let Some(observed) = observed {
+                        let mut observed_lease: NamespaceOwnerLease =
+                            serde_json::from_slice(&observed.bytes)
+                                .context("invalid GCS namespace owner record")?;
+                        observed_lease.generation = observed.generation;
+                        if observed_lease.owner_id == owner_id {
+                            return Ok(Some(observed_lease));
+                        }
+                        anyhow::ensure!(
+                            observed_lease.expires_at_secs <= now_secs,
+                            "runtime namespace is owned by {} until {}",
+                            observed_lease.owner_id,
+                            observed_lease.expires_at_secs
+                        );
+                    }
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    anyhow::bail!("runtime namespace owner changed during claim");
+                }
+                Err(error) => {
+                    if let Ok(Some(observed)) = self
+                        .read_named(&name, format!("gs://{}/{}", self.bucket_id, name))
+                        .await
+                    {
+                        let mut observed_lease: NamespaceOwnerLease =
+                            serde_json::from_slice(&observed.bytes)
+                                .context("invalid GCS namespace owner record")?;
+                        observed_lease.generation = observed.generation;
+                        if observed_lease.owner_id == owner_id {
+                            return Ok(Some(observed_lease));
+                        }
+                    }
+                    return Err(error).context("failed to claim GCS namespace owner");
+                }
+            }
+        }
+        unreachable!("namespace owner claim loop returns on every terminal branch")
     }
 
     async fn renew_namespace_owner(
@@ -471,16 +527,40 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             generation: None,
         };
         let bytes = serde_json::to_vec(&renewed).context("serialize namespace owner renewal")?;
-        let object = Box::pin(
+        let result = Box::pin(
             self.storage
                 .write_object(&self.bucket_resource, &name, bytes::Bytes::from(bytes))
                 .set_if_generation_match(current.generation.unwrap_or(0))
                 .send_buffered(),
         )
-        .await
-        .context("failed to renew GCS namespace owner")?;
-        renewed.generation = Some(object.generation);
-        Ok(Some(renewed))
+        .await;
+        match result {
+            Ok(object) => {
+                renewed.generation = Some(object.generation);
+                Ok(Some(renewed))
+            }
+            Err(error) => {
+                let observed = self
+                    .read_named(&name, format!("gs://{}/{}", self.bucket_id, name))
+                    .await;
+                if let Ok(Some(observed)) = observed {
+                    let mut observed_lease: NamespaceOwnerLease =
+                        serde_json::from_slice(&observed.bytes)
+                            .context("invalid GCS namespace owner record")?;
+                    observed_lease.generation = observed.generation;
+                    if observed_lease.owner_id == renewed.owner_id
+                        && observed_lease.epoch == renewed.epoch
+                        && observed_lease.expires_at_secs >= renewed.expires_at_secs
+                    {
+                        return Ok(Some(observed_lease));
+                    }
+                    if error.http_status_code() == Some(412) {
+                        return Ok(None);
+                    }
+                }
+                Err(error).context("failed to renew GCS namespace owner; outcome is unknown")
+            }
+        }
     }
 
     async fn verify_namespace_owner(
@@ -501,5 +581,34 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             && current_lease.epoch == lease.epoch
             && current.generation == lease.generation
             && current_lease.expires_at_secs > now_secs)
+    }
+
+    async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
+        let name = self.owner_name();
+        let Some(current) = self
+            .read_named(&name, format!("gs://{}/{}", self.bucket_id, name))
+            .await?
+        else {
+            return Ok(false);
+        };
+        let current_lease: NamespaceOwnerLease =
+            serde_json::from_slice(&current.bytes).context("invalid GCS namespace owner record")?;
+        if current_lease.owner_id != lease.owner_id
+            || current_lease.epoch != lease.epoch
+            || current.generation != lease.generation
+        {
+            return Ok(false);
+        }
+        let request = self
+            .control
+            .delete_object()
+            .set_bucket(&self.bucket_resource)
+            .set_object(&name)
+            .set_if_generation_match(current.generation.unwrap_or(0));
+        match request.send().await {
+            Ok(()) => Ok(true),
+            Err(error) if matches!(error.http_status_code(), Some(404 | 412)) => Ok(false),
+            Err(error) => Err(error).context("failed to release GCS namespace owner"),
+        }
     }
 }

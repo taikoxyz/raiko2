@@ -1106,11 +1106,13 @@ All API errors use the Hoodi-style envelope:
 ## Configuration Notes
 
 - `runtime.environment` is the business/deployment boundary. `runtime.namespace` is the immutable
-  single-instance ownership boundary. Both scope request fingerprints, public task IDs, runtime
-  records, provider checkpoints, and proof artifacts.
+  single-instance ownership boundary. Namespaces do not share data; roots inside one namespace may
+  reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
+  runtime records, provider checkpoints, and proof artifacts.
 - `runtime.store.backend` selects the single authoritative runtime store. Use `gcs` with a non-empty
-  `bucket` in production. `memory` is an explicit ephemeral emergency mode; switching backends is
-  an operator action and there is no automatic failover, merge, writeback, or compatibility import.
+  `bucket` outside `development`, `local`, or `test`. `memory` is rejected for other environments;
+  switching backends is a drain-and-cutover operator action and there is no automatic failover,
+  merge, writeback, SQLite import, or compatibility migration.
 - GCS object names start with `<prefix>/<environment>/<namespace>/`. A namespace owner record
   prevents two live instances from mutating the same runtime state.
 - Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`

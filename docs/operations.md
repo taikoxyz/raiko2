@@ -820,6 +820,14 @@ Operator notes:
 - Production runtime state, provider checkpoints, publication outboxes, and proof manifests are
   stored in the configured GCS namespace. Publication proof bytes are separate immutable objects,
   not fields in the runtime snapshot. There are no local task workdirs.
+- Run one instance per namespace. Drain and stop the old instance before a replacement claims the
+  same namespace. Namespace changes are hard cuts with no cross-namespace data migration, and the
+  in-process queue is recovered from GCS rather than Redis.
+- This release requires an atomic configuration cutover. Before starting the new binary, remove
+  legacy `[queue]` keys `backend`, `namespace`, and `redis_url`, remove legacy `[runtime]` keys
+  `root` and `inactive_ttl_secs`, and add explicit `runtime.environment`, `runtime.namespace`, and
+  `[runtime.store]` settings. Apply the new ConfigMap while the old instance is drained; old and new
+  schemas are not dual-read. Keep the prior ConfigMap and GCS namespace together for rollback.
 - Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
   proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must
   remain available for as long as any active manifest references it. Generation-scoped

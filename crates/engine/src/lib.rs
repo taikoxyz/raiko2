@@ -22,7 +22,7 @@ pub use tasks::{
 };
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -64,6 +64,7 @@ where
     context: ProofContext,
     observer: Option<Arc<dyn EngineObserver>>,
     last_maintenance_success_ms: AtomicU64,
+    worker_groups: Mutex<Vec<Arc<crate::worker::WorkerGroup>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -400,6 +401,7 @@ where
                 context,
                 observer,
                 last_maintenance_success_ms: AtomicU64::new(0),
+                worker_groups: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -739,11 +741,12 @@ where
         observer_task: &EngineTask,
     ) -> Result<(), TaskStoreError> {
         let error = task_lease_lost_error();
-        self.inner
+        let failed = self
+            .inner
             .scheduler
-            .fail(lease.id.clone(), error.clone())
+            .complete_permanent_failure(lease.clone(), error.clone())
             .await?;
-        if let Some(observer) = &self.inner.observer {
+        if failed && let Some(observer) = &self.inner.observer {
             observer
                 .on_task_failed(&lease.id, observer_task, &error)
                 .await;
@@ -853,7 +856,7 @@ where
             concurrency,
             ..WorkerConfig::default()
         };
-        crate::worker::spawn_workers(self.clone(), &config);
+        self.register_worker_group(crate::worker::spawn_workers(self.clone(), &config));
     }
 
     pub fn start_workers_with_maintenance_interval(
@@ -871,7 +874,27 @@ where
             maintenance_interval,
             ..WorkerConfig::default()
         };
-        crate::worker::spawn_workers(self.clone(), &config);
+        self.register_worker_group(crate::worker::spawn_workers(self.clone(), &config));
+    }
+
+    fn register_worker_group(&self, group: crate::worker::WorkerGroup) {
+        self.inner
+            .worker_groups
+            .lock()
+            .expect("worker group lock poisoned")
+            .push(Arc::new(group));
+    }
+
+    pub async fn shutdown_workers(&self) {
+        let groups = self
+            .inner
+            .worker_groups
+            .lock()
+            .map(|mut groups| groups.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for group in groups {
+            group.shutdown().await;
+        }
     }
 
     #[must_use]
@@ -2244,6 +2267,49 @@ mod tests {
         assert!(matches!(view.state, TaskState::Succeeded { .. }));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 2);
+        assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_lease_failure_does_not_overwrite_terminal_state_or_notify_observer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(PublicationFailingObserver::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+            Some(observer.clone()),
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let lease = engine
+            .inner
+            .scheduler
+            .next_ready("old-worker")
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected running lease"))?;
+        engine
+            .inner
+            .scheduler
+            .fail(job_id.clone(), "newer terminal failure".into())
+            .await?;
+
+        engine
+            .fail_task_after_lease_loss(&lease, &lease.payload)
+            .await?;
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(
+            view.state,
+            TaskState::Failed { ref error, .. } if error == "newer terminal failure"
+        ));
         assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
         Ok(())
     }

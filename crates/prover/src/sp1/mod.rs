@@ -1749,13 +1749,29 @@ async fn request_network_proof(
         let request_id = B256::from_str(&request_id_string).map_err(|e| {
             RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
         })?;
-        let wait_timeout = if resuming_request {
-            resumed_deadline_secs.map_or(timeout, |deadline| {
-                Duration::from_secs(deadline.saturating_sub(sp1_now_secs()).max(1))
-            })
-        } else {
-            timeout
-        };
+        let (wait_timeout, check_before_wait) = sp1_resume_wait_plan(
+            resuming_request,
+            resumed_deadline_secs,
+            sp1_now_secs(),
+            timeout,
+        );
+        if check_before_wait {
+            let (status, maybe_proof) =
+                client.get_proof_status(request_id).await.map_err(|err| {
+                    RaikoError::Guest(format!(
+                        "Failed to check expired SP1 {stage} request {request_id_string}: {err}"
+                    ))
+                })?;
+            if decode_fulfillment_status(status.fulfillment_status())
+                == FulfillmentStatus::Fulfilled
+                && let Some(proof) = maybe_proof
+            {
+                return Ok(NetworkProofRequestResult {
+                    request_id: request_id_string,
+                    proof,
+                });
+            }
+        }
         match wait_sp1_network_proof(
             client,
             status_tracker,
@@ -1792,6 +1808,22 @@ async fn request_network_proof(
                 tokio::time::sleep(SP1_NETWORK_REQUEST_RETRY_DELAY).await;
             }
         }
+    }
+}
+
+const fn sp1_resume_wait_plan(
+    resuming_request: bool,
+    resumed_deadline_secs: Option<u64>,
+    now_secs: u64,
+    configured_timeout: Duration,
+) -> (Duration, bool) {
+    if !resuming_request {
+        return (configured_timeout, false);
+    }
+    match resumed_deadline_secs {
+        Some(deadline) if deadline <= now_secs => (Duration::from_secs(1), true),
+        Some(deadline) => (Duration::from_secs(deadline - now_secs), false),
+        None => (configured_timeout, false),
     }
 }
 
@@ -1957,7 +1989,8 @@ mod tests {
         decode_execution_status, decode_fulfillment_status, default_sp1_network_rpc_url,
         encode_sp1_onchain_payload, load_sp1_resume, load_sp1_subproof_for_aggregation,
         notify_sp1_network_submission, remote_verifier_program_vkey, remote_verifier_proof_bytes,
-        resolve_sp1_network_rpc_url, sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
+        resolve_sp1_network_rpc_url, sp1_resume_wait_plan, sp1_sdk_network_mode,
+        sp1_transient_poll_status, sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -1980,6 +2013,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     struct FlakyProgressObserver {
@@ -2041,6 +2075,24 @@ mod tests {
         assert_eq!(attempt, 2);
         assert_eq!(deadline, None);
         assert_eq!(request_id.as_deref(), Some("0x1234"));
+    }
+
+    #[test]
+    fn expired_resume_requires_status_check_before_short_wait() {
+        let configured = Duration::from_secs(600);
+
+        assert_eq!(
+            sp1_resume_wait_plan(true, Some(99), 100, configured),
+            (Duration::from_secs(1), true)
+        );
+        assert_eq!(
+            sp1_resume_wait_plan(true, Some(140), 100, configured),
+            (Duration::from_secs(40), false)
+        );
+        assert_eq!(
+            sp1_resume_wait_plan(true, None, 100, configured),
+            (configured, false)
+        );
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ pub async fn run_server(config: Config, json_logs: bool) -> Result<()> {
     let state = AppState::new(config.clone()).await?;
 
     // Build router
-    let app = app::build_router(state);
+    let app = app::build_router(state.clone());
 
     // Bind to address
     let addr = net::bind_addr(&config);
@@ -28,9 +28,11 @@ pub async fn run_server(config: Config, json_logs: bool) -> Result<()> {
     info!("Server listening on http://{}", addr);
 
     // Run server
-    axum::serve(listener, app)
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    state.shutdown().await;
+    server_result?;
 
     Ok(())
 }

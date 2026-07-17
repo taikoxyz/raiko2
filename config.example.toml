@@ -52,11 +52,11 @@ initial_backoff_ms = 1000
 compute_units_per_second = 1000
 
 [runtime]
-environment = "devnet"
-namespace = "raiko2-devnet-a"
+environment = "development"
+namespace = "raiko2-development"
 
 [runtime.store]
-# Use GCS in production. Memory is an explicit, ephemeral emergency mode; there is no failover.
+# Memory is accepted only for development, local, and test environments. Use GCS everywhere else.
 backend = "memory"
 prefix = "raiko2/runtime/v1"
 # bucket = "my-raiko2-runtime"

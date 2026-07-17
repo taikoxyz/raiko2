@@ -139,18 +139,6 @@ impl RuntimeObserver {
             .await
     }
 
-    async fn update_active_root_records_count<F>(
-        &self,
-        id: &EngineTaskId,
-        mutator: F,
-    ) -> Result<usize>
-    where
-        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
-    {
-        self.update_root_records_with_policy_count(id, TerminalRootPolicy::Exclude, mutator)
-            .await
-    }
-
     async fn update_retry_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
@@ -473,7 +461,11 @@ impl RuntimeObserver {
     ) -> Result<Option<PublishedProofCommit>> {
         let root_ref = Self::root_task_ref(id);
         let records = self.find_root_records(id).await?;
-        let records = self.matching_active_root_records(id, records)?;
+        // Reconciliation may complete a root after the canonical artifact commit but before this
+        // publication retry. Completed is therefore still an eligible owner; failed/cancelled
+        // roots remain excluded so late worker results cannot reopen terminal requests.
+        let records =
+            self.matching_root_records(id, records, TerminalRootPolicy::IncludeCompleted)?;
         anyhow::ensure!(
             proof.proof.is_some(),
             "refusing to publish proof artifact without a proof payload"
@@ -770,35 +762,40 @@ impl RuntimeObserver {
         proof_uris: HashMap<String, String>,
     ) -> Result<usize> {
         let updated_roots = self
-            .update_active_root_records_count(id, move |record, updated_at, observed_at_ms| {
-                record.error = None;
-                let task_id = Self::timing_key_for_task(id, task);
-                let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-                    .context("failed to parse task metadata")?;
-                metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
-                let root_completed =
-                    Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
-                metadata.runtime.active_stage = Some(stage.to_string());
-                metadata.runtime.last_event = Some(
+            .update_root_records_with_policy_count(
+                id,
+                TerminalRootPolicy::IncludeCompleted,
+                move |record, updated_at, observed_at_ms| {
+                    record.error = None;
+                    let task_id = Self::timing_key_for_task(id, task);
+                    let mut metadata: TaskMetadata =
+                        serde_json::from_value(record.metadata.clone())
+                            .context("failed to parse task metadata")?;
+                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
+                    let root_completed =
+                        Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
+                    metadata.runtime.active_stage = Some(stage.to_string());
+                    metadata.runtime.last_event = Some(
+                        if root_completed {
+                            "completed"
+                        } else {
+                            "stage_completed"
+                        }
+                        .to_string(),
+                    );
+                    record.metadata = serde_json::to_value(metadata)
+                        .context("failed to serialize task metadata")?;
                     if root_completed {
-                        "completed"
+                        record.runner_status = RunnerStatus::Completed;
+                        record.proof_uri = proof_uris.get(&record.task_id).cloned();
                     } else {
-                        "stage_completed"
+                        record.runner_status = RunnerStatus::Allocated;
+                        record.proof_uri = None;
                     }
-                    .to_string(),
-                );
-                record.metadata =
-                    serde_json::to_value(metadata).context("failed to serialize task metadata")?;
-                if root_completed {
-                    record.runner_status = RunnerStatus::Completed;
-                    record.proof_uri = proof_uris.get(&record.task_id).cloned();
-                } else {
-                    record.runner_status = RunnerStatus::Allocated;
-                    record.proof_uri = None;
-                }
-                record.updated_at = updated_at;
-                Ok(())
-            })
+                    record.updated_at = updated_at;
+                    Ok(())
+                },
+            )
             .await
             .context("failed to sync runtime task success")?;
         Ok(updated_roots)
@@ -1378,6 +1375,8 @@ mod tests {
         ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    include!("runtime_observer_state_tests.rs");
 
     #[derive(Debug, Default)]
     struct FailingArtifactStore {
@@ -2094,148 +2093,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidated_publication_cancels_active_and_completed_roots() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-invalidated-completion-rollback",
-        ))?);
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-        let roots = [
-            ("task_allocated", RunnerStatus::Allocated),
-            ("task_running", RunnerStatus::Running),
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
-        ];
-        for (task_id, status) in roots {
-            register_observer_task(
-                runtime.as_ref(),
-                task_id,
-                "taiko_dev/ethereum",
-                pipeline,
-                &request,
-                status,
-            )
-            .await?;
-        }
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "taiko_dev/ethereum".to_string(),
-            route,
-        );
-
-        observer
-            .mark_proof_publication_failed(
-                &task_id,
-                "prove",
-                "proof invalidated during completion",
-                PublicationFailureDisposition::Invalidated,
-            )
-            .await;
-
-        for task_id in ["task_allocated", "task_running", "task_completed"] {
-            let invalidated = runtime.get_task(task_id).await?.expect("invalidated task");
-            assert_eq!(
-                invalidated.runner_status,
-                RunnerStatus::Cancelled,
-                "{task_id}"
-            );
-            assert_eq!(invalidated.proof_uri, None, "{task_id}");
-            assert_eq!(
-                invalidated.error.as_deref(),
-                Some("proof invalidated during completion"),
-                "{task_id}"
-            );
-        }
-        for (task_id, status) in [
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-        ] {
-            let terminal = runtime.get_task(task_id).await?.expect("terminal task");
-            assert_eq!(terminal.runner_status, status, "{task_id}");
-            assert_eq!(terminal.proof_uri, None, "{task_id}");
-            assert_eq!(terminal.error, None, "{task_id}");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn retryable_publication_failure_resets_only_active_roots() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-retryable-publication-matrix",
-        ))?);
-        let pipeline = PipelineKey::ShastaNative;
-        let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-        let roots = [
-            ("task_allocated", RunnerStatus::Allocated),
-            ("task_running", RunnerStatus::Running),
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
-        ];
-        for (root_id, status) in roots {
-            register_observer_task(
-                runtime.as_ref(),
-                root_id,
-                "taiko_dev/ethereum",
-                pipeline,
-                &request,
-                status,
-            )
-            .await?;
-        }
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "taiko_dev/ethereum".to_string(),
-            pipeline.route(),
-        );
-
-        observer
-            .mark_proof_publication_failed(
-                &task_id,
-                "prove",
-                "transient artifact store failure",
-                PublicationFailureDisposition::Retryable,
-            )
-            .await;
-
-        for task_id in ["task_allocated", "task_running"] {
-            let retryable = runtime.get_task(task_id).await?.expect("retryable task");
-            assert_eq!(
-                retryable.runner_status,
-                RunnerStatus::Allocated,
-                "{task_id}"
-            );
-            assert_eq!(retryable.proof_uri, None, "{task_id}");
-            assert_eq!(
-                retryable.error.as_deref(),
-                Some("transient artifact store failure"),
-                "{task_id}"
-            );
-        }
-        for (task_id, status) in [
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
-        ] {
-            let terminal = runtime.get_task(task_id).await?.expect("terminal task");
-            assert_eq!(terminal.runner_status, status, "{task_id}");
-            assert_eq!(terminal.proof_uri, None, "{task_id}");
-            assert_eq!(terminal.error, None, "{task_id}");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn transient_success_sync_failure_stays_in_publication_retry_loop() -> Result<()> {
         let artifact_root = unique_runtime_root("runtime-observer-sync-retry-artifacts");
         let store = Arc::new(InvalidatesDuringPublicationStore {
@@ -2784,173 +2641,6 @@ mod tests {
                 .is_none()
         );
         assert!(second.list_proof_artifacts().await?.is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn proof_publication_success_updates_only_active_shared_roots() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-terminal-root",
-        ))?);
-        let pipeline = PipelineKey::ShastaNative;
-        let request = proposal_request();
-        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-
-        let roots = [
-            ("task_allocated", RunnerStatus::Allocated),
-            ("task_running", RunnerStatus::Running),
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
-        ];
-        for (task_id, status) in roots {
-            register_observer_task(
-                runtime.as_ref(),
-                task_id,
-                "taiko_dev/ethereum",
-                pipeline,
-                &request,
-                status,
-            )
-            .await?;
-        }
-
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaNative.route(),
-        );
-        observer
-            .on_task_succeeded(
-                &proposal_task_id,
-                &EngineTask::ProveProposal {
-                    request,
-                    input_task: proposal_task_id.clone(),
-                },
-                &EngineTaskSuccess::Proof {
-                    stage: raiko2_pipeline::PipelineStage::Prove,
-                    proof: proof_fixture(),
-                },
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-
-        for task_id in ["task_allocated", "task_running"] {
-            let active = runtime.get_task(task_id).await?.expect("active task");
-            assert_eq!(active.runner_status, RunnerStatus::Completed, "{task_id}");
-            assert!(active.proof_uri.is_some(), "{task_id}");
-        }
-        for (task_id, status) in [
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
-        ] {
-            let terminal = runtime.get_task(task_id).await?.expect("terminal task");
-            assert_eq!(terminal.runner_status, status, "{task_id}");
-            assert_eq!(terminal.proof_uri, None, "{task_id}");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn proof_publication_without_active_roots_invalidates_artifact_and_outbox() -> Result<()>
-    {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-zero-active-publication",
-        ))?);
-        let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let request = proposal_request();
-        let proof_ref = proposal_task_ref(pipeline, &request);
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-        for (root_id, status) in [
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
-        ] {
-            register_observer_task(
-                runtime.as_ref(),
-                root_id,
-                network_pair,
-                pipeline,
-                &request,
-                status,
-            )
-            .await?;
-        }
-        let proof = proof_fixture();
-        let proof_bytes = serde_json::to_vec(&proof)?;
-        runtime
-            .upsert_pending_proof_publication(
-                network_pair,
-                pipeline,
-                route,
-                &proof_ref,
-                &proof_bytes,
-            )
-            .await?;
-        runtime
-            .publish_proof_artifact_bytes(network_pair, pipeline, route, &proof_ref, &proof_bytes)
-            .await?;
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string(), route);
-
-        let error = observer
-            .on_task_succeeded(
-                &task_id,
-                &EngineTask::ProveProposal {
-                    request: request.clone(),
-                    input_task: task_id.clone(),
-                },
-                &EngineTaskSuccess::Proof {
-                    stage: raiko2_pipeline::PipelineStage::Prove,
-                    proof,
-                },
-            )
-            .await
-            .expect_err("publication without an active root must be invalidated");
-
-        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
-        for (root_id, status) in [
-            ("task_cancelled", RunnerStatus::Cancelled),
-            ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Cancelled),
-        ] {
-            let terminal = runtime.get_task(root_id).await?.expect("terminal task");
-            assert_eq!(terminal.runner_status, status, "{root_id}");
-            assert_eq!(terminal.proof_uri, None, "{root_id}");
-        }
-        assert!(
-            runtime
-                .read_proof_artifact_bytes(network_pair, pipeline, route, &proof_ref)
-                .await?
-                .is_none()
-        );
-        assert!(
-            runtime
-                .get_proof_artifact(network_pair, pipeline, route, &proof_ref)
-                .await?
-                .is_none()
-        );
-        assert!(
-            runtime
-                .get_pending_proof_publication(network_pair, pipeline, route, &proof_ref)
-                .await?
-                .is_none()
-        );
-        assert!(
-            observer
-                .load_completed_proof(&task_id, &EngineTask::Proposal { request })
-                .await
-                .map_err(anyhow::Error::msg)?
-                .is_none()
-        );
         Ok(())
     }
 

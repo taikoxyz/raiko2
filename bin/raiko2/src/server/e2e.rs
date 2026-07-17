@@ -3,6 +3,9 @@
 //! These tests exercise the HTTP handlers + engine orchestration without relying on
 //! external RPC endpoints. A minimal JSON-RPC server is spun up only for `/ready`.
 
+mod invalidation_prefix;
+mod invalidation_range;
+
 use std::sync::Arc;
 
 use alloy_primitives::{hex, keccak256};
@@ -40,7 +43,9 @@ use super::task_metadata::{
     proposal_task_ref, root_proof_artifact_refs,
 };
 use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
-use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
+use raiko2_runtime::{
+    MemoryProofArtifactStore, ProofArtifactRegistration, ProofArtifactStore, RuntimeManager,
+};
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
     let status = res.status();
@@ -168,7 +173,7 @@ async fn write_e2e_proof_artifact(
     network_pair: &str,
     proof_ref: &str,
     pipeline_key: PipelineKey,
-    route: &str,
+    route: PipelineRoute,
     proof: &Proof,
 ) -> String {
     let publication = state
@@ -176,7 +181,7 @@ async fn write_e2e_proof_artifact(
         .publish_proof_artifact_bytes(
             network_pair,
             pipeline_key,
-            route.parse().expect("route"),
+            route,
             proof_ref,
             &serde_json::to_vec(proof).expect("serialize proof"),
         )
@@ -189,7 +194,7 @@ async fn write_e2e_proof_artifact(
             network_pair: network_pair.to_string(),
             proof_ref: proof_ref.to_string(),
             pipeline_key,
-            route: route.parse().expect("route"),
+            route,
             proof_uri: artifact.proof_uri.clone(),
             content_hash: artifact.content_hash.clone(),
             generation: artifact.generation,
@@ -204,10 +209,9 @@ async fn replace_e2e_proof_artifact(
     network_pair: &str,
     proof_ref: &str,
     pipeline_key: PipelineKey,
-    route: &str,
+    route: PipelineRoute,
     proof: &Proof,
 ) {
-    let route = route.parse().expect("route");
     let old = state
         .runtime
         .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
@@ -231,15 +235,47 @@ async fn replace_e2e_proof_artifact(
         .remove_proof_artifact(network_pair, pipeline_key, route, proof_ref)
         .await
         .expect("remove proof artifact record");
-    write_e2e_proof_artifact(
-        state,
-        network_pair,
-        proof_ref,
-        pipeline_key,
-        &route.to_string(),
-        proof,
-    )
-    .await;
+    write_e2e_proof_artifact(state, network_pair, proof_ref, pipeline_key, route, proof).await;
+}
+
+async fn write_e2e_pending_publication(
+    state: &AppState,
+    network_pair: &str,
+    proof_ref: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+) {
+    state
+        .runtime
+        .upsert_pending_proof_publication(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            br#"{"proof":"0xpending"}"#,
+        )
+        .await
+        .expect("write pending proof publication");
+}
+
+async fn assert_e2e_pending_publication(
+    state: &AppState,
+    network_pair: &str,
+    proof_ref: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    expected: bool,
+) {
+    assert_eq!(
+        state
+            .runtime
+            .get_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
+            .await
+            .expect("get pending proof publication")
+            .is_some(),
+        expected,
+        "unexpected pending publication state for {proof_ref}"
+    );
 }
 
 async fn report_task_ids(app: &Router) -> Vec<String> {
@@ -1078,525 +1114,6 @@ async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
 }
 
 #[tokio::test]
-async fn e2e_v4_invalidate_artifacts_range_removes_canonical_root_ref() {
-    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
-    complete_v4_sp1_proposal(&app, &engine, 21).await;
-
-    let records = state.runtime.list_tasks().await.expect("list tasks");
-    let record = records.first().expect("runtime task").clone();
-    let metadata: TaskMetadata =
-        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-
-    let root_refs = root_proof_artifact_refs(&metadata, record.pipeline_key)
-        .expect("proposal root refs")
-        .refs;
-    assert_eq!(root_refs.len(), 1, "expected one canonical root ref");
-
-    let request = json!({
-        "proof_type": "sp1",
-        "proposal_id_start": 21,
-        "proposal_id_end": 21
-    });
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        request,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    assert_eq!(
-        invalidated["data"]["artifacts"]["removed"],
-        root_refs.len(),
-        "{invalidated}"
-    );
-    for proof_ref in root_refs {
-        assert!(
-            state
-                .runtime
-                .get_proof_artifact(
-                    &metadata.network_pair,
-                    record.pipeline_key,
-                    record.route,
-                    &proof_ref,
-                )
-                .await
-                .expect("get proof artifact")
-                .is_none(),
-            "stale root proof ref remained: {proof_ref}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn e2e_v4_invalidate_artifacts_range_removes_aggregate_child_refs() {
-    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
-    complete_v4_sp1_aggregation(&app, &engine, 31, 32).await;
-
-    let records = state.runtime.list_tasks().await.expect("list tasks");
-    let record = records.first().expect("runtime task");
-    let metadata: TaskMetadata =
-        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-    let proposal_refs = metadata
-        .proposals
-        .iter()
-        .flat_map(|proposal| proposal_proof_artifact_refs(record.pipeline_key, proposal))
-        .collect::<Vec<_>>();
-    assert!(!proposal_refs.is_empty(), "expected child proposal refs");
-    for proof_ref in &proposal_refs {
-        write_e2e_proof_artifact(
-            &state,
-            &metadata.network_pair,
-            proof_ref,
-            record.pipeline_key,
-            &record.route.to_string(),
-            &fixture_external_aggregate_proof(),
-        )
-        .await;
-    }
-
-    let request = json!({
-        "proof_type": "sp1",
-        "proposal_id_start": 31,
-        "proposal_id_end": 32
-    });
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        request,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    for proof_ref in proposal_refs {
-        assert!(
-            state
-                .runtime
-                .get_proof_artifact(
-                    &metadata.network_pair,
-                    record.pipeline_key,
-                    record.route,
-                    &proof_ref,
-                )
-                .await
-                .expect("get proof artifact")
-                .is_none(),
-            "stale child proposal proof ref remained: {proof_ref}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn e2e_v4_invalidate_artifacts_prefix_matches_aggregate_root() {
-    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
-    let aggregation_payload = v4_sp1_aggregation_request(41, 42);
-    complete_v4_sp1_aggregation(&app, &engine, 41, 42).await;
-
-    let records = state.runtime.list_tasks().await.expect("list tasks");
-    let record = records
-        .iter()
-        .find(|record| {
-            let metadata: TaskMetadata =
-                serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-            metadata.aggregate_request.is_some()
-        })
-        .expect("aggregate runtime task")
-        .clone();
-    assert_eq!(
-        record.runner_status,
-        RunnerStatus::Completed,
-        "aggregate runtime task must be terminal before invalidation: {record:?}"
-    );
-    let metadata: TaskMetadata =
-        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-    assert_eq!(
-        metadata.requested_proof_type.as_deref(),
-        Some("sp1"),
-        "unexpected proof-type scope metadata: {metadata:?}"
-    );
-    let root_refs = root_proof_artifact_refs(&metadata, record.pipeline_key)
-        .expect("aggregate root refs")
-        .refs;
-    let proposal_refs = metadata
-        .proposals
-        .iter()
-        .flat_map(|proposal| proposal_proof_artifact_refs(record.pipeline_key, proposal))
-        .collect::<Vec<_>>();
-    assert!(!proposal_refs.is_empty(), "expected child proposal refs");
-
-    let root_ref = root_refs.first().expect("aggregate root ref");
-    replace_e2e_proof_artifact(
-        &state,
-        &metadata.network_pair,
-        root_ref,
-        record.pipeline_key,
-        &record.route.to_string(),
-        &Proof {
-            proof: Some(format!("0x{}", "aa".repeat(32))),
-            input: Some(alloy_primitives::B256::ZERO),
-            ..Proof::default()
-        },
-    )
-    .await;
-
-    let request = json!({
-        "proof_type": "sp1",
-        "proof_prefix": "0xAAAA",
-        "proposal_id_start": 41,
-        "proposal_id_end": 42
-    });
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        request,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["matched"], 1, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
-
-    for proof_ref in &root_refs {
-        assert!(
-            state
-                .runtime
-                .get_proof_artifact(
-                    &metadata.network_pair,
-                    record.pipeline_key,
-                    record.route,
-                    proof_ref,
-                )
-                .await
-                .expect("get proof artifact")
-                .is_none(),
-            "stale proof ref remained: {proof_ref}"
-        );
-    }
-    for proof_ref in &proposal_refs {
-        assert!(
-            state
-                .runtime
-                .get_proof_artifact(
-                    &metadata.network_pair,
-                    record.pipeline_key,
-                    record.route,
-                    proof_ref,
-                )
-                .await
-                .expect("get shared proposal proof artifact")
-                .is_some(),
-            "shared proposal proof was removed: {proof_ref}"
-        );
-    }
-
-    let (status, resubmitted) = post_json_with_api_key(
-        &app,
-        "/v4/proof/proposal",
-        "submit-secret",
-        aggregation_payload,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{resubmitted}");
-    assert_eq!(resubmitted["data"]["status"], "registered", "{resubmitted}");
-    assert!(resubmitted["data"]["proof"].is_null(), "{resubmitted}");
-}
-
-#[tokio::test]
-async fn e2e_v4_invalidate_artifacts_prefix_keeps_unmatched_aggregate() {
-    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
-    let aggregation_payload = v4_sp1_aggregation_request(51, 52);
-    complete_v4_sp1_aggregation(&app, &engine, 51, 52).await;
-
-    let record = state
-        .runtime
-        .list_tasks()
-        .await
-        .expect("list tasks")
-        .into_iter()
-        .find(|record| {
-            serde_json::from_value::<TaskMetadata>(record.metadata.clone())
-                .expect("parse task metadata")
-                .aggregate_request
-                .is_some()
-        })
-        .expect("aggregate runtime task");
-    let metadata: TaskMetadata =
-        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-    let root_ref = root_proof_artifact_refs(&metadata, record.pipeline_key)
-        .expect("aggregate root refs")
-        .refs
-        .into_iter()
-        .next()
-        .expect("aggregate root ref");
-    replace_e2e_proof_artifact(
-        &state,
-        &metadata.network_pair,
-        &root_ref,
-        record.pipeline_key,
-        &record.route.to_string(),
-        &Proof {
-            proof: Some(format!("0x{}", "aa".repeat(32))),
-            input: Some(alloy_primitives::B256::ZERO),
-            ..Proof::default()
-        },
-    )
-    .await;
-
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        json!({
-            "proof_type": "sp1",
-            "proof_prefix": "0xBBBB",
-            "proposal_id_start": 51,
-            "proposal_id_end": 52
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["matched"], 0, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["removed"], 0, "{invalidated}");
-    assert_eq!(
-        invalidated["data"]["artifacts"]["matched"], 0,
-        "{invalidated}"
-    );
-    assert!(
-        state
-            .runtime
-            .get_task(&record.task_id)
-            .await
-            .expect("get aggregate task")
-            .is_some()
-    );
-    assert!(
-        state
-            .runtime
-            .get_proof_artifact(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                &root_ref,
-            )
-            .await
-            .expect("get aggregate proof artifact")
-            .is_some()
-    );
-
-    let (status, completed) = post_json_with_api_key(
-        &app,
-        "/v4/proof/proposal",
-        "submit-secret",
-        aggregation_payload,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_eq!(completed["data"]["status"], "completed", "{completed}");
-}
-
-#[tokio::test]
-async fn e2e_v4_invalidate_artifacts_prefix_removes_only_matched_aggregate_input() {
-    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
-    complete_v4_sp1_aggregation(&app, &engine, 71, 72).await;
-
-    let record = state
-        .runtime
-        .list_tasks()
-        .await
-        .expect("list tasks")
-        .into_iter()
-        .find(|record| {
-            serde_json::from_value::<TaskMetadata>(record.metadata.clone())
-                .expect("parse task metadata")
-                .aggregate_request
-                .is_some()
-        })
-        .expect("aggregate runtime task");
-    let metadata: TaskMetadata =
-        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-    let root_ref = root_proof_artifact_refs(&metadata, record.pipeline_key)
-        .expect("aggregate root refs")
-        .refs
-        .into_iter()
-        .next()
-        .expect("aggregate root ref");
-    let proposal_refs = metadata
-        .proposals
-        .iter()
-        .flat_map(|proposal| proposal_proof_artifact_refs(record.pipeline_key, proposal))
-        .collect::<Vec<_>>();
-    assert_eq!(proposal_refs.len(), 2, "expected two proposal refs");
-    replace_e2e_proof_artifact(
-        &state,
-        &metadata.network_pair,
-        &proposal_refs[0],
-        record.pipeline_key,
-        &record.route.to_string(),
-        &Proof {
-            proof: Some(format!("0x{}", "bb".repeat(32))),
-            input: Some(alloy_primitives::B256::ZERO),
-            ..Proof::default()
-        },
-    )
-    .await;
-
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        json!({
-            "proof_type": "sp1",
-            "proof_prefix": "0xBBBB",
-            "proposal_id_start": 71,
-            "proposal_id_end": 72
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["matched"], 1, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
-    assert!(
-        state
-            .runtime
-            .get_proof_artifact(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                &root_ref,
-            )
-            .await
-            .expect("get aggregate proof artifact")
-            .is_none(),
-        "aggregate output depending on the invalidated input remained"
-    );
-    assert!(
-        state
-            .runtime
-            .get_proof_artifact(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                &proposal_refs[0],
-            )
-            .await
-            .expect("get matched proposal proof artifact")
-            .is_none(),
-        "matched proposal input remained"
-    );
-    assert!(
-        state
-            .runtime
-            .get_proof_artifact(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                &proposal_refs[1],
-            )
-            .await
-            .expect("get unmatched proposal proof artifact")
-            .is_some(),
-        "unmatched proposal input was removed"
-    );
-}
-
-#[tokio::test]
-async fn e2e_v4_invalidate_artifacts_keeps_shared_artifact_for_nonterminal_root() {
-    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
-    complete_v4_sp1_proposal(&app, &engine, 61).await;
-
-    let aggregation_payload = v4_sp1_aggregation_request(61, 61);
-    let (status, submitted) = post_json_with_api_key(
-        &app,
-        "/v4/proof/proposal",
-        "submit-secret",
-        aggregation_payload.clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{submitted}");
-    assert_eq!(submitted["data"]["status"], "registered", "{submitted}");
-    let aggregate_task_id = submitted["data"]["task_id"]
-        .as_str()
-        .expect("aggregate task id")
-        .to_string();
-
-    let records = state.runtime.list_tasks().await.expect("list tasks");
-    let proposal_record = records
-        .iter()
-        .find(|record| {
-            let metadata: TaskMetadata =
-                serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
-            metadata.aggregate_request.is_none()
-                && metadata
-                    .proposals
-                    .iter()
-                    .any(|proposal| proposal.proposal_id == 61)
-        })
-        .expect("completed proposal task");
-    let proposal_metadata: TaskMetadata =
-        serde_json::from_value(proposal_record.metadata.clone()).expect("parse proposal metadata");
-    let proposal_ref = proposal_proof_artifact_refs(
-        proposal_record.pipeline_key,
-        proposal_metadata.proposals.first().expect("proposal"),
-    )
-    .into_iter()
-    .next()
-    .expect("proposal artifact ref");
-
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        json!({
-            "proof_type": "sp1",
-            "proposal_id_start": 61,
-            "proposal_id_end": 61
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["matched"], 1, "{invalidated}");
-    assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
-    assert_eq!(
-        invalidated["data"]["tasks"]["skipped_non_terminal"], 1,
-        "{invalidated}"
-    );
-    assert!(
-        state
-            .runtime
-            .get_task(&aggregate_task_id)
-            .await
-            .expect("get aggregate task")
-            .is_some(),
-        "nonterminal aggregate root was removed"
-    );
-    assert!(
-        state
-            .runtime
-            .get_proof_artifact(
-                &proposal_metadata.network_pair,
-                proposal_record.pipeline_key,
-                proposal_record.route,
-                &proposal_ref,
-            )
-            .await
-            .expect("get shared proposal artifact")
-            .is_some(),
-        "artifact needed by the nonterminal aggregate root was removed"
-    );
-
-    drive_engine_to_idle(&engine).await;
-    let (status, completed) = post_json_with_api_key(
-        &app,
-        "/v4/proof/proposal",
-        "submit-secret",
-        aggregation_payload,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_eq!(completed["data"]["status"], "completed", "{completed}");
-}
-
-#[tokio::test]
 async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(11_155_111).await {
         Ok(value) => value,
@@ -1632,6 +1149,61 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
             .expect("reth error")
             .contains("l1 chain_id mismatch")
     );
+
+    l1_handle.abort();
+    l2_handle.abort();
+}
+
+#[tokio::test]
+async fn e2e_ready_fails_after_runtime_namespace_takeover() {
+    let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l1 rpc listener: {err}"),
+    };
+    let (l2_rpc, l2_handle) = match spawn_chain_id_rpc(167_001).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l2 rpc listener: {err}"),
+    };
+
+    let mut config = base_config();
+    config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
+    config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
+    let store = Arc::new(
+        MemoryProofArtifactStore::new("test".into(), "ready-owner-takeover".into())
+            .expect("memory artifact store"),
+    );
+    let runtime = Arc::new(RuntimeManager::with_store(store.clone()).expect("runtime manager"));
+    runtime
+        .acquire_namespace_owner(60)
+        .await
+        .expect("acquire runtime namespace");
+    store
+        .claim_namespace_owner("replacement-owner", u64::MAX, 60)
+        .await
+        .expect("replace expired owner")
+        .expect("replacement lease");
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        runtime,
+    );
+    let app = app::build_router_with_legacy_v3_for_tests(state);
+
+    let (status, body) = get_json(&app, "/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["runtime"]["ok"], false);
+    assert!(
+        body["runtime"]["error"]
+            .as_str()
+            .expect("runtime error")
+            .contains("runtime namespace ownership is unavailable")
+    );
+    assert_eq!(body["reth"]["ok"], true);
+    assert_eq!(body["queue"]["ok"], true);
+    assert_eq!(body["prover"]["ok"], true);
 
     l1_handle.abort();
     l2_handle.abort();
@@ -3193,7 +2765,7 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
         "taiko_dev/ethereum",
         &proof_ref,
         PipelineKey::ShastaSp1,
-        "sp1/local",
+        PipelineKey::ShastaSp1.route(),
         &proof,
     )
     .await;
@@ -4535,7 +4107,7 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
         "taiko_dev/ethereum",
         &proof_ref,
         record.pipeline_key,
-        &record.route.to_string(),
+        record.route,
         &proof,
     )
     .await;

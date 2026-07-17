@@ -175,11 +175,18 @@ impl RuntimeManager {
     pub async fn check_readiness(&self) -> Result<()> {
         self.ensure_active()?;
         let owner = self.owner.lock().await;
-        if let Some(lease) = owner.as_ref()
-            && !self.store.verify_namespace_owner(lease, now_secs()).await?
-        {
-            self.active.store(false, Ordering::Release);
-            anyhow::bail!("runtime namespace ownership is unavailable");
+        if let Some(lease) = owner.as_ref() {
+            let verified = match self.store.verify_namespace_owner(lease, now_secs()).await {
+                Ok(verified) => verified,
+                Err(error) => {
+                    self.active.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            };
+            if !verified {
+                self.active.store(false, Ordering::Release);
+                anyhow::bail!("runtime namespace ownership is unavailable");
+            }
         }
         Ok(())
     }
@@ -1138,6 +1145,8 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    include!("ownership_state_tests.rs");
+
     fn proposal_registration(
         task_id: &str,
         proposal_id: u64,
@@ -1283,122 +1292,6 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "inactive".into())?;
         runtime.active.store(false, Ordering::Release);
         assert!(runtime.check_readiness().await.is_err());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn current_namespace_owner_is_ready_and_can_mutate_runtime() -> Result<()> {
-        let runtime = RuntimeManager::new_memory("test".into(), "current-owner".into())?;
-        runtime.acquire_namespace_owner(60).await?;
-        runtime.initialize().await?;
-        runtime.fence_namespace_owner().await?;
-
-        runtime.check_readiness().await?;
-        runtime
-            .register_task(proposal_registration(
-                "current-owner-task",
-                1,
-                PipelineKey::ShastaNative,
-            ))
-            .await?;
-
-        assert!(runtime.get_task("current-owner-task").await?.is_some());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn takeover_deactivates_stale_owner_and_blocks_runtime_and_tombstone_writes() -> Result<()>
-    {
-        let store = Arc::new(MemoryProofArtifactStore::new(
-            "test".into(),
-            "owner-takeover".into(),
-        )?);
-        let first = RuntimeManager::with_store(store.clone())?;
-        first.acquire_namespace_owner(1).await?;
-        first.initialize().await?;
-        first.fence_namespace_owner().await?;
-        first.check_readiness().await?;
-
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let proof_ref = "proposal-before-takeover";
-        let publication = first
-            .publish_proof_artifact_bytes(
-                "l1-l2",
-                pipeline,
-                route,
-                proof_ref,
-                br#"{"proof":"0x01"}"#,
-            )
-            .await?;
-        let artifact = publication.object().clone();
-        first
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "l1-l2".into(),
-                proof_ref: proof_ref.into(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: artifact.proof_uri.clone(),
-                content_hash: artifact.content_hash.clone(),
-                generation: artifact.generation,
-            })
-            .await?;
-
-        let first_lease = first
-            .owner
-            .lock()
-            .await
-            .as_ref()
-            .context("first owner must hold a lease")?
-            .clone();
-        let second_lease = store
-            .claim_namespace_owner("new-owner", first_lease.expires_at_secs, 60)
-            .await?
-            .context("expired owner must be replaceable")?;
-
-        let second = RuntimeManager::with_store(store.clone())?;
-        *second.owner.lock().await = Some(second_lease);
-        second.initialize().await?;
-        second.fence_namespace_owner().await?;
-        second.check_readiness().await?;
-        second
-            .register_task(proposal_registration("new-owner-task", 2, pipeline))
-            .await?;
-
-        assert!(first.check_readiness().await.is_err());
-        assert!(
-            first
-                .register_task(proposal_registration("stale-owner-task", 3, pipeline))
-                .await
-                .is_err()
-        );
-        assert!(
-            first
-                .mark_proof_artifact_invalidated(
-                    "l1-l2",
-                    pipeline,
-                    route,
-                    proof_ref,
-                    &artifact.content_hash,
-                )
-                .await
-                .is_err()
-        );
-        assert!(
-            !store
-                .is_invalidated(
-                    &RuntimeManager::artifact_key("l1-l2", pipeline, route, proof_ref),
-                    artifact.generation,
-                    &artifact.content_hash,
-                )
-                .await?
-        );
-        assert!(
-            second
-                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
-                .await?
-                .is_some()
-        );
         Ok(())
     }
 

@@ -646,13 +646,41 @@ mod tests {
                 .is_err()
         );
 
+        let renewed = store
+            .renew_namespace_owner(&first, 105, 20)
+            .await?
+            .context("current owner must renew")?;
+        assert_eq!(renewed.epoch, first.epoch);
+        assert_eq!(renewed.expires_at_secs, 125);
+        assert_ne!(renewed.generation, first.generation);
+        assert!(!store.verify_namespace_owner(&first, 105).await?);
+        assert!(store.verify_namespace_owner(&renewed, 124).await?);
+        let mut superseded = first.clone();
+        superseded.owner_id = "owner-b".to_string();
+        assert!(
+            store
+                .renew_namespace_owner(&superseded, 106, 20)
+                .await?
+                .is_none(),
+            "a different owner must not renew the active lease"
+        );
+        assert!(store.verify_namespace_owner(&renewed, 124).await?);
+
         let second = store
-            .claim_namespace_owner("owner-b", 110, 10)
+            .claim_namespace_owner("owner-b", 125, 10)
             .await?
             .context("expired owner must be replaceable")?;
-        assert_eq!(second.epoch, first.epoch + 1);
-        assert!(!store.verify_namespace_owner(&first, 110).await?);
-        assert!(store.verify_namespace_owner(&second, 110).await?);
+        assert_eq!(second.epoch, renewed.epoch + 1);
+        assert!(!store.verify_namespace_owner(&renewed, 125).await?);
+        assert!(store.verify_namespace_owner(&second, 125).await?);
+
+        let empty = MemoryProofArtifactStore::new("devnet".into(), "raiko2-no-owner".into())?;
+        assert!(
+            empty
+                .renew_namespace_owner(&first, 100, 10)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 }

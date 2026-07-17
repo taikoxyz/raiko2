@@ -360,13 +360,13 @@ Response:
         "last_anchor_block_number": 199,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_mainnet%2Fethereum/proposal_.../content/<sha256>.proof.json"
+        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_mainnet~2Fethereum/proposal_.../content/<sha256>.proof.json"
       }
     ],
     "aggregate": null,
     "proof": "0x...",
     "proof_ref": "proposal:...",
-    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_mainnet%2Fethereum/proposal_.../content/<sha256>.proof.json",
+    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_mainnet~2Fethereum/proposal_.../content/<sha256>.proof.json",
     "error": null
   }
 }
@@ -1035,7 +1035,7 @@ Returns the root-task view derived from the original batch request.
         "last_anchor_block_number": 41,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_hoodi%2Fhoodi/proposal_.../content/<sha256>.proof.json"
+        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_hoodi~2Fhoodi/proposal_.../content/<sha256>.proof.json"
       }
     ],
     "aggregate": {
@@ -1043,11 +1043,11 @@ Returns the root-task view derived from the original batch request.
       "status": "completed",
       "proof": "0x...",
       "proof_ref": "aggregate:...",
-      "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_hoodi%2Fhoodi/aggregate_.../content/<sha256>.proof.json"
+      "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_hoodi~2Fhoodi/aggregate_.../content/<sha256>.proof.json"
     },
     "proof": "0x...",
     "proof_ref": "aggregate:...",
-    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1%2Fnetwork/taiko_hoodi%2Fhoodi/aggregate_.../content/<sha256>.proof.json"
+    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_hoodi~2Fhoodi/aggregate_.../content/<sha256>.proof.json"
   }
 }
 ```

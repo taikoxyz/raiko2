@@ -12,8 +12,8 @@ pub use ready_sort::{
     zset_member_from_encoded,
 };
 pub use scheduler::{
-    NewTask, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy, TaskLease, TaskView,
-    TaskViewState,
+    NewTask, RetryPolicy, Scheduler, SchedulerConfig, TaskCompletionDisposition,
+    TaskExecutionPolicy, TaskLease, TaskView, TaskViewState,
 };
 pub use store::{MemoryStore, StoreResult, TaskStore, TaskStoreError};
 pub use types::{

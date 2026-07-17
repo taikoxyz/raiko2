@@ -4700,8 +4700,14 @@ mod tests {
             .map_err(|err| anyhow::anyhow!(err.message))?;
 
         assert!(!response_is_completed(&response));
-        let proposals = recorder.proposals.lock().expect("proposal submissions");
-        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .len(),
+            1
+        );
         let stored = runtime
             .get_task(&record.task_id)
             .await?
@@ -5554,9 +5560,9 @@ mod tests {
             .expect("register corrupt artifact");
 
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let error = match build_submission_plan(&runtime, &submission, &request_fingerprint).await {
-            Ok(_) => panic!("corrupt canonical artifact must require explicit invalidation"),
-            Err(error) => error,
+        let Err(error) = build_submission_plan(&runtime, &submission, &request_fingerprint).await
+        else {
+            panic!("corrupt canonical artifact must require explicit invalidation");
         };
         assert!(
             error.message.contains("invalid JSON"),

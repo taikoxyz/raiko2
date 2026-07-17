@@ -42,6 +42,21 @@ impl<P, O: Clone, Id> Clone for Scheduler<P, O, Id> {
 /// loop until it returns `0`, or make this value configurable.
 const MAINTENANCE_TICK_LIMIT: usize = 128;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskCompletionDisposition {
+    Succeeded,
+    Retrying,
+    Failed,
+    Stale,
+}
+
+impl TaskCompletionDisposition {
+    #[must_use]
+    pub const fn applied(self) -> bool {
+        !matches!(self, Self::Stale)
+    }
+}
+
 impl<P, O: Clone, Id> Scheduler<P, O, Id>
 where
     P: Send + 'static,
@@ -176,8 +191,28 @@ where
         lease: TaskLease<P, Id>,
         result: Result<O, String>,
     ) -> Result<bool, TaskStoreError> {
+        Ok(self
+            .complete_with_disposition(lease, result)
+            .await?
+            .applied())
+    }
+
+    /// Completes a running lease and reports whether it reached a terminal state or was retried.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
+    pub async fn complete_with_disposition(
+        &self,
+        lease: TaskLease<P, Id>,
+        result: Result<O, String>,
+    ) -> Result<TaskCompletionDisposition, TaskStoreError> {
         match result {
-            Ok(output) => self.complete_success(lease, output).await,
+            Ok(output) => Ok(if self.complete_success(lease, output).await? {
+                TaskCompletionDisposition::Succeeded
+            } else {
+                TaskCompletionDisposition::Stale
+            }),
             Err(error) => self.complete_failure(lease, error).await,
         }
     }
@@ -226,17 +261,26 @@ where
         &self,
         lease: TaskLease<P, Id>,
         error: String,
-    ) -> Result<bool, TaskStoreError> {
+    ) -> Result<TaskCompletionDisposition, TaskStoreError> {
         let Some(delay) = lease.execution_policy.retry.retry_delay(lease.attempt) else {
-            return self.fail_completed_lease(lease, error).await;
+            return Ok(if self.fail_completed_lease(lease, error).await? {
+                TaskCompletionDisposition::Failed
+            } else {
+                TaskCompletionDisposition::Stale
+            });
         };
 
-        match retry_schedule(delay) {
+        let updated = match retry_schedule(delay) {
             RetrySchedule::Now => self.retry_now(lease).await,
             RetrySchedule::At(next_ready_at_ms) => {
                 self.retry_later(lease, error, next_ready_at_ms).await
             }
-        }
+        }?;
+        Ok(if updated {
+            TaskCompletionDisposition::Retrying
+        } else {
+            TaskCompletionDisposition::Stale
+        })
     }
 
     async fn retry_now(&self, lease: TaskLease<P, Id>) -> Result<bool, TaskStoreError> {
@@ -1908,7 +1952,17 @@ mod tests {
                 .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
             assert_eq!(lease.id, a);
             assert_eq!(lease.attempt, attempt);
-            sched.complete(lease, Err("boom".to_string())).await?;
+            let disposition = sched
+                .complete_with_disposition(lease, Err("boom".to_string()))
+                .await?;
+            assert_eq!(
+                disposition,
+                if attempt < 3 {
+                    TaskCompletionDisposition::Retrying
+                } else {
+                    TaskCompletionDisposition::Failed
+                }
+            );
         }
 
         assert!(matches!(

@@ -199,7 +199,7 @@ async fn invalidate_artifacts_inner(
     )
     .await?;
     let matched_artifact_refs = proof_artifact_identities(&matched_artifacts);
-    let matched_tasks = select_invalidation_tasks(
+    let (matched_tasks, protected_artifact_refs) = select_invalidation_tasks(
         candidate_tasks,
         req.proof_prefix.as_deref(),
         &matched_artifact_refs,
@@ -217,6 +217,9 @@ async fn invalidate_artifacts_inner(
         &mut data,
     )
     .await?;
+    matched_artifacts.retain(|artifact| {
+        !protected_artifact_refs.contains(&ProofArtifactIdentity::from_artifact(artifact))
+    });
 
     if !req.dry_run {
         let blocked_artifact_refs = remove_invalidated_tasks(state, matched_tasks, &mut data).await;
@@ -239,6 +242,7 @@ async fn invalidate_artifacts_inner(
 struct CandidateInvalidationTasks {
     records: Vec<CandidateInvalidationTask>,
     artifact_refs: HashSet<ProofArtifactIdentity>,
+    protected_artifact_refs: HashSet<ProofArtifactIdentity>,
 }
 
 struct CandidateInvalidationTask {
@@ -255,6 +259,17 @@ struct ProofArtifactIdentity {
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_ref: String,
+}
+
+impl ProofArtifactIdentity {
+    fn from_artifact(artifact: &raiko2_runtime::ProofArtifactRecord) -> Self {
+        Self {
+            network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
+            proof_ref: artifact.proof_ref.clone(),
+        }
+    }
 }
 
 struct InvalidationTaskLogContext {
@@ -312,6 +327,7 @@ async fn collect_invalidation_task_candidates(
     let mut candidates = CandidateInvalidationTasks {
         records: Vec::new(),
         artifact_refs: HashSet::new(),
+        protected_artifact_refs: HashSet::new(),
     };
     for record in tasks {
         if !pipeline_keys.contains(&record.pipeline_key) {
@@ -329,16 +345,6 @@ async fn collect_invalidation_task_candidates(
                 continue;
             }
         };
-        if !scope.matches(&metadata) {
-            continue;
-        }
-        if !metadata_matches_proposal_range(&metadata, proposal_range) {
-            continue;
-        }
-        if !is_terminal_runtime_status(record.runner_status) {
-            data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
-            continue;
-        }
         let root_artifact_refs =
             root_invalidation_artifact_refs(&metadata, record.pipeline_key, record.route);
         let artifact_refs = invalidation_artifact_refs(
@@ -347,6 +353,16 @@ async fn collect_invalidation_task_candidates(
             record.route,
             proposal_range,
         );
+        if !scope.matches(&metadata) || !metadata_matches_proposal_range(&metadata, proposal_range)
+        {
+            candidates.protected_artifact_refs.extend(artifact_refs);
+            continue;
+        }
+        if !is_terminal_runtime_status(record.runner_status) {
+            data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
+            candidates.protected_artifact_refs.extend(artifact_refs);
+            continue;
+        }
         candidates
             .artifact_refs
             .extend(artifact_refs.iter().cloned());
@@ -369,8 +385,12 @@ fn select_invalidation_tasks(
     proof_prefix: Option<&str>,
     matched_artifact_refs: &HashSet<ProofArtifactIdentity>,
     data: &mut wire::InvalidateArtifactsData,
-) -> Vec<CandidateInvalidationTask> {
+) -> (
+    Vec<CandidateInvalidationTask>,
+    HashSet<ProofArtifactIdentity>,
+) {
     let mut matched = Vec::new();
+    let mut protected_artifact_refs = candidates.protected_artifact_refs;
     for task in candidates.records {
         let task_matches = if proof_prefix.is_none() {
             true
@@ -384,9 +404,11 @@ fn select_invalidation_tasks(
         if task_matches {
             data.tasks.matched = data.tasks.matched.saturating_add(1);
             matched.push(task);
+        } else {
+            protected_artifact_refs.extend(task.artifact_refs.iter().cloned());
         }
     }
-    matched
+    (matched, protected_artifact_refs)
 }
 
 fn proof_artifact_identities(
@@ -394,12 +416,7 @@ fn proof_artifact_identities(
 ) -> HashSet<ProofArtifactIdentity> {
     artifacts
         .iter()
-        .map(|artifact| ProofArtifactIdentity {
-            network_pair: artifact.network_pair.clone(),
-            pipeline_key: artifact.pipeline_key,
-            route: artifact.route,
-            proof_ref: artifact.proof_ref.clone(),
-        })
+        .map(ProofArtifactIdentity::from_artifact)
         .collect()
 }
 
@@ -1677,13 +1694,25 @@ fn proof_status_string(status: &ProofStatus) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn proposal_request_fingerprint_for_test(
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, Error> {
+    Ok(
+        proposal_request_fingerprint("test", "raiko2-test", submission)
+            .map_err(Error::from_api_error)?
+            .as_str()
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::{AggregateStatus, ProposalStatus, RootRuntime, RuntimeRunnerStatus};
     use super::*;
     use crate::config::Config;
     use crate::server::proof_artifact::load_proof_artifact_material;
     use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
-    use crate::server::task_metadata::ProposalTask;
+    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata};
     use raiko2_engine::{
         AggregateProofInput, AggregationTaskRequest, EngineTaskId, ProposalTaskRequest,
         ProverTaskConfig,
@@ -1700,18 +1729,20 @@ mod tests {
 
     type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-    struct RemoveFailEngine;
+    struct TestRemoveEngine {
+        fail_remove: bool,
+    }
 
     #[derive(Debug)]
     struct DeleteFailArtifactStore;
 
     #[async_trait::async_trait]
     impl ProofArtifactStore for DeleteFailArtifactStore {
-        fn environment(&self) -> &str {
+        fn environment(&self) -> &'static str {
             "test"
         }
 
-        fn namespace(&self) -> &str {
+        fn namespace(&self) -> &'static str {
             "delete-failure"
         }
 
@@ -1775,7 +1806,7 @@ mod tests {
         }
     }
 
-    impl EngineHandle for RemoveFailEngine {
+    impl EngineHandle for TestRemoveEngine {
         fn submit_proposal_proof_with_dependencies(
             &self,
             _request: ProposalTaskRequest,
@@ -1811,10 +1842,14 @@ mod tests {
         }
 
         fn remove(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async {
-                Err(TaskStoreError::backend(std::io::Error::other(
-                    "engine remove failed",
-                )))
+            Box::pin(async move {
+                if self.fail_remove {
+                    Err(TaskStoreError::backend(std::io::Error::other(
+                        "engine remove failed",
+                    )))
+                } else {
+                    Ok(())
+                }
             })
         }
     }
@@ -1849,7 +1884,7 @@ mod tests {
         factory.insert(
             "taiko_dev/taiko_dev_l1",
             PipelineKey::ShastaSp1,
-            Arc::new(RemoveFailEngine),
+            Arc::new(TestRemoveEngine { fail_remove: true }),
         );
         let runtime = Arc::new(
             RuntimeManager::new(test_runtime_root("invalidate-child-cleanup-fails"))
@@ -1914,12 +1949,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn invalidate_artifacts_keeps_artifact_record_when_child_cleanup_fails() {
         let mut factory = StaticPipelineFactory::default();
         factory.insert(
             "taiko_dev/taiko_dev_l1",
             PipelineKey::ShastaSp1,
-            Arc::new(RemoveFailEngine),
+            Arc::new(TestRemoveEngine { fail_remove: true }),
         );
         let runtime = Arc::new(
             RuntimeManager::new(test_runtime_root("invalidate-artifact-cleanup-fails"))
@@ -2026,6 +2062,106 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn invalidation_preserves_proposal_artifact_used_by_active_root() {
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            network_pair,
+            pipeline,
+            Arc::new(TestRemoveEngine { fail_remove: false }),
+        );
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-shared-active-proposal"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        );
+        let mut completed_metadata = task_log_metadata_with_requests(&[58], false);
+        completed_metadata.requested_proof_type = Some("sp1".to_string());
+        let mut active_metadata = task_log_metadata_with_requests(&[58], true);
+        active_metadata.requested_proof_type = Some("sp1".to_string());
+        let proposal_ref = proposal_proof_artifact_refs(
+            pipeline,
+            completed_metadata.proposals.first().expect("proposal"),
+        )
+        .into_iter()
+        .next()
+        .expect("proposal artifact ref");
+
+        for (task_id, metadata, status) in [
+            (
+                "completed-proposal-root",
+                &completed_metadata,
+                RuntimeTaskRunnerStatus::Completed,
+            ),
+            (
+                "active-aggregate-root",
+                &active_metadata,
+                RuntimeTaskRunnerStatus::Running,
+            ),
+        ] {
+            let mut record = runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    pipeline_key: Some(pipeline),
+                    route,
+                    task_kind: "hoodi_proposal".to_string(),
+                    proposal_id: Some(58),
+                    proof_ids: vec![proposal_ref.clone()],
+                    metadata: serde_json::to_value(metadata).expect("serialize metadata"),
+                    request_fingerprint: None,
+                })
+                .await
+                .expect("register runtime task");
+            record.runner_status = status;
+            runtime.upsert_task(&record).await.expect("upsert task");
+        }
+        register_test_artifact(
+            runtime.as_ref(),
+            network_pair,
+            pipeline,
+            route,
+            &proposal_ref,
+            "0xproposal",
+        )
+        .await;
+        let data = invalidate_artifacts_inner(
+            &state,
+            &wire::InvalidateArtifactsRequest {
+                proof_type: wire::ProofType::Sp1,
+                proof_prefix: None,
+                proposal_id_start: Some(58),
+                proposal_id_end: Some(58),
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("invalidate artifacts");
+
+        assert_eq!(data.tasks.removed, 1);
+        assert!(
+            runtime
+                .get_task("active-aggregate-root")
+                .await
+                .expect("get active root")
+                .is_some()
+        );
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, pipeline, route, &proposal_ref)
+                .await
+                .expect("get shared proposal artifact")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn remove_invalidated_artifacts_keeps_retryable_record_when_backing_delete_fails() {
         let runtime = Arc::new(
             RuntimeManager::new_with_artifact_store(
@@ -2104,7 +2240,7 @@ mod tests {
         factory.insert(
             "taiko_dev/taiko_dev_l1",
             PipelineKey::ShastaSp1,
-            Arc::new(RemoveFailEngine),
+            Arc::new(TestRemoveEngine { fail_remove: true }),
         );
         let runtime = Arc::new(
             RuntimeManager::new(test_runtime_root("invalidate-late-terminal-root"))
@@ -2707,8 +2843,40 @@ mod tests {
             aggregate_task_id: aggregate.then(|| "aggregate-task".to_string()),
             aggregate_request: None,
             aggregate_input_artifacts: Vec::new(),
-            runtime: Default::default(),
+            runtime: RuntimeMetadata::default(),
         }
+    }
+
+    async fn register_test_artifact(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        pipeline: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        proof: &str,
+    ) {
+        let bytes = serde_json::to_vec(&Proof {
+            proof: Some(proof.to_string()),
+            ..Proof::default()
+        })
+        .expect("serialize proof");
+        let publication = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, &bytes)
+            .await
+            .expect("publish proof artifact");
+        let artifact = publication.object();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
+            })
+            .await
+            .expect("register proof artifact");
     }
 
     fn test_runtime_root(label: &str) -> PathBuf {
@@ -2717,16 +2885,4 @@ mod tests {
             .map_or(0, |duration| duration.as_nanos());
         std::env::temp_dir().join(format!("raiko2-{label}-{}-{nanos}", process::id()))
     }
-}
-
-#[cfg(test)]
-pub(super) fn proposal_request_fingerprint_for_test(
-    submission: &CanonicalBatchSubmission,
-) -> Result<String, Error> {
-    Ok(
-        proposal_request_fingerprint("test", "raiko2-test", submission)
-            .map_err(Error::from_api_error)?
-            .as_str()
-            .to_string(),
-    )
 }

@@ -54,10 +54,20 @@ impl PipelineFactory for StaticPipelineFactory {
     }
 
     fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {
-        !self.engines.is_empty()
-            && self
-                .engines
-                .values()
-                .all(|engine| engine.queue_maintenance_ready(max_age))
+        self.engines
+            .values()
+            .all(|engine| engine.queue_maintenance_ready(max_age))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_factory_is_queue_ready() {
+        let factory = StaticPipelineFactory::default();
+
+        assert!(factory.queue_maintenance_ready(std::time::Duration::from_secs(1)));
     }
 }

@@ -139,6 +139,18 @@ impl RuntimeObserver {
             .await
     }
 
+    async fn update_active_root_records_count<F>(
+        &self,
+        id: &EngineTaskId,
+        mutator: F,
+    ) -> Result<usize>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+    {
+        self.update_root_records_with_policy_count(id, TerminalRootPolicy::Exclude, mutator)
+            .await
+    }
+
     async fn update_retry_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
@@ -156,6 +168,20 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
+        self.update_root_records_with_policy_count(id, terminal_policy, mutator)
+            .await
+            .map(|_| ())
+    }
+
+    async fn update_root_records_with_policy_count<F>(
+        &self,
+        id: &EngineTaskId,
+        terminal_policy: TerminalRootPolicy,
+        mutator: F,
+    ) -> Result<usize>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+    {
         let _guard = self.root_updates.lock().await;
         let root_ref = Self::root_task_ref(id);
         let records = self.find_root_records(id).await?;
@@ -165,12 +191,13 @@ impl RuntimeObserver {
         let mut records = self.matching_root_records(id, records, terminal_policy)?;
         let updated_at = now_ts();
         let observed_at_ms = now_ms();
+        let updated_records = records.len();
         for record in &mut records {
             mutator(record, updated_at, observed_at_ms)?;
             record.updated_at = updated_at;
             self.runtime.upsert_task(record).await?;
         }
-        Ok(())
+        Ok(updated_records)
     }
 
     async fn load_root_record(&self, id: &EngineTaskId) -> Result<Option<RuntimeTaskRecord>> {
@@ -688,11 +715,31 @@ impl RuntimeObserver {
             }
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
-        if let Err(error) = self
+        let updated_roots = match self
             .sync_proof_success(id, task, stage, publication.proof_uris)
             .await
         {
-            return ProofCommitAttempt::Retryable(error);
+            Ok(updated_roots) => updated_roots,
+            Err(error) => return ProofCommitAttempt::Retryable(error),
+        };
+        if updated_roots == 0 {
+            let invalidation = self
+                .runtime
+                .invalidate_pending_proof_publication(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &publication.root_ref,
+                )
+                .await
+                .context("failed to invalidate proof publication without an active runtime owner");
+            return match invalidation {
+                Ok(_) => ProofCommitAttempt::Invalidated(anyhow::anyhow!(
+                    "proof task {} no longer has an active runtime owner",
+                    publication.root_ref
+                )),
+                Err(error) => ProofCommitAttempt::Retryable(error),
+            };
         }
         match self
             .runtime
@@ -721,39 +768,40 @@ impl RuntimeObserver {
         task: &EngineTask,
         stage: &'static str,
         proof_uris: HashMap<String, String>,
-    ) -> Result<()> {
-        self.update_root_records(id, move |record, updated_at, observed_at_ms| {
-            record.error = None;
-            let task_id = Self::timing_key_for_task(id, task);
-            let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-                .context("failed to parse task metadata")?;
-            metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
-            let root_completed =
-                Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
-            metadata.runtime.active_stage = Some(stage.to_string());
-            metadata.runtime.last_event = Some(
+    ) -> Result<usize> {
+        let updated_roots = self
+            .update_active_root_records_count(id, move |record, updated_at, observed_at_ms| {
+                record.error = None;
+                let task_id = Self::timing_key_for_task(id, task);
+                let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+                    .context("failed to parse task metadata")?;
+                metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
+                let root_completed =
+                    Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
+                metadata.runtime.active_stage = Some(stage.to_string());
+                metadata.runtime.last_event = Some(
+                    if root_completed {
+                        "completed"
+                    } else {
+                        "stage_completed"
+                    }
+                    .to_string(),
+                );
+                record.metadata =
+                    serde_json::to_value(metadata).context("failed to serialize task metadata")?;
                 if root_completed {
-                    "completed"
+                    record.runner_status = RunnerStatus::Completed;
+                    record.proof_uri = proof_uris.get(&record.task_id).cloned();
                 } else {
-                    "stage_completed"
+                    record.runner_status = RunnerStatus::Allocated;
+                    record.proof_uri = None;
                 }
-                .to_string(),
-            );
-            record.metadata =
-                serde_json::to_value(metadata).context("failed to serialize task metadata")?;
-            if root_completed {
-                record.runner_status = RunnerStatus::Completed;
-                record.proof_uri = proof_uris.get(&record.task_id).cloned();
-            } else {
-                record.runner_status = RunnerStatus::Allocated;
-                record.proof_uri = None;
-            }
-            record.updated_at = updated_at;
-            Ok(())
-        })
-        .await
-        .context("failed to sync runtime task success")?;
-        Ok(())
+                record.updated_at = updated_at;
+                Ok(())
+            })
+            .await
+            .context("failed to sync runtime task success")?;
+        Ok(updated_roots)
     }
 
     fn root_completed_by_proof_success(
@@ -1345,6 +1393,83 @@ mod tests {
         allow_recheck: tokio::sync::Notify,
     }
 
+    #[derive(Debug)]
+    struct BlocksCanonicalPutStore {
+        inner: MemoryProofArtifactStore,
+        put_entered: tokio::sync::Notify,
+        allow_put: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ProofArtifactStore for BlocksCanonicalPutStore {
+        fn environment(&self) -> &str {
+            self.inner.environment()
+        }
+
+        fn namespace(&self) -> &str {
+            self.inner.namespace()
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn put_if_absent(
+            &self,
+            key: &ProofArtifactKey,
+            bytes: &[u8],
+        ) -> Result<ProofArtifactPutResult> {
+            self.put_entered.notify_one();
+            self.allow_put.notified().await;
+            self.inner.put_if_absent(key, bytes).await
+        }
+
+        async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            self.inner.get(key).await
+        }
+
+        async fn get_prefix(
+            &self,
+            key: &ProofArtifactKey,
+            max_bytes: usize,
+        ) -> Result<Option<ProofArtifactPrefix>> {
+            self.inner.get_prefix(key, max_bytes).await
+        }
+
+        async fn mark_invalidated(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            content_hash: &str,
+        ) -> Result<()> {
+            self.inner
+                .mark_invalidated(key, generation, content_hash)
+                .await
+        }
+
+        async fn is_invalidated(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            content_hash: &str,
+        ) -> Result<bool> {
+            self.inner
+                .is_invalidated(key, generation, content_hash)
+                .await
+        }
+
+        async fn delete(
+            &self,
+            key: &ProofArtifactKey,
+            generation: Option<i64>,
+            expected_content_hash: &str,
+        ) -> Result<()> {
+            self.inner
+                .delete(key, generation, expected_content_hash)
+                .await
+        }
+    }
+
     #[async_trait]
     impl ProofArtifactStore for InvalidatesDuringPublicationStore {
         fn environment(&self) -> &str {
@@ -1419,11 +1544,11 @@ mod tests {
 
     #[async_trait]
     impl ProofArtifactStore for FailingArtifactStore {
-        fn environment(&self) -> &str {
+        fn environment(&self) -> &'static str {
             "test"
         }
 
-        fn namespace(&self) -> &str {
+        fn namespace(&self) -> &'static str {
             "failure"
         }
 
@@ -2036,7 +2161,7 @@ mod tests {
                     .into_owned(),
             )?,
             checks: AtomicUsize::new(0),
-            block_on_check: 2,
+            block_on_check: 1,
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
@@ -2107,6 +2232,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_before_canonical_put_invalidates_late_publication() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-cancel-before-put-artifacts");
+        let store = Arc::new(BlocksCanonicalPutStore {
+            inner: MemoryProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            put_entered: tokio::sync::Notify::new(),
+            allow_put: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-cancel-before-put"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        register_observer_task(
+            runtime.as_ref(),
+            "task_cancel_before_put",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = Arc::new(RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        ));
+        let publishing_observer = Arc::clone(&observer);
+        let publishing_id = task_id.clone();
+        let publication = tokio::spawn(async move {
+            publishing_observer
+                .on_task_succeeded(
+                    &publishing_id,
+                    &EngineTask::ProveProposal {
+                        request,
+                        input_task: publishing_id.clone(),
+                    },
+                    &EngineTaskSuccess::Proof {
+                        stage: raiko2_pipeline::PipelineStage::Prove,
+                        proof: proof_fixture(),
+                    },
+                )
+                .await
+        });
+
+        store.put_entered.notified().await;
+        observer.on_task_cancelled(&task_id).await;
+        store.allow_put.notify_one();
+
+        let error = publication
+            .await?
+            .expect_err("late publication must lose to cancellation");
+        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+                .await?
+                .is_none()
+        );
+        let cancelled = runtime
+            .get_task("task_cancel_before_put")
+            .await?
+            .expect("cancelled runtime task");
+        assert_eq!(cancelled.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(cancelled.proof_uri, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn publication_rechecks_shared_tombstone_before_clearing_outbox() -> Result<()> {
         let artifact_root = unique_runtime_root("runtime-observer-publication-race-artifacts");
         let store = Arc::new(InvalidatesDuringPublicationStore {
@@ -2673,6 +2881,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_completes_non_aggregate_root_after_all_proofs() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-multi-proposal",

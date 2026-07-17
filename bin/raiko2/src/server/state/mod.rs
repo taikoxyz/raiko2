@@ -102,6 +102,38 @@ pub struct AppState {
     pub runtime: Arc<RuntimeManager>,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
     pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
+    namespace_owner_heartbeat: Option<Arc<NamespaceOwnerHeartbeat>>,
+}
+
+#[derive(Debug)]
+struct NamespaceOwnerHeartbeat {
+    handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl NamespaceOwnerHeartbeat {
+    const fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    async fn stop(&self) {
+        let handle = self.handle.lock().ok().and_then(|mut handle| handle.take());
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for NamespaceOwnerHeartbeat {
+    fn drop(&mut self) {
+        if let Ok(mut handle) = self.handle.lock()
+            && let Some(handle) = handle.take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 async fn build_artifact_store(config: &Config) -> Result<Arc<dyn ProofArtifactStore>> {
@@ -166,58 +198,56 @@ impl AppState {
             None
         };
 
-        let mut factory = StaticPipelineFactory::default();
-
         // One balance gate shared by every pair's Boundless prover: all pairs fund the same market
         // account (one global signer/rpc/deployment), so concurrent submissions across pairs must
         // deposit against a single combined reserved total, not one per pair.
         #[cfg(feature = "host")]
         let boundless_balance_gate = BoundlessBalanceGate::new();
 
-        for pair in &resolved_pairs {
-            let registration = PairPipelineRegistration {
-                config: &config,
-                pair,
-                runtime: Arc::clone(&runtime),
-                #[cfg(feature = "host")]
-                boundless_balance_gate: boundless_balance_gate.clone(),
-                #[cfg(feature = "local-provers")]
-                shasta_backends: &shasta_backends,
-                #[cfg(all(feature = "host", not(feature = "local-provers")))]
-                boundless_backend: &boundless_backend,
-                #[cfg(all(feature = "host", not(feature = "local-provers")))]
-                sp1_backend: &sp1_backend,
-                #[cfg(feature = "host")]
-                sp1_prover: sp1_prover.clone(),
-                scheduler_config: scheduler_config.clone(),
-                workers,
-                maintenance_interval,
-            };
-            register_pair_pipelines(&mut factory, &registration)?;
-        }
-
         runtime
             .acquire_namespace_owner(config.runtime.store.owner_lease_secs)
             .await?;
-        let heartbeat = spawn_namespace_owner_heartbeat(
+        let heartbeat = Arc::new(spawn_namespace_owner_heartbeat(
             Arc::clone(&runtime),
             config.runtime.store.owner_heartbeat_secs,
             config.runtime.store.owner_lease_secs,
-        );
+        ));
         let startup = async {
+            let mut factory = StaticPipelineFactory::default();
+            for pair in &resolved_pairs {
+                let registration = PairPipelineRegistration {
+                    config: &config,
+                    pair,
+                    runtime: Arc::clone(&runtime),
+                    #[cfg(feature = "host")]
+                    boundless_balance_gate: boundless_balance_gate.clone(),
+                    #[cfg(feature = "local-provers")]
+                    shasta_backends: &shasta_backends,
+                    #[cfg(all(feature = "host", not(feature = "local-provers")))]
+                    boundless_backend: &boundless_backend,
+                    #[cfg(all(feature = "host", not(feature = "local-provers")))]
+                    sp1_backend: &sp1_backend,
+                    #[cfg(feature = "host")]
+                    sp1_prover: sp1_prover.clone(),
+                    scheduler_config: scheduler_config.clone(),
+                    workers,
+                    maintenance_interval,
+                };
+                register_pair_pipelines(&mut factory, &registration)?;
+            }
             runtime.initialize().await?;
             runtime.fence_namespace_owner().await?;
             restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
 
             let config = Arc::new(config);
             let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-            Self::from_parts(config, pipelines, runtime)
-                .finish_initialization()
-                .await
+            let mut state = Self::from_parts(config, pipelines, runtime);
+            state.namespace_owner_heartbeat = Some(Arc::clone(&heartbeat));
+            state.finish_initialization().await
         }
         .await;
         if startup.is_err() {
-            heartbeat.abort();
+            heartbeat.stop().await;
         }
         startup
     }
@@ -251,6 +281,7 @@ impl AppState {
             runtime,
             zk_any_sampler,
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
+            namespace_owner_heartbeat: None,
         }
     }
 }
@@ -259,8 +290,8 @@ fn spawn_namespace_owner_heartbeat(
     runtime: Arc<RuntimeManager>,
     heartbeat_secs: u64,
     lease_secs: u64,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> NamespaceOwnerHeartbeat {
+    NamespaceOwnerHeartbeat::new(tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(heartbeat_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
@@ -286,7 +317,7 @@ fn spawn_namespace_owner_heartbeat(
                 }
             }
         }
-    })
+    }))
 }
 
 struct PairPipelineRegistration<'a> {
@@ -976,6 +1007,47 @@ mod tests {
     use raiko2_engine::{ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
     use raiko2_runtime::RuntimeTaskRecord;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CancellationMarker(Arc<AtomicBool>);
+
+    impl Drop for CancellationMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_guard_keeps_task_alive_during_slow_startup() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let task_ticks = Arc::clone(&ticks);
+        let heartbeat = NamespaceOwnerHeartbeat::new(tokio::spawn(async move {
+            loop {
+                task_ticks.fetch_add(1, Ordering::Release);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert!(ticks.load(Ordering::Acquire) > 1);
+        heartbeat.stop().await;
+    }
+
+    #[tokio::test]
+    async fn heartbeat_guard_stop_awaits_task_cancellation() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&cancelled);
+        let heartbeat = NamespaceOwnerHeartbeat::new(tokio::spawn(async move {
+            let _marker = CancellationMarker(task_cancelled);
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+
+        heartbeat.stop().await;
+
+        assert!(cancelled.load(Ordering::Acquire));
+    }
 
     #[tokio::test]
     async fn restore_proof_artifacts_registers_cached_child_proposal_refs() -> Result<()> {

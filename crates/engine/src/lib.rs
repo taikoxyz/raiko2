@@ -822,10 +822,14 @@ where
         let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
         let completed_id = lease.id.clone();
-        let completion = self.inner.scheduler.complete(lease, result).await;
+        let completion = self
+            .inner
+            .scheduler
+            .complete_with_disposition(lease, result)
+            .await;
         renew_task.abort();
-        let completed = completion?;
-        if completed
+        let completion = completion?;
+        if completion == raiko2_queue::TaskCompletionDisposition::Failed
             && should_notify_queue_task
             && let Some(observer) = &self.inner.observer
             && success.is_none()
@@ -1461,6 +1465,7 @@ mod tests {
 
     struct PublicationFailingObserver {
         proof_successes: AtomicUsize,
+        task_failures: AtomicUsize,
         failures: usize,
     }
 
@@ -1468,6 +1473,7 @@ mod tests {
         fn new(failures: usize) -> Self {
             Self {
                 proof_successes: AtomicUsize::new(0),
+                task_failures: AtomicUsize::new(0),
                 failures,
             }
         }
@@ -1490,6 +1496,10 @@ mod tests {
                 }
             }
             Ok(())
+        }
+
+        async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {
+            self.task_failures.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2221,6 +2231,7 @@ mod tests {
         assert!(matches!(view.state, TaskState::Retrying { .. }));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
 
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         engine.inner.scheduler.maintenance_tick().await?;
@@ -2233,6 +2244,31 @@ mod tests {
         assert!(matches!(view.state, TaskState::Succeeded { .. }));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 2);
+        assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queue_maintenance_readiness_requires_a_fresh_successful_tick()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        assert!(!engine.queue_maintenance_ready(Duration::from_secs(1)));
+        crate::worker::Runnable::maintenance_tick(&engine)
+            .await
+            .map_err(std::io::Error::other)?;
+        assert!(engine.queue_maintenance_ready(Duration::from_secs(1)));
+
+        engine
+            .inner
+            .last_maintenance_success_ms
+            .store(super::now_millis().saturating_sub(100), Ordering::Release);
+        assert!(!engine.queue_maintenance_ready(Duration::from_millis(50)));
         Ok(())
     }
 

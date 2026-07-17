@@ -315,21 +315,13 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             .load_named_object(&object_name, self.proof_uri(key))
             .await?
         {
-            return if existing.content_hash == content_hash(bytes) {
-                Ok(ProofArtifactPutResult::AlreadyExists(existing))
-            } else {
-                Ok(ProofArtifactPutResult::Conflict(existing))
-            };
+            return Ok(existing_put_result(existing, bytes));
         }
-        let legacy_name = self.legacy_object_name(key);
-        if legacy_name != object_name {
-            let legacy_uri = format!("gs://{}/{legacy_name}", self.bucket_id);
-            let legacy = self
-                .put_named_if_absent(&legacy_name, legacy_uri, bytes)
-                .await?;
-            if let ProofArtifactPutResult::Conflict(existing) = legacy {
-                return Ok(ProofArtifactPutResult::Conflict(existing));
-            }
+        if let Some(legacy) = self
+            .load_and_migrate_legacy_object(key, &object_name)
+            .await?
+        {
+            return Ok(existing_put_result(legacy, bytes));
         }
         self.put_named_if_absent(&object_name, self.proof_uri(key), bytes)
             .await
@@ -409,5 +401,39 @@ impl ProofArtifactStore for GcsProofArtifactStore {
             }
         }
         Ok(())
+    }
+}
+
+fn existing_put_result(existing: ProofArtifactObject, bytes: &[u8]) -> ProofArtifactPutResult {
+    if existing.content_hash == content_hash(bytes) {
+        ProofArtifactPutResult::AlreadyExists(existing)
+    } else {
+        ProofArtifactPutResult::Conflict(existing)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(bytes: &[u8]) -> ProofArtifactObject {
+        ProofArtifactObject {
+            proof_uri: "gs://bucket/object".to_string(),
+            content_hash: content_hash(bytes),
+            generation: Some(1),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn migrated_legacy_object_is_compared_before_a_canonical_write() {
+        assert!(matches!(
+            existing_put_result(object(b"generation-a"), b"generation-a"),
+            ProofArtifactPutResult::AlreadyExists(_)
+        ));
+        assert!(matches!(
+            existing_put_result(object(b"generation-a"), b"generation-b"),
+            ProofArtifactPutResult::Conflict(_)
+        ));
     }
 }

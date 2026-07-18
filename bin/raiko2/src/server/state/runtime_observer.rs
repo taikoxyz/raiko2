@@ -50,6 +50,11 @@ struct RuntimeExecutionOwners {
     incarnations: Vec<uuid::Uuid>,
 }
 
+struct RuntimeProofCompletionPermit {
+    _operation: raiko2_runtime::RuntimeLifecycleOperationGuard,
+    owner_incarnations: Vec<uuid::Uuid>,
+}
+
 #[derive(Clone)]
 struct PublishedProofCommit {
     proof_uris: HashMap<String, String>,
@@ -1279,6 +1284,11 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> std::result::Result<TaskExecutionPermit, EngineObserverError> {
+        let _operation = self
+            .runtime
+            .acquire_lifecycle_operation()
+            .await
+            .map_err(|error| EngineObserverError::RuntimeInactive(error.to_string()))?;
         let proof_ref = Self::root_task_ref(id);
         let owners = self.current_execution_owners(id).await?;
         if owners.incarnations.is_empty() {
@@ -1327,6 +1337,11 @@ impl EngineObserver for RuntimeObserver {
         proof: &raiko2_primitives::Proof,
         execution_permit: &TaskExecutionPermit,
     ) -> std::result::Result<ProofCompletionPermit, EngineObserverError> {
+        let operation = self
+            .runtime
+            .acquire_lifecycle_operation()
+            .await
+            .map_err(|error| EngineObserverError::RuntimeInactive(error.to_string()))?;
         let proof_ref = Self::root_task_ref(id);
         let execution_owners = Self::execution_owners(execution_permit)?;
         let active_incarnations = self
@@ -1389,7 +1404,12 @@ impl EngineObserver for RuntimeObserver {
             .await
             .map_err(|error| publication_observer_error(&error))?;
         if checkpointed {
-            return Ok(ProofCompletionPermit::tracked(owner_incarnations));
+            return Ok(ProofCompletionPermit::tracked(
+                RuntimeProofCompletionPermit {
+                    _operation: operation,
+                    owner_incarnations,
+                },
+            ));
         }
         Err(EngineObserverError::ProofInvalidated(format!(
             "proof task {proof_ref} lost its runtime owner during checkpoint"
@@ -1638,8 +1658,10 @@ impl EngineObserver for RuntimeObserver {
                         "proof completion requires its pre-issued permit".to_string(),
                     )
                 })?;
-                let owner_incarnations =
-                    permit.guard::<Vec<uuid::Uuid>>().cloned().ok_or_else(|| {
+                let owner_incarnations = permit
+                    .guard::<RuntimeProofCompletionPermit>()
+                    .map(|permit| permit.owner_incarnations.clone())
+                    .ok_or_else(|| {
                         EngineObserverError::RuntimeInactive(
                             "proof completion permit does not belong to the runtime".to_string(),
                         )
@@ -2137,6 +2159,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     include!("runtime_observer_state_tests.rs");
+    include!("runtime_observer_race_tests.rs");
 
     #[derive(Debug, Default)]
     struct FailingArtifactStore {
@@ -4077,36 +4100,41 @@ mod tests {
             RunnerStatus::Running,
         )
         .await?;
-        let permit = checkpoint_permit(&runtime);
-        runtime.start_draining();
-
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
             pipeline.route(),
         );
-        observer
-            .on_task_progress(
-                &proposal_task_id,
-                &EngineTask::ProveProposal {
-                    request,
-                    input_task: proposal_task_id.clone(),
-                },
-                &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
-                    attempt: 1,
-                    provider_request_id: "0xaccepted".to_string(),
-                    network_mode: Sp1NetworkMode::Reserved,
-                    fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
-                    skip_simulation: true,
-                    cycle_limit: 1_000_000,
-                    timeout_secs: 3_600,
-                    max_price_per_pgu: None,
-                    auction_timeout_secs: None,
-                }),
-                &permit,
-            )
-            .await
-            .expect("pre-admitted checkpoint must persist while draining");
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: proposal_task_id.clone(),
+        };
+        let execution_permit = observer
+            .test_execution_permit(&proposal_task_id, &task)
+            .await?;
+        let permit = checkpoint_permit(&runtime);
+        runtime.start_draining();
+
+        EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                attempt: 1,
+                provider_request_id: "0xaccepted".to_string(),
+                network_mode: Sp1NetworkMode::Reserved,
+                fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                skip_simulation: true,
+                cycle_limit: 1_000_000,
+                timeout_secs: 3_600,
+                max_price_per_pgu: None,
+                auction_timeout_secs: None,
+            }),
+            &permit,
+            &execution_permit,
+        )
+        .await
+        .expect("pre-admitted checkpoint must persist while draining");
 
         drop(permit);
         runtime.begin_draining().await;

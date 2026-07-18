@@ -35,11 +35,18 @@ deployment invariant; the application has no distributed owner lease or owner ep
 environment and namespace participate in task fingerprints and object names.
 
 ### Global Runtime Fence
-The process-wide lifecycle gate for every task and external-store mutation in one namespace. It
+The process-wide shutdown authority for every task and external-store mutation in one namespace. It
 allows writes while active and rejects ordinary writes as soon as draining starts. A remote request
 accepted before that transition carries the sole capability that may persist its request-ID
 checkpoint during the bounded drain. It is not a task-local lock or multi-instance coordination
 protocol.
+
+### Lifecycle Operation Gate
+The process-local serialization boundary for a lifecycle operation that spans the authoritative
+runtime, scheduler queue, and proof artifact store. Admission, replacement, cancellation, cleanup,
+invalidation, and proof completion enter this gate before committing a cross-component change.
+Snapshots taken before entry are revalidated with the task incarnation or artifact descriptor.
+This gate prevents local ABA races; it is not a distributed lock or namespace ownership mechanism.
 
 ### GCS Generation
 The native object-version token used for runtime-state compare-and-swap and exact manifest

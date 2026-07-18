@@ -124,10 +124,11 @@ pub(crate) async fn run_runtime_cleanup_pass(
 
     for record in records {
         match cleanup_expired_root_task(runtime.as_ref(), pipelines.as_ref(), &record).await {
-            Ok(outcome) => {
+            Ok(Some(outcome)) => {
                 stats.removed_roots += 1;
                 stats.skipped_shared_children += outcome.skipped_shared_children;
             }
+            Ok(None) => {}
             Err(err) => {
                 stats.retained_failures += 1;
                 warn!(task_id = %record.task_id, error = %err, "failed to cleanup expired runtime task");
@@ -159,6 +160,14 @@ async fn cancel_orphaned_runtime_tasks(
     let mut cancelled = 0usize;
 
     for record in records {
+        let _lifecycle_operation = runtime.acquire_lifecycle_operation().await?;
+        if runtime
+            .get_task(&record.task_id)
+            .await?
+            .is_none_or(|current| current.incarnation_id != record.incarnation_id)
+        {
+            continue;
+        }
         let metadata: TaskMetadata = match serde_json::from_value(record.metadata.clone()) {
             Ok(metadata) => metadata,
             Err(err) => {
@@ -195,8 +204,9 @@ async fn cancel_orphaned_runtime_tasks(
         }
 
         let cancelled_stale = runtime
-            .cancel_nonterminal_task_if_stale(
+            .cancel_nonterminal_task_if_incarnation_and_stale(
                 &record.task_id,
+                record.incarnation_id,
                 record.updated_at,
                 Some(ORPHANED_RUNTIME_ERROR.to_string()),
             )
@@ -591,7 +601,15 @@ async fn cleanup_expired_root_task(
     runtime: &RuntimeManager,
     pipelines: &dyn PipelineFactory,
     record: &RuntimeTaskRecord,
-) -> Result<ChildCleanupOutcome> {
+) -> Result<Option<ChildCleanupOutcome>> {
+    let _lifecycle_operation = runtime.acquire_lifecycle_operation().await?;
+    if runtime
+        .get_task(&record.task_id)
+        .await?
+        .is_none_or(|current| current.incarnation_id != record.incarnation_id)
+    {
+        return Ok(None);
+    }
     let metadata: TaskMetadata =
         serde_json::from_value(record.metadata.clone()).context("failed to parse task metadata")?;
     let engine = pipelines
@@ -606,10 +624,10 @@ async fn cleanup_expired_root_task(
     )
     .await?;
     runtime
-        .remove_task(&record.task_id)
+        .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
         .await
         .with_context(|| format!("failed to remove runtime task {}", record.task_id))?;
-    Ok(outcome)
+    Ok(Some(outcome))
 }
 
 pub(crate) const fn proposal_task_id(
@@ -637,8 +655,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_task_chain_ids,
-        proposal_task_id, run_runtime_cleanup_pass,
+        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, cleanup_expired_root_task,
+        proposal_task_chain_ids, proposal_task_id, run_runtime_cleanup_pass,
     };
     use crate::server::state::{
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
@@ -1216,6 +1234,50 @@ mod tests {
         .await?;
 
         assert!(engine.cancelled().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_snapshot_cannot_remove_replacement_queue_children() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "cleanup-incarnation",
+        ))?);
+        let engine = Arc::new(MockEngine::default());
+        let factory = build_factory(engine.clone());
+        let proposal_task_id = encoded_proposal_task_id(44)?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "root",
+            &proposal_task_id,
+            RunnerStatus::Completed,
+            now_ts().saturating_sub(100),
+        )
+        .await?;
+        let stale = runtime.get_task("root").await?.expect("stale root");
+        assert!(runtime.remove_task("root").await?);
+        register_runtime_task(
+            runtime.as_ref(),
+            "root",
+            &proposal_task_id,
+            RunnerStatus::Running,
+            now_ts(),
+        )
+        .await?;
+
+        assert!(
+            cleanup_expired_root_task(runtime.as_ref(), &factory, &stale)
+                .await?
+                .is_none()
+        );
+        assert!(engine.removed().is_empty());
+        assert_eq!(
+            runtime
+                .get_task("root")
+                .await?
+                .expect("replacement")
+                .runner_status,
+            RunnerStatus::Running
+        );
         Ok(())
     }
 

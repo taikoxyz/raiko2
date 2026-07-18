@@ -103,6 +103,7 @@ struct SubmissionPlan {
     proposal_sources: Vec<ProposalPlanSource>,
     aggregate: Option<PlannedAggregateTask>,
     aggregate_inputs: Vec<AggregateProofInput>,
+    cached_artifact_preconditions: Vec<raiko2_runtime::ProofArtifactPrecondition>,
 }
 
 #[derive(Clone)]
@@ -715,6 +716,7 @@ async fn build_submission_plan(
 
     let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
+    let mut cached_artifact_preconditions = Vec::new();
     if submission.aggregate_requested {
         aggregate_inputs.reserve(proposals.len());
         for proposal in &proposals {
@@ -722,6 +724,13 @@ async fn build_submission_plan(
                 load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
             {
                 proposal_sources.push(ProposalPlanSource::Cached);
+                cached_artifact_preconditions.push(raiko2_runtime::ProofArtifactPrecondition {
+                    network_pair: material.record.network_pair.clone(),
+                    proof_ref: material.record.proof_ref.clone(),
+                    pipeline_key: material.record.pipeline_key,
+                    route: material.record.route,
+                    descriptor: material.record.descriptor(),
+                });
                 aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                     network_pair: material.record.network_pair,
                     pipeline_key: material.record.pipeline_key,
@@ -752,6 +761,7 @@ async fn build_submission_plan(
         proposal_sources,
         aggregate,
         aggregate_inputs,
+        cached_artifact_preconditions,
     })
 }
 
@@ -813,7 +823,10 @@ async fn register_batch_task(
 
     state
         .runtime
-        .register_task_if_absent(registration)
+        .register_task_if_absent_with_artifact_preconditions(
+            registration,
+            &plan.cached_artifact_preconditions,
+        )
         .await
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
 }
@@ -1181,7 +1194,10 @@ async fn replace_existing_batch_task(
     let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
     state
         .runtime
-        .register_task(registration)
+        .register_task_with_artifact_preconditions(
+            registration,
+            &plan.cached_artifact_preconditions,
+        )
         .await
         .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?;
 
@@ -1235,6 +1251,7 @@ async fn build_recovery_plan_from_metadata(
     let proposals = planned_recovery_proposals(existing, metadata)?;
     let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
+    let mut cached_artifact_preconditions = Vec::new();
     if metadata.aggregate_requested {
         aggregate_inputs.reserve(proposals.len());
         for (proposal, persisted) in proposals.iter().zip(&metadata.proposals) {
@@ -1247,6 +1264,13 @@ async fn build_recovery_plan_from_metadata(
             .await?
             {
                 proposal_sources.push(ProposalPlanSource::Cached);
+                cached_artifact_preconditions.push(raiko2_runtime::ProofArtifactPrecondition {
+                    network_pair: material.record.network_pair.clone(),
+                    proof_ref: material.record.proof_ref.clone(),
+                    pipeline_key: material.record.pipeline_key,
+                    route: material.record.route,
+                    descriptor: material.record.descriptor(),
+                });
                 aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                     network_pair: material.record.network_pair,
                     pipeline_key: material.record.pipeline_key,
@@ -1283,6 +1307,7 @@ async fn build_recovery_plan_from_metadata(
         proposal_sources,
         aggregate,
         aggregate_inputs,
+        cached_artifact_preconditions,
     })
 }
 
@@ -1861,7 +1886,12 @@ async fn cleanup_external_aggregate_submission(
     submission: &ExternalAggregateSubmission,
     metadata: &TaskMetadata,
 ) {
-    let _ = state.runtime.remove_task(&submission.public_task_id).await;
+    if let Ok(Some(record)) = state.runtime.get_task(&submission.public_task_id).await {
+        let _ = state
+            .runtime
+            .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
+            .await;
+    }
     let _ = remove_task_children(
         engine,
         submission.route.pipeline_key(),
@@ -2227,6 +2257,11 @@ async fn clear_prover_tasks(
     state: &AppState,
     scope: ProverTaskScope,
 ) -> Result<ClearProverStatus, ApiError> {
+    let _lifecycle_operation = state
+        .runtime
+        .acquire_lifecycle_operation()
+        .await
+        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
     let records = state
         .runtime
         .list_tasks()
@@ -5382,6 +5417,72 @@ mod tests {
                 ),
                 dependency: Box::new(plan.proposals[1].task_id.clone()),
             }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_admission_rejects_artifact_invalidated_after_planning() -> Result<()> {
+        let route = native_local_route();
+        let runtime = RuntimeManager::new(unique_test_runtime_root("cached-admission-race"))?;
+        let submission = canonical_multi_submission(route);
+        let first_request = ProposalTaskRequest {
+            proposal_id: 7,
+            l2_block_range: Some(L2BlockRange { start: 7, end: 7 }),
+            l1_inclusion_block_number: 11,
+            last_anchor_block_number: 6,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &first_request);
+        write_test_proof_artifact(
+            &runtime,
+            &submission.pair.key,
+            &proof_ref,
+            &valid_native_proof(),
+        )
+        .await?;
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        let expected = plan
+            .cached_artifact_preconditions
+            .first()
+            .expect("cached descriptor")
+            .clone();
+        assert!(matches!(
+            runtime
+                .invalidate_proof_artifact_descriptor_if_unowned(
+                    &expected.network_pair,
+                    expected.pipeline_key,
+                    expected.route,
+                    &expected.proof_ref,
+                    &expected.descriptor,
+                )
+                .await?,
+            raiko2_runtime::ProofArtifactInvalidationResult::Invalidated(_)
+        ));
+
+        let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        assert!(
+            runtime
+                .register_task_if_absent_with_artifact_preconditions(
+                    registration,
+                    &plan.cached_artifact_preconditions,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .get_task(&submission.public_task_id)
+                .await?
+                .is_none()
         );
         Ok(())
     }

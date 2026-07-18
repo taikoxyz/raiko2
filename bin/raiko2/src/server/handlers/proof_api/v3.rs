@@ -92,6 +92,11 @@ async fn request_batch_shasta_proof_inner(
         proposal_ids = ?proposal_ids,
         "received hoodi shasta batch request proposal ids"
     );
+    let _lifecycle_operation = state
+        .runtime
+        .acquire_lifecycle_operation()
+        .await
+        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_batch_task(&state, &submission, existing, None).await
@@ -127,6 +132,11 @@ async fn request_aggregation_proof_inner(
         submission.route.pipeline_key(),
     )?;
     let aggregate = planned_external_aggregate_task(&state.runtime, &submission).await?;
+    let _lifecycle_operation = state
+        .runtime
+        .acquire_lifecycle_operation()
+        .await
+        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
 
     info!(
         task_id = submission.public_task_id.as_str(),
@@ -170,6 +180,11 @@ pub(crate) async fn cancel_task(
     Path(id): Path<String>,
 ) -> Result<Json<ApiOk<TaskData>>, ApiError> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
+    let _lifecycle_operation = state
+        .runtime
+        .acquire_lifecycle_operation()
+        .await
+        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
 
     let TaskLookup {
         record,
@@ -247,6 +262,11 @@ pub(crate) async fn prune_proofs(
     headers: HeaderMap,
 ) -> Result<Json<PruneStatus>, ApiError> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
+    let _lifecycle_operation = state
+        .runtime
+        .acquire_lifecycle_operation()
+        .await
+        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
 
     let records = state
         .runtime
@@ -273,7 +293,7 @@ pub(crate) async fn prune_proofs(
 
         state
             .runtime
-            .remove_task(&record.task_id)
+            .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
             .await
             .map_err(|err| {
                 ApiError::internal(format!("failed to prune task {}: {err}", record.task_id))

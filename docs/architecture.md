@@ -34,6 +34,9 @@ The architecture is organized around these invariants:
    When the lifecycle is inactive or draining, every worker, observer, cleanup loop, API mutation, and
    external-store write is fenced together. GCS object generations remain separate object-version
    CAS tokens; they are not instance epochs.
+9. Every operation spanning runtime, queue, or artifact state enters one process-local lifecycle
+   operation gate. Snapshot-derived removal uses the expected task incarnation, while cached-proof
+   admission revalidates the exact artifact descriptor before creating the root.
 
 ## System Architecture
 
@@ -42,6 +45,7 @@ flowchart TB
   Client["Taiko client"] --> API["v4 HTTP API"]
   API --> Identity["Request normalization and identity"]
   Identity --> Runtime["RuntimeManager<br/>authoritative task and artifact state"]
+  Identity --> OperationGate["Lifecycle operation gate<br/>process-local serialization"]
   Identity --> Factory["PipelineFactory<br/>pair and route selection"]
 
   Factory --> Engine["Engine<br/>stage orchestration"]
@@ -51,6 +55,9 @@ flowchart TB
   Pipeline --> Prover["Local, Boundless, SP1, or remote SGX prover"]
 
   Engine --> Observer["RuntimeObserver"]
+  OperationGate --> Runtime
+  OperationGate --> Engine
+  OperationGate --> Observer
   Observer --> Runtime
   Observer --> ArtifactCommit["Proof publication transaction"]
   ArtifactCommit --> Runtime
@@ -137,7 +144,7 @@ permanently strand a non-terminal runtime root.
 
 ## Runtime Lifecycle And Fencing
 
-The runtime uses one process-local lifecycle fence for the entire namespace. It has no distributed
+The runtime uses one process-local shutdown fence for the entire namespace. It has no distributed
 owner record, lease renewal, owner epoch, or task-scoped lifecycle fence. Immutable runtime-task
 incarnations and scheduler lease tokens only reject stale callbacks; they never grant write authority
 or bypass the namespace lifecycle state. `Active` permits mutations;
@@ -147,6 +154,36 @@ provider-submission permit acquired while `Active`; shutdown waits for those per
 deadline. Runtime-state and artifact-manifest GCS generations are retained
 because they provide exact object-version compare-and-swap and conditional deletion; they do not
 coordinate multiple instances.
+
+Cross-component state changes additionally use one exclusive lifecycle operation gate. The lock
+order is lifecycle operation gate, shutdown-fence read guard, publication mutation gate,
+authoritative runtime mutation, then store I/O. API admission holds it from root registration through queue enqueue; cancellation holds it
+from the authoritative-root snapshot through queue cancellation and runtime synchronization;
+cleanup holds it while revalidating the captured incarnation and removing queue children and the
+same runtime incarnation. Proof completion holds it from the durable outbox checkpoint through
+publication, root synchronization, and queue completion. Invalidation uses the same gate.
+
+```mermaid
+sequenceDiagram
+  participant A as Stale operation A
+  participant Gate as Lifecycle operation gate
+  participant Runtime
+  participant Queue
+  participant B as Replacement B
+
+  A->>A: Capture task incarnation A
+  B->>Gate: Replace A with incarnation B
+  Gate->>Runtime: Install B
+  Gate->>Queue: Enqueue B
+  B-->>Gate: Release
+  A->>Gate: Resume cleanup or cancellation
+  Gate->>Runtime: Compare expected incarnation A
+  Runtime-->>A: Mismatch; no queue or runtime mutation
+```
+
+The operation gate is deliberately process-local because deployments prohibit overlapping instances
+for one namespace. Task incarnations remain necessary as snapshot preconditions across async pauses;
+GCS generations remain necessary only as object CAS tokens. Neither is an instance epoch.
 
 After leasing a queue task, the engine captures a runtime-issued execution capability mapping every
 existing runtime task ID to its incarnation, then revalidates the unique queue lease token before

@@ -173,6 +173,11 @@ async fn invalidate_artifacts_inner(
     state: &AppState,
     req: &wire::InvalidateArtifactsRequest,
 ) -> Result<wire::InvalidateArtifactsData, ApiError> {
+    let _lifecycle_operation = state
+        .runtime
+        .acquire_lifecycle_operation()
+        .await
+        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
     let mut data = wire::InvalidateArtifactsData {
         dry_run: req.dry_run,
         ..wire::InvalidateArtifactsData::default()
@@ -649,7 +654,11 @@ async fn remove_invalidated_tasks(
             continue;
         }
 
-        match state.runtime.remove_task(&record.task_id).await {
+        match state
+            .runtime
+            .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
+            .await
+        {
             Ok(true) => data.tasks.removed = data.tasks.removed.saturating_add(1),
             Ok(false) => {}
             Err(err) => {
@@ -1642,6 +1651,16 @@ async fn submit_submission(
     let plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
         .await
         .map_err(Error::from_api_error)?;
+    let _lifecycle_operation =
+        state
+            .runtime
+            .acquire_lifecycle_operation()
+            .await
+            .map_err(|error| {
+                Error::from_api_error(ApiError::internal(format!(
+                    "runtime lifecycle unavailable: {error}"
+                )))
+            })?;
     match register_batch_task(state, submission, &plan, request_fingerprint)
         .await
         .map_err(Error::from_api_error)?

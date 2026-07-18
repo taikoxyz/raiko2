@@ -64,8 +64,10 @@ The runtime is governed by these invariants:
    overlap, and the application has no distributed owner lease, owner epoch, or ownership heartbeat.
 3. Namespaces are isolated persistence domains. They never share tasks, artifacts, checkpoints, or
    invalidation markers, although roots inside one namespace may reuse one canonical artifact.
-4. The runtime fence covers every task mutation and external-store write for the whole instance and
-   namespace. Inactive or draining runtimes reject new mutations and wait for in-flight writes. The
+4. The runtime shutdown fence covers every task mutation and external-store write for the whole
+   instance and namespace. A separate process-local lifecycle operation gate serializes admission,
+   replacement, cancellation, cleanup, invalidation, and proof completion across runtime, queue,
+   and artifact state. Inactive or draining runtimes reject new mutations and wait for in-flight writes. The
    only draining-time write is the request-ID checkpoint authorized by a provider-submission permit
    acquired before the fence closed; it must finish within the bounded shutdown deadline.
 5. Proof computation is not task completion. Completion requires a normalized proof to be durably

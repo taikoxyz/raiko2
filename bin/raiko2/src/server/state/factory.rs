@@ -17,6 +17,8 @@ pub struct PipelineBindingKey {
 pub trait PipelineFactory: Send + Sync {
     fn get(&self, network_pair: &str, key: PipelineKey) -> Option<Arc<dyn EngineHandle>>;
 
+    fn start_workers(&self, _workers: usize, _maintenance_interval: std::time::Duration) {}
+
     fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
         true
     }
@@ -57,6 +59,12 @@ impl PipelineFactory for StaticPipelineFactory {
                 pipeline: key,
             })
             .cloned()
+    }
+
+    fn start_workers(&self, workers: usize, maintenance_interval: std::time::Duration) {
+        for engine in self.engines.values() {
+            engine.start_workers(workers, maintenance_interval);
+        }
     }
 
     fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {

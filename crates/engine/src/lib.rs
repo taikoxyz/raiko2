@@ -77,6 +77,7 @@ pub enum EngineTaskSuccess {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineObserverError {
     RuntimeSync(String),
+    RuntimeInactive(String),
     ProofPublication(String),
     ProofInvalidated(String),
 }
@@ -85,6 +86,7 @@ impl std::fmt::Display for EngineObserverError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RuntimeSync(error)
+            | Self::RuntimeInactive(error)
             | Self::ProofPublication(error)
             | Self::ProofInvalidated(error) => formatter.write_str(error),
         }
@@ -126,6 +128,7 @@ impl From<EngineObserverError> for TaskExecutionError {
     fn from(error: EngineObserverError) -> Self {
         match error {
             EngineObserverError::RuntimeSync(error)
+            | EngineObserverError::RuntimeInactive(error)
             | EngineObserverError::ProofPublication(error) => Self::Retryable(error),
             EngineObserverError::ProofInvalidated(error) => Self::ProofInvalidated(error),
         }
@@ -303,11 +306,23 @@ enum LeaseInterruption {
 
 #[async_trait]
 impl ProverProgressObserver for EngineProgressObserver {
-    async fn on_progress(&self, progress: &ProverProgress) -> raiko2_primitives::RaikoResult<()> {
-        self.observer
+    async fn on_progress(
+        &self,
+        progress: &ProverProgress,
+    ) -> Result<(), raiko2_prover::ProgressPersistenceError> {
+        match self
+            .observer
             .on_task_progress(&self.task_id, &self.task, progress)
             .await
-            .map_err(|error| raiko2_primitives::RaikoError::Guest(error.to_string()))
+        {
+            Ok(()) => Ok(()),
+            Err(EngineObserverError::RuntimeInactive(error)) => {
+                Err(raiko2_prover::ProgressPersistenceError::Permanent(error))
+            }
+            Err(error) => Err(raiko2_prover::ProgressPersistenceError::Retryable(
+                error.to_string(),
+            )),
+        }
     }
 
     async fn load_pending_proof_checkpoint(
@@ -688,7 +703,8 @@ where
                 (
                     EngineTaskSuccess::Proof { proof, .. },
                     EngineObserverError::ProofPublication(error)
-                    | EngineObserverError::RuntimeSync(error),
+                    | EngineObserverError::RuntimeSync(error)
+                    | EngineObserverError::RuntimeInactive(error),
                 ) => TaskExecutionError::ProofPublication {
                     error,
                     proof: Box::new(proof),

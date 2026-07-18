@@ -29,8 +29,19 @@ The business and deployment boundary, such as `devnet` or `mainnet`. It scopes r
 storage, but does not identify a concrete server instance.
 
 ### Runtime Namespace
-The immutable ownership boundary for one raiko2 instance. A GCS-backed namespace has one renewable
-owner lease, and both environment and namespace participate in task fingerprints and object names.
+The immutable persistence boundary for one raiko2 instance. Exactly one process may use a namespace
+at a time, old and replacement processes never overlap, and namespaces never share data. This is a
+deployment invariant; the application has no distributed owner lease or owner epoch. Both
+environment and namespace participate in task fingerprints and object names.
+
+### Global Runtime Fence
+The process-wide lifecycle gate for every task and external-store mutation in one namespace. It
+allows writes while active and waits for in-flight writes before entering draining. It is not a
+task-local lock or multi-instance coordination protocol.
+
+### GCS Generation
+The native object-version token used for runtime-state compare-and-swap and exact manifest
+invalidation or deletion. It versions one object and is not an instance epoch or ownership token.
 
 ### Stage Lease
 The in-memory scheduler ownership of one executable stage. It remains held through provider

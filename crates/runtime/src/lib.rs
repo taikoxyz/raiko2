@@ -9,7 +9,7 @@ mod artifact_store;
 mod publication;
 
 pub use artifact_store::{
-    GcsProofArtifactStore, MemoryProofArtifactStore, NamespaceOwnerLease, ProofArtifactKey,
+    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactDescriptor, ProofArtifactKey,
     ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore,
     RuntimeStateObject, RuntimeStateWriteResult, validate_scope_component,
 };
@@ -20,7 +20,7 @@ use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
@@ -54,30 +54,9 @@ pub struct RuntimeManager {
     state: RwLock<RuntimeState>,
     generation: StdMutex<Option<i64>>,
     mutation: Mutex<()>,
-    owner: Mutex<Option<artifact_store::NamespaceOwnerLease>>,
-    authority: AtomicU8,
+    lifecycle_gate: RwLock<()>,
+    active: AtomicBool,
     state_coherent: AtomicBool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-enum RuntimeAuthorityState {
-    Active = 0,
-    Unknown = 1,
-    Lost = 2,
-    Draining = 3,
-}
-
-impl RuntimeAuthorityState {
-    fn load(value: &AtomicU8) -> Self {
-        match value.load(Ordering::Acquire) {
-            0 => Self::Active,
-            1 => Self::Unknown,
-            2 => Self::Lost,
-            3 => Self::Draining,
-            _ => unreachable!("runtime authority state is always written from the enum"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +82,17 @@ pub struct ProofArtifactRegistration {
     pub generation: Option<i64>,
 }
 
+impl ProofArtifactRegistration {
+    #[must_use]
+    pub fn descriptor(&self) -> ProofArtifactDescriptor {
+        ProofArtifactDescriptor {
+            proof_uri: self.proof_uri.clone(),
+            content_hash: self.content_hash.clone(),
+            generation: self.generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProofArtifactRecord {
     pub environment: String,
@@ -115,6 +105,17 @@ pub struct ProofArtifactRecord {
     pub generation: Option<i64>,
     pub invalidated_at: Option<i64>,
     pub updated_at: i64,
+}
+
+impl ProofArtifactRecord {
+    #[must_use]
+    pub fn descriptor(&self) -> ProofArtifactDescriptor {
+        ProofArtifactDescriptor {
+            proof_uri: self.proof_uri.clone(),
+            content_hash: self.content_hash.clone(),
+            generation: self.generation,
+        }
+    }
 }
 
 impl RuntimeManager {
@@ -141,8 +142,8 @@ impl RuntimeManager {
             state: RwLock::new(RuntimeState::default()),
             generation: StdMutex::new(None),
             mutation: Mutex::new(()),
-            owner: Mutex::new(None),
-            authority: AtomicU8::new(RuntimeAuthorityState::Active as u8),
+            lifecycle_gate: RwLock::new(()),
+            active: AtomicBool::new(true),
             state_coherent: AtomicBool::new(true),
         })
     }
@@ -155,117 +156,39 @@ impl RuntimeManager {
         Self::with_store(store)
     }
 
-    pub async fn acquire_namespace_owner(&self, lease_secs: u64) -> Result<()> {
-        let owner_id = uuid::Uuid::new_v4().to_string();
-        let lease = self
-            .store
-            .claim_namespace_owner(&owner_id, now_secs(), lease_secs)
-            .await?
-            .context("runtime namespace ownership was not acquired")?;
-        *self.owner.lock().await = Some(lease);
-        self.authority
-            .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
-        Ok(())
+    pub async fn begin_draining(&self) {
+        let _lifecycle = self.lifecycle_gate.write().await;
+        self.active.store(false, Ordering::Release);
     }
 
-    /// Renews GCS namespace ownership. `false` means another owner superseded this process.
-    pub async fn renew_namespace_owner(&self, lease_secs: u64) -> Result<bool> {
-        let mut owner = self.owner.lock().await;
-        let lease = owner.clone();
-        let Some(lease) = lease else {
-            self.authority
-                .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
-            return Ok(true);
-        };
-        match self
-            .store
-            .renew_namespace_owner(&lease, now_secs(), lease_secs)
-            .await
-        {
-            Ok(Some(renewed)) => {
-                *owner = Some(renewed);
-                self.authority
-                    .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
-                Ok(true)
-            }
-            Ok(None) => {
-                self.authority
-                    .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
-                Ok(false)
-            }
-            Err(error) => {
-                self.authority
-                    .store(RuntimeAuthorityState::Unknown as u8, Ordering::Release);
-                Err(error)
-            }
-        }
+    #[must_use]
+    pub fn accepts_mutations(&self) -> bool {
+        self.active.load(Ordering::Acquire) && self.state_coherent.load(Ordering::Acquire)
     }
 
-    /// Stops admissions and conditionally releases the namespace lease held by this process.
-    pub async fn release_namespace_owner(&self) -> Result<bool> {
-        self.authority
-            .store(RuntimeAuthorityState::Draining as u8, Ordering::Release);
-        let _mutation = self.mutation.lock().await;
-        let lease = self.owner.lock().await.clone();
-        let Some(lease) = lease else {
-            return Ok(true);
-        };
-        let released = self.store.release_namespace_owner(&lease).await?;
-        if released {
-            *self.owner.lock().await = None;
-        } else {
-            self.authority
-                .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
-        }
-        Ok(released)
-    }
-
-    pub fn begin_draining(&self) {
-        self.authority
-            .store(RuntimeAuthorityState::Draining as u8, Ordering::Release);
-    }
-
-    /// Verifies that this process still owns its authoritative runtime namespace.
+    /// Verifies that the single-instance runtime is active and its authoritative store is readable.
     pub async fn check_readiness(&self) -> Result<()> {
-        anyhow::ensure!(
-            !matches!(
-                RuntimeAuthorityState::load(&self.authority),
-                RuntimeAuthorityState::Lost | RuntimeAuthorityState::Draining
-            ),
-            "runtime namespace ownership is unavailable"
-        );
-        let lease = self.owner.lock().await.clone();
-        if let Some(lease) = lease.as_ref() {
-            let verified = match self.store.verify_namespace_owner(lease, now_secs()).await {
-                Ok(verified) => verified,
-                Err(error) => {
-                    self.authority
-                        .store(RuntimeAuthorityState::Unknown as u8, Ordering::Release);
-                    return Err(error);
-                }
-            };
-            if !verified {
-                self.authority
-                    .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
-                anyhow::bail!("runtime namespace ownership is unavailable");
-            }
-        }
-        self.authority
-            .store(RuntimeAuthorityState::Active as u8, Ordering::Release);
+        self.ensure_active_lifecycle()?;
+        let _mutation = self.mutation.lock().await;
+        self.ensure_active_lifecycle()?;
+        let stored = self
+            .store
+            .load_runtime_state()
+            .await
+            .context("authoritative runtime store is unavailable")?;
         if !self.state_coherent.load(Ordering::Acquire) {
-            let _mutation = self.mutation.lock().await;
-            self.reload_authoritative_state()
-                .await
-                .context("runtime state generation is not coherent with the authoritative store")?;
+            self.install_runtime_state_object(stored).await?;
         }
+        self.ensure_active()
+    }
+
+    fn ensure_active_lifecycle(&self) -> Result<()> {
+        anyhow::ensure!(self.active.load(Ordering::Acquire), "runtime is draining");
         Ok(())
     }
 
     fn ensure_active(&self) -> Result<()> {
-        anyhow::ensure!(
-            RuntimeAuthorityState::load(&self.authority) == RuntimeAuthorityState::Active,
-            "runtime namespace ownership is unavailable"
-        );
+        self.ensure_active_lifecycle()?;
         anyhow::ensure!(
             self.state_coherent.load(Ordering::Acquire),
             "runtime state generation is not coherent with the authoritative store"
@@ -276,29 +199,6 @@ impl RuntimeManager {
     pub async fn initialize(&self) -> Result<()> {
         let _mutation = self.mutation.lock().await;
         self.reload_authoritative_state().await
-    }
-
-    /// Advances the durable state generation after acquiring namespace ownership.
-    ///
-    /// A previous owner may still have one state write in flight when its lease expires. Rewriting
-    /// the loaded snapshot with compare-and-swap invalidates that owner's cached generation before
-    /// this process admits recovered work.
-    pub async fn fence_namespace_owner(&self) -> Result<()> {
-        const MAX_ATTEMPTS: usize = 8;
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            match self.mutate(|_| Ok(())).await {
-                Ok(()) => return Ok(()),
-                Err(_) if attempt < MAX_ATTEMPTS => {
-                    self.initialize().await?;
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => {
-                    return Err(error).context("failed to fence runtime namespace ownership");
-                }
-            }
-        }
-        unreachable!("namespace fencing loop returns on every terminal branch")
     }
 
     #[must_use]
@@ -319,6 +219,8 @@ impl RuntimeManager {
     async fn mutate<T>(&self, update: impl Fn(&mut RuntimeState) -> Result<T>) -> Result<T> {
         const MAX_ATTEMPTS: usize = 3;
 
+        let _lifecycle = self.lifecycle_gate.read().await;
+        self.ensure_active()?;
         let _mutation = self.mutation.lock().await;
         let mut last_error = None;
         for attempt in 1..=MAX_ATTEMPTS {
@@ -341,7 +243,6 @@ impl RuntimeManager {
                     return Ok(output);
                 }
                 Ok(RuntimeStateWriteResult::Conflict(observed)) => {
-                    self.verify_authority_after_write_conflict().await?;
                     if let Some(observed) = observed.as_ref()
                         && observed.bytes == next_bytes
                     {
@@ -364,7 +265,6 @@ impl RuntimeManager {
                             ));
                         }
                     };
-                    self.verify_authority_after_write_conflict().await?;
                     if let Some(observed) = observed.as_ref()
                         && observed.bytes == next_bytes
                     {
@@ -438,31 +338,11 @@ impl RuntimeManager {
         self.install_runtime_state_object(stored).await
     }
 
-    async fn verify_authority_after_write_conflict(&self) -> Result<()> {
-        let lease = self.owner.lock().await.clone();
-        let Some(lease) = lease.as_ref() else {
-            anyhow::bail!(
-                "runtime state generation changed without an active namespace owner lease"
-            );
-        };
-        match self.store.verify_namespace_owner(lease, now_secs()).await {
-            Ok(true) => Ok(()),
-            Ok(false) => {
-                self.authority
-                    .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
-                anyhow::bail!("runtime namespace ownership is unavailable")
-            }
-            Err(error) => {
-                self.authority
-                    .store(RuntimeAuthorityState::Unknown as u8, Ordering::Release);
-                Err(error)
-            }
-        }
-    }
-
-    async fn fence_external_mutation(&self) -> Result<()> {
-        self.check_readiness().await?;
-        self.mutate(|_| Ok(())).await
+    async fn fence_external_mutation(&self) -> Result<tokio::sync::RwLockReadGuard<'_, ()>> {
+        self.mutate(|_| Ok(())).await?;
+        let lifecycle = self.lifecycle_gate.read().await;
+        self.ensure_active()?;
+        Ok(lifecycle)
     }
 
     fn artifact_key(
@@ -487,13 +367,15 @@ impl RuntimeManager {
         proof_ref: &str,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
-        self.fence_external_mutation().await?;
-        self.store
-            .put_if_absent(
-                &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
-                bytes,
-            )
+        let lifecycle = self.fence_external_mutation().await?;
+        let key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let publication = self.store.put_if_absent(&key, bytes).await?;
+        drop(lifecycle);
+        let _lifecycle = self
+            .fence_external_mutation()
             .await
+            .context("global runtime fence changed during artifact publication")?;
+        Ok(publication)
     }
 
     pub async fn read_proof_artifact_bytes(
@@ -538,7 +420,7 @@ impl RuntimeManager {
         generation: Option<i64>,
         expected_content_hash: &str,
     ) -> Result<()> {
-        self.fence_external_mutation().await?;
+        let _lifecycle = self.fence_external_mutation().await?;
         self.store
             .delete(
                 &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
@@ -910,6 +792,31 @@ impl RuntimeManager {
             .await
     }
 
+    pub async fn remove_proof_artifact_if_descriptor(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<bool> {
+        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        let expected = descriptor.clone();
+        self.mutate(move |state| {
+            if state
+                .artifacts
+                .get(&key)
+                .is_some_and(|record| record.descriptor() == expected)
+            {
+                state.artifacts.remove(&key);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+        .await
+    }
+
     pub async fn mark_proof_artifact_invalidated(
         &self,
         network_pair: &str,
@@ -918,16 +825,42 @@ impl RuntimeManager {
         proof_ref: &str,
         content_hash: &str,
     ) -> Result<bool> {
-        self.check_readiness().await?;
+        let Some(record) = self
+            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if record.content_hash != content_hash {
+            return Ok(false);
+        }
+        self.mark_proof_artifact_descriptor_invalidated(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            &record.descriptor(),
+        )
+        .await
+    }
+
+    pub async fn mark_proof_artifact_descriptor_invalidated(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<bool> {
         let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
         let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        let expected_content_hash = content_hash.to_string();
+        let expected_descriptor = descriptor.clone();
         let invalidated_generation = self
             .mutate(move |state| {
                 let Some(record) = state.artifacts.get_mut(&key) else {
                     return Ok(None);
                 };
-                if record.content_hash != expected_content_hash {
+                if record.descriptor() != expected_descriptor {
                     return Ok(None);
                 }
                 record.invalidated_at.get_or_insert_with(now_ts);
@@ -936,11 +869,14 @@ impl RuntimeManager {
             })
             .await?;
         if let Some(generation) = invalidated_generation {
+            let lifecycle = self.fence_external_mutation().await?;
             self.store
-                .mark_invalidated(&object_key, generation, content_hash)
+                .mark_invalidated(&object_key, generation, &descriptor.content_hash)
                 .await?;
+            drop(lifecycle);
+            let _lifecycle = self.fence_external_mutation().await?;
             self.store
-                .delete(&object_key, generation, content_hash)
+                .delete(&object_key, generation, &descriptor.content_hash)
                 .await?;
         }
         Ok(invalidated_generation.is_some())
@@ -957,26 +893,53 @@ impl RuntimeManager {
         let local_record = self
             .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
             .await?;
-        let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
-        let generation = match self.store.get(&object_key).await? {
-            Some(object) if object.content_hash == content_hash => object.generation,
-            Some(_) => return Ok(false),
-            None => {
-                return Ok(local_record.is_some_and(|record| {
-                    record.content_hash == content_hash && record.invalidated_at.is_some()
-                }));
-            }
+        let Some(record) = local_record.filter(|record| record.content_hash == content_hash) else {
+            return Ok(false);
         };
+        self.proof_artifact_descriptor_is_invalidated(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            &record.descriptor(),
+        )
+        .await
+    }
+
+    pub async fn proof_artifact_descriptor_is_invalidated(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<bool> {
+        let local_record = self
+            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
+            .await?;
         if local_record.as_ref().is_some_and(|record| {
-            record.content_hash == content_hash
-                && record.generation == generation
-                && record.invalidated_at.is_some()
+            record.descriptor() == *descriptor && record.invalidated_at.is_some()
         }) {
             return Ok(true);
         }
+        let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
         self.store
-            .is_invalidated(&object_key, generation, content_hash)
+            .is_invalidated(&object_key, descriptor.generation, &descriptor.content_hash)
             .await
+    }
+
+    pub async fn proof_artifact_descriptor_is_current(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<bool> {
+        Ok(self
+            .read_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .is_some_and(|object| object.descriptor() == *descriptor))
     }
 
     pub async fn upsert_pending_proof_publication(
@@ -987,7 +950,7 @@ impl RuntimeManager {
         proof_ref: &str,
         proof_bytes: &[u8],
     ) -> Result<()> {
-        self.fence_external_mutation().await?;
+        let _lifecycle = self.fence_external_mutation().await?;
         let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
         match self.store.put_if_absent(&key, proof_bytes).await? {
             ProofArtifactPutResult::Created(_) | ProofArtifactPutResult::AlreadyExists(_) => Ok(()),
@@ -1037,11 +1000,11 @@ impl RuntimeManager {
         route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<bool> {
-        self.fence_external_mutation().await?;
         let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
         let Some(object) = self.store.get(&key).await? else {
             return Ok(false);
         };
+        let _lifecycle = self.fence_external_mutation().await?;
         self.store
             .delete(&key, object.generation, &object.content_hash)
             .await?;
@@ -1055,10 +1018,6 @@ impl RuntimeManager {
         route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<bool> {
-        // Advance the authoritative state generation before touching the shared tombstone. A
-        // superseded process cannot pass this CAS fence, and a new owner inherits every operation
-        // that did pass it.
-        self.fence_external_mutation().await?;
         let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
         let canonical = self.store.get(&object_key).await?;
         if let Some(object) = canonical.as_ref() {
@@ -1072,12 +1031,12 @@ impl RuntimeManager {
                 generation: object.generation,
             })
             .await?;
-            self.mark_proof_artifact_invalidated(
+            self.mark_proof_artifact_descriptor_invalidated(
                 network_pair,
                 pipeline_key,
                 route,
                 proof_ref,
-                &object.content_hash,
+                &object.descriptor(),
             )
             .await?;
         }
@@ -1346,35 +1305,9 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    include!("ownership_state_tests.rs");
-
-    fn proposal_registration(
-        task_id: &str,
-        proposal_id: u64,
-        pipeline_key: PipelineKey,
-    ) -> TaskRegistration {
-        TaskRegistration {
-            task_id: task_id.into(),
-            pipeline_key: Some(pipeline_key),
-            route: pipeline_key.route(),
-            task_kind: "proposal".into(),
-            proposal_id: Some(proposal_id),
-            proof_ids: Vec::new(),
-            metadata: serde_json::json!({}),
-            request_fingerprint: None,
-        }
-    }
 
     #[tokio::test]
     async fn memory_runtime_deduplicates_request_fingerprint() -> Result<()> {
@@ -1408,103 +1341,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn namespace_fence_rejects_writes_from_previous_generation() -> Result<()> {
-        let store = Arc::new(MemoryProofArtifactStore::new(
-            "test".into(),
-            "shared".into(),
-        )?);
-        let first = RuntimeManager::with_store(store.clone())?;
-        first.initialize().await?;
-        first.fence_namespace_owner().await?;
-
-        let second = RuntimeManager::with_store(store)?;
-        second.initialize().await?;
-        second.fence_namespace_owner().await?;
-
-        let error = first
-            .register_task(TaskRegistration {
-                task_id: "stale-owner-task".into(),
-                pipeline_key: Some(PipelineKey::ShastaNative),
-                route: PipelineKey::ShastaNative.route(),
-                task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
-                metadata: serde_json::json!({}),
-                request_fingerprint: None,
-            })
-            .await
-            .expect_err("the previous state generation must be fenced");
-
-        assert!(error.to_string().contains("generation changed"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stale_generation_cannot_publish_invalidation_marker() -> Result<()> {
-        let store = Arc::new(MemoryProofArtifactStore::new(
-            "test".into(),
-            "shared-invalidation".into(),
-        )?);
-        let first = RuntimeManager::with_store(store.clone())?;
-        first.initialize().await?;
-        first.fence_namespace_owner().await?;
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let proof_ref = "proposal-stale-invalidation";
-        let publication = first
-            .publish_proof_artifact_bytes(
-                "l1-l2",
-                pipeline,
-                route,
-                proof_ref,
-                br#"{"proof":"0x01"}"#,
-            )
-            .await?;
-        let artifact = publication.object();
-        first
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "l1-l2".into(),
-                proof_ref: proof_ref.into(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: artifact.proof_uri.clone(),
-                content_hash: artifact.content_hash.clone(),
-                generation: artifact.generation,
-            })
-            .await?;
-
-        let second = RuntimeManager::with_store(store.clone())?;
-        second.initialize().await?;
-        second.fence_namespace_owner().await?;
-
-        first
-            .mark_proof_artifact_invalidated(
-                "l1-l2",
-                pipeline,
-                route,
-                proof_ref,
-                &artifact.content_hash,
-            )
-            .await
-            .expect_err("stale runtime generation must fail before tombstone publication");
-        assert!(
-            !store
-                .is_invalidated(
-                    &RuntimeManager::artifact_key("l1-l2", pipeline, route, proof_ref),
-                    artifact.generation,
-                    &artifact.content_hash,
-                )
-                .await?
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn inactive_runtime_is_not_ready() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "inactive".into())?;
-        runtime
-            .authority
-            .store(RuntimeAuthorityState::Lost as u8, Ordering::Release);
+        runtime.begin_draining().await;
         assert!(runtime.check_readiness().await.is_err());
         Ok(())
     }

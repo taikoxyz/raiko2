@@ -14,8 +14,15 @@
   `environment` configuration value rather than inferred from `chain_id` or a deployment name.
   Proof tasks and artifacts from different environments are isolated even when every other request
   field is identical.
-- **Runtime namespace**: The immutable single-instance ownership and storage boundary inside one
-  proof environment. It is distinct from the business environment and is part of task identity.
+- **Runtime namespace**: The immutable single-instance persistence boundary inside one proof
+  environment. Exactly one process uses it at a time, replacement processes never overlap, and
+  namespaces never share data. It is distinct from the business environment and is part of task
+  identity. The application intentionally has no distributed owner lease, owner epoch, or
+  ownership heartbeat.
+- **Global runtime fence**: The process-wide lifecycle gate that covers all task and external-store
+  mutations for the namespace. Entering draining waits for in-flight writes and rejects new ones.
+- **GCS generation**: A per-object version used for runtime-state CAS and exact artifact
+  invalidation/deletion. It is not an instance epoch or a distributed lock.
 - **Proof task identity**: The identity of proof work for one normalized request, concrete proof
   type, execution route, proof environment, runtime namespace, and effective prover configuration.
 - **Proof artifact identity**: The identity of a published proof for one concrete proof type,

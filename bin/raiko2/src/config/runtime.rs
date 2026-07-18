@@ -17,10 +17,6 @@ pub struct RuntimeStoreConfig {
     pub bucket: Option<String>,
     #[serde(default = "default_prefix")]
     pub prefix: String,
-    #[serde(default = "default_owner_heartbeat_secs")]
-    pub owner_heartbeat_secs: u64,
-    #[serde(default = "default_owner_lease_secs")]
-    pub owner_lease_secs: u64,
 }
 
 impl Default for RuntimeStoreConfig {
@@ -29,8 +25,6 @@ impl Default for RuntimeStoreConfig {
             backend: RuntimeStoreBackend::Memory,
             bucket: None,
             prefix: default_prefix(),
-            owner_heartbeat_secs: default_owner_heartbeat_secs(),
-            owner_lease_secs: default_owner_lease_secs(),
         }
     }
 }
@@ -57,12 +51,6 @@ impl RuntimeConfig {
     pub fn validate(&self) -> Result<()> {
         validate_scope_component("runtime.environment", &self.environment)?;
         validate_scope_component("runtime.namespace", &self.namespace)?;
-        if self.store.owner_heartbeat_secs == 0 {
-            bail!("runtime.store.owner_heartbeat_secs must be greater than zero");
-        }
-        if self.store.owner_lease_secs <= self.store.owner_heartbeat_secs {
-            bail!("runtime.store.owner_lease_secs must exceed owner_heartbeat_secs");
-        }
         match self.store.backend {
             RuntimeStoreBackend::Memory => {
                 if self.store.bucket.is_some() {
@@ -96,14 +84,6 @@ impl RuntimeConfig {
 
 fn default_prefix() -> String {
     "raiko2/runtime/v1".to_string()
-}
-
-const fn default_owner_heartbeat_secs() -> u64 {
-    15
-}
-
-const fn default_owner_lease_secs() -> u64 {
-    60
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -25,6 +24,24 @@ pub struct ProofArtifactObject {
     pub content_hash: String,
     pub generation: Option<i64>,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProofArtifactDescriptor {
+    pub proof_uri: String,
+    pub content_hash: String,
+    pub generation: Option<i64>,
+}
+
+impl ProofArtifactObject {
+    #[must_use]
+    pub fn descriptor(&self) -> ProofArtifactDescriptor {
+        ProofArtifactDescriptor {
+            proof_uri: self.proof_uri.clone(),
+            content_hash: self.content_hash.clone(),
+            generation: self.generation,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,14 +77,6 @@ pub struct RuntimeStateObject {
 pub enum RuntimeStateWriteResult {
     Stored { generation: Option<i64> },
     Conflict(Option<RuntimeStateObject>),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct NamespaceOwnerLease {
-    pub owner_id: String,
-    pub epoch: u64,
-    pub expires_at_secs: u64,
-    pub generation: Option<i64>,
 }
 
 #[async_trait]
@@ -113,28 +122,6 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         bytes: &[u8],
         expected_generation: Option<i64>,
     ) -> Result<RuntimeStateWriteResult>;
-
-    async fn claim_namespace_owner(
-        &self,
-        owner_id: &str,
-        now_secs: u64,
-        lease_secs: u64,
-    ) -> Result<Option<NamespaceOwnerLease>>;
-
-    async fn renew_namespace_owner(
-        &self,
-        lease: &NamespaceOwnerLease,
-        now_secs: u64,
-        lease_secs: u64,
-    ) -> Result<Option<NamespaceOwnerLease>>;
-
-    async fn verify_namespace_owner(
-        &self,
-        lease: &NamespaceOwnerLease,
-        now_secs: u64,
-    ) -> Result<bool>;
-
-    async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool>;
 }
 
 #[derive(Debug)]
@@ -151,7 +138,6 @@ struct MemoryStoreInner {
     contents: HashMap<(ProofArtifactKey, String), Vec<u8>>,
     invalidations: HashSet<(ProofArtifactKey, Option<i64>, String)>,
     runtime_state: Option<RuntimeStateObject>,
-    namespace_owner: Option<NamespaceOwnerLease>,
 }
 
 #[derive(Clone, Debug)]
@@ -385,102 +371,6 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
             generation: Some(generation),
         })
     }
-
-    async fn claim_namespace_owner(
-        &self,
-        owner_id: &str,
-        now_secs: u64,
-        lease_secs: u64,
-    ) -> Result<Option<NamespaceOwnerLease>> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let epoch = if let Some(current) = inner.namespace_owner.as_ref() {
-            anyhow::ensure!(
-                current.owner_id == owner_id || current.expires_at_secs <= now_secs,
-                "runtime namespace is owned by {} until {}",
-                current.owner_id,
-                current.expires_at_secs
-            );
-            if current.owner_id == owner_id {
-                current.epoch
-            } else {
-                current.epoch.saturating_add(1)
-            }
-        } else {
-            1
-        };
-        let lease = NamespaceOwnerLease {
-            owner_id: owner_id.to_string(),
-            epoch,
-            expires_at_secs: now_secs.saturating_add(lease_secs),
-            generation: Some(Self::next_generation(&mut inner)),
-        };
-        inner.namespace_owner = Some(lease.clone());
-        Ok(Some(lease))
-    }
-
-    async fn renew_namespace_owner(
-        &self,
-        lease: &NamespaceOwnerLease,
-        now_secs: u64,
-        lease_secs: u64,
-    ) -> Result<Option<NamespaceOwnerLease>> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let Some(current) = inner.namespace_owner.as_ref() else {
-            return Ok(None);
-        };
-        if current.owner_id != lease.owner_id || current.epoch != lease.epoch {
-            return Ok(None);
-        }
-        let renewed = NamespaceOwnerLease {
-            owner_id: lease.owner_id.clone(),
-            epoch: lease.epoch,
-            expires_at_secs: now_secs.saturating_add(lease_secs),
-            generation: Some(Self::next_generation(&mut inner)),
-        };
-        inner.namespace_owner = Some(renewed.clone());
-        Ok(Some(renewed))
-    }
-
-    async fn verify_namespace_owner(
-        &self,
-        lease: &NamespaceOwnerLease,
-        now_secs: u64,
-    ) -> Result<bool> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        Ok(inner.namespace_owner.as_ref().is_some_and(|current| {
-            current.owner_id == lease.owner_id
-                && current.epoch == lease.epoch
-                && current.generation == lease.generation
-                && current.expires_at_secs > now_secs
-        }))
-    }
-
-    async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let Some(current) = inner.namespace_owner.as_ref() else {
-            return Ok(false);
-        };
-        if current.owner_id != lease.owner_id
-            || current.epoch != lease.epoch
-            || current.generation != lease.generation
-        {
-            return Ok(false);
-        }
-        inner.namespace_owner = None;
-        Ok(true)
-    }
 }
 
 pub fn validate_scope_component(name: &str, value: &str) -> Result<()> {
@@ -524,7 +414,6 @@ pub fn encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context as _;
     use raiko2_pipeline::PipelineKey;
 
     fn key() -> ProofArtifactKey {
@@ -647,60 +536,6 @@ mod tests {
         let repaired = store.put_if_absent(&key, b"proof-a").await?;
         assert!(matches!(repaired, ProofArtifactPutResult::AlreadyExists(_)));
         assert_eq!(store.get(&key).await?, Some(first));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn memory_namespace_owner_lease_supports_expiry_and_takeover() -> Result<()> {
-        let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-owner".into())?;
-        let first = store
-            .claim_namespace_owner("owner-a", 100, 10)
-            .await?
-            .context("first owner must receive a lease")?;
-
-        assert!(store.verify_namespace_owner(&first, 109).await?);
-        assert!(
-            store
-                .claim_namespace_owner("owner-b", 109, 10)
-                .await
-                .is_err()
-        );
-
-        let renewed = store
-            .renew_namespace_owner(&first, 105, 20)
-            .await?
-            .context("current owner must renew")?;
-        assert_eq!(renewed.epoch, first.epoch);
-        assert_eq!(renewed.expires_at_secs, 125);
-        assert_ne!(renewed.generation, first.generation);
-        assert!(!store.verify_namespace_owner(&first, 105).await?);
-        assert!(store.verify_namespace_owner(&renewed, 124).await?);
-        let mut superseded = first.clone();
-        superseded.owner_id = "owner-b".to_string();
-        assert!(
-            store
-                .renew_namespace_owner(&superseded, 106, 20)
-                .await?
-                .is_none(),
-            "a different owner must not renew the active lease"
-        );
-        assert!(store.verify_namespace_owner(&renewed, 124).await?);
-
-        let second = store
-            .claim_namespace_owner("owner-b", 125, 10)
-            .await?
-            .context("expired owner must be replaceable")?;
-        assert_eq!(second.epoch, renewed.epoch + 1);
-        assert!(!store.verify_namespace_owner(&renewed, 125).await?);
-        assert!(store.verify_namespace_owner(&second, 125).await?);
-
-        let empty = MemoryProofArtifactStore::new("devnet".into(), "raiko2-no-owner".into())?;
-        assert!(
-            empty
-                .renew_namespace_owner(&first, 100, 10)
-                .await?
-                .is_none()
-        );
         Ok(())
     }
 }

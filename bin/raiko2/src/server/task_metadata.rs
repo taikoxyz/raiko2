@@ -8,6 +8,7 @@ use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
 };
+use raiko2_runtime::ProofArtifactDescriptor;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -95,6 +96,8 @@ pub(crate) struct RuntimeMetadata {
     pub(crate) proposals: BTreeMap<String, TaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate: Option<TaskRuntimeMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_artifact: Option<ProofArtifactDescriptor>,
 }
 
 impl RuntimeMetadata {

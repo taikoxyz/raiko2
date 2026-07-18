@@ -43,9 +43,7 @@ use super::task_metadata::{
     proposal_task_ref, root_proof_artifact_refs,
 };
 use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
-use raiko2_runtime::{
-    MemoryProofArtifactStore, ProofArtifactRegistration, ProofArtifactStore, RuntimeManager,
-};
+use raiko2_runtime::{MemoryProofArtifactStore, ProofArtifactRegistration, RuntimeManager};
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
     let status = res.status();
@@ -1155,7 +1153,7 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
 }
 
 #[tokio::test]
-async fn e2e_ready_fails_after_runtime_namespace_takeover() {
+async fn e2e_ready_fails_after_runtime_begins_draining() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
         Ok(value) => value,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -1171,19 +1169,11 @@ async fn e2e_ready_fails_after_runtime_namespace_takeover() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     let store = Arc::new(
-        MemoryProofArtifactStore::new("test".into(), "ready-owner-takeover".into())
+        MemoryProofArtifactStore::new("test".into(), "ready-draining".into())
             .expect("memory artifact store"),
     );
-    let runtime = Arc::new(RuntimeManager::with_store(store.clone()).expect("runtime manager"));
-    runtime
-        .acquire_namespace_owner(60)
-        .await
-        .expect("acquire runtime namespace");
-    store
-        .claim_namespace_owner("replacement-owner", u64::MAX, 60)
-        .await
-        .expect("replace expired owner")
-        .expect("replacement lease");
+    let runtime = Arc::new(RuntimeManager::with_store(store).expect("runtime manager"));
+    runtime.begin_draining().await;
     let state = AppState::from_parts(
         Arc::new(config),
         Arc::new(StaticPipelineFactory::default()),
@@ -1199,7 +1189,7 @@ async fn e2e_ready_fails_after_runtime_namespace_takeover() {
         body["runtime"]["error"]
             .as_str()
             .expect("runtime error")
-            .contains("runtime namespace ownership is unavailable")
+            .contains("runtime is draining")
     );
     assert_eq!(body["reth"]["ok"], true);
     assert_eq!(body["queue"]["ok"], true);

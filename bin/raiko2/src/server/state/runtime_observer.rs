@@ -10,8 +10,8 @@ use raiko2_prover::{
     BoundlessSubmissionResume, NetworkProverBackend, PendingProofCheckpoint, ProverProgress,
 };
 use raiko2_runtime::{
-    ProofArtifactPublicationInvalidated, ProofArtifactPutResult, RunnerStatus, RuntimeManager,
-    RuntimeTaskRecord,
+    ProofArtifactDescriptor, ProofArtifactPublicationInvalidated, ProofArtifactPutResult,
+    RunnerStatus, RuntimeManager, RuntimeTaskRecord,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -47,7 +47,7 @@ struct PublishedProofCommit {
     proof_uris: HashMap<String, String>,
     synchronized_roots: HashSet<String>,
     root_ref: String,
-    content_hash: String,
+    descriptor: ProofArtifactDescriptor,
 }
 
 enum ProofCommitAttempt {
@@ -554,7 +554,7 @@ impl RuntimeObserver {
             proof_uris,
             synchronized_roots: HashSet::new(),
             root_ref,
-            content_hash: artifact.content_hash.clone(),
+            descriptor: artifact.descriptor(),
         }))
     }
 
@@ -620,6 +620,7 @@ impl RuntimeObserver {
                         metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, terminal);
                         metadata.runtime.active_stage = active_stage;
                         metadata.runtime.last_event = Some(terminal.to_string());
+                        metadata.runtime.proof_artifact = None;
                     })?;
                     record.updated_at = updated_at;
                     Ok(())
@@ -752,13 +753,35 @@ impl RuntimeObserver {
             }
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
-        let (updated_roots, synchronized_roots) = match self
-            .sync_proof_success(id, task, stage, &publication.proof_uris)
+        match self
+            .runtime
+            .proof_artifact_descriptor_is_current(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &publication.root_ref,
+                &publication.descriptor,
+            )
             .await
+            .context("failed to verify canonical proof publication before root synchronization")
         {
-            Ok(updated_roots) => updated_roots,
+            Ok(true) => {}
+            Ok(false) => {
+                return ProofCommitAttempt::Invalidated {
+                    error: anyhow::anyhow!(
+                        "canonical proof artifact {} changed before root synchronization",
+                        publication.root_ref
+                    ),
+                    publication: Some(publication),
+                };
+            }
             Err(error) => return ProofCommitAttempt::Retryable(error),
-        };
+        }
+        let (updated_roots, synchronized_roots) =
+            match self.sync_proof_success(id, task, stage, &publication).await {
+                Ok(updated_roots) => updated_roots,
+                Err(error) => return ProofCommitAttempt::Retryable(error),
+            };
         if updated_roots == 0 {
             let invalidation = self
                 .runtime
@@ -784,12 +807,12 @@ impl RuntimeObserver {
         publication.synchronized_roots = synchronized_roots;
         match self
             .runtime
-            .proof_artifact_is_invalidated(
+            .proof_artifact_descriptor_is_invalidated(
                 &self.network_pair,
                 id.0.pipeline_key(),
                 self.route,
                 &publication.root_ref,
-                &publication.content_hash,
+                &publication.descriptor,
             )
             .await
             .context("failed to fence completed proof against invalidation")
@@ -811,7 +834,7 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         stage: &'static str,
-        proof_uris: &HashMap<String, String>,
+        publication: &PublishedProofCommit,
     ) -> Result<(usize, HashSet<String>)> {
         let synchronized_roots = Mutex::new(HashSet::new());
         let updated_roots = self
@@ -827,10 +850,25 @@ impl RuntimeObserver {
                     metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
                     let root_completed =
                         Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
-                    if record.runner_status == RunnerStatus::Completed
-                        && (!root_completed || record.proof_uri.is_some())
-                    {
-                        return Ok(root_completed);
+                    if record.runner_status == RunnerStatus::Completed {
+                        if !root_completed {
+                            return Ok(false);
+                        }
+                        let expected_uri = publication.proof_uris.get(&record.task_id);
+                        if record.proof_uri.as_ref() == expected_uri
+                            && expected_uri.is_some()
+                            && metadata.runtime.proof_artifact.as_ref()
+                                == Some(&publication.descriptor)
+                        {
+                            synchronized_roots
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
+                                .insert(record.task_id.clone());
+                            return Ok(true);
+                        }
+                        if record.proof_uri.is_some() {
+                            return Ok(false);
+                        }
                     }
                     metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some(
@@ -841,6 +879,8 @@ impl RuntimeObserver {
                         }
                         .to_string(),
                     );
+                    metadata.runtime.proof_artifact =
+                        root_completed.then(|| publication.descriptor.clone());
                     record.metadata = serde_json::to_value(metadata)
                         .context("failed to serialize task metadata")?;
                     if root_completed {
@@ -849,7 +889,7 @@ impl RuntimeObserver {
                             .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
                             .insert(record.task_id.clone());
                         record.runner_status = RunnerStatus::Completed;
-                        record.proof_uri = proof_uris.get(&record.task_id).cloned();
+                        record.proof_uri = publication.proof_uris.get(&record.task_id).cloned();
                     } else {
                         record.runner_status = RunnerStatus::Allocated;
                         record.proof_uri = None;
@@ -1102,7 +1142,12 @@ impl EngineObserver for RuntimeObserver {
                 error = %err,
                 "failed to sync runtime task progress"
             );
-            EngineObserverError::RuntimeSync(format!("failed to sync runtime task progress: {err}"))
+            let message = format!("failed to sync runtime task progress: {err}");
+            if self.runtime.accepts_mutations() {
+                EngineObserverError::RuntimeSync(message)
+            } else {
+                EngineObserverError::RuntimeInactive(message)
+            }
         })
     }
 
@@ -1469,9 +1514,9 @@ mod tests {
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
     use raiko2_runtime::{
-        MemoryProofArtifactStore, NamespaceOwnerLease, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore,
-        RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
+        MemoryProofArtifactStore, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
+        ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore, RuntimeStateObject,
+        RuntimeStateWriteResult, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1580,40 +1625,6 @@ mod tests {
                 .store_runtime_state(bytes, expected_generation)
                 .await
         }
-
-        async fn claim_namespace_owner(
-            &self,
-            owner_id: &str,
-            now_secs: u64,
-            lease_secs: u64,
-        ) -> Result<Option<NamespaceOwnerLease>> {
-            self.inner
-                .claim_namespace_owner(owner_id, now_secs, lease_secs)
-                .await
-        }
-
-        async fn renew_namespace_owner(
-            &self,
-            lease: &NamespaceOwnerLease,
-            now_secs: u64,
-            lease_secs: u64,
-        ) -> Result<Option<NamespaceOwnerLease>> {
-            self.inner
-                .renew_namespace_owner(lease, now_secs, lease_secs)
-                .await
-        }
-
-        async fn verify_namespace_owner(
-            &self,
-            lease: &NamespaceOwnerLease,
-            now_secs: u64,
-        ) -> Result<bool> {
-            self.inner.verify_namespace_owner(lease, now_secs).await
-        }
-
-        async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
-            self.inner.release_namespace_owner(lease).await
-        }
     }
 
     #[async_trait]
@@ -1700,40 +1711,6 @@ mod tests {
                 .store_runtime_state(bytes, expected_generation)
                 .await
         }
-
-        async fn claim_namespace_owner(
-            &self,
-            owner_id: &str,
-            now_secs: u64,
-            lease_secs: u64,
-        ) -> Result<Option<NamespaceOwnerLease>> {
-            self.inner
-                .claim_namespace_owner(owner_id, now_secs, lease_secs)
-                .await
-        }
-
-        async fn renew_namespace_owner(
-            &self,
-            lease: &NamespaceOwnerLease,
-            now_secs: u64,
-            lease_secs: u64,
-        ) -> Result<Option<NamespaceOwnerLease>> {
-            self.inner
-                .renew_namespace_owner(lease, now_secs, lease_secs)
-                .await
-        }
-
-        async fn verify_namespace_owner(
-            &self,
-            lease: &NamespaceOwnerLease,
-            now_secs: u64,
-        ) -> Result<bool> {
-            self.inner.verify_namespace_owner(lease, now_secs).await
-        }
-
-        async fn release_namespace_owner(&self, lease: &NamespaceOwnerLease) -> Result<bool> {
-            self.inner.release_namespace_owner(lease).await
-        }
     }
 
     #[async_trait]
@@ -1810,44 +1787,6 @@ mod tests {
             Ok(RuntimeStateWriteResult::Stored {
                 generation: Some(expected_generation.unwrap_or(0).saturating_add(1)),
             })
-        }
-
-        async fn claim_namespace_owner(
-            &self,
-            owner_id: &str,
-            now_secs: u64,
-            lease_secs: u64,
-        ) -> Result<Option<NamespaceOwnerLease>> {
-            Ok(Some(NamespaceOwnerLease {
-                owner_id: owner_id.to_string(),
-                epoch: 1,
-                expires_at_secs: now_secs.saturating_add(lease_secs),
-                generation: Some(1),
-            }))
-        }
-
-        async fn renew_namespace_owner(
-            &self,
-            lease: &NamespaceOwnerLease,
-            now_secs: u64,
-            lease_secs: u64,
-        ) -> Result<Option<NamespaceOwnerLease>> {
-            Ok(Some(NamespaceOwnerLease {
-                expires_at_secs: now_secs.saturating_add(lease_secs),
-                ..lease.clone()
-            }))
-        }
-
-        async fn verify_namespace_owner(
-            &self,
-            _lease: &NamespaceOwnerLease,
-            _now_secs: u64,
-        ) -> Result<bool> {
-            Ok(true)
-        }
-
-        async fn release_namespace_owner(&self, _lease: &NamespaceOwnerLease) -> Result<bool> {
-            Ok(true)
         }
     }
 
@@ -2501,6 +2440,52 @@ mod tests {
             .expect("cancelled runtime task");
         assert_eq!(cancelled.runner_status, RunnerStatus::Cancelled);
         assert_eq!(cancelled.proof_uri, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn global_drain_waits_for_inflight_external_store_write() -> Result<()> {
+        let store = Arc::new(BlocksCanonicalPutStore {
+            inner: MemoryProofArtifactStore::new(
+                "test".to_string(),
+                "global-drain-store-write".to_string(),
+            )?,
+            put_entered: tokio::sync::Notify::new(),
+            allow_put: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("global-drain-store-write"),
+            store.clone(),
+        )?);
+        let publishing_runtime = Arc::clone(&runtime);
+        let publication = tokio::spawn(async move {
+            publishing_runtime
+                .publish_proof_artifact_bytes(
+                    "taiko_dev/ethereum",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "proposal-1",
+                    br#"{"proof":"0x01"}"#,
+                )
+                .await
+        });
+
+        store.put_entered.notified().await;
+        let draining_runtime = Arc::clone(&runtime);
+        let mut draining = tokio::spawn(async move { draining_runtime.begin_draining().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut draining)
+                .await
+                .is_err(),
+            "draining must wait until the external store write leaves the global fence"
+        );
+
+        store.allow_put.notify_one();
+        draining.await?;
+        let error = publication
+            .await?
+            .expect_err("publication must not commit after the global fence begins draining");
+        assert!(format!("{error:#}").contains("runtime is draining"));
         Ok(())
     }
 

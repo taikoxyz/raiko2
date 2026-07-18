@@ -45,15 +45,16 @@ impl RuntimeManager {
             .await
             .context("failed to publish proof artifact")?;
         let artifact = publication.object();
+        let descriptor = artifact.descriptor();
         validate_canonical_proof(&artifact.bytes)?;
 
         if self
-            .proof_artifact_is_invalidated(
+            .proof_artifact_descriptor_is_invalidated(
                 network_pair,
                 pipeline_key,
                 route,
                 proof_ref,
-                &artifact.content_hash,
+                &descriptor,
             )
             .await
             .context("failed to check published proof invalidation state")?
@@ -77,22 +78,22 @@ impl RuntimeManager {
         .context("failed to register proof artifact")?;
 
         if self
-            .proof_artifact_is_invalidated(
+            .proof_artifact_descriptor_is_invalidated(
                 network_pair,
                 pipeline_key,
                 route,
                 proof_ref,
-                &artifact.content_hash,
+                &descriptor,
             )
             .await
             .context("failed to recheck published proof invalidation state")?
         {
-            self.mark_proof_artifact_invalidated(
+            self.mark_proof_artifact_descriptor_invalidated(
                 network_pair,
                 pipeline_key,
                 route,
                 proof_ref,
-                &artifact.content_hash,
+                &descriptor,
             )
             .await
             .context("failed to retain local proof invalidation state")?;

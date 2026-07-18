@@ -14,6 +14,8 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Engine abstraction used by the HTTP server.
 pub trait EngineHandle: Send + Sync {
+    fn start_workers(&self, _workers: usize, _maintenance_interval: std::time::Duration) {}
+
     fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
         true
     }
@@ -125,6 +127,10 @@ where
     S::Backend: raiko2_pipeline::ProverBackend + 'static,
     S::Provider: raiko2_provider::Provider + 'static,
 {
+    fn start_workers(&self, workers: usize, maintenance_interval: std::time::Duration) {
+        self.start_workers_with_maintenance_interval(workers, maintenance_interval);
+    }
+
     fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {
         Engine::queue_maintenance_ready(self, max_age)
     }

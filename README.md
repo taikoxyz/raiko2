@@ -18,7 +18,8 @@ asynchronous proposal-side proof requests.
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
-- One isolated runtime namespace per instance: GCS for durable operation or local-only memory mode
+- Exactly one live instance per isolated runtime namespace; replacements never overlap
+- GCS for durable operation or local-only memory mode, with no cross-namespace data sharing
 - In-process queue projected from the namespaced runtime store
 
 ## Quickstart
@@ -51,7 +52,7 @@ otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally w
 
 ## Core Flow
 
-The complete runtime, ownership, publication, and recovery design is documented in
+The complete runtime lifecycle, publication, and recovery design is documented in
 [Architecture](docs/architecture.md).
 
 1. `Preflight` resolves canonical Shasta inputs from L1 and L2 RPC.

@@ -1120,28 +1120,45 @@ async fn publish_boundless_progress(
     evaluated_mcycles_count: u32,
 ) -> RaikoResult<()> {
     if let Some(observer) = observer {
-        observer
-            .on_progress(&ProverProgress::BoundlessSubmission(
-                BoundlessSubmissionProgress {
-                    provider_request_id: submission.provider_request_id.clone(),
-                    remote_tx_hash: submission.remote_tx_hash.clone(),
-                    expires_at: submission.expires_at,
-                    lock_expires_at: submission.lock_expires_at,
-                    image_ref: image_ref.to_string(),
-                    deployment: deployment.to_string(),
-                    offchain,
-                    quoted_mcycles_count: Some(quoted_mcycles_count),
-                    evaluated_mcycles_count: Some(evaluated_mcycles_count),
-                    submitted_at: submission.submitted_at,
-                    max_price_multiplier: submission.max_price_multiplier,
-                    max_price_wei: Some(submission.max_price_wei.to_string()),
-                    rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
-                },
-            ))
-            .await?;
+        let progress = ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+            provider_request_id: submission.provider_request_id.clone(),
+            remote_tx_hash: submission.remote_tx_hash.clone(),
+            expires_at: submission.expires_at,
+            lock_expires_at: submission.lock_expires_at,
+            image_ref: image_ref.to_string(),
+            deployment: deployment.to_string(),
+            offchain,
+            quoted_mcycles_count: Some(quoted_mcycles_count),
+            evaluated_mcycles_count: Some(evaluated_mcycles_count),
+            submitted_at: submission.submitted_at,
+            max_price_multiplier: submission.max_price_multiplier,
+            max_price_wei: Some(submission.max_price_wei.to_string()),
+            rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
+        });
+        loop {
+            match observer.on_progress(&progress).await {
+                Ok(()) => break,
+                Err(crate::ProgressPersistenceError::Retryable(error)) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to persist Boundless submission checkpoint; retrying without resubmission"
+                    );
+                    tokio::time::sleep(BOUNDLESS_SUBMISSION_CHECKPOINT_RETRY_DELAY).await;
+                }
+                Err(crate::ProgressPersistenceError::Permanent(error)) => {
+                    return Err(RaikoError::Guest(error));
+                }
+            }
+        }
     }
     Ok(())
 }
+
+const BOUNDLESS_SUBMISSION_CHECKPOINT_RETRY_DELAY: Duration = if cfg!(test) {
+    Duration::from_millis(1)
+} else {
+    Duration::from_secs(1)
+};
 
 impl TryFrom<BoundlessSubmissionResume> for Submission {
     type Error = RaikoError;
@@ -2795,12 +2812,12 @@ mod tests {
         BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessSubmissionState,
         BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
         ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
+        Submission, TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
         defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
-        parse_bool_result, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
-        validate_offer_params,
+        parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
+        quote_batch_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2814,7 +2831,10 @@ mod tests {
     use std::{
         collections::HashMap,
         env,
-        sync::{Arc, Mutex, MutexGuard},
+        sync::{
+            Arc, Mutex, MutexGuard,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant, SystemTime},
     };
     use url::Url;
@@ -2823,6 +2843,67 @@ mod tests {
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
     const TEST_REBID_PRICE_STEP_BPS: u32 = 5000;
     const TEST_REBID_MAX_ATTEMPTS: u32 = 4;
+
+    struct FlakyProgressObserver {
+        remaining_failures: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for FlakyProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::ProgressPersistenceError::Retryable(
+                    "checkpoint unavailable".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn boundless_checkpoint_retries_the_accepted_submission_in_place() {
+        let observer = Arc::new(FlakyProgressObserver {
+            remaining_failures: AtomicUsize::new(2),
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let submission = Submission {
+            market_request_id: U256::from(1),
+            provider_request_id: "0xaccepted".to_string(),
+            remote_tx_hash: None,
+            expires_at: 100,
+            lock_expires_at: 90,
+            submitted_at: 1,
+            max_price_multiplier: 1,
+            max_price_wei: U256::from(1),
+            attempt: 1,
+        };
+
+        publish_boundless_progress(
+            Some(&progress_observer),
+            &submission,
+            "image",
+            "deployment",
+            true,
+            1,
+            1,
+        )
+        .await
+        .expect("checkpoint eventually persists");
+
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
+    }
 
     const STORAGE_ENV_VARS: &[&str] = &[
         "BOUNDLESS_STORAGE_UPLOADER",

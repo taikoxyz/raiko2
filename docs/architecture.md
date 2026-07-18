@@ -13,8 +13,9 @@ The architecture is organized around these invariants:
 
 1. The namespaced runtime store is authoritative for task state, artifact registration, and remote
    submission checkpoints. The in-process queue is an execution projection of that state.
-2. A GCS-backed `(environment, namespace)` has one renewable writer owner. Ownership loss freezes
-   admissions and shared mutations and makes the instance not ready.
+2. A GCS-backed `(environment, namespace)` has exactly one live process. This is an operational
+   deployment invariant, not a distributed coordination feature. The runtime intentionally has no
+   owner lease, owner epoch, or ownership heartbeat.
 3. Proof computation is not completion. A task becomes completed only after its normalized proof is
    durably published, registered, and synchronized to its runtime root.
 4. Proof manifests are create-only and first-valid-wins. Content objects are immutable and addressed
@@ -23,9 +24,14 @@ The architecture is organized around these invariants:
    identical bytes under a new manifest generation without reactivating the invalidated generation.
 6. Remote request identifiers are resumable only after their submission checkpoint is durably stored.
    Request-level SP1 retry configuration may lower, but never raise, the operator limit.
-7. One running instance owns one namespace. Namespaces are isolated persistence domains and never
-   share tasks, artifacts, checkpoints, or invalidation markers. Multiple roots inside the same
-   namespace may reference the same canonical proof artifact.
+7. One running instance owns one namespace, and old and replacement instances never overlap.
+   Namespaces are isolated persistence domains and never share tasks, artifacts, checkpoints, or
+   invalidation markers. Multiple roots inside the same namespace may reference the same canonical
+   proof artifact.
+8. The runtime fence is global to the instance and namespace, never scoped to an individual task.
+   When the lifecycle is inactive or draining, every worker, observer, cleanup loop, API mutation, and
+   external-store write is fenced together. GCS object generations remain separate object-version
+   CAS tokens; they are not instance epochs.
 
 ## System Architecture
 
@@ -51,7 +57,6 @@ flowchart TB
   Store -->|production| GCS["GCS namespace"]
   Store -->|explicit ephemeral mode| Memory["Memory store"]
 
-  GCS --> Owner["Owner lease"]
   GCS --> State["Runtime state object"]
   GCS --> Manifest["Create-only manifests"]
   GCS --> Content["Immutable proof content"]
@@ -73,7 +78,7 @@ domain and persistence rules live in crates:
 | Queue | In-process task scheduling and maintenance | `crates/queue` |
 | Pipeline | Preflight, validation, encoding, proving, and aggregation wiring | `crates/pipeline` |
 | Prover | Local and hosted prover adapters plus remote submission recovery | `crates/prover` |
-| Runtime | Authoritative task state, ownership fencing, artifact storage, publication | `crates/runtime` |
+| Runtime | Authoritative task state, global lifecycle fencing, artifact storage, publication | `crates/runtime` |
 
 ## Identity And Isolation
 
@@ -81,7 +86,7 @@ Every durable key is scoped by an explicit proof environment and runtime namespa
 different boundaries:
 
 - `environment` separates business deployments such as devnet and mainnet.
-- `namespace` separates one authoritative runtime ownership domain inside an environment.
+- `namespace` separates one authoritative persistence domain inside an environment.
 - The network pair, concrete pipeline, execution route, and normalized request identity further
   scope tasks and artifacts.
 
@@ -128,59 +133,52 @@ startup recovery compare the runtime root with active engine state. Only active 
 (`Pending`, `Ready`, `Retrying`, or `Running`) block re-enqueue; a terminal engine record cannot
 permanently strand a non-terminal runtime root.
 
-## Runtime Ownership And Fencing
+## Runtime Lifecycle And Fencing
 
-The GCS backend stores an owner lease containing `owner_id`, monotonically advancing `epoch`, expiry,
-and the GCS object generation. Claim and renewal writes use generation preconditions. Runtime state
-writes use compare-and-swap against the last observed runtime-state generation.
+The runtime uses one process-local lifecycle fence for the entire namespace. It has no distributed
+owner record, lease renewal, owner epoch, or task-local fence. `Active` permits mutations;
+`Draining` rejects every admission, runtime mutation, checkpoint write, publication, invalidation,
+reconciliation, and cleanup write. Runtime-state and artifact-manifest GCS generations are retained
+because they provide exact object-version compare-and-swap and conditional deletion; they do not
+coordinate multiple instances.
 
-Startup orders ownership before recovery:
+Startup loads authoritative state before recovery:
 
 ```mermaid
 flowchart TD
   Start([Process start]) --> Build[Build runtime store and prover clients]
-  Build --> Claim[Claim namespace owner]
-  Claim --> Heartbeat[Start cancellable owner heartbeat]
-  Heartbeat --> Load[Load authoritative runtime state]
-  Load --> Fence[CAS-write runtime state to fence prior owner]
-  Fence --> Restore[Restore artifact registrations]
+  Build --> Load[Load authoritative runtime state]
+  Load --> Restore[Restore artifact registrations]
   Restore --> Recover[Re-enqueue recoverable non-terminal roots]
   Recover --> Cleanup[Start runtime cleanup loop]
   Cleanup --> Serve([Serve traffic])
 
-  Load -->|error| Abort[Abort heartbeat and fail startup]
-  Fence -->|error| Abort
+  Load -->|error| Abort[Fail startup]
   Restore -->|error| Abort
   Recover -->|error| Abort
 ```
 
-Every external artifact mutation first verifies live ownership and advances the runtime-state CAS
-fence. If renewal or verification fails, `RuntimeManager` becomes inactive. Later state mutations,
-artifact writes, invalidations, and request admissions fail closed until ownership is valid again.
+Every external artifact mutation crosses the global lifecycle and authoritative-state coherence
+fence. Draining takes the write side of that global gate, waits for any in-flight runtime or external
+store mutation to leave it, and rejects every later mutation. If authoritative state cannot be
+reloaded, later mutations and request admissions fail closed. Memory mode is an explicit ephemeral backend
+accepted only for `development`, `local`, and `test`, not an automatic GCS fallback.
 
-Memory mode deliberately has no distributed owner object. It is an explicit ephemeral, single-process
-backend accepted only for `development`, `local`, and `test`, not an automatic GCS fallback.
-
-Runtime authority is an explicit state machine:
+Runtime lifecycle is an explicit state machine:
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Active: owner acquired and state loaded
-  Active --> Unknown: renewal or verification transport error
-  Unknown --> Active: authoritative verification succeeds
-  Active --> Lost: owner record proves another owner
-  Unknown --> Lost: authoritative verification proves ownership loss
+  [*] --> Active: authoritative state loaded
+  Active --> Incoherent: authoritative store read or CAS is ambiguous
+  Incoherent --> Active: authoritative state reload succeeds
   Active --> Draining: graceful shutdown begins
-  Unknown --> Draining: graceful shutdown begins
-  Lost --> [*]
-  Draining --> [*]: workers stop and lease is conditionally released
+  Incoherent --> Draining: graceful shutdown begins
+  Draining --> [*]: workers and maintenance stop
 ```
 
-`Unknown`, `Lost`, and `Draining` reject mutations and make readiness fail. A transient verification
-error is recoverable: a later readiness check re-verifies the authoritative owner and reloads runtime
-state when a previous write outcome was ambiguous. Proven ownership loss is permanent for that
-process. Graceful shutdown stops and joins engine workers and maintenance tasks before conditionally
-deleting the exact owner lease.
+`Incoherent` and `Draining` reject mutations and make readiness fail. A later readiness check may
+reload authoritative state after an ambiguous store result. Graceful shutdown stops admissions,
+drains work, and stops engine workers and maintenance tasks before process exit.
 
 ## Proof Artifact Storage
 
@@ -188,7 +186,6 @@ For a logical `ProofArtifactKey`, the GCS backend uses this layout:
 
 ```text
 <prefix>/<environment>/<namespace>/
-  owner.owner.json
   work/runtime-state.runtime.json
   proofs/<pipeline>/<route>/<network-pair>/<proof-ref>/
     manifest.manifest.json
@@ -229,7 +226,7 @@ sequenceDiagram
 
   Engine->>Observer: on_task_succeeded(normalized proof)
   Observer->>Runtime: Upsert pending publication outbox
-  Runtime->>Store: Ownership-fenced create-if-absent
+  Runtime->>Store: Globally fenced create-if-absent
   Observer->>Runtime: Commit proof publication
   Runtime->>Store: Validate and publish canonical content + manifest
   Store-->>Runtime: Created, AlreadyExists, or Conflict
@@ -261,7 +258,7 @@ sequenceDiagram
   participant GCS
 
   Cancel->>Runtime: Invalidate pending publication
-  Runtime->>GCS: Verify owner and advance runtime CAS fence
+  Runtime->>GCS: Cross global lifecycle and state-coherence fence
   Runtime->>GCS: Read current canonical manifest metadata
   alt Canonical generation exists
     Runtime->>State: Register exact hash and generation if needed
@@ -274,8 +271,8 @@ sequenceDiagram
 ```
 
 If generation A is invalidated, a later identical proof may create generation B. Reads of A remain
-invalidated, while B is active because its generation differs. Conditional delete prevents an old
-owner or delayed cancellation from deleting a replacement manifest.
+invalidated, while B is active because its generation differs. Conditional delete prevents a
+delayed cancellation from deleting a replacement manifest.
 
 Cancellation is checked both before and after artifact registration. Cancellation after the pending
 outbox was already drained still reconciles the canonical manifest by reading it directly, restoring
@@ -287,9 +284,8 @@ Recovery always starts from runtime state and canonical artifact metadata, never
 
 ```mermaid
 flowchart TD
-  Restart([New owner starts]) --> Load[Load runtime state]
-  Load --> Fence[Advance CAS generation]
-  Fence --> Scan[Inspect non-terminal roots and artifact refs]
+  Restart([Replacement starts after old process exits]) --> Load[Load runtime state]
+  Load --> Scan[Inspect non-terminal roots and artifact refs]
   Scan --> Artifact{Canonical artifact readable?}
   Artifact -->|yes| Register[Repair artifact registration]
   Register --> Converge[Converge root without reproving]
@@ -332,7 +328,7 @@ sequenceDiagram
   Provider-->>Worker: Provider request ID
   loop Until checkpoint is durable or stage is stopped
     Worker->>Observer: Persist submission checkpoint
-    Observer->>Runtime: Ownership-fenced runtime CAS
+    Observer->>Runtime: Globally fenced runtime CAS
     Runtime-->>Observer: Success or error
   end
   Observer-->>Worker: Checkpoint durable
@@ -354,9 +350,11 @@ Without an override, the operator value is used. A request cannot raise the conf
 
 ## Deployment And Migration
 
-Production deployments use `backend = "gcs"`. Each deployment instance receives a unique namespace;
-there is no supported active/active sharing of one namespace and no data sharing across namespaces.
-A rolling replacement therefore uses a drain handoff rather than concurrent writers:
+Production deployments use `backend = "gcs"`. A namespace is assigned to exactly one live deployment
+instance at a time; there is no supported active/active sharing and no data sharing across namespaces.
+Rolling overlap is forbidden even when Kubernetes would normally start the replacement before
+terminating the old pod. Deployments must use a `Recreate`-equivalent sequence: the old process exits
+before the replacement starts.
 
 ```mermaid
 sequenceDiagram
@@ -367,9 +365,8 @@ sequenceDiagram
 
   Old->>Old: Stop HTTP admissions and drain requests
   Old->>Old: Stop and join workers and maintenance
-  Old->>GCS: Conditionally release exact owner lease
-  New->>GCS: Claim namespace owner
-  New->>GCS: Load and fence authoritative runtime state
+  Old-->>New: Process has exited; overlap is impossible
+  New->>GCS: Load authoritative runtime state
   New->>New: Restore artifacts and recover non-terminal roots
   New->>New: Become ready
 ```
@@ -388,9 +385,9 @@ only when every required dependency is healthy:
 flowchart TD
   Probe[/GET /ready/] --> RPC{All configured RPC pairs reachable<br/>with expected chain IDs?}
   RPC -->|no| Fail[status = error]
-  RPC -->|yes| Owner{Namespace owner active,<br/>lease valid, store reachable?}
-  Owner -->|no| Fail
-  Owner -->|yes| Queue{Every registered engine completed<br/>maintenance recently?}
+  RPC -->|yes| Runtime{Runtime active,<br/>state coherent, store reachable?}
+  Runtime -->|no| Fail
+  Runtime -->|yes| Queue{Every registered engine completed<br/>maintenance recently?}
   Queue -->|no| Fail
   Queue -->|yes| Prover{Configured prover prerequisites valid?}
   Prover -->|no| Fail
@@ -414,8 +411,7 @@ operator can identify the failed boundary without inferring it from the aggregat
   for at least the invalidation window before garbage collection.
 - Generation-scoped invalidation markers must outlive the longest retry, recovery, and cleanup window;
   the current operational minimum is 30 days.
-- Runtime state and owner objects are control-plane data and must not share artifact garbage-collection
-  rules.
+- Runtime state is control-plane data and must not share artifact garbage-collection rules.
 - GCS and memory are alternative authoritative backends. The server does not dual-write or fail over
   automatically between them.
 

@@ -134,9 +134,25 @@ pub enum ProverProgress {
     Sp1NetworkSubmission(Sp1NetworkSubmissionProgress),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressPersistenceError {
+    Retryable(String),
+    Permanent(String),
+}
+
+impl std::fmt::Display for ProgressPersistenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable(error) | Self::Permanent(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for ProgressPersistenceError {}
+
 #[async_trait::async_trait]
 pub trait ProverProgressObserver: Send + Sync {
-    async fn on_progress(&self, progress: &ProverProgress) -> RaikoResult<()>;
+    async fn on_progress(&self, progress: &ProverProgress) -> Result<(), ProgressPersistenceError>;
 
     async fn load_pending_proof_checkpoint(
         &self,

@@ -58,9 +58,9 @@ GET /health
 GET /ready
 ```
 
-Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, current ownership
-of the authoritative runtime namespace, the in-memory queue, and the hosted proving capabilities
-exposed by the endpoint. Loss of the GCS owner lease returns HTTP `503` until ownership is restored.
+Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the global runtime
+lifecycle and authoritative-store coherence, the in-memory queue, and the hosted proving
+capabilities exposed by the endpoint. Draining or an inaccessible runtime store returns HTTP `503`.
 
 ## Metrics
 
@@ -1106,18 +1106,19 @@ All API errors use the Hoodi-style envelope:
 ## Configuration Notes
 
 - `runtime.environment` is the business/deployment boundary. `runtime.namespace` is the immutable
-  single-instance ownership boundary. Namespaces do not share data; roots inside one namespace may
+  single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
 - `runtime.store.backend` selects the single authoritative runtime store. Use `gcs` with a non-empty
   `bucket` outside `development`, `local`, or `test`. `memory` is rejected for other environments;
   switching backends is a drain-and-cutover operator action and there is no automatic failover,
   merge, writeback, SQLite import, or compatibility migration.
-- GCS object names start with `<prefix>/<environment>/<namespace>/`. A namespace owner record
-  prevents two live instances from mutating the same runtime state.
+- GCS object names start with `<prefix>/<environment>/<namespace>/`. The service intentionally has no
+  distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
+  and replacement processes never overlap for one namespace.
 - Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
-  pointer. Runtime snapshots and owner leases use `*.runtime.json` and `*.owner.json`; the suffixes
-  allow operations to apply 7-day runtime retention and 30-day proof/manifest/tombstone retention
+  pointer. Runtime snapshots use `*.runtime.json`; the suffixes allow operations to apply 7-day
+  runtime retention and 30-day proof/manifest/tombstone retention
   without a bucket-wide age rule.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and contains a non-null proof payload. Publication is create-only: an

@@ -60,8 +60,6 @@ namespace = "raiko2-development"
 backend = "memory"
 prefix = "raiko2/runtime/v1"
 # bucket = "my-raiko2-runtime"
-owner_heartbeat_secs = 15
-owner_lease_secs = 60
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
 # Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.

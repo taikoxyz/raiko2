@@ -114,7 +114,11 @@
             ]),
             synchronized_roots: std::collections::HashSet::from(["task_exact".into()]),
             root_ref: "proposal".into(),
-            content_hash: "hash".into(),
+            descriptor: ProofArtifactDescriptor {
+                proof_uri: "memory://canonical-proof".into(),
+                content_hash: "hash".into(),
+                generation: Some(1),
+            },
         };
 
         observer

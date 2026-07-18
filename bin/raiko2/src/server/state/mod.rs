@@ -102,39 +102,7 @@ pub struct AppState {
     pub runtime: Arc<RuntimeManager>,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
     pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
-    namespace_owner_heartbeat: Option<Arc<NamespaceOwnerHeartbeat>>,
     background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-}
-
-#[derive(Debug)]
-struct NamespaceOwnerHeartbeat {
-    handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl NamespaceOwnerHeartbeat {
-    const fn new(handle: tokio::task::JoinHandle<()>) -> Self {
-        Self {
-            handle: Mutex::new(Some(handle)),
-        }
-    }
-
-    async fn stop(&self) {
-        let handle = self.handle.lock().ok().and_then(|mut handle| handle.take());
-        if let Some(handle) = handle {
-            handle.abort();
-            let _ = handle.await;
-        }
-    }
-}
-
-impl Drop for NamespaceOwnerHeartbeat {
-    fn drop(&mut self) {
-        if let Ok(mut handle) = self.handle.lock()
-            && let Some(handle) = handle.take()
-        {
-            handle.abort();
-        }
-    }
 }
 
 async fn build_artifact_store(config: &Config) -> Result<Arc<dyn ProofArtifactStore>> {
@@ -168,8 +136,6 @@ impl AppState {
         let artifact_store = build_artifact_store(&config).await?;
         let runtime = Arc::new(RuntimeManager::with_store(artifact_store)?);
         let scheduler_config = setup::scheduler_config(&config);
-        let workers = config.queue.workers;
-        let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         #[cfg(feature = "local-provers")]
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
@@ -205,15 +171,10 @@ impl AppState {
         #[cfg(feature = "host")]
         let boundless_balance_gate = BoundlessBalanceGate::new();
 
-        runtime
-            .acquire_namespace_owner(config.runtime.store.owner_lease_secs)
-            .await?;
-        let heartbeat = Arc::new(spawn_namespace_owner_heartbeat(
-            Arc::clone(&runtime),
-            config.runtime.store.owner_heartbeat_secs,
-            config.runtime.store.owner_lease_secs,
-        ));
-        let startup = async {
+        async {
+            runtime.initialize().await?;
+            restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+
             let mut factory = StaticPipelineFactory::default();
             for pair in &resolved_pairs {
                 let registration = PairPipelineRegistration {
@@ -231,27 +192,15 @@ impl AppState {
                     #[cfg(feature = "host")]
                     sp1_prover: sp1_prover.clone(),
                     scheduler_config: scheduler_config.clone(),
-                    workers,
-                    maintenance_interval,
                 };
                 register_pair_pipelines(&mut factory, &registration)?;
             }
-            runtime.initialize().await?;
-            runtime.fence_namespace_owner().await?;
-            restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
-
             let config = Arc::new(config);
             let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-            let mut state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
-            state.namespace_owner_heartbeat = Some(Arc::clone(&heartbeat));
+            let state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
             state.finish_initialization().await
         }
-        .await;
-        if startup.is_err() {
-            heartbeat.stop().await;
-            let _ = runtime.release_namespace_owner().await;
-        }
-        startup
+        .await
     }
 
     async fn finish_initialization(self) -> Result<Self> {
@@ -262,6 +211,10 @@ impl AppState {
                 "recovered pending runtime tasks into the memory queue"
             );
         }
+        self.pipelines.start_workers(
+            self.config.queue.workers,
+            Duration::from_millis(self.config.queue.maintenance_interval_ms),
+        );
         let cleanup = spawn_runtime_cleanup_loop(
             Arc::clone(&self.config),
             Arc::clone(&self.runtime),
@@ -287,12 +240,12 @@ impl AppState {
             runtime,
             zk_any_sampler,
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
-            namespace_owner_heartbeat: None,
             background_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.runtime.begin_draining().await;
         self.pipelines.shutdown().await;
         let handles = self
             .background_tasks
@@ -303,48 +256,7 @@ impl AppState {
             handle.abort();
             let _ = handle.await;
         }
-        if let Some(heartbeat) = &self.namespace_owner_heartbeat {
-            heartbeat.stop().await;
-        }
-        self.runtime.begin_draining();
-        if let Err(error) = self.runtime.release_namespace_owner().await {
-            tracing::warn!(%error, "failed to release runtime namespace ownership");
-        }
     }
-}
-
-fn spawn_namespace_owner_heartbeat(
-    runtime: Arc<RuntimeManager>,
-    heartbeat_secs: u64,
-    lease_secs: u64,
-) -> NamespaceOwnerHeartbeat {
-    NamespaceOwnerHeartbeat::new(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(heartbeat_secs));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            match runtime.renew_namespace_owner(lease_secs).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    tracing::error!(
-                        environment = runtime.environment(),
-                        namespace = runtime.namespace(),
-                        "runtime namespace ownership was superseded; stopping heartbeat"
-                    );
-                    break;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        environment = runtime.environment(),
-                        namespace = runtime.namespace(),
-                        %error,
-                        "runtime namespace owner renewal failed; admissions are frozen"
-                    );
-                }
-            }
-        }
-    }))
 }
 
 struct PairPipelineRegistration<'a> {
@@ -363,8 +275,6 @@ struct PairPipelineRegistration<'a> {
     #[cfg(feature = "host")]
     sp1_prover: Option<Sp1Prover>,
     scheduler_config: SchedulerConfig,
-    workers: usize,
-    maintenance_interval: Duration,
 }
 
 #[cfg(feature = "host")]
@@ -430,10 +340,6 @@ fn register_pair_pipelines(
                 )),
                 registration.boundless_balance_gate.clone(),
             )?;
-            boundless_engine.start_workers_with_maintenance_interval(
-                registration.workers,
-                registration.maintenance_interval,
-            );
             factory.insert(
                 registration.pair.key.clone(),
                 PipelineKey::ShastaRisc0Network,
@@ -457,10 +363,6 @@ fn register_pair_pipelines(
                     PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network),
                 )),
             )?;
-            sp1_engine.start_workers_with_maintenance_interval(
-                registration.workers,
-                registration.maintenance_interval,
-            );
             factory.insert(
                 registration.pair.key.clone(),
                 PipelineKey::ShastaSp1,
@@ -489,10 +391,6 @@ fn register_pair_pipelines(
                 PipelineKey::ShastaRisc0.route(),
             )),
         )?;
-        risc0_engine.start_workers_with_maintenance_interval(
-            registration.workers,
-            registration.maintenance_interval,
-        );
         factory.insert(
             registration.pair.key.clone(),
             PipelineKey::ShastaRisc0,
@@ -511,10 +409,6 @@ fn register_pair_pipelines(
             )),
             registration.boundless_balance_gate.clone(),
         )?;
-        boundless_engine.start_workers_with_maintenance_interval(
-            registration.workers,
-            registration.maintenance_interval,
-        );
         factory.insert(
             registration.pair.key.clone(),
             PipelineKey::ShastaRisc0Network,
@@ -536,10 +430,6 @@ fn register_pair_pipelines(
                 registration.config.prover.sp1_route(),
             )),
         )?;
-        sp1_engine.start_workers_with_maintenance_interval(
-            registration.workers,
-            registration.maintenance_interval,
-        );
         factory.insert(
             registration.pair.key.clone(),
             PipelineKey::ShastaSp1,
@@ -556,10 +446,6 @@ fn register_pair_pipelines(
                 PipelineKey::ShastaNative.route(),
             )),
         )?;
-        native_engine.start_workers_with_maintenance_interval(
-            registration.workers,
-            registration.maintenance_interval,
-        );
         factory.insert(
             registration.pair.key.clone(),
             PipelineKey::ShastaNative,
@@ -588,8 +474,6 @@ fn register_remote_sgx_pipelines(
             pair: registration.pair,
             scheduler_config: registration.scheduler_config.clone(),
             observer: Arc::clone(&runtime_observer),
-            workers: registration.workers,
-            maintenance_interval: registration.maintenance_interval,
             pipeline_key: PipelineKey::ShastaSgx,
             proof_type: ProofType::Sgx,
             base_url: &registration.config.prover.remote_sgx.base_url,
@@ -602,8 +486,6 @@ fn register_remote_sgx_pipelines(
             pair: registration.pair,
             scheduler_config: registration.scheduler_config.clone(),
             observer: runtime_observer,
-            workers: registration.workers,
-            maintenance_interval: registration.maintenance_interval,
             pipeline_key: PipelineKey::ShastaSgxGeth,
             proof_type: ProofType::SgxGeth,
             base_url: &registration.config.prover.remote_sgx.sgxgeth_base_url,
@@ -617,8 +499,6 @@ struct RemoteSgxRegistration<'a> {
     pair: &'a ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
-    workers: usize,
-    maintenance_interval: Duration,
     pipeline_key: PipelineKey,
     proof_type: ProofType,
     base_url: &'a str,
@@ -641,10 +521,6 @@ fn register_remote_sgx_engine(
         registration.proof_type,
         registration.base_url.to_string(),
     )?;
-    engine.start_workers_with_maintenance_interval(
-        registration.workers,
-        registration.maintenance_interval,
-    );
     factory.insert(
         registration.pair.key.clone(),
         registration.pipeline_key,
@@ -1033,48 +909,6 @@ mod tests {
     use raiko2_engine::{ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
     use raiko2_runtime::RuntimeTaskRecord;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    struct CancellationMarker(Arc<AtomicBool>);
-
-    impl Drop for CancellationMarker {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    #[tokio::test]
-    async fn heartbeat_guard_keeps_task_alive_during_slow_startup() {
-        let ticks = Arc::new(AtomicUsize::new(0));
-        let task_ticks = Arc::clone(&ticks);
-        let heartbeat = NamespaceOwnerHeartbeat::new(tokio::spawn(async move {
-            loop {
-                task_ticks.fetch_add(1, Ordering::Release);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }));
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        assert!(ticks.load(Ordering::Acquire) > 1);
-        heartbeat.stop().await;
-    }
-
-    #[tokio::test]
-    async fn heartbeat_guard_stop_awaits_task_cancellation() {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let task_cancelled = Arc::clone(&cancelled);
-        let heartbeat = NamespaceOwnerHeartbeat::new(tokio::spawn(async move {
-            let _marker = CancellationMarker(task_cancelled);
-            std::future::pending::<()>().await;
-        }));
-        tokio::task::yield_now().await;
-
-        heartbeat.stop().await;
-
-        assert!(cancelled.load(Ordering::Acquire));
-    }
-
     #[tokio::test]
     async fn restore_proof_artifacts_registers_cached_child_proposal_refs() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(

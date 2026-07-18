@@ -1592,12 +1592,15 @@ async fn notify_sp1_network_submission(
         loop {
             match observer.on_progress(&progress).await {
                 Ok(()) => break,
-                Err(error) => {
+                Err(crate::ProgressPersistenceError::Retryable(error)) => {
                     tracing::warn!(
                         %error,
                         "failed to persist SP1 network submission checkpoint; retrying without resubmission"
                     );
                     tokio::time::sleep(SP1_SUBMISSION_CHECKPOINT_RETRY_DELAY).await;
+                }
+                Err(crate::ProgressPersistenceError::Permanent(error)) => {
+                    return Err(raiko2_primitives::RaikoError::Guest(error));
                 }
             }
         }
@@ -2021,12 +2024,26 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct PermanentProgressObserver;
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for PermanentProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            Err(crate::ProgressPersistenceError::Permanent(
+                "runtime is draining".to_string(),
+            ))
+        }
+    }
+
     #[async_trait::async_trait]
     impl crate::ProverProgressObserver for FlakyProgressObserver {
         async fn on_progress(
             &self,
             _progress: &crate::ProverProgress,
-        ) -> raiko2_primitives::RaikoResult<()> {
+        ) -> Result<(), crate::ProgressPersistenceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self
                 .remaining_failures
@@ -2035,7 +2052,7 @@ mod tests {
                 })
                 .is_ok()
             {
-                return Err(raiko2_primitives::RaikoError::Guest(
+                return Err(crate::ProgressPersistenceError::Retryable(
                     "checkpoint unavailable".to_string(),
                 ));
             }
@@ -2113,6 +2130,23 @@ mod tests {
         .expect("checkpoint eventually persists");
 
         assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn submission_checkpoint_stops_on_permanent_runtime_fence() {
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> =
+            Arc::new(PermanentProgressObserver);
+
+        let error = notify_sp1_network_submission(
+            Some(&progress_observer),
+            "0x1234".to_string(),
+            &super::Sp1Config::default(),
+            1,
+        )
+        .await
+        .expect_err("permanent runtime fence must stop checkpoint persistence");
+
+        assert!(error.to_string().contains("runtime is draining"));
     }
 
     #[test]

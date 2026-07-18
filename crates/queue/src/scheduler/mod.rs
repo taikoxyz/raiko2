@@ -6,8 +6,8 @@ pub use config::{SchedulerConfig, TaskExecutionPolicy};
 pub use retry::RetryPolicy;
 pub use types::{NewTask, TaskLease, TaskView, TaskViewState};
 
-use crate::{Priority, TaskId, TaskState, TaskStore, TaskStoreError};
-use std::collections::{HashSet, VecDeque};
+use crate::{Priority, TaskId, TaskStore, TaskStoreError};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -246,20 +246,13 @@ where
 
         let updated = self
             .store
-            .set_state_if_running(
-                &id,
-                &lease_token,
-                attempt,
-                TaskState::Succeeded { output },
-                None,
-            )
+            .complete_success_and_release_dependents_if_running(&id, &lease_token, attempt, output)
             .await?;
         if !updated {
             self.notify.notify_one();
             return Ok(false);
         }
 
-        self.release_dependents(&id).await?;
         self.notify.notify_one();
 
         Ok(true)
@@ -342,23 +335,18 @@ where
     ) -> Result<bool, TaskStoreError> {
         let updated = self
             .store
-            .set_state_if_running(
+            .complete_failure_and_fail_dependents_if_running(
                 &lease.id,
                 &lease.lease_token,
                 lease.attempt,
-                TaskState::Failed {
-                    error,
-                    caused_by_dep: None,
-                },
-                None,
+                error,
+                "dependency failed".to_string(),
             )
             .await?;
         if !updated {
             self.notify.notify_one();
             return Ok(false);
         }
-        self.fail_dependents(lease.id, "dependency failed".to_string())
-            .await?;
         self.notify.notify_one();
         Ok(true)
     }
@@ -398,21 +386,8 @@ where
     ///
     /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn cancel(&self, id: TaskId<Id>) -> Result<(), TaskStoreError> {
-        let Some(current) = self.store.get_state(&id).await? else {
-            self.notify.notify_one();
-            return Ok(());
-        };
-
-        if matches!(
-            current,
-            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
-        ) {
-            self.notify.notify_one();
-            return Ok(());
-        }
-
-        self.store.set_state(&id, TaskState::Cancelled).await?;
-        self.fail_dependents(id, "dependency cancelled".to_string())
+        self.store
+            .cancel_and_fail_dependents(&id, "dependency cancelled".to_string())
             .await?;
         self.notify.notify_one();
 
@@ -428,27 +403,7 @@ where
     ///
     /// Returns a store error when the task state or its dependent states cannot be updated.
     pub async fn fail(&self, id: TaskId<Id>, error: String) -> Result<(), TaskStoreError> {
-        let Some(current) = self.store.get_state(&id).await? else {
-            self.notify.notify_one();
-            return Ok(());
-        };
-        if matches!(
-            current,
-            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
-        ) {
-            self.notify.notify_one();
-            return Ok(());
-        }
-        self.store
-            .set_state(
-                &id,
-                TaskState::Failed {
-                    error: error.clone(),
-                    caused_by_dep: None,
-                },
-            )
-            .await?;
-        self.fail_dependents(id, error).await?;
+        self.store.fail_and_fail_dependents(&id, error).await?;
         self.notify.notify_one();
         Ok(())
     }
@@ -555,52 +510,6 @@ where
         }
         Ok(moved)
     }
-
-    async fn release_dependents(&self, id: &TaskId<Id>) -> Result<(), TaskStoreError> {
-        for dependent in self.store.dependents_of(id).await? {
-            let remaining = self.store.dec_remaining_deps(&dependent).await?;
-            if remaining == 0
-                && let Some(priority) = self.store.try_mark_ready(&dependent).await?
-            {
-                self.store.push_ready(priority, dependent).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn fail_dependents(&self, root: TaskId<Id>, error: String) -> Result<(), TaskStoreError> {
-        let mut queue: VecDeque<TaskId<Id>> = self.store.dependents_of(&root).await?.into();
-        let mut visited = HashSet::new();
-
-        while let Some(id) = queue.pop_front() {
-            if !visited.insert(id.clone()) {
-                continue;
-            }
-
-            let state = self.store.get_state(&id).await?;
-            if !matches!(
-                state,
-                Some(TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. })
-            ) {
-                self.store
-                    .set_state(
-                        &id,
-                        TaskState::Failed {
-                            error: error.clone(),
-                            caused_by_dep: Some(root.clone()),
-                        },
-                    )
-                    .await?;
-            }
-
-            for dependent in self.store.dependents_of(&id).await? {
-                queue.push_back(dependent);
-            }
-        }
-
-        Ok(())
-    }
 }
 
 fn now_millis() -> u64 {
@@ -637,10 +546,9 @@ mod tests {
     use crate::MemoryStore;
     use crate::Priority;
     use crate::StoreResult;
+    use crate::TaskState;
     use crate::TaskStoreError;
-    use std::collections::{HashMap, HashSet};
     use std::time::Duration;
-    use tokio::sync::Mutex;
 
     type TestId = u64;
     type TestTaskId = TaskId<TestId>;
@@ -660,338 +568,6 @@ mod tests {
 
     struct BuggyTakeStore<P, O> {
         inner: MemoryStore<P, O, TestId>,
-    }
-
-    struct UniqueDependentsStore<P, O> {
-        inner: Mutex<UniqueDependentsInner<P, O>>,
-    }
-
-    struct UniqueDependentsInner<P, O> {
-        tasks: HashMap<TestTaskId, UniqueTaskRecord<P, O>>,
-        dependents: HashMap<TestTaskId, HashSet<TestTaskId>>,
-        remaining: HashMap<TestTaskId, usize>,
-        ready_high: VecDeque<TestTaskId>,
-        ready_medium: VecDeque<TestTaskId>,
-        ready_low: VecDeque<TestTaskId>,
-    }
-
-    struct UniqueTaskRecord<P, O> {
-        payload: Option<P>,
-        state: TaskState<O, TestId>,
-        priority: Priority,
-        attempt: u32,
-        execution_policy: TaskExecutionPolicy,
-    }
-
-    impl<P, O> UniqueDependentsStore<P, O> {
-        fn new() -> Self {
-            Self {
-                inner: Mutex::new(UniqueDependentsInner {
-                    tasks: HashMap::new(),
-                    dependents: HashMap::new(),
-                    remaining: HashMap::new(),
-                    ready_high: VecDeque::new(),
-                    ready_medium: VecDeque::new(),
-                    ready_low: VecDeque::new(),
-                }),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O, TestId>
-        for UniqueDependentsStore<P, O>
-    {
-        async fn insert_task(
-            &self,
-            id: TestTaskId,
-            payload: P,
-            prio: Priority,
-            deps: Vec<TestTaskId>,
-            execution_policy: TaskExecutionPolicy,
-        ) -> StoreResult<bool> {
-            let mut guard = self.inner.lock().await;
-            if guard.tasks.contains_key(&id) {
-                return Ok(false);
-            }
-            guard.remaining.insert(id.clone(), deps.len());
-            for dep in deps {
-                guard.dependents.entry(dep).or_default().insert(id.clone());
-            }
-            let remaining = guard.remaining.get(&id).copied().unwrap_or(0);
-            guard.tasks.insert(
-                id,
-                UniqueTaskRecord {
-                    payload: Some(payload),
-                    state: TaskState::pending(remaining),
-                    priority: prio,
-                    attempt: 0,
-                    execution_policy,
-                },
-            );
-            Ok(true)
-        }
-
-        async fn get_state(&self, id: &TestTaskId) -> StoreResult<Option<TaskState<O, TestId>>> {
-            let guard = self.inner.lock().await;
-            Ok(guard.tasks.get(id).map(|record| record.state.clone()))
-        }
-
-        async fn set_state(&self, id: &TestTaskId, state: TaskState<O, TestId>) -> StoreResult<()> {
-            let mut guard = self.inner.lock().await;
-            if let Some(record) = guard.tasks.get_mut(id) {
-                record.state = state;
-            }
-            Ok(())
-        }
-
-        async fn set_state_if_running(
-            &self,
-            id: &TestTaskId,
-            worker: &str,
-            attempt: u32,
-            state: TaskState<O, TestId>,
-            payload: Option<P>,
-        ) -> StoreResult<bool> {
-            let mut guard = self.inner.lock().await;
-            let Some(record) = guard.tasks.get_mut(id) else {
-                return Ok(false);
-            };
-            let TaskState::Running {
-                worker: current_worker,
-                attempt: current_attempt,
-            } = &record.state
-            else {
-                return Ok(false);
-            };
-            if current_worker != worker || *current_attempt != attempt {
-                return Ok(false);
-            }
-
-            if let Some(payload) = payload {
-                record.payload = Some(payload);
-            }
-            record.state = state;
-            Ok(true)
-        }
-
-        async fn get_view(
-            &self,
-            id: &TestTaskId,
-        ) -> StoreResult<Option<(TaskState<O, TestId>, Priority)>> {
-            let guard = self.inner.lock().await;
-            let Some(record) = guard.tasks.get(id) else {
-                return Ok(None);
-            };
-            Ok(Some((record.state.clone(), record.priority)))
-        }
-
-        async fn get_view_state(
-            &self,
-            id: &TestTaskId,
-        ) -> StoreResult<Option<(crate::TaskStateKind, Priority)>> {
-            let guard = self.inner.lock().await;
-            let Some(record) = guard.tasks.get(id) else {
-                return Ok(None);
-            };
-            Ok(Some((
-                crate::TaskStateKind::from(&record.state),
-                record.priority,
-            )))
-        }
-
-        async fn list_view_states(
-            &self,
-        ) -> StoreResult<Vec<(TestTaskId, crate::TaskStateKind, Priority)>> {
-            let guard = self.inner.lock().await;
-            Ok(guard
-                .tasks
-                .iter()
-                .map(|(id, record)| {
-                    (
-                        id.clone(),
-                        crate::TaskStateKind::from(&record.state),
-                        record.priority,
-                    )
-                })
-                .collect())
-        }
-
-        async fn dependents_of(&self, dep: &TestTaskId) -> StoreResult<Vec<TestTaskId>> {
-            let guard = self.inner.lock().await;
-            Ok(guard
-                .dependents
-                .get(dep)
-                .map(|set| set.iter().cloned().collect())
-                .unwrap_or_default())
-        }
-
-        async fn dec_remaining_deps(&self, id: &TestTaskId) -> StoreResult<usize> {
-            let mut guard = self.inner.lock().await;
-            let entry = guard.remaining.entry(id.clone()).or_insert(0);
-            if *entry > 0 {
-                *entry -= 1;
-            }
-            let remaining = *entry;
-
-            if let Some(record) = guard.tasks.get_mut(id)
-                && matches!(record.state, TaskState::Pending { .. })
-            {
-                record.state = TaskState::pending(remaining);
-            }
-
-            Ok(remaining)
-        }
-
-        async fn try_mark_ready(&self, id: &TestTaskId) -> StoreResult<Option<Priority>> {
-            let mut guard = self.inner.lock().await;
-            let remaining = guard.remaining.get(id).copied().unwrap_or(0);
-            if remaining != 0 {
-                return Ok(None);
-            }
-            let Some(record) = guard.tasks.get_mut(id) else {
-                return Ok(None);
-            };
-            match record.state {
-                TaskState::Pending { .. } => {
-                    record.state = TaskState::Ready;
-                    Ok(Some(record.priority))
-                }
-                _ => Ok(None),
-            }
-        }
-
-        async fn push_ready(&self, prio: Priority, id: TestTaskId) -> StoreResult<()> {
-            let mut guard = self.inner.lock().await;
-            match prio {
-                Priority::High => guard.ready_high.push_back(id),
-                Priority::Medium => guard.ready_medium.push_back(id),
-                Priority::Low => guard.ready_low.push_back(id),
-            }
-            Ok(())
-        }
-
-        async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TestTaskId>> {
-            let mut guard = self.inner.lock().await;
-            let id = match prio {
-                Priority::High => guard.ready_high.pop_front(),
-                Priority::Medium => guard.ready_medium.pop_front(),
-                Priority::Low => guard.ready_low.pop_front(),
-            };
-            Ok(id)
-        }
-
-        async fn take_ready(
-            &self,
-            id: &TestTaskId,
-            worker: &str,
-        ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
-            let mut guard = self.inner.lock().await;
-            let Some(record) = guard.tasks.get_mut(id) else {
-                return Ok(None);
-            };
-            if !matches!(record.state, TaskState::Ready) {
-                return Ok(None);
-            }
-            let Some(payload) = record.payload.as_ref() else {
-                return Ok(None);
-            };
-
-            record.attempt = record.attempt.saturating_add(1);
-            let attempt = record.attempt;
-            record.state = TaskState::Running {
-                worker: worker.to_string(),
-                attempt,
-            };
-            Ok(Some((
-                payload.clone(),
-                record.priority,
-                attempt,
-                record.execution_policy.clone(),
-            )))
-        }
-
-        async fn renew_lease(
-            &self,
-            id: &TestTaskId,
-            worker: &str,
-            attempt: u32,
-        ) -> StoreResult<bool> {
-            let mut guard = self.inner.lock().await;
-            let Some(record) = guard.tasks.get_mut(id) else {
-                return Ok(false);
-            };
-
-            let TaskState::Running {
-                worker: current_worker,
-                attempt: current_attempt,
-            } = &record.state
-            else {
-                return Ok(false);
-            };
-
-            Ok(current_worker == worker && *current_attempt == attempt)
-        }
-
-        async fn put_payload(&self, id: &TestTaskId, payload: P) -> StoreResult<()> {
-            let mut guard = self.inner.lock().await;
-            if let Some(record) = guard.tasks.get_mut(id) {
-                record.payload = Some(payload);
-            }
-            Ok(())
-        }
-
-        async fn checkpoint_payload_if_running(
-            &self,
-            id: &TestTaskId,
-            worker: &str,
-            attempt: u32,
-            payload: P,
-            execution_policy: TaskExecutionPolicy,
-        ) -> StoreResult<bool> {
-            let mut guard = self.inner.lock().await;
-            let Some(record) = guard.tasks.get_mut(id) else {
-                return Ok(false);
-            };
-            if !matches!(
-                &record.state,
-                TaskState::Running {
-                    worker: current_worker,
-                    attempt: current_attempt,
-                } if current_worker == worker && *current_attempt == attempt
-            ) {
-                return Ok(false);
-            }
-            record.payload = Some(payload);
-            record.execution_policy = execution_policy;
-            Ok(true)
-        }
-
-        async fn schedule(&self, _id: TestTaskId, _not_before_ms: u64) -> StoreResult<()> {
-            Ok(())
-        }
-
-        async fn promote_scheduled(&self, _now_ms: u64, _limit: usize) -> StoreResult<usize> {
-            Ok(0)
-        }
-
-        async fn requeue_expired_leases(&self, _now_ms: u64, _limit: usize) -> StoreResult<usize> {
-            Ok(0)
-        }
-
-        async fn remove_task(&self, id: &TestTaskId) -> StoreResult<bool> {
-            let mut guard = self.inner.lock().await;
-            let existed = guard.tasks.remove(id).is_some();
-            guard.remaining.remove(id);
-            guard.dependents.remove(id);
-            for dependents in guard.dependents.values_mut() {
-                dependents.remove(id);
-            }
-            guard.ready_high.retain(|queued| queued != id);
-            guard.ready_medium.retain(|queued| queued != id);
-            guard.ready_low.retain(|queued| queued != id);
-            Ok(existed)
-        }
     }
 
     #[async_trait::async_trait]
@@ -1018,14 +594,6 @@ mod tests {
             self.inner.get_state(id).await
         }
 
-        async fn set_state(
-            &self,
-            id: &TestTaskId,
-            state: TaskState<O, TestId>,
-        ) -> crate::StoreResult<()> {
-            self.inner.set_state(id, state).await
-        }
-
         async fn set_state_if_running(
             &self,
             id: &TestTaskId,
@@ -1037,6 +605,55 @@ mod tests {
             self.inner
                 .set_state_if_running(id, worker, attempt, state, payload)
                 .await
+        }
+
+        async fn complete_success_and_release_dependents_if_running(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+            output: O,
+        ) -> crate::StoreResult<bool> {
+            self.inner
+                .complete_success_and_release_dependents_if_running(id, worker, attempt, output)
+                .await
+        }
+
+        async fn complete_failure_and_fail_dependents_if_running(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+            error: String,
+            dependent_error: String,
+        ) -> crate::StoreResult<bool> {
+            self.inner
+                .complete_failure_and_fail_dependents_if_running(
+                    id,
+                    worker,
+                    attempt,
+                    error,
+                    dependent_error,
+                )
+                .await
+        }
+
+        async fn cancel_and_fail_dependents(
+            &self,
+            id: &TestTaskId,
+            dependent_error: String,
+        ) -> crate::StoreResult<bool> {
+            self.inner
+                .cancel_and_fail_dependents(id, dependent_error)
+                .await
+        }
+
+        async fn fail_and_fail_dependents(
+            &self,
+            id: &TestTaskId,
+            error: String,
+        ) -> crate::StoreResult<bool> {
+            self.inner.fail_and_fail_dependents(id, error).await
         }
 
         async fn get_view(
@@ -1061,10 +678,6 @@ mod tests {
 
         async fn dependents_of(&self, dep: &TestTaskId) -> crate::StoreResult<Vec<TestTaskId>> {
             self.inner.dependents_of(dep).await
-        }
-
-        async fn dec_remaining_deps(&self, id: &TestTaskId) -> crate::StoreResult<usize> {
-            self.inner.dec_remaining_deps(id).await
         }
 
         async fn try_mark_ready(&self, id: &TestTaskId) -> crate::StoreResult<Option<Priority>> {
@@ -1243,7 +856,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_dependencies_do_not_block_dependents() -> StoreResult<()> {
         let sched: Scheduler<&'static str, &'static str, TestId> =
-            Scheduler::new(UniqueDependentsStore::new());
+            Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(

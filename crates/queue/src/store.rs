@@ -1,7 +1,7 @@
 use crate::ready_sort::insert_ready_sorted;
 use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind};
 use async_trait::async_trait;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::hash::Hash;
 use std::time::Duration;
@@ -73,7 +73,6 @@ where
         execution_policy: TaskExecutionPolicy,
     ) -> StoreResult<bool>;
     async fn get_state(&self, id: &TaskId<Id>) -> StoreResult<Option<TaskState<O, Id>>>;
-    async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()>;
     async fn set_state_if_running(
         &self,
         id: &TaskId<Id>,
@@ -82,6 +81,27 @@ where
         state: TaskState<O, Id>,
         payload: Option<P>,
     ) -> StoreResult<bool>;
+    async fn complete_success_and_release_dependents_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        output: O,
+    ) -> StoreResult<bool>;
+    async fn complete_failure_and_fail_dependents_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        error: String,
+        dependent_error: String,
+    ) -> StoreResult<bool>;
+    async fn cancel_and_fail_dependents(
+        &self,
+        id: &TaskId<Id>,
+        dependent_error: String,
+    ) -> StoreResult<bool>;
+    async fn fail_and_fail_dependents(&self, id: &TaskId<Id>, error: String) -> StoreResult<bool>;
     async fn retry_now_if_running(
         &self,
         id: TaskId<Id>,
@@ -132,7 +152,6 @@ where
     ) -> StoreResult<Option<(TaskStateKind, Priority)>>;
     async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
-    async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
     async fn try_mark_ready(&self, id: &TaskId<Id>) -> StoreResult<Option<Priority>>;
     async fn push_ready(&self, prio: Priority, id: TaskId<Id>) -> StoreResult<()>;
     async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId<Id>>>;
@@ -372,6 +391,94 @@ fn remove_dependent_edges<Id>(
     });
 }
 
+fn running_lease_matches<P, O, Id>(
+    inner: &Inner<P, O, Id>,
+    id: &TaskId<Id>,
+    worker: &str,
+    attempt: u32,
+) -> bool
+where
+    Id: Clone + Eq + Hash,
+{
+    matches!(
+        inner.tasks.get(id).map(|record| &record.state),
+        Some(TaskState::Running {
+            worker: current_worker,
+            attempt: current_attempt,
+        }) if current_worker == worker && *current_attempt == attempt
+    )
+}
+
+fn release_dependents_locked<P, O, Id>(inner: &mut Inner<P, O, Id>, root: &TaskId<Id>)
+where
+    Id: ReadyQueueSort,
+{
+    let dependents = inner.dependents.get(root).cloned().unwrap_or_default();
+    for dependent in dependents {
+        let is_pending = inner
+            .tasks
+            .get(&dependent)
+            .is_some_and(|record| matches!(record.state, TaskState::Pending { .. }));
+        if !is_pending {
+            continue;
+        }
+        let remaining = {
+            let entry = inner.remaining.entry(dependent.clone()).or_insert(0);
+            *entry = entry.saturating_sub(1);
+            *entry
+        };
+        let mut ready_priority = None;
+        if let Some(record) = inner.tasks.get_mut(&dependent) {
+            record.state = TaskState::pending(remaining);
+            if remaining == 0 {
+                record.state = TaskState::Ready;
+                ready_priority = Some(record.priority);
+            }
+        }
+        if let Some(priority) = ready_priority {
+            push_ready_locked(inner, priority, dependent);
+        }
+    }
+}
+
+fn fail_dependents_locked<P, O, Id>(inner: &mut Inner<P, O, Id>, root: &TaskId<Id>, error: &str)
+where
+    Id: ReadyQueueSort,
+{
+    let mut queue: VecDeque<TaskId<Id>> = inner
+        .dependents
+        .get(root)
+        .cloned()
+        .unwrap_or_default()
+        .into();
+    let mut visited = HashSet::new();
+
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let is_terminal = inner.tasks.get(&id).is_some_and(|record| {
+            matches!(
+                record.state,
+                TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
+            )
+        });
+        if !is_terminal {
+            remove_queue_memberships(inner, &id);
+            if let Some(record) = inner.tasks.get_mut(&id) {
+                record.state = TaskState::Failed {
+                    error: error.to_string(),
+                    caused_by_dep: Some(root.clone()),
+                };
+                record.lease_until_ms = None;
+            }
+        }
+        if let Some(dependents) = inner.dependents.get(&id) {
+            queue.extend(dependents.iter().cloned());
+        }
+    }
+}
+
 #[async_trait]
 impl<P, O, Id> TaskStore<P, O, Id> for MemoryStore<P, O, Id>
 where
@@ -473,21 +580,6 @@ where
         Ok(g.tasks.get(id).map(|r| &r.state).cloned())
     }
 
-    async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()> {
-        let mut g = self.inner.lock().await;
-        if !matches!(state, TaskState::Running { .. }) {
-            remove_queue_memberships(&mut g, id);
-        }
-        if let Some(r) = g.tasks.get_mut(id) {
-            r.state = state;
-            if !matches!(r.state, TaskState::Running { .. }) {
-                r.lease_until_ms = None;
-            }
-        }
-
-        Ok(())
-    }
-
     async fn set_state_if_running(
         &self,
         id: &TaskId<Id>,
@@ -518,6 +610,105 @@ where
         if !matches!(record.state, TaskState::Running { .. }) {
             record.lease_until_ms = None;
         }
+        Ok(true)
+    }
+
+    async fn complete_success_and_release_dependents_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        output: O,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        if !running_lease_matches(&g, id, worker, attempt) {
+            return Ok(false);
+        }
+        remove_queue_memberships(&mut g, id);
+        let record = g
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| TaskStoreError::corrupt_msg("running task disappeared"))?;
+        record.state = TaskState::Succeeded { output };
+        record.lease_until_ms = None;
+        release_dependents_locked(&mut g, id);
+        Ok(true)
+    }
+
+    async fn complete_failure_and_fail_dependents_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        error: String,
+        dependent_error: String,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        if !running_lease_matches(&g, id, worker, attempt) {
+            return Ok(false);
+        }
+        remove_queue_memberships(&mut g, id);
+        let record = g
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| TaskStoreError::corrupt_msg("running task disappeared"))?;
+        record.state = TaskState::Failed {
+            error,
+            caused_by_dep: None,
+        };
+        record.lease_until_ms = None;
+        fail_dependents_locked(&mut g, id, &dependent_error);
+        Ok(true)
+    }
+
+    async fn cancel_and_fail_dependents(
+        &self,
+        id: &TaskId<Id>,
+        dependent_error: String,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get(id) else {
+            return Ok(false);
+        };
+        if matches!(
+            record.state,
+            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
+        ) {
+            return Ok(false);
+        }
+        remove_queue_memberships(&mut g, id);
+        let record = g
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| TaskStoreError::corrupt_msg("task disappeared during cancellation"))?;
+        record.state = TaskState::Cancelled;
+        record.lease_until_ms = None;
+        fail_dependents_locked(&mut g, id, &dependent_error);
+        Ok(true)
+    }
+
+    async fn fail_and_fail_dependents(&self, id: &TaskId<Id>, error: String) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get(id) else {
+            return Ok(false);
+        };
+        if matches!(
+            record.state,
+            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
+        ) {
+            return Ok(false);
+        }
+        remove_queue_memberships(&mut g, id);
+        let record = g
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| TaskStoreError::corrupt_msg("task disappeared during failure"))?;
+        record.state = TaskState::Failed {
+            error: error.clone(),
+            caused_by_dep: None,
+        };
+        record.lease_until_ms = None;
+        fail_dependents_locked(&mut g, id, &error);
         Ok(true)
     }
 
@@ -622,25 +813,6 @@ where
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>> {
         let g = self.inner.lock().await;
         Ok(g.dependents.get(dep).cloned().unwrap_or_default())
-    }
-
-    async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize> {
-        let mut g = self.inner.lock().await;
-        let remaining = {
-            let entry = g.remaining.entry(id.clone()).or_insert(0);
-            if *entry > 0 {
-                *entry -= 1;
-            }
-            *entry
-        };
-
-        if let Some(record) = g.tasks.get_mut(id)
-            && matches!(record.state, TaskState::Pending { .. })
-        {
-            record.state = TaskState::pending(remaining);
-        }
-
-        Ok(remaining)
     }
 
     async fn try_mark_ready(&self, id: &TaskId<Id>) -> StoreResult<Option<Priority>> {

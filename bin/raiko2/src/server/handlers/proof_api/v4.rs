@@ -1593,6 +1593,19 @@ async fn submit_submission(
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
 ) -> Result<String, Error> {
+    // Submission, recovery, replacement, and invalidation share one namespace-wide lifecycle
+    // boundary. Acquire it before even reading an existing row so no early-return recovery path
+    // can race an invalidation snapshot.
+    let _lifecycle_operation =
+        state
+            .runtime
+            .acquire_lifecycle_operation()
+            .await
+            .map_err(|error| {
+                Error::from_api_error(ApiError::internal(format!(
+                    "runtime lifecycle unavailable: {error}"
+                )))
+            })?;
     // Deterministic v4 task IDs are reusable only when the normalized request fingerprint matches.
     if let Some(existing) = state
         .runtime
@@ -1651,16 +1664,6 @@ async fn submit_submission(
     let plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
         .await
         .map_err(Error::from_api_error)?;
-    let _lifecycle_operation =
-        state
-            .runtime
-            .acquire_lifecycle_operation()
-            .await
-            .map_err(|error| {
-                Error::from_api_error(ApiError::internal(format!(
-                    "runtime lifecycle unavailable: {error}"
-                )))
-            })?;
     match register_batch_task(state, submission, &plan, request_fingerprint)
         .await
         .map_err(Error::from_api_error)?
@@ -1753,7 +1756,14 @@ mod tests {
         ProofArtifactStore, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
         RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
     };
-    use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
+    use std::{
+        future::Future,
+        path::PathBuf,
+        pin::Pin,
+        process,
+        sync::Arc,
+        time::{Duration, SystemTime},
+    };
 
     type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1925,6 +1935,100 @@ mod tests {
         assert_eq!(context.proposal_ids, "31..32");
         assert_eq!(context.proposal_count, 2);
         assert!(context.aggregate);
+    }
+
+    #[tokio::test]
+    async fn existing_submission_waits_for_global_lifecycle_operation() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("existing-submit-lifecycle"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Risc0,
+            aggregate: false,
+            prover: None,
+            proposals: vec![wire::ProposalRequest {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_number_start: 7,
+                l2_block_number_end: 7,
+                last_anchor_block_number: 6,
+            }],
+        };
+        let mut submission = proposal_submission(&state, &req).expect("canonical submission");
+        let fingerprint =
+            proposal_request_fingerprint(runtime.environment(), runtime.namespace(), &submission)
+                .expect("request fingerprint");
+        submission.public_task_id = fingerprint.public_task_id();
+        let metadata = TaskMetadata {
+            network_pair: submission.pair.key.clone(),
+            network: submission.pair.network.clone(),
+            l1_network: submission.pair.l1_network.clone(),
+            proof_type: submission.route.proof_type(),
+            requested_proof_type: Some(submission.requested_proof_type.as_str().to_string()),
+            prover_type: submission.prover_type,
+            execution_mode: submission.execution_mode,
+            aggregate_requested: false,
+            proposals: Vec::new(),
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        runtime
+            .register_task(TaskRegistration {
+                task_id: submission.public_task_id.clone(),
+                pipeline_key: Some(submission.route.pipeline_key()),
+                route: submission.route.route,
+                task_kind: "hoodi_proposal".to_string(),
+                proposal_id: Some(7),
+                proof_ids: Vec::new(),
+                metadata: serde_json::to_value(metadata).expect("serialize metadata"),
+                request_fingerprint: Some(fingerprint.as_str().to_string()),
+            })
+            .await
+            .expect("register existing task");
+        runtime
+            .sync_status(
+                &submission.public_task_id,
+                RuntimeTaskRunnerStatus::Cancelled,
+                None,
+                None,
+            )
+            .await
+            .expect("cancel existing task");
+
+        let lifecycle = runtime
+            .acquire_lifecycle_operation()
+            .await
+            .expect("hold lifecycle operation");
+        let submit_state = state.clone();
+        let submit_fingerprint = fingerprint.as_str().to_string();
+        let mut submit = tokio::spawn(async move {
+            submit_submission(&submit_state, &submission, &submit_fingerprint).await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut submit)
+                .await
+                .is_err(),
+            "existing-task submission crossed the global lifecycle boundary"
+        );
+
+        drop(lifecycle);
+        let result = tokio::time::timeout(Duration::from_secs(1), submit)
+            .await
+            .expect("submission should resume after lifecycle release")
+            .expect("submission task should not panic");
+        assert!(
+            result.is_err(),
+            "empty test factory should reject submission"
+        );
     }
 
     #[tokio::test]

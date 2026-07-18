@@ -25,6 +25,14 @@ impl FakeGcsTransport {
             .remove(name);
         Ok(())
     }
+
+    fn contains(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .objects
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?
+            .contains_key(name))
+    }
 }
 
 #[async_trait]
@@ -172,6 +180,11 @@ async fn different_hash_conflicts_with_dangling_manifest_through_gcs_seam() -> R
     };
     assert_eq!(conflict.descriptor, first.descriptor());
     assert_eq!(conflict.object, None);
+    let rejected_hash = content_hash(br#"{"proof":"0x02"}"#);
+    assert!(
+        !transport.contains(&store.content_name(&key, &rejected_hash))?,
+        "a known manifest conflict must not upload unreferenced content"
+    );
     Ok(())
 }
 

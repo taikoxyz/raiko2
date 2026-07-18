@@ -342,6 +342,45 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
         let hash = content_hash(bytes);
+        if let Some((existing_manifest, generation)) = self.read_manifest(key).await? {
+            let descriptor = ProofArtifactDescriptor {
+                proof_uri: self.content_uri(key, &existing_manifest.content_hash),
+                content_hash: existing_manifest.content_hash,
+                generation: Some(generation),
+            };
+            if descriptor.content_hash != hash {
+                let content_name = self.content_name(key, &descriptor.content_hash);
+                let object = self
+                    .read_named(&content_name, descriptor.proof_uri.clone())
+                    .await?
+                    .map(|mut object| {
+                        object.generation = descriptor.generation;
+                        object
+                    });
+                if let Some(object) = object.as_ref() {
+                    anyhow::ensure!(
+                        object.content_hash == descriptor.content_hash,
+                        "proof manifest content hash mismatch"
+                    );
+                }
+                return Ok(ProofArtifactPutResult::Conflict(ProofArtifactConflict {
+                    descriptor,
+                    object,
+                }));
+            }
+
+            let content_name = self.content_name(key, &hash);
+            self.transport
+                .create(&content_name, bytes)
+                .await
+                .context("failed to repair immutable GCS proof content")?;
+            let existing = self
+                .read_manifest_object(key)
+                .await?
+                .context("GCS manifest exists but content is missing after repair")?;
+            return Ok(ProofArtifactPutResult::AlreadyExists(existing));
+        }
+
         let content_name = self.content_name(key, &hash);
         self.transport
             .create(&content_name, bytes)

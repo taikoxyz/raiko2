@@ -4,6 +4,7 @@ mod app;
 #[cfg(feature = "fixture-server")]
 mod fixture;
 mod handlers;
+mod lifecycle;
 mod net;
 mod proof_artifact;
 mod ready;

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::server::lifecycle::ProofLifecycle;
 use crate::server::state::PipelineFactory;
 use crate::server::state::{EngineHandle, EngineQueueTaskState};
 use crate::server::task_metadata::{
@@ -7,7 +8,7 @@ use crate::server::task_metadata::{
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
-use raiko2_queue::{TaskStoreError, encode_task_id};
+use raiko2_queue::DetachMode;
 use raiko2_runtime::{
     ExpiredTaskCursor, ProofArtifactRecord, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
 };
@@ -97,10 +98,12 @@ pub(crate) async fn run_runtime_cleanup_pass(
     if ttl_secs == 0 {
         return Ok(RuntimeCleanupStats::default());
     }
+    let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
 
     let orphaned_cancelled = cancel_orphaned_runtime_tasks(
         runtime.as_ref(),
         pipelines.as_ref(),
+        &lifecycle,
         ttl_secs,
         orphan_cursor,
     )
@@ -125,7 +128,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
     };
 
     for record in records {
-        match cleanup_expired_root_task(runtime.as_ref(), pipelines.as_ref(), &record).await {
+        match cleanup_expired_root_task(runtime.as_ref(), &lifecycle, &record).await {
             Ok(Some(outcome)) => {
                 stats.removed_roots += 1;
                 stats.skipped_shared_children += outcome.skipped_shared_children;
@@ -144,6 +147,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
 async fn cancel_orphaned_runtime_tasks(
     runtime: &RuntimeManager,
     pipelines: &dyn PipelineFactory,
+    lifecycle: &ProofLifecycle,
     ttl_secs: u64,
     cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<usize> {
@@ -162,7 +166,6 @@ async fn cancel_orphaned_runtime_tasks(
     let mut cancelled = 0usize;
 
     for record in records {
-        let _lifecycle_operation = runtime.acquire_lifecycle_operation().await?;
         if runtime
             .get_task(&record.task_id)
             .await?
@@ -193,49 +196,29 @@ async fn cancel_orphaned_runtime_tasks(
             continue;
         }
 
-        let Some(engine) = pipelines.get(&metadata.network_pair, record.pipeline_key) else {
-            continue;
-        };
-        if has_active_queue_task(
-            engine.as_ref(),
-            &metadata_queue_task_ids(&metadata, record.pipeline_key),
-        )
-        .await?
+        if let Some(engine) = pipelines.get(&metadata.network_pair, record.pipeline_key)
+            && has_active_queue_task(
+                engine.as_ref(),
+                &metadata_queue_task_ids(&metadata, record.pipeline_key),
+            )
+            .await?
         {
             continue;
         }
 
-        let cancelled_stale = runtime
-            .cancel_nonterminal_task_if_incarnation_and_stale(
-                &record.task_id,
-                record.incarnation_id,
-                record.updated_at,
-                Some(ORPHANED_RUNTIME_ERROR.to_string()),
-            )
+        let cancellation = lifecycle
+            .cancel(&record, &metadata, Some(ORPHANED_RUNTIME_ERROR.to_string()))
             .await
             .with_context(|| format!("failed cancel orphaned runtime task {}", record.task_id))?;
-        if !cancelled_stale {
+        if !matches!(
+            cancellation,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ) {
             continue;
         }
 
         cancelled += 1;
         warn!(task_id = %record.task_id, "cancelled orphaned runtime task");
-
-        if let Err(err) = cancel_registered_tasks(
-            runtime,
-            &engine,
-            &record.task_id,
-            record.pipeline_key,
-            &metadata,
-        )
-        .await
-        {
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed best-effort queue cleanup for orphaned runtime task"
-            );
-        }
     }
 
     Ok(cancelled)
@@ -364,228 +347,6 @@ fn metadata_queue_task_ids(
     task_ids
 }
 
-pub(crate) async fn cancel_registered_tasks(
-    runtime: &RuntimeManager,
-    engine: &Arc<dyn EngineHandle>,
-    public_task_id: &str,
-    pipeline_key: PipelineKey,
-    metadata: &TaskMetadata,
-) -> Result<()> {
-    let mut errors = Vec::new();
-
-    for proposal in &metadata.proposals {
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
-        if has_other_live_task_reference(
-            runtime,
-            public_task_id,
-            &proposal.task_id,
-            &metadata.network_pair,
-        )
-        .await?
-            || proposal_has_other_shared_dependent(engine, &task_id, metadata, pipeline_key).await?
-        {
-            continue;
-        }
-        for stage_task_id in proposal_task_chain_ids(&task_id) {
-            if let Err(err) = engine.cancel(stage_task_id.clone()).await {
-                let encoded = encode_task_id(&stage_task_id)
-                    .unwrap_or_else(|_| "<invalid-task-id>".to_string());
-                errors.push(format!("{encoded}: {err}"));
-            }
-        }
-    }
-
-    if let Some(task_id) = &metadata.aggregate_task_id
-        && !has_other_live_task_reference(runtime, public_task_id, task_id, &metadata.network_pair)
-            .await?
-    {
-        let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) else {
-            return if errors.is_empty() {
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "failed to cancel one or more child tasks: {}",
-                    errors.join("; ")
-                ))
-            };
-        };
-        if let Err(err) = engine.cancel(task_id.clone()).await {
-            let encoded =
-                encode_task_id(&task_id).unwrap_or_else(|_| "<invalid-task-id>".to_string());
-            errors.push(format!("{encoded}: {err}"));
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "failed to cancel one or more child tasks: {}",
-            errors.join("; ")
-        ))
-    }
-}
-
-pub(crate) async fn has_other_task_reference(
-    runtime: &RuntimeManager,
-    public_task_id: &str,
-    engine_task_id: &str,
-    network_pair: &str,
-) -> Result<bool> {
-    let records = runtime
-        .find_tasks_by_task_ref(engine_task_id)
-        .await
-        .with_context(|| {
-            format!("failed to inspect runtime task references for {engine_task_id}")
-        })?;
-    for record in records {
-        if record.task_id != public_task_id && record_matches_network_pair(&record, network_pair)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-async fn proposal_has_other_shared_dependent(
-    engine: &Arc<dyn EngineHandle>,
-    proposal_task_id: &EngineTaskId,
-    metadata: &TaskMetadata,
-    pipeline_key: PipelineKey,
-) -> Result<bool> {
-    let owned_dependents = metadata
-        .proposals
-        .iter()
-        .filter_map(|proposal| proposal.engine_task_id(pipeline_key))
-        .chain(metadata.aggregate_engine_task_id(pipeline_key))
-        .collect::<HashSet<_>>();
-    let dependents = engine
-        .dependents_of(proposal_task_id.clone())
-        .await
-        .map_err(|err| task_store_error_to_anyhow(&err))?;
-    Ok(dependents
-        .iter()
-        .any(|dependent| !owned_dependents.contains(dependent)))
-}
-
-pub(crate) async fn has_other_live_task_reference(
-    runtime: &RuntimeManager,
-    public_task_id: &str,
-    engine_task_id: &str,
-    network_pair: &str,
-) -> Result<bool> {
-    let records = runtime
-        .find_tasks_by_task_ref(engine_task_id)
-        .await
-        .with_context(|| {
-            format!("failed to inspect runtime task references for {engine_task_id}")
-        })?;
-    for record in records {
-        if record.task_id != public_task_id
-            && matches!(
-                record.runner_status,
-                RunnerStatus::Allocated | RunnerStatus::Running | RunnerStatus::Completed
-            )
-            && record_matches_network_pair(&record, network_pair)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-pub(crate) async fn remove_task_children(
-    engine: &Arc<dyn EngineHandle>,
-    pipeline_key: PipelineKey,
-    metadata: &TaskMetadata,
-    removed_engine_task_ids: &mut HashSet<String>,
-) -> Result<()> {
-    for proposal in &metadata.proposals {
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
-        for stage_task_id in proposal_task_chain_ids(&task_id) {
-            let encoded = encode_task_id(&stage_task_id)
-                .context("failed to encode proposal stage task id")?;
-            if removed_engine_task_ids.insert(encoded) {
-                engine
-                    .remove(stage_task_id)
-                    .await
-                    .map_err(|err| task_store_error_to_anyhow(&err))?;
-            }
-        }
-    }
-
-    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
-        let encoded = encode_task_id(&task_id).context("failed to encode aggregate task id")?;
-        if removed_engine_task_ids.insert(encoded) {
-            engine
-                .remove(task_id)
-                .await
-                .map_err(|err| task_store_error_to_anyhow(&err))?;
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) async fn remove_task_children_if_unreferenced(
-    runtime: &RuntimeManager,
-    engine: &Arc<dyn EngineHandle>,
-    public_task_id: &str,
-    pipeline_key: PipelineKey,
-    metadata: &TaskMetadata,
-) -> Result<ChildCleanupOutcome> {
-    let mut outcome = ChildCleanupOutcome::default();
-
-    for proposal in &metadata.proposals {
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
-        let stage_task_ids = proposal_task_chain_ids(&task_id);
-        if has_other_task_reference(
-            runtime,
-            public_task_id,
-            &proposal.task_id,
-            &metadata.network_pair,
-        )
-        .await?
-            || proposal_has_other_shared_dependent(engine, &task_id, metadata, pipeline_key).await?
-        {
-            outcome.skipped_shared_children += stage_task_ids.len();
-            continue;
-        }
-        for stage_task_id in stage_task_ids {
-            engine
-                .remove(stage_task_id)
-                .await
-                .map_err(|err| task_store_error_to_anyhow(&err))?;
-        }
-    }
-
-    if let Some(task_id) = &metadata.aggregate_task_id {
-        if has_other_task_reference(runtime, public_task_id, task_id, &metadata.network_pair)
-            .await?
-        {
-            outcome.skipped_shared_children += 1;
-        } else if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
-            engine
-                .remove(task_id)
-                .await
-                .map_err(|err| task_store_error_to_anyhow(&err))?;
-        }
-    }
-
-    Ok(outcome)
-}
-
-fn record_matches_network_pair(record: &RuntimeTaskRecord, network_pair: &str) -> Result<bool> {
-    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-        .context("failed to parse referenced task metadata")?;
-    Ok(metadata.network_pair == network_pair)
-}
-
 pub(crate) fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
     if !matches!(task_id.0, EngineTaskKey::Proposal { .. }) {
         return Vec::new();
@@ -617,10 +378,9 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
 
 async fn cleanup_expired_root_task(
     runtime: &RuntimeManager,
-    pipelines: &dyn PipelineFactory,
+    lifecycle: &ProofLifecycle,
     record: &RuntimeTaskRecord,
 ) -> Result<Option<ChildCleanupOutcome>> {
-    let _lifecycle_operation = runtime.acquire_lifecycle_operation().await?;
     if runtime
         .get_task(&record.task_id)
         .await?
@@ -630,19 +390,21 @@ async fn cleanup_expired_root_task(
     }
     let metadata: TaskMetadata =
         serde_json::from_value(record.metadata.clone()).context("failed to parse task metadata")?;
-    let engine = pipelines
-        .get(&metadata.network_pair, record.pipeline_key)
-        .ok_or_else(|| anyhow!("pipeline not available: {}", record.pipeline_key.as_str()))?;
-    let outcome = remove_task_children_if_unreferenced(
-        runtime,
-        &engine,
-        &record.task_id,
-        record.pipeline_key,
-        &metadata,
-    )
-    .await?;
+    let (retirement, detached) = lifecycle
+        .retire(record, &metadata, DetachMode::Remove)
+        .await?;
+    if !matches!(
+        retirement,
+        raiko2_runtime::RuntimeMutationOutcome::Applied
+            | raiko2_runtime::RuntimeMutationOutcome::AlreadyApplied
+    ) {
+        return Ok(None);
+    }
+    let outcome = ChildCleanupOutcome {
+        skipped_shared_children: detached.retained.len(),
+    };
     runtime
-        .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
+        .remove_task_if_current(&record.lifetime())
         .await
         .with_context(|| format!("failed to remove runtime task {}", record.task_id))?;
     Ok(Some(outcome))
@@ -658,10 +420,6 @@ pub(crate) const fn proposal_task_id(
     })
 }
 
-fn task_store_error_to_anyhow(err: &TaskStoreError) -> anyhow::Error {
-    anyhow!("failed to remove task: {err}")
-}
-
 fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -673,8 +431,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, cleanup_expired_root_task,
-        proposal_task_chain_ids, proposal_task_id, run_runtime_cleanup_pass,
+        ExpiredTaskCursor, RuntimeCleanupStats, cleanup_expired_root_task, proposal_task_id,
+        run_runtime_cleanup_pass,
     };
     use crate::server::state::{
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
@@ -683,10 +441,7 @@ mod tests {
         ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
     };
     use anyhow::{Context, Result};
-    use raiko2_engine::{
-        AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey,
-        ProposalTaskRequest, ProverTaskConfig,
-    };
+    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
@@ -696,7 +451,7 @@ mod tests {
     use std::collections::HashSet;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -805,9 +560,7 @@ mod tests {
     }
 
     struct MockEngine {
-        removed: Mutex<Vec<String>>,
-        cancelled: Mutex<Vec<String>>,
-        fail_on: HashSet<String>,
+        failing_owners: HashSet<String>,
         queue_task_ids: HashSet<String>,
         queue_task_state: EngineQueueTaskState,
     }
@@ -815,9 +568,7 @@ mod tests {
     impl Default for MockEngine {
         fn default() -> Self {
             Self {
-                removed: Mutex::new(Vec::new()),
-                cancelled: Mutex::new(Vec::new()),
-                fail_on: HashSet::new(),
+                failing_owners: HashSet::new(),
                 queue_task_ids: HashSet::new(),
                 queue_task_state: EngineQueueTaskState::Succeeded,
             }
@@ -825,11 +576,9 @@ mod tests {
     }
 
     impl MockEngine {
-        fn new(fail_on: HashSet<String>) -> Self {
+        fn with_failing_owners(failing_owners: HashSet<String>) -> Self {
             Self {
-                removed: Mutex::new(Vec::new()),
-                cancelled: Mutex::new(Vec::new()),
-                fail_on,
+                failing_owners,
                 queue_task_ids: HashSet::new(),
                 queue_task_state: EngineQueueTaskState::Succeeded,
             }
@@ -852,33 +601,9 @@ mod tests {
                 ..Self::default()
             }
         }
-
-        fn removed(&self) -> Vec<String> {
-            self.removed.lock().expect("removed lock").clone()
-        }
-
-        fn cancelled(&self) -> Vec<String> {
-            self.cancelled.lock().expect("cancelled lock").clone()
-        }
     }
 
     impl EngineHandle for MockEngine {
-        fn submit_proposal_proof_with_dependencies(
-            &self,
-            _request: ProposalTaskRequest,
-            _dependencies: Vec<EngineTaskId>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected proposal submission") })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            _request: AggregationTaskRequest,
-            _inputs: Vec<AggregateProofInput>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregation submission from inputs") })
-        }
-
         fn get_status(
             &self,
             _id: EngineTaskId,
@@ -899,27 +624,28 @@ mod tests {
             Box::pin(async move { Ok(present.then_some(EngineQueueTaskView { id, state })) })
         }
 
-        fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            let encoded = encode_task_id(&id).expect("encode task id");
-            let cancelled = &self.cancelled;
-            Box::pin(async move {
-                cancelled.lock().expect("cancelled lock").push(encoded);
-                Ok(())
-            })
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: raiko2_engine::EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { Ok(raiko2_queue::AttachOutcome::Attached) })
         }
 
-        fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            let encoded = encode_task_id(&id).expect("encode task id");
-            let should_fail = self.fail_on.contains(&encoded);
-            let removed = &self.removed;
+        fn detach_execution(
+            &self,
+            owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
+            let should_fail = self.failing_owners.contains(&owner.task_id);
             Box::pin(async move {
                 if should_fail {
                     Err(TaskStoreError::backend(std::io::Error::other(
-                        "mock remove failure",
+                        "mock detach failure",
                     )))
                 } else {
-                    removed.lock().expect("removed lock").push(encoded);
-                    Ok(())
+                    Ok(raiko2_queue::DetachOutcome::not_attached(mode))
                 }
             })
         }
@@ -959,7 +685,6 @@ mod tests {
         assert_eq!(stats, RuntimeCleanupStats::default());
         let active = runtime.get_task("active-root").await?.expect("active root");
         assert_eq!(active.runner_status, RunnerStatus::Running);
-        assert!(engine.cancelled().is_empty());
         Ok(())
     }
 
@@ -1078,22 +803,22 @@ mod tests {
                 scanned: 1,
                 expired: 1,
                 removed_roots: 1,
-                skipped_shared_children: 1,
+                skipped_shared_children: 0,
                 retained_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_none());
         assert!(runtime.get_task("live-root").await?.is_some());
-        assert!(engine.removed().is_empty());
         Ok(())
     }
 
     #[tokio::test]
-    async fn runtime_cleanup_retains_root_when_child_removal_fails() -> Result<()> {
+    async fn runtime_cleanup_retains_root_when_projection_detach_fails() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("ttl-failure"))?);
-        let failing_stage = first_stage_task_id(9)?;
-        let engine = Arc::new(MockEngine::new(HashSet::from([failing_stage.clone()])));
+        let engine = Arc::new(MockEngine::with_failing_owners(HashSet::from([
+            "expired-root".to_string(),
+        ])));
         let factory = Arc::new(build_factory(engine));
         let proposal_task_id = encoded_proposal_task_id(9)?;
 
@@ -1135,8 +860,9 @@ mod tests {
     #[tokio::test]
     async fn runtime_cleanup_cursor_advances_past_failed_old_records() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("ttl-cursor"))?);
-        let failing_stage = first_stage_task_id(1)?;
-        let engine = Arc::new(MockEngine::new(HashSet::from([failing_stage])));
+        let engine = Arc::new(MockEngine::with_failing_owners(HashSet::from([
+            "expired-a".to_string(),
+        ])));
         let factory = Arc::new(build_factory(engine));
         let mut orphan_cursor = None;
         let mut terminal_cursor = None;
@@ -1218,50 +944,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_registered_tasks_preserves_children_referenced_by_completed_roots() -> Result<()>
-    {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("cancel-shared"))?);
-        let engine = Arc::new(MockEngine::default());
-        let engine_handle: Arc<dyn EngineHandle> = engine.clone();
-        let proposal_task_id = encoded_proposal_task_id(4)?;
-
-        register_runtime_task(
-            runtime.as_ref(),
-            "terminal-root",
-            &proposal_task_id,
-            RunnerStatus::Completed,
-            now_ts(),
-        )
-        .await?;
-        register_runtime_task(
-            runtime.as_ref(),
-            "live-root",
-            &proposal_task_id,
-            RunnerStatus::Running,
-            now_ts(),
-        )
-        .await?;
-
-        cancel_registered_tasks(
-            runtime.as_ref(),
-            &engine_handle,
-            "live-root",
-            PipelineKey::ShastaRisc0,
-            &metadata_for_task(&proposal_task_id),
-        )
-        .await?;
-
-        assert!(engine.cancelled().is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn expired_snapshot_cannot_remove_replacement_queue_children() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "cleanup-incarnation",
         ))?);
         let engine = Arc::new(MockEngine::default());
-        let factory = build_factory(engine.clone());
+        let factory = Arc::new(build_factory(engine.clone()));
         let proposal_task_id = encoded_proposal_task_id(44)?;
         register_runtime_task(
             runtime.as_ref(),
@@ -1272,7 +960,10 @@ mod tests {
         )
         .await?;
         let stale = runtime.get_task("root").await?.expect("stale root");
-        assert!(runtime.remove_task("root").await?);
+        assert!(matches!(
+            runtime.remove_task_if_current(&stale.lifetime()).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
         register_runtime_task(
             runtime.as_ref(),
             "root",
@@ -1283,11 +974,14 @@ mod tests {
         .await?;
 
         assert!(
-            cleanup_expired_root_task(runtime.as_ref(), &factory, &stale)
-                .await?
-                .is_none()
+            cleanup_expired_root_task(
+                runtime.as_ref(),
+                &crate::server::lifecycle::ProofLifecycle::new(Arc::clone(&runtime), factory),
+                &stale,
+            )
+            .await?
+            .is_none()
         );
-        assert!(engine.removed().is_empty());
         assert_eq!(
             runtime
                 .get_task("root")
@@ -1296,44 +990,6 @@ mod tests {
                 .runner_status,
             RunnerStatus::Running
         );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn cancel_registered_tasks_does_not_treat_other_pair_as_shared_child() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "cancel-cross-pair",
-        ))?);
-        let engine = Arc::new(MockEngine::default());
-        let engine_handle: Arc<dyn EngineHandle> = engine.clone();
-        let proposal_task_id = encoded_proposal_task_id(5)?;
-
-        register_runtime_task_with_pair(
-            runtime.as_ref(),
-            "other-pair-root",
-            &proposal_task_id,
-            RunnerStatus::Running,
-            now_ts(),
-            "taiko_alt/ethereum",
-        )
-        .await?;
-
-        cancel_registered_tasks(
-            runtime.as_ref(),
-            &engine_handle,
-            "current-root",
-            PipelineKey::ShastaRisc0,
-            &metadata_for_task_with_pair(&proposal_task_id, "taiko_dev/ethereum"),
-        )
-        .await?;
-
-        let prove_task_id =
-            decode_task_id::<EngineTaskKey>(&proposal_task_id).expect("decode prove task id");
-        let expected = proposal_task_chain_ids(&prove_task_id)
-            .into_iter()
-            .map(|task_id| encode_task_id(&task_id).expect("encode stage task id"))
-            .collect::<Vec<_>>();
-        assert_eq!(engine.cancelled(), expected);
         Ok(())
     }
 
@@ -1475,17 +1131,6 @@ mod tests {
         };
         let task_id = proposal_task_id(PipelineKey::ShastaRisc0, request);
         encode_task_id(&task_id).context("encode proposal task id")
-    }
-
-    fn first_stage_task_id(proposal_id: u64) -> Result<String> {
-        let prove_task_id =
-            decode_task_id::<EngineTaskKey>(&encoded_proposal_task_id(proposal_id)?)
-                .expect("decode prove task id");
-        let stage_task_id = proposal_task_chain_ids(&prove_task_id)
-            .into_iter()
-            .next()
-            .expect("proposal stage task");
-        encode_task_id(&stage_task_id).context("encode failing task id")
     }
 
     fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {

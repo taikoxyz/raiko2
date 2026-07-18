@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
     EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
-    ProofCompletionPermit, ProposalStage, TaskCancellationPermit, TaskExecutionPermit,
+    ProofCompletionPermit, ProposalStage, TaskExecutionPermit, TerminalFailureProjection,
     tasks::{EngineTask, ProofArtifactRef},
 };
 use raiko2_pipeline::PipelineRoute;
@@ -11,6 +11,7 @@ use raiko2_prover::{
     ProgressPersistenceError, ProverProgress, Sp1NetworkSubmissionProgress,
     SubmissionCheckpointPermit,
 };
+use raiko2_queue::RootOwner;
 use raiko2_runtime::{
     ProofArtifactDescriptor, ProofArtifactPublicationInvalidated, ProofArtifactPutResult,
     ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
@@ -51,7 +52,6 @@ struct RuntimeExecutionOwners {
 }
 
 struct RuntimeProofCompletionPermit {
-    _operation: raiko2_runtime::RuntimeLifecycleOperationGuard,
     owner_incarnations: Vec<uuid::Uuid>,
 }
 
@@ -153,16 +153,6 @@ impl RuntimeObserver {
         })
     }
 
-    fn cancellation_owners(
-        permit: &TaskCancellationPermit,
-    ) -> std::result::Result<&RuntimeExecutionOwners, EngineObserverError> {
-        permit.guard::<RuntimeExecutionOwners>().ok_or_else(|| {
-            EngineObserverError::RuntimeInactive(
-                "task cancellation permit does not belong to the runtime".to_string(),
-            )
-        })
-    }
-
     async fn find_root_records(&self, id: &EngineTaskId) -> Result<Vec<RuntimeTaskRecord>> {
         let canonical_ref = Self::root_task_ref(id);
         self.runtime.find_tasks_by_task_ref(&canonical_ref).await
@@ -199,65 +189,6 @@ impl RuntimeObserver {
             by_task_id: owner_records.into_iter().collect(),
             incarnations,
         })
-    }
-
-    async fn cancel_runtime_roots(
-        &self,
-        id: &EngineTaskId,
-        stage: &str,
-        task_id: &str,
-        owners: &RuntimeExecutionOwners,
-    ) -> Result<(usize, Option<ProofArtifactDescriptor>)> {
-        let root_ref = Self::root_task_ref(id);
-        self.runtime
-            .update_tasks_and_invalidate_artifact(
-                &root_ref,
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                |records| {
-                    let mut completed_root_exists = false;
-                    let mut matching_root_exists = false;
-                    let mut cancelled_roots = 0usize;
-                    let updated_at = now_ts();
-                    let observed_at_ms = now_ms();
-                    for record in records {
-                        if owners.by_task_id.get(&record.task_id) != Some(&record.incarnation_id)
-                            || !self.record_matches_observer(id, record)?
-                        {
-                            continue;
-                        }
-                        matching_root_exists = true;
-                        if record.runner_status == RunnerStatus::Completed {
-                            completed_root_exists = true;
-                            continue;
-                        }
-                        if is_terminal_status(record.runner_status) {
-                            continue;
-                        }
-                        record.runner_status = RunnerStatus::Cancelled;
-                        record.error = None;
-                        update_task_metadata(record, |metadata| {
-                            metadata.mark_stage_terminal(
-                                task_id,
-                                stage,
-                                observed_at_ms,
-                                "cancelled",
-                            );
-                            metadata.runtime.active_stage = Some(stage.to_string());
-                            metadata.runtime.last_event = Some("cancelled".to_string());
-                        })?;
-                        record.updated_at = updated_at;
-                        cancelled_roots += 1;
-                    }
-                    Ok((
-                        cancelled_roots,
-                        matching_root_exists && !completed_root_exists,
-                    ))
-                },
-            )
-            .await
-            .map(|(cancelled_roots, _, descriptor)| (cancelled_roots, descriptor))
     }
 
     fn stage_name(task: &EngineTask) -> &'static str {
@@ -550,13 +481,6 @@ impl RuntimeObserver {
         match progress {
             ProverProgress::BoundlessSubmission(_) => "boundless",
             ProverProgress::Sp1NetworkSubmission(_) => "sp1_network",
-        }
-    }
-
-    const fn stage_name_from_task_id(id: &EngineTaskId) -> &'static str {
-        match &id.0 {
-            EngineTaskKey::Proposal { .. } => "proposal",
-            EngineTaskKey::Aggregate { .. } => "aggregate",
         }
     }
 
@@ -1270,25 +1194,11 @@ impl RuntimeObserver {
 
 #[async_trait]
 impl EngineObserver for RuntimeObserver {
-    async fn acquire_task_cancellation_permit(
-        &self,
-        id: &EngineTaskId,
-    ) -> std::result::Result<TaskCancellationPermit, EngineObserverError> {
-        Ok(TaskCancellationPermit::tracked(
-            self.current_execution_owners(id).await?,
-        ))
-    }
-
     async fn acquire_task_execution_permit(
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> std::result::Result<TaskExecutionPermit, EngineObserverError> {
-        let _operation = self
-            .runtime
-            .acquire_lifecycle_operation()
-            .await
-            .map_err(|error| EngineObserverError::RuntimeInactive(error.to_string()))?;
         let proof_ref = Self::root_task_ref(id);
         let owners = self.current_execution_owners(id).await?;
         if owners.incarnations.is_empty() {
@@ -1337,11 +1247,6 @@ impl EngineObserver for RuntimeObserver {
         proof: &raiko2_primitives::Proof,
         execution_permit: &TaskExecutionPermit,
     ) -> std::result::Result<ProofCompletionPermit, EngineObserverError> {
-        let operation = self
-            .runtime
-            .acquire_lifecycle_operation()
-            .await
-            .map_err(|error| EngineObserverError::RuntimeInactive(error.to_string()))?;
         let proof_ref = Self::root_task_ref(id);
         let execution_owners = Self::execution_owners(execution_permit)?;
         let active_incarnations = self
@@ -1405,10 +1310,7 @@ impl EngineObserver for RuntimeObserver {
             .map_err(|error| publication_observer_error(&error))?;
         if checkpointed {
             return Ok(ProofCompletionPermit::tracked(
-                RuntimeProofCompletionPermit {
-                    _operation: operation,
-                    owner_incarnations,
-                },
+                RuntimeProofCompletionPermit { owner_incarnations },
             ));
         }
         Err(EngineObserverError::ProofInvalidated(format!(
@@ -1731,14 +1633,14 @@ impl EngineObserver for RuntimeObserver {
         task: &EngineTask,
         error: &str,
         execution_permit: &TaskExecutionPermit,
-    ) {
-        let owner_incarnations = match Self::execution_owners(execution_permit) {
-            Ok(owners) => &owners.incarnations,
-            Err(permit_error) => {
-                tracing::warn!(task = ?id, error = %permit_error, "rejected foreign task execution permit");
-                return;
-            }
-        };
+    ) -> std::result::Result<TerminalFailureProjection, EngineObserverError> {
+        let execution_owners = Self::execution_owners(execution_permit)?;
+        let owner_incarnations = &execution_owners.incarnations;
+        let root_owners = execution_owners
+            .by_task_id
+            .iter()
+            .map(|(task_id, incarnation_id)| RootOwner::new(task_id.clone(), *incarnation_id))
+            .collect::<Vec<_>>();
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
         let task_id = Self::timing_key_for_task(id, task);
@@ -1751,94 +1653,32 @@ impl EngineObserver for RuntimeObserver {
             Some(error),
         )
         .await;
-        if let Err(err) = self
-            .update_execution_root_records(
-                id,
-                owner_incarnations,
-                |record, updated_at, observed_at_ms| {
-                    record.runner_status = RunnerStatus::Failed;
-                    record.error = Some(error.to_string());
-                    update_task_metadata(record, |metadata| {
-                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
-                        metadata.runtime.active_stage = Some(stage.to_string());
-                        metadata.runtime.last_event = Some("failed".to_string());
-                    })?;
-                    record.updated_at = updated_at;
-                    Ok(())
-                },
-            )
-            .await
-        {
+        let gate = self.runtime.execution_lifecycle_gate();
+        let lifecycle_guard = gate.lock_owned().await;
+        self.update_execution_root_records(
+            id,
+            owner_incarnations,
+            |record, updated_at, observed_at_ms| {
+                record.runner_status = RunnerStatus::Failed;
+                record.error = Some(error.to_string());
+                update_task_metadata(record, |metadata| {
+                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
+                    metadata.runtime.active_stage = Some(stage.to_string());
+                    metadata.runtime.last_event = Some("failed".to_string());
+                })?;
+                record.updated_at = updated_at;
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|err| {
             tracing::warn!(task = ?id, error = %err, "failed to sync runtime task failure");
-        }
-    }
-
-    async fn on_task_cancelled(&self, id: &EngineTaskId, permit: &TaskCancellationPermit) {
-        let cancellation_owners = match Self::cancellation_owners(permit) {
-            Ok(owners) => owners,
-            Err(error) => {
-                tracing::warn!(task = ?id, %error, "refusing unpermitted runtime cancellation");
-                return;
-            }
-        };
-        let stage = Self::stage_name_from_task_id(id);
-        let finished_at_ms = now_ms();
-        let task_id = Self::timing_key_for_stage_name(id, stage);
-        let root_ref = Self::root_task_ref(id);
-        let (cancelled_roots, descriptor) = match self
-            .cancel_runtime_roots(id, stage, &task_id, cancellation_owners)
-            .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                tracing::warn!(
-                    task = ?id,
-                    %error,
-                    "failed to atomically cancel runtime roots"
-                );
-                return;
-            }
-        };
-        if cancelled_roots == 0 {
-            return;
-        }
-        self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms, None)
-            .await;
-        if let Some(descriptor) = descriptor
-            && let Err(err) = self
-                .runtime
-                .finalize_proof_artifact_invalidation(
-                    &self.network_pair,
-                    id.0.pipeline_key(),
-                    self.route,
-                    &root_ref,
-                    descriptor.generation,
-                    &descriptor.content_hash,
-                )
-                .await
-        {
-            tracing::warn!(
-                task = ?id,
-                error = %err,
-                "failed to invalidate cancelled proof publication"
-            );
-        }
-        if let Err(err) = self
-            .runtime
-            .remove_pending_proof_publication_if_unowned(
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                &root_ref,
-            )
-            .await
-        {
-            tracing::warn!(
-                task = ?id,
-                error = %err,
-                "failed to clear cancelled proof publication outbox"
-            );
-        }
+            EngineObserverError::RuntimeSync(format!("failed to sync runtime task failure: {err}"))
+        })?;
+        Ok(TerminalFailureProjection::tracked(
+            root_owners,
+            lifecycle_guard,
+        ))
     }
 
     async fn load_pending_proof_checkpoint(
@@ -2076,7 +1916,7 @@ impl RuntimeObserver {
         let Ok(execution_permit) = self.test_execution_permit(id, task).await else {
             return;
         };
-        EngineObserver::on_task_failed(self, id, task, error, &execution_permit).await;
+        let _ = EngineObserver::on_task_failed(self, id, task, error, &execution_permit).await;
     }
 
     async fn on_task_succeeded(
@@ -2151,10 +1991,13 @@ mod tests {
         BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
+    use raiko2_runtime::test_support::{
+        ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
+        RuntimeStateStore, RuntimeStateWriteResult, RuntimeStore, RuntimeStoreScope,
+    };
     use raiko2_runtime::{
-        MemoryProofArtifactStore, ProofArtifactDeleteResult, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore,
-        RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
+        ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
+        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2182,8 +2025,7 @@ mod tests {
         allow_put: tokio::sync::Notify,
     }
 
-    #[async_trait]
-    impl ProofArtifactStore for BlocksCanonicalPutStore {
+    impl RuntimeStoreScope for BlocksCanonicalPutStore {
         fn environment(&self) -> &str {
             self.inner.environment()
         }
@@ -2195,7 +2037,10 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "test"
         }
+    }
 
+    #[async_trait]
+    impl ProofObjectStore for BlocksCanonicalPutStore {
         async fn put_if_absent(
             &self,
             key: &ProofArtifactKey,
@@ -2227,39 +2072,33 @@ mod tests {
             self.inner.get_prefix(key, max_bytes).await
         }
 
-        async fn mark_invalidated(
+        async fn invalidate_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
-        ) -> Result<()> {
-            self.inner
-                .mark_invalidated(key, generation, content_hash)
-                .await
+            descriptor: &ProofArtifactDescriptor,
+        ) -> Result<ExactInvalidationResult> {
+            self.inner.invalidate_exact(key, descriptor).await
         }
 
         async fn is_invalidated(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
+            descriptor: &ProofArtifactDescriptor,
         ) -> Result<bool> {
-            self.inner
-                .is_invalidated(key, generation, content_hash)
-                .await
+            self.inner.is_invalidated(key, descriptor).await
         }
 
-        async fn delete(
+        async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            expected_content_hash: &str,
+            descriptor: &ProofArtifactDescriptor,
         ) -> Result<ProofArtifactDeleteResult> {
-            self.inner
-                .delete(key, generation, expected_content_hash)
-                .await
+            self.inner.delete_exact(key, descriptor).await
         }
+    }
 
+    #[async_trait]
+    impl RuntimeStateStore for BlocksCanonicalPutStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             self.inner.load_runtime_state().await
         }
@@ -2275,8 +2114,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl ProofArtifactStore for InvalidatesDuringPublicationStore {
+    impl RuntimeStoreScope for InvalidatesDuringPublicationStore {
         fn environment(&self) -> &str {
             self.inner.environment()
         }
@@ -2288,7 +2126,10 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "test"
         }
+    }
 
+    #[async_trait]
+    impl ProofObjectStore for InvalidatesDuringPublicationStore {
         async fn put_if_absent(
             &self,
             key: &ProofArtifactKey,
@@ -2316,43 +2157,37 @@ mod tests {
             self.inner.get_prefix(key, max_bytes).await
         }
 
-        async fn mark_invalidated(
+        async fn invalidate_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
-        ) -> Result<()> {
-            self.inner
-                .mark_invalidated(key, generation, content_hash)
-                .await
+            descriptor: &ProofArtifactDescriptor,
+        ) -> Result<ExactInvalidationResult> {
+            self.inner.invalidate_exact(key, descriptor).await
         }
 
         async fn is_invalidated(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
+            descriptor: &ProofArtifactDescriptor,
         ) -> Result<bool> {
             if self.checks.fetch_add(1, Ordering::SeqCst) == self.block_on_check {
                 self.recheck_entered.notify_one();
                 self.allow_recheck.notified().await;
             }
-            self.inner
-                .is_invalidated(key, generation, content_hash)
-                .await
+            self.inner.is_invalidated(key, descriptor).await
         }
 
-        async fn delete(
+        async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            expected_content_hash: &str,
+            descriptor: &ProofArtifactDescriptor,
         ) -> Result<ProofArtifactDeleteResult> {
-            self.inner
-                .delete(key, generation, expected_content_hash)
-                .await
+            self.inner.delete_exact(key, descriptor).await
         }
+    }
 
+    #[async_trait]
+    impl RuntimeStateStore for InvalidatesDuringPublicationStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             self.inner.load_runtime_state().await
         }
@@ -2368,8 +2203,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl ProofArtifactStore for FailingArtifactStore {
+    impl RuntimeStoreScope for FailingArtifactStore {
         fn environment(&self) -> &'static str {
             "test"
         }
@@ -2381,7 +2215,10 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "test"
         }
+    }
 
+    #[async_trait]
+    impl ProofObjectStore for FailingArtifactStore {
         async fn put_if_absent(
             &self,
             _key: &ProofArtifactKey,
@@ -2410,33 +2247,33 @@ mod tests {
             Ok(None)
         }
 
-        async fn mark_invalidated(
+        async fn invalidate_exact(
             &self,
             _key: &ProofArtifactKey,
-            _generation: Option<i64>,
-            _content_hash: &str,
-        ) -> Result<()> {
-            Ok(())
+            _descriptor: &ProofArtifactDescriptor,
+        ) -> Result<ExactInvalidationResult> {
+            Ok(ExactInvalidationResult::AlreadyInvalidated)
         }
 
         async fn is_invalidated(
             &self,
             _key: &ProofArtifactKey,
-            _generation: Option<i64>,
-            _content_hash: &str,
+            _descriptor: &ProofArtifactDescriptor,
         ) -> Result<bool> {
             Ok(false)
         }
 
-        async fn delete(
+        async fn delete_exact(
             &self,
             _key: &ProofArtifactKey,
-            _generation: Option<i64>,
-            _expected_content_hash: &str,
+            _descriptor: &ProofArtifactDescriptor,
         ) -> Result<ProofArtifactDeleteResult> {
             Ok(ProofArtifactDeleteResult::Missing)
         }
+    }
 
+    #[async_trait]
+    impl RuntimeStateStore for FailingArtifactStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             Ok(None)
         }
@@ -2990,14 +2827,11 @@ mod tests {
                     .into_owned(),
             )?,
             checks: AtomicUsize::new(0),
-            block_on_check: 1,
+            block_on_check: 0,
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-sync-retry"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let request = proposal_request();
@@ -3084,10 +2918,7 @@ mod tests {
             put_entered: tokio::sync::Notify::new(),
             allow_put: tokio::sync::Notify::new(),
         });
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-cancel-before-put"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let request = proposal_request();
@@ -3129,13 +2960,13 @@ mod tests {
         });
 
         store.put_entered.notified().await;
-        let cancellation_permit = observer
-            .acquire_task_cancellation_permit(&task_id)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        observer
-            .on_task_cancelled(&task_id, &cancellation_permit)
-            .await;
+        let root = runtime
+            .get_task("task_cancel_before_put")
+            .await?
+            .expect("running runtime task");
+        runtime
+            .cancel_task_if_current(&root.lifetime(), None)
+            .await?;
         store.allow_put.notify_one();
 
         let error = publication
@@ -3167,10 +2998,7 @@ mod tests {
             put_entered: tokio::sync::Notify::new(),
             allow_put: tokio::sync::Notify::new(),
         });
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("global-drain-store-write"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let publishing_runtime = Arc::clone(&runtime);
         let publication = tokio::spawn(async move {
             publishing_runtime
@@ -3221,10 +3049,7 @@ mod tests {
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
-        let first = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-publication-race-a"),
-            store.clone(),
-        )?);
+        let first = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let request = proposal_request();
@@ -3330,10 +3155,7 @@ mod tests {
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-reconcile-race"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let request = proposal_request();
@@ -3402,10 +3224,7 @@ mod tests {
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-full-invalidation"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let proof_ref = proposal_task_ref(pipeline, &proposal_request());
@@ -3552,7 +3371,7 @@ mod tests {
     #[tokio::test]
     async fn engine_recovery_honors_tombstone_from_another_replica() -> Result<()> {
         let artifact_root = unique_runtime_root("runtime-observer-shared-artifacts");
-        let store: Arc<dyn ProofArtifactStore> = Arc::new(MemoryProofArtifactStore::new(
+        let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
             "shared-environment".to_string(),
             artifact_root
                 .file_name()
@@ -3560,14 +3379,8 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         )?);
-        let first = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-replica-a"),
-            Arc::clone(&store),
-        )?);
-        let second = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-replica-b"),
-            store,
-        )?);
+        let first = Arc::new(RuntimeManager::with_store(Arc::clone(&store)));
+        let second = Arc::new(RuntimeManager::with_store(store));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let request = proposal_request();
@@ -4006,10 +3819,7 @@ mod tests {
             "test".into(),
             "progress-conflict".into(),
         )?);
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-progress-conflict"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaSp1;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4027,10 +3837,7 @@ mod tests {
         .await?;
         let permit = checkpoint_permit(&runtime);
 
-        let competing_runtime = RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-progress-conflict-other"),
-            store,
-        )?;
+        let competing_runtime = RuntimeManager::with_store(store);
         competing_runtime.initialize().await?;
         competing_runtime
             .register_task(TaskRegistration {
@@ -4491,12 +4298,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_failure_persists_roots_and_returns_their_projection_owners() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-terminal-failure-projection",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::Preflight {
+            request: request.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "task_terminal_failure_projection",
+            "terminal_failure_projection/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let registered = runtime
+            .get_task("task_terminal_failure_projection")
+            .await?
+            .expect("registered runtime root");
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "terminal_failure_projection/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let execution_permit = observer
+            .test_execution_permit(&proposal_task_id, &task)
+            .await?;
+
+        let projection = EngineObserver::on_task_failed(
+            &observer,
+            &proposal_task_id,
+            &task,
+            "terminal failure",
+            &execution_permit,
+        )
+        .await?;
+
+        assert_eq!(
+            projection.root_owners(),
+            &[RootOwner::new(
+                registered.task_id,
+                registered.incarnation_id,
+            )]
+        );
+        let failed = runtime
+            .get_task("task_terminal_failure_projection")
+            .await?
+            .expect("failed runtime root");
+        assert_eq!(failed.runner_status, RunnerStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("terminal failure"));
+        drop(projection);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_observer_fails_closed_when_outbox_checkpoint_cannot_persist() -> Result<()> {
         let store = Arc::new(FailingArtifactStore::default());
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            unique_runtime_root("runtime-observer-proof-persistence"),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {

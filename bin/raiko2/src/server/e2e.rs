@@ -43,7 +43,8 @@ use super::task_metadata::{
     proposal_task_ref, root_proof_artifact_refs,
 };
 use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
-use raiko2_runtime::{MemoryProofArtifactStore, ProofArtifactRegistration, RuntimeManager};
+use raiko2_runtime::test_support::{MemoryProofArtifactStore, RuntimeStore};
+use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
     let status = res.status();
@@ -1177,11 +1178,11 @@ async fn e2e_ready_fails_after_runtime_begins_draining() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    let store = Arc::new(
+    let store: Arc<dyn RuntimeStore> = Arc::new(
         MemoryProofArtifactStore::new("test".into(), "ready-draining".into())
             .expect("memory artifact store"),
     );
-    let runtime = Arc::new(RuntimeManager::with_store(store).expect("runtime manager"));
+    let runtime = Arc::new(RuntimeManager::with_store(store));
     let permit = runtime
         .acquire_submission_checkpoint_permit()
         .expect("pre-drain checkpoint permit");
@@ -2065,10 +2066,16 @@ async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission
     assert!(first["data"].get("task_id").is_none(), "{first}");
     let task_id = single_report_task_id(&app).await;
 
+    let registered = state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .expect("get registered task")
+        .expect("registered task");
     state
         .runtime
-        .sync_status(
-            &task_id,
+        .sync_nonterminal_status_if_current(
+            &registered.lifetime(),
             RunnerStatus::Failed,
             Some("fixture failed".to_string()),
             None,
@@ -2121,10 +2128,16 @@ async fn e2e_duplicate_aggregate_shasta_post_recovers_failed_root_before_remote_
     assert!(first["data"].get("task_id").is_none(), "{first}");
     let task_id = single_report_task_id(&app).await;
 
+    let registered = state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .expect("get registered task")
+        .expect("registered task");
     state
         .runtime
-        .sync_status(
-            &task_id,
+        .sync_nonterminal_status_if_current(
+            &registered.lifetime(),
             RunnerStatus::Failed,
             Some("fixture aggregate failed".to_string()),
             None,
@@ -2696,7 +2709,7 @@ async fn e2e_batch_aggregate_sp1_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 

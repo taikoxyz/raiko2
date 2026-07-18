@@ -58,39 +58,48 @@ contract; if they conflict with this section, this README governs.
 
 The runtime is governed by these invariants:
 
-1. The configured runtime store is authoritative for task state, artifact registration, and remote
-   submission checkpoints. The in-process queue is an execution projection of that state.
+1. The configured runtime-state repository is authoritative for task state, artifact registration,
+   and remote submission checkpoints. The in-process queue is an execution projection of that state.
 2. Each `(runtime.environment, runtime.namespace)` has exactly one live process. Replacements never
    overlap, and the application has no distributed owner lease, owner epoch, or ownership heartbeat.
 3. Namespaces are isolated persistence domains. They never share tasks, artifacts, checkpoints, or
    invalidation markers, although roots inside one namespace may reuse one canonical artifact.
-4. The runtime shutdown fence covers every task mutation and external-store write for the whole
-   instance and namespace. A separate process-local lifecycle operation gate serializes admission,
-   replacement, cancellation, cleanup, invalidation, and proof completion across runtime, queue,
-   and artifact state. Inactive or draining runtimes reject new mutations and wait for in-flight writes. The
-   only draining-time write is the request-ID checkpoint authorized by a provider-submission permit
-   acquired before the fence closed; it must finish within the bounded shutdown deadline.
+4. The namespace fence is the single process-wide mutation authority. Entering `Draining` closes
+   admission and readiness immediately, rejects new ordinary mutations and external writes, and
+   waits only for short repository commits plus request-ID checkpoints covered by provider permits
+   acquired while `Active`. A separate process-local lifecycle transition gate serializes only the
+   active-root decision with its one in-memory queue attach or detach; neither mechanism is held
+   across a complete task, provider call, external storage operation, or publication saga, and
+   shutdown does not wait for every proof task to finish.
 5. Proof computation is not task completion. Completion requires a normalized proof to be durably
    published, registered, readable, and synchronized to the runtime root.
 6. Proof manifests are create-only and first-valid-wins. Content is immutable and addressed by
    SHA-256; invalidation binds to one manifest generation and content hash.
 7. Remote proving resumes a request identifier only after its submission checkpoint is durable.
    Request-level retry settings may lower, but never raise, operator-owned limits.
-8. Durable deployments use one GCS runtime store; memory mode is explicitly ephemeral. The service
-   does not dual-write or automatically fail over between runtime stores.
-9. A replacement starts only after the old process has stopped admissions, drained work, stopped
-   workers, and exited. Deployment configuration must enforce this non-overlapping sequence.
-10. Each runtime task lifetime has an immutable `incarnation_id`. It rejects a delayed worker
-    checkpoint or cancellation callback after a replacement reuses the same deterministic task ID.
-    Pending proof outboxes persist the exact eligible incarnations, and the completion permit carries
-    that set through the artifact/root CAS; it is not a namespace owner epoch, lease, or distributed
-    lock.
+8. Durable deployments use separate state and proof-object repository semantics over one configured
+   GCS namespace; memory mode is explicitly ephemeral. The service does not dual-write or
+   automatically fail over between backends.
+9. A replacement starts only after the old process has stopped admissions, completed its bounded
+   fence drain, stopped and joined workers, and exited. The drain does not wait for all proof tasks;
+   deployment configuration must enforce the non-overlapping replacement sequence.
+10. Each runtime task lifetime has an immutable `incarnation_id`. Exact `TaskLifetime`
+    preconditions reject delayed worker, cancellation, cleanup, and publication callbacks after a
+    replacement reuses the same deterministic task ID. A task lifetime is stale-callback identity,
+    not a namespace owner epoch, lease, or distributed lock.
 11. Each scheduler lease also carries a non-reused local token. This prevents remove/recreate ABA
-    from accepting an old completion even when task ID, worker label, and attempt number repeat.
-    The runtime additionally issues an execution permit mapping task IDs to the incarnations present
-    when execution starts. Proof checkpointing may add a distinct late-joining shared root, but never
-    a replacement incarnation for an already captured task ID. The permit does not authorize runtime
-    writes; the namespace lifecycle fence remains authoritative.
+    from accepting an old completion even when task ID, worker label, and attempt number repeat. The
+    token identifies one local execution attempt and never authorizes runtime writes.
+12. The in-process execution projection atomically attaches a complete task graph to a root owner
+    and atomically detaches that owner. Shared stages remain executable while any live root owns
+    them; the last owner leaving cancels or removes the stage. Cancellation and terminal failure
+    first persist the exact root transition, then remove its owner before another root can reuse the
+    stage. Runtime state remains authoritative if projection removal fails, and reconciliation
+    rebuilds the projection instead of rolling state back.
+13. Cross-domain lifecycle work is coordinated by the concrete `ProofLifecycle` service as
+    state-first, idempotent effects. Repository commands use exact task lifetimes and artifact
+    descriptors and return typed outcomes such as `Applied`, `AlreadyApplied`, `Stale`,
+    `BlockedByLiveOwner`, `Missing`, or `Conflict`; no full-span cross-component lock is used.
 
 ## Core Flow
 

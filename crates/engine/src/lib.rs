@@ -17,8 +17,8 @@ pub mod worker;
 
 pub use tasks::{
     AggregateProofInput, AggregationSource, AggregationTaskRequest, EncodedGuestInput,
-    EngineTaskId, EngineTaskKey, ProofArtifactRef, ProposalStage, ProposalTaskRequest,
-    ProverTaskConfig,
+    EngineAggregationPlan, EngineExecutionPlan, EngineTaskId, EngineTaskKey, ProofArtifactRef,
+    ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 
 use std::sync::{
@@ -37,8 +37,9 @@ use raiko2_prover::{
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{
-    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
-    TaskLease, TaskState, TaskStoreError, TaskView, TaskViewState,
+    AttachOutcome, DetachMode, DetachOutcome, ExecutionGraph, ExecutionNode, MemoryStore, NewTask,
+    Priority, ProjectionView, RetryPolicy, RootOwner, Scheduler, SchedulerConfig,
+    TaskExecutionPolicy, TaskLease, TaskState, TaskStoreError, TaskView, TaskViewState,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -227,28 +228,40 @@ pub struct ProofCompletionPermit {
     guard: Box<dyn std::any::Any + Send + Sync>,
 }
 
-pub struct TaskCancellationPermit {
-    guard: Box<dyn std::any::Any + Send + Sync>,
-}
-
 pub struct TaskExecutionPermit {
     guard: Box<dyn std::any::Any + Send + Sync>,
 }
 
-impl TaskCancellationPermit {
-    pub fn tracked(guard: impl std::any::Any + Send + Sync + 'static) -> Self {
+/// Keeps the root-owner transition gate held until the engine removes failed projections.
+///
+/// A terminal queue failure first becomes durable runtime state, then the engine removes every
+/// affected `RootOwner` while this permit is alive. The opaque guard prevents recovery from
+/// reattaching an owner between those two effects.
+pub struct TerminalFailureProjection {
+    root_owners: Vec<RootOwner>,
+    _lifecycle_guard: Box<dyn std::any::Any + Send>,
+}
+
+impl TerminalFailureProjection {
+    /// Creates a terminal-failure projection guarded by the caller's lifecycle transition lock.
+    pub fn tracked(
+        root_owners: Vec<RootOwner>,
+        lifecycle_guard: impl std::any::Any + Send + 'static,
+    ) -> Self {
         Self {
-            guard: Box::new(guard),
+            root_owners,
+            _lifecycle_guard: Box::new(lifecycle_guard),
         }
     }
 
+    /// Returns the exact runtime-root owners that must leave the execution projection.
     #[must_use]
-    pub fn guard<T: std::any::Any>(&self) -> Option<&T> {
-        self.guard.downcast_ref()
+    pub fn root_owners(&self) -> &[RootOwner] {
+        &self.root_owners
     }
 
     fn untracked() -> Self {
-        Self::tracked(())
+        Self::tracked(Vec::new(), ())
     }
 }
 
@@ -288,13 +301,6 @@ impl ProofCompletionPermit {
 
 #[async_trait]
 pub trait EngineObserver: Send + Sync {
-    async fn acquire_task_cancellation_permit(
-        &self,
-        _id: &EngineTaskId,
-    ) -> Result<TaskCancellationPermit, EngineObserverError> {
-        Ok(TaskCancellationPermit::untracked())
-    }
-
     async fn acquire_task_execution_permit(
         &self,
         _id: &EngineTaskId,
@@ -356,10 +362,9 @@ pub trait EngineObserver: Send + Sync {
         _task: &EngineTask,
         _error: &str,
         _execution_permit: &TaskExecutionPermit,
-    ) {
+    ) -> Result<TerminalFailureProjection, EngineObserverError> {
+        Ok(TerminalFailureProjection::untracked())
     }
-
-    async fn on_task_cancelled(&self, _id: &EngineTaskId, _permit: &TaskCancellationPermit) {}
 
     async fn load_pending_proof_checkpoint(
         &self,
@@ -663,98 +668,90 @@ where
         }
     }
 
+    /// Attaches an entire root-owned proving plan atomically to the queue projection.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the task store cannot enqueue required tasks.
-    pub async fn submit_proposal_proof(
+    /// Returns an error when the plan is malformed or the queue cannot attach it.
+    pub async fn attach_execution_plan(
         &self,
-        request: ProposalTaskRequest,
-    ) -> Result<EngineTaskId, TaskStoreError> {
-        self.submit_proposal_proof_with_dependencies(request, Vec::new())
-            .await
-    }
+        owner: RootOwner,
+        plan: EngineExecutionPlan,
+    ) -> Result<AttachOutcome, TaskStoreError> {
+        let mut nodes =
+            Vec::with_capacity(plan.proposals.len() + usize::from(plan.aggregate.is_some()));
+        let mut previous = None;
+        let mut proposal_ids = std::collections::HashSet::new();
 
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot enqueue required tasks.
-    pub async fn submit_proposal_proof_with_dependencies(
-        &self,
-        request: ProposalTaskRequest,
-        dependencies: Vec<EngineTaskId>,
-    ) -> Result<EngineTaskId, TaskStoreError> {
-        let proposal_id = self.proposal_task_id(request.clone());
-        self.inner
-            .scheduler
-            .submit_with_execution_policy(
-                proposal_id,
-                NewTask {
+        for request in plan.proposals {
+            let task_id = self.proposal_task_id(request.clone());
+            if !proposal_ids.insert(task_id.clone()) {
+                continue;
+            }
+            nodes.push(ExecutionNode {
+                id: task_id.clone(),
+                task: NewTask {
                     priority: PROPOSAL_TASK_PRIORITY,
                     payload: EngineTask::Proposal { request },
                 },
-                dependencies,
-                self.externally_stateful_stage_execution_policy(),
-            )
-            .await
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot enqueue the aggregation task or if any proof
-    /// task input does not point to a proposal prove stage in this pipeline.
-    pub async fn submit_aggregation_proof_from_inputs(
-        &self,
-        request: AggregationTaskRequest,
-        inputs: Vec<AggregateProofInput>,
-    ) -> Result<EngineTaskId, TaskStoreError> {
-        if inputs.is_empty() {
-            return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 1 proof input",
-            ));
+                dependencies: previous.into_iter().collect(),
+                execution_policy: self.externally_stateful_stage_execution_policy(),
+            });
+            previous = Some(task_id);
         }
 
-        let mut proof_tasks = Vec::new();
-        for input in &inputs {
-            let proof_task = match input {
-                AggregateProofInput::PendingProofArtifact {
-                    dependency: proof_task,
-                    ..
-                } => proof_task,
-                AggregateProofInput::ProofArtifact(_) => continue,
-            };
-            match &proof_task.0 {
-                EngineTaskKey::Proposal { pipeline, .. }
-                    if *pipeline == self.inner.spec.pipeline_key() =>
-                {
-                    proof_tasks.push((**proof_task).clone());
-                }
-                EngineTaskKey::Proposal { .. } => {
-                    return Err(TaskStoreError::corrupt_msg(
-                        "aggregation input must reference proposal tasks in this pipeline",
-                    ));
-                }
-                EngineTaskKey::Aggregate { .. } => {
-                    return Err(TaskStoreError::corrupt_msg(
-                        "aggregation input cannot reference an aggregate task",
-                    ));
+        if let Some(aggregate) = plan.aggregate {
+            if aggregate.inputs.is_empty() {
+                return Err(TaskStoreError::corrupt_msg(
+                    "aggregation requires at least 1 proof input",
+                ));
+            }
+            let mut dependencies = Vec::new();
+            for input in &aggregate.inputs {
+                let AggregateProofInput::PendingProofArtifact { dependency, .. } = input else {
+                    continue;
+                };
+                match &dependency.0 {
+                    EngineTaskKey::Proposal { pipeline, .. }
+                        if *pipeline == self.inner.spec.pipeline_key()
+                            && proposal_ids.contains(dependency.as_ref()) =>
+                    {
+                        if !dependencies.contains(dependency.as_ref()) {
+                            dependencies.push((**dependency).clone());
+                        }
+                    }
+                    EngineTaskKey::Proposal { .. } => {
+                        return Err(TaskStoreError::corrupt_msg(
+                            "aggregation input must reference a proposal in this execution plan",
+                        ));
+                    }
+                    EngineTaskKey::Aggregate { .. } => {
+                        return Err(TaskStoreError::corrupt_msg(
+                            "aggregation input cannot reference an aggregate task",
+                        ));
+                    }
                 }
             }
-        }
-
-        let aggregate_id = self.aggregate_task_id(request.clone());
-        self.inner
-            .scheduler
-            .submit_with_execution_policy(
-                aggregate_id,
-                NewTask {
+            nodes.push(ExecutionNode {
+                id: self.aggregate_task_id(aggregate.request.clone()),
+                task: NewTask {
                     priority: AGGREGATION_TASK_PRIORITY,
                     payload: EngineTask::Aggregate {
-                        request,
-                        source: AggregationSource::Inputs(inputs),
+                        request: aggregate.request,
+                        source: AggregationSource::Inputs(aggregate.inputs),
                     },
                 },
-                proof_tasks,
-                self.externally_stateful_stage_execution_policy(),
-            )
+                dependencies,
+                execution_policy: self.externally_stateful_stage_execution_policy(),
+            });
+        }
+
+        if nodes.is_empty() {
+            return Err(TaskStoreError::corrupt_msg(
+                "execution plan must contain at least one task",
+            ));
+        }
+        self.attach_execution(owner, ExecutionGraph::new(nodes))
             .await
     }
 
@@ -785,41 +782,42 @@ where
         self.inner.scheduler.list().await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot cancel the task.
-    pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
-        let cancellation_permit = match &self.inner.observer {
-            Some(observer) => observer
-                .acquire_task_cancellation_permit(&id)
-                .await
-                .map_err(TaskStoreError::backend)?,
-            None => TaskCancellationPermit::untracked(),
-        };
-        self.inner.scheduler.cancel(id.clone()).await?;
-        if let Some(observer) = &self.inner.observer {
-            observer.on_task_cancelled(&id, &cancellation_permit).await;
-        }
-        Ok(())
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot delete the task.
-    pub async fn remove(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
-        self.inner.scheduler.remove(id).await
-    }
-
-    /// Returns aggregate tasks that currently depend on a proposal task.
+    /// Atomically projects one runtime-root incarnation onto its complete engine task graph.
     ///
     /// # Errors
     ///
-    /// Returns `TaskStoreError` when the scheduler cannot read dependency edges.
-    pub async fn dependents_of(
+    /// Returns an error if the queue rejects the graph or cannot persist it.
+    pub async fn attach_execution(
         &self,
-        id: &EngineTaskId,
-    ) -> Result<Vec<EngineTaskId>, TaskStoreError> {
-        self.inner.scheduler.dependents_of(id).await
+        owner: RootOwner,
+        graph: ExecutionGraph<EngineTask, EngineTaskKey>,
+    ) -> Result<AttachOutcome, TaskStoreError> {
+        self.inner.scheduler.attach(owner, graph).await
+    }
+
+    /// Detaches exactly one runtime-root incarnation from the in-memory execution projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the queue cannot update the projection.
+    pub async fn detach_execution(
+        &self,
+        owner: &RootOwner,
+        mode: DetachMode,
+    ) -> Result<DetachOutcome<EngineTaskKey>, TaskStoreError> {
+        self.inner.scheduler.detach(owner, mode).await
+    }
+
+    /// Returns the currently attached task graph for one exact runtime-root incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the queue cannot read the projection.
+    pub async fn inspect_execution(
+        &self,
+        owner: &RootOwner,
+    ) -> Result<Option<ProjectionView<EngineTaskKey>>, TaskStoreError> {
+        self.inner.scheduler.inspect(owner).await
     }
 
     async fn checkpoint_completed_proof(
@@ -969,9 +967,22 @@ where
             .complete_permanent_failure(lease.clone(), error.clone())
             .await?;
         if failed && let Some(observer) = &self.inner.observer {
-            observer
+            match observer
                 .on_task_failed(&lease.id, observer_task, &error, execution_permit)
-                .await;
+                .await
+            {
+                Ok(projection) => {
+                    self.detach_terminal_failure_projection(&lease.id, projection)
+                        .await;
+                }
+                Err(observer_error) => {
+                    tracing::warn!(
+                        task = ?lease.id,
+                        error = %observer_error,
+                        "failed to persist terminal lease-loss state"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1017,20 +1028,49 @@ where
     async fn notify_applied_terminal_failure(
         &self,
         completion: raiko2_queue::TaskCompletionDisposition,
-        should_notify: bool,
         id: &EngineTaskId,
         task: &EngineTask,
         error: Option<&str>,
         execution_permit: &TaskExecutionPermit,
     ) {
         if completion == raiko2_queue::TaskCompletionDisposition::Failed
-            && should_notify
             && let Some(observer) = &self.inner.observer
             && let Some(error) = error
         {
-            observer
+            match observer
                 .on_task_failed(id, task, error, execution_permit)
-                .await;
+                .await
+            {
+                Ok(projection) => {
+                    self.detach_terminal_failure_projection(id, projection)
+                        .await;
+                }
+                Err(observer_error) => {
+                    tracing::warn!(
+                        task = ?id,
+                        error = %observer_error,
+                        "failed to persist terminal task failure"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn detach_terminal_failure_projection(
+        &self,
+        id: &EngineTaskId,
+        projection: TerminalFailureProjection,
+    ) {
+        for owner in projection.root_owners() {
+            if let Err(error) = self.inner.scheduler.detach(owner, DetachMode::Remove).await {
+                tracing::warn!(
+                    task = ?id,
+                    root_task_id = %owner.task_id,
+                    root_incarnation_id = %owner.incarnation_id,
+                    %error,
+                    "failed to remove terminal root from execution projection"
+                );
+            }
         }
     }
 
@@ -1148,7 +1188,6 @@ where
         let completion = completion?;
         self.notify_applied_terminal_failure(
             completion,
-            should_notify_queue_task,
             &completed_id,
             &terminal_observer_task,
             error.as_deref(),
@@ -1313,6 +1352,9 @@ where
     ) -> Result<LeaseInterruption, TaskStoreError> {
         let notifier = self.inner.scheduler.notifier();
         loop {
+            let notification = notifier.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
             let Some(view) = self.inner.scheduler.get(id.clone()).await? else {
                 return Ok(LeaseInterruption::Lost);
             };
@@ -1326,7 +1368,7 @@ where
                 _ => return Ok(LeaseInterruption::Lost),
             }
 
-            notifier.notified().await;
+            notification.await;
         }
     }
 
@@ -1795,15 +1837,18 @@ mod tests {
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_prover::{GuestInputCodec, Prover};
     use raiko2_provider::Provider;
-    use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
+    use raiko2_queue::{
+        AttachOutcome, DetachMode, RetryPolicy, RootOwner, SchedulerConfig, TaskState,
+    };
 
     use crate::tasks::{
         AggregateProofInput, AggregationTaskRequest, EngineOutput, ProofArtifactRef,
         ProposalTaskRequest, ProverTaskConfig,
     };
     use crate::{
-        AbortOnDropTask, Engine, EngineObserver, EngineObserverError, EngineTask, EngineTaskId,
-        EngineTaskKey, EngineTaskSuccess, PROPOSAL_TASK_PRIORITY,
+        AbortOnDropTask, Engine, EngineAggregationPlan, EngineExecutionPlan, EngineObserver,
+        EngineObserverError, EngineTask, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
+        PROPOSAL_TASK_PRIORITY, TerminalFailureProjection,
     };
 
     struct TaskDropSignal(Arc<AtomicUsize>);
@@ -1883,8 +1928,9 @@ mod tests {
             _task: &EngineTask,
             _error: &str,
             _execution_permit: &crate::TaskExecutionPermit,
-        ) {
+        ) -> Result<TerminalFailureProjection, EngineObserverError> {
             self.task_failures.fetch_add(1, Ordering::SeqCst);
+            Ok(TerminalFailureProjection::untracked())
         }
     }
 
@@ -1905,32 +1951,35 @@ mod tests {
         }
     }
 
-    struct CancellationPermitMarker;
-
-    struct CancellationPermitObserver {
-        permits: AtomicUsize,
-        callbacks: AtomicUsize,
+    struct TerminalFailureObserver {
+        owner: RootOwner,
     }
 
     #[async_trait::async_trait]
-    impl EngineObserver for CancellationPermitObserver {
-        async fn acquire_task_cancellation_permit(
+    impl EngineObserver for TerminalFailureObserver {
+        async fn checkpoint_completed_proof(
             &self,
             _id: &EngineTaskId,
-        ) -> Result<crate::TaskCancellationPermit, EngineObserverError> {
-            self.permits.fetch_add(1, Ordering::SeqCst);
-            Ok(crate::TaskCancellationPermit::tracked(
-                CancellationPermitMarker,
+            _task: &EngineTask,
+            _proof: &Proof,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) -> Result<crate::ProofCompletionPermit, EngineObserverError> {
+            Err(EngineObserverError::ProofInvalidated(
+                "injected invalidation".to_string(),
             ))
         }
 
-        async fn on_task_cancelled(
+        async fn on_task_failed(
             &self,
             _id: &EngineTaskId,
-            permit: &crate::TaskCancellationPermit,
-        ) {
-            assert!(permit.guard::<CancellationPermitMarker>().is_some());
-            self.callbacks.fetch_add(1, Ordering::SeqCst);
+            _task: &EngineTask,
+            _error: &str,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) -> Result<TerminalFailureProjection, EngineObserverError> {
+            Ok(TerminalFailureProjection::tracked(
+                vec![self.owner.clone()],
+                (),
+            ))
         }
     }
 
@@ -2297,6 +2346,45 @@ mod tests {
         }
     }
 
+    macro_rules! attach_proposal {
+        ($engine:expr, $root:expr, $request:expr) => {{
+            let request = $request;
+            let owner = RootOwner::new($root, uuid::Uuid::new_v4());
+            let task_id = $engine.proposal_task_id(request.clone());
+            $engine
+                .attach_execution_plan(
+                    owner.clone(),
+                    EngineExecutionPlan {
+                        proposals: vec![request],
+                        aggregate: None,
+                    },
+                )
+                .await?;
+            (owner, task_id)
+        }};
+    }
+
+    macro_rules! attach_aggregate {
+        ($engine:expr, $root:expr, $proposals:expr, $request:expr, $inputs:expr) => {{
+            let request = $request;
+            let owner = RootOwner::new($root, uuid::Uuid::new_v4());
+            let task_id = $engine.aggregate_task_id(request.clone());
+            $engine
+                .attach_execution_plan(
+                    owner.clone(),
+                    EngineExecutionPlan {
+                        proposals: $proposals,
+                        aggregate: Some(EngineAggregationPlan {
+                            request,
+                            inputs: $inputs,
+                        }),
+                    },
+                )
+                .await?;
+            (owner, task_id)
+        }};
+    }
+
     fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
@@ -2316,9 +2404,7 @@ mod tests {
         );
         let request = proposal_request(1);
 
-        engine.submit_proposal_proof(request.clone()).await?;
-
-        let task_id = engine.proposal_task_id(request);
+        let (_owner, task_id) = attach_proposal!(engine, "proposal-priority", request);
         let view = engine
             .get(task_id)
             .await?
@@ -2329,7 +2415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_proposal_proof_runs_dependency_pipeline()
+    async fn execution_plan_attaches_the_complete_root_graph_atomically()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -2337,8 +2423,47 @@ mod tests {
             raiko2_queue::MemoryStore::new(),
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
+        let first = proposal_request(1);
+        let second = proposal_request(2);
+        let second_id = engine.proposal_task_id(second.clone());
+        let owner = RootOwner::new("root", uuid::Uuid::new_v4());
+        let plan = EngineExecutionPlan {
+            proposals: vec![first, second],
+            aggregate: Some(EngineAggregationPlan {
+                request: aggregation_request("root"),
+                inputs: vec![pending_proof_input("proposal-2", second_id)],
+            }),
+        };
 
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        assert_eq!(
+            engine
+                .attach_execution_plan(owner.clone(), plan.clone())
+                .await?,
+            AttachOutcome::Attached
+        );
+        assert_eq!(
+            engine.attach_execution_plan(owner.clone(), plan).await?,
+            AttachOutcome::AlreadyAttached
+        );
+        let graph = engine
+            .inspect_execution(&owner)
+            .await?
+            .expect("attached execution graph");
+        assert_eq!(graph.tasks.len(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_proposal_runs_dependency_pipeline() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let (_owner, job_id) = attach_proposal!(engine, "proposal-run", proposal_request(1));
 
         assert!(Box::pin(engine.run_one("w1")).await?);
 
@@ -2362,7 +2487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_aggregation_proof_enqueues_aggregate_task()
+    async fn attached_aggregate_enqueues_complete_execution_graph()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -2374,15 +2499,16 @@ mod tests {
         let first = engine.proposal_task_id(proposal_request(1));
         let second = engine.proposal_task_id(proposal_request(2));
         let request = aggregation_request("agg-1");
-        let aggregate_id = engine
-            .submit_aggregation_proof_from_inputs(
-                request.clone(),
-                vec![
-                    pending_proof_input("proposal-1", first.clone()),
-                    pending_proof_input("proposal-2", second.clone()),
-                ],
-            )
-            .await?;
+        let (_owner, aggregate_id) = attach_aggregate!(
+            engine,
+            "aggregate-two-proposals",
+            vec![proposal_request(1), proposal_request(2)],
+            request.clone(),
+            vec![
+                pending_proof_input("proposal-1", first.clone()),
+                pending_proof_input("proposal-2", second.clone()),
+            ]
+        );
 
         let view = engine
             .get(aggregate_id.clone())
@@ -2396,12 +2522,16 @@ mod tests {
                 request,
             })
         );
-        assert_eq!(engine.dependents_of(&first).await?, vec![aggregate_id]);
+        let execution = engine
+            .inspect_execution(&_owner)
+            .await?
+            .expect("attached execution graph");
+        assert_eq!(execution.tasks.len(), 3);
         Ok(())
     }
 
     #[tokio::test]
-    async fn submit_aggregation_proof_accepts_single_proposal_task()
+    async fn attached_aggregate_accepts_single_proposal_task()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -2416,12 +2546,13 @@ mod tests {
             proposal_ids: vec![1],
             prover_config: ProverTaskConfig::default(),
         };
-        let aggregate_id = engine
-            .submit_aggregation_proof_from_inputs(
-                request.clone(),
-                vec![pending_proof_input("proposal-1", proof_task.clone())],
-            )
-            .await?;
+        let (_owner, aggregate_id) = attach_aggregate!(
+            engine,
+            "aggregate-single-proposal",
+            vec![proposal_request(1)],
+            request.clone(),
+            vec![pending_proof_input("proposal-1", proof_task.clone())]
+        );
 
         let view = engine
             .get(aggregate_id.clone())
@@ -2439,8 +2570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_aggregation_proof_rejects_empty_input() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn attached_aggregate_rejects_empty_input() -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
             test_context(),
@@ -2449,7 +2579,16 @@ mod tests {
         );
 
         let err = engine
-            .submit_aggregation_proof_from_inputs(aggregation_request("agg-empty"), Vec::new())
+            .attach_execution_plan(
+                RootOwner::new("aggregate-empty", uuid::Uuid::new_v4()),
+                EngineExecutionPlan {
+                    proposals: vec![],
+                    aggregate: Some(EngineAggregationPlan {
+                        request: aggregation_request("agg-empty"),
+                        inputs: Vec::new(),
+                    }),
+                },
+            )
             .await
             .unwrap_err();
         assert!(
@@ -2460,7 +2599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_aggregation_proof_rejects_wrong_pipeline_proposal_task()
+    async fn attached_aggregate_rejects_wrong_pipeline_proposal_task()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -2474,19 +2613,25 @@ mod tests {
             request: proposal_request(1),
         });
         let err = engine
-            .submit_aggregation_proof_from_inputs(
-                aggregation_request("agg-wrong-pipeline"),
-                vec![pending_proof_input("proposal-1", other_pipeline_task)],
+            .attach_execution_plan(
+                RootOwner::new("aggregate-wrong-pipeline", uuid::Uuid::new_v4()),
+                EngineExecutionPlan {
+                    proposals: vec![],
+                    aggregate: Some(EngineAggregationPlan {
+                        request: aggregation_request("agg-wrong-pipeline"),
+                        inputs: vec![pending_proof_input("proposal-1", other_pipeline_task)],
+                    }),
+                },
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("proposal tasks in this pipeline"));
+        assert!(err.to_string().contains("proposal in this execution plan"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn submit_proposal_proof_with_dependencies_delays_next_proposal()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn attached_execution_plan_delays_next_proposal() -> Result<(), Box<dyn std::error::Error>>
+    {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
             test_context(),
@@ -2494,11 +2639,18 @@ mod tests {
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
-        let first_prove = engine.submit_proposal_proof(proposal_request(1)).await?;
         let second_request = proposal_request(2);
         let second_proposal = engine.proposal_task_id(second_request.clone());
+        let first_request = proposal_request(1);
+        let owner = RootOwner::new("proposal-chain", uuid::Uuid::new_v4());
         engine
-            .submit_proposal_proof_with_dependencies(second_request, vec![first_prove])
+            .attach_execution_plan(
+                owner,
+                EngineExecutionPlan {
+                    proposals: vec![first_request, second_request],
+                    aggregate: None,
+                },
+            )
             .await?;
 
         let ready = engine
@@ -2530,7 +2682,7 @@ mod tests {
             scheduler_config,
         );
 
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let (_owner, job_id) = attach_proposal!(engine, "retry-none", proposal_request(1));
 
         assert!(Box::pin(engine.run_one("w1")).await?);
 
@@ -2543,7 +2695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submitted_proposal_and_aggregate_tasks_use_scheduler_retry()
+    async fn attached_proposal_and_aggregate_tasks_use_scheduler_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(45),
@@ -2558,7 +2710,8 @@ mod tests {
             retry: scheduler_config.retry.clone(),
         };
         let request = proposal_request(9);
-        let proposal_id = engine.submit_proposal_proof(request.clone()).await?;
+        let (_proposal_owner, proposal_id) =
+            attach_proposal!(engine, "retry-policy-proposal", request.clone());
 
         let proposal = engine
             .inner
@@ -2569,14 +2722,15 @@ mod tests {
         assert_eq!(proposal.id, proposal_id);
         assert_eq!(proposal.execution_policy, task_policy);
 
-        let aggregate_id = engine
-            .submit_aggregation_proof_from_inputs(
-                aggregation_request("agg"),
-                vec![AggregateProofInput::ProofArtifact(proof_artifact(
-                    "aggregate-input",
-                ))],
-            )
-            .await?;
+        let (_aggregate_owner, aggregate_id) = attach_aggregate!(
+            engine,
+            "retry-policy-aggregate",
+            vec![],
+            aggregation_request("agg"),
+            vec![AggregateProofInput::ProofArtifact(proof_artifact(
+                "aggregate-input"
+            ))]
+        );
         let aggregate = engine
             .inner
             .scheduler
@@ -2605,7 +2759,7 @@ mod tests {
             scheduler_config,
         );
 
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let (_owner, job_id) = attach_proposal!(engine, "retry-failed-prove", proposal_request(1));
 
         assert!(Box::pin(engine.run_one("w1")).await?);
 
@@ -2634,7 +2788,7 @@ mod tests {
             },
             Some(observer.clone()),
         );
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let (_owner, job_id) = attach_proposal!(engine, "publication-retry", proposal_request(1));
 
         assert!(Box::pin(engine.run_one("w1")).await?);
 
@@ -2676,15 +2830,36 @@ mod tests {
             },
             Some(observer.clone()),
         );
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let owner = RootOwner::new("stale-lease", uuid::Uuid::new_v4());
+        let request = proposal_request(1);
+        let job_id = engine.proposal_task_id(request.clone());
+        engine
+            .attach_execution_plan(
+                owner.clone(),
+                EngineExecutionPlan {
+                    proposals: vec![request.clone()],
+                    aggregate: None,
+                },
+            )
+            .await?;
         let lease = engine
             .inner
             .scheduler
             .next_ready("old-worker")
             .await?
             .ok_or_else(|| std::io::Error::other("expected running lease"))?;
-        engine.remove(job_id.clone()).await?;
-        let replacement_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        engine.detach_execution(&owner, DetachMode::Remove).await?;
+        let replacement_owner = RootOwner::new("stale-lease-replacement", uuid::Uuid::new_v4());
+        engine
+            .attach_execution_plan(
+                replacement_owner,
+                EngineExecutionPlan {
+                    proposals: vec![request],
+                    aggregate: None,
+                },
+            )
+            .await?;
+        let replacement_id = job_id.clone();
         assert_eq!(replacement_id, job_id);
         let replacement = engine
             .inner
@@ -2751,7 +2926,8 @@ mod tests {
             Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
             Some(Arc::new(PublicationInvalidatingObserver)),
         );
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let (_owner, job_id) =
+            attach_proposal!(engine, "publication-invalidated", proposal_request(1));
 
         assert!(Box::pin(engine.run_one("w1")).await?);
 
@@ -2760,6 +2936,52 @@ mod tests {
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
         assert!(matches!(view.state, TaskState::Failed { .. }));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_removes_root_owner_before_a_shared_stage_is_reused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let owner = RootOwner::new("failed-root", uuid::Uuid::new_v4());
+        let request = proposal_request(1);
+        let observer = Arc::new(TerminalFailureObserver {
+            owner: owner.clone(),
+        });
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
+            Some(observer),
+        );
+        let task_id = engine.proposal_task_id(request.clone());
+        let plan = EngineExecutionPlan {
+            proposals: vec![request],
+            aggregate: None,
+        };
+        engine
+            .attach_execution_plan(owner.clone(), plan.clone())
+            .await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+        assert!(engine.inspect_execution(&owner).await?.is_none());
+
+        let replacement = RootOwner::new("replacement-root", uuid::Uuid::new_v4());
+        assert_eq!(
+            engine
+                .attach_execution_plan(replacement.clone(), plan)
+                .await?,
+            AttachOutcome::Attached
+        );
+        let view = engine
+            .get(task_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected reattached task view"))?;
+        assert!(matches!(view.state, TaskState::Ready));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         Ok(())
     }
@@ -2780,7 +3002,7 @@ mod tests {
             Engine::<TestSpec<CountingProver>>::default_scheduler_config(),
             Some(observer.clone()),
         );
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let (_owner, job_id) = attach_proposal!(engine, "recovered-output", proposal_request(1));
 
         assert!(Box::pin(engine.run_one("w1")).await?);
 
@@ -2795,7 +3017,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_one_stops_running_task_after_cancel() -> Result<(), Box<dyn std::error::Error>> {
+    async fn run_one_stops_running_task_after_root_detach() -> Result<(), Box<dyn std::error::Error>>
+    {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
@@ -2806,12 +3029,12 @@ mod tests {
             raiko2_queue::MemoryStore::new(),
             scheduler_config,
         );
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let (owner, job_id) = attach_proposal!(engine, "detach-running", proposal_request(1));
 
         let worker_engine = engine.clone();
         let handle = tokio::spawn(async move { Box::pin(worker_engine.run_one("w1")).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        engine.cancel(job_id.clone()).await?;
+        engine.detach_execution(&owner, DetachMode::Cancel).await?;
 
         let result = tokio::time::timeout(Duration::from_secs(1), handle)
             .await
@@ -2823,34 +3046,6 @@ mod tests {
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
         assert!(matches!(view.state, TaskState::Cancelled));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn cancel_carries_observer_permit_into_callback() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let observer = Arc::new(CancellationPermitObserver {
-            permits: AtomicUsize::new(0),
-            callbacks: AtomicUsize::new(0),
-        });
-        let engine = Engine::with_store_scheduler_config_and_observer(
-            TestSpec::new(MockProver),
-            test_context(),
-            raiko2_queue::MemoryStore::new(),
-            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
-            Some(observer.clone()),
-        );
-        let task_id = engine.submit_proposal_proof(proposal_request(1)).await?;
-
-        engine.cancel(task_id.clone()).await?;
-
-        let task = engine
-            .get(task_id)
-            .await?
-            .ok_or_else(|| std::io::Error::other("expected cancelled task"))?;
-        assert!(matches!(task.state, TaskState::Cancelled));
-        assert_eq!(observer.permits.load(Ordering::SeqCst), 1);
-        assert_eq!(observer.callbacks.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

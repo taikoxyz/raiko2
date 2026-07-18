@@ -1,11 +1,18 @@
 use super::*;
 use raiko2_pipeline::PipelineKey;
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 #[derive(Debug, Default)]
 struct FakeGcsTransport {
     objects: Mutex<BTreeMap<String, GcsObject>>,
     next_generation: Mutex<i64>,
+    delete_failure: AtomicU8,
 }
 
 impl FakeGcsTransport {
@@ -104,6 +111,10 @@ impl GcsTransport for FakeGcsTransport {
         name: &str,
         generation: Option<i64>,
     ) -> Result<ProofArtifactDeleteResult> {
+        let failure = self.delete_failure.swap(0, Ordering::SeqCst);
+        if failure == 1 {
+            anyhow::bail!("injected GCS delete failure before commit");
+        }
         let mut objects = self
             .objects
             .lock()
@@ -116,6 +127,9 @@ impl GcsTransport for FakeGcsTransport {
             "fake GCS generation precondition failed"
         );
         objects.remove(name);
+        if failure == 2 {
+            anyhow::bail!("injected GCS delete failure after commit");
+        }
         Ok(ProofArtifactDeleteResult::Removed)
     }
 }
@@ -241,12 +255,10 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
         .expect("proof publication should materialize content")
         .clone();
 
-    store
-        .mark_invalidated(&key, first.generation, &first.content_hash)
-        .await?;
-    store
-        .delete(&key, first.generation, &first.content_hash)
-        .await?;
+    assert!(matches!(
+        store.invalidate_exact(&key, &first.descriptor()).await?,
+        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+    ));
     let second = store
         .put_if_absent(&key, proof)
         .await?
@@ -255,21 +267,10 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
         .clone();
 
     assert_ne!(first.generation, second.generation);
+    assert!(store.is_invalidated(&key, &first.descriptor()).await?);
+    assert!(!store.is_invalidated(&key, &second.descriptor()).await?);
     assert!(
-        store
-            .is_invalidated(&key, first.generation, &first.content_hash)
-            .await?
-    );
-    assert!(
-        !store
-            .is_invalidated(&key, second.generation, &second.content_hash)
-            .await?
-    );
-    assert!(
-        store
-            .delete(&key, first.generation, &first.content_hash)
-            .await
-            .is_err(),
+        store.delete_exact(&key, &first.descriptor()).await.is_err(),
         "a stale generation must not delete the replacement manifest"
     );
     assert_eq!(
@@ -280,6 +281,59 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
             .generation,
         second.generation
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_invalidation_recovers_commit_then_error_by_readback() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    transport.delete_failure.store(2, Ordering::SeqCst);
+
+    assert_eq!(
+        store.invalidate_exact(&key, &object.descriptor()).await?,
+        ExactInvalidationResult::AlreadyInvalidated
+    );
+    assert!(store.is_invalidated(&key, &object.descriptor()).await?);
+    assert_eq!(store.get_descriptor(&key).await?, None);
+    assert_eq!(
+        store.invalidate_exact(&key, &object.descriptor()).await?,
+        ExactInvalidationResult::AlreadyInvalidated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_invalidation_retries_fail_before_commit() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    transport.delete_failure.store(1, Ordering::SeqCst);
+
+    let error = store
+        .invalidate_exact(&key, &object.descriptor())
+        .await
+        .expect_err("a pre-commit delete failure must remain retryable");
+    assert!(error.to_string().contains("before commit"));
+    assert_eq!(store.get_descriptor(&key).await?, Some(object.descriptor()));
+    assert!(store.is_invalidated(&key, &object.descriptor()).await?);
+    assert!(matches!(
+        store.invalidate_exact(&key, &object.descriptor()).await?,
+        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+    ));
     Ok(())
 }
 
@@ -296,15 +350,11 @@ async fn delete_reports_removed_then_missing_through_gcs_seam() -> Result<()> {
         .clone();
 
     assert_eq!(
-        store
-            .delete(&key, object.generation, &object.content_hash)
-            .await?,
+        store.delete_exact(&key, &object.descriptor()).await?,
         ProofArtifactDeleteResult::Removed
     );
     assert_eq!(
-        store
-            .delete(&key, object.generation, &object.content_hash)
-            .await?,
+        store.delete_exact(&key, &object.descriptor()).await?,
         ProofArtifactDeleteResult::Missing
     );
     Ok(())

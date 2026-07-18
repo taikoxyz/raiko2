@@ -1,5 +1,6 @@
 use crate::{
-    ProofArtifactLifecycle, ProofArtifactPutResult, ProofArtifactRegistration, RuntimeManager,
+    ArtifactExpectation, ProofArtifactKey, ProofArtifactLifecycle, ProofArtifactPutResult,
+    ProofArtifactRegistration, RuntimeManager,
 };
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
@@ -130,14 +131,16 @@ impl RuntimeManager {
                     .await
                     .context("failed to register pending proof artifact")?;
                 if lifecycle == ProofArtifactLifecycle::Invalidated {
-                    self.finalize_proof_artifact_invalidation(
-                        network_pair,
-                        pipeline_key,
-                        route,
-                        proof_ref,
-                        descriptor.generation,
-                        &descriptor.content_hash,
-                    )
+                    self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
+                        key: ProofArtifactKey {
+                            network_pair: network_pair.clone(),
+                            pipeline_key,
+                            route,
+                            proof_ref: proof_ref.clone(),
+                        },
+                        descriptor: descriptor.clone(),
+                        lifecycle: ProofArtifactLifecycle::Invalidated,
+                    })
                     .await
                     .context("failed to invalidate detached proof manifest")?;
                     return Err(publication_invalidated(proof_ref));
@@ -184,14 +187,16 @@ impl RuntimeManager {
                     self.register_invalidated_proof_artifact(registration.clone())
                         .await
                         .context("failed to record orphan proof invalidation")?;
-                    self.finalize_proof_artifact_invalidation(
-                        network_pair,
-                        pipeline_key,
-                        route,
-                        proof_ref,
-                        descriptor.generation,
-                        &descriptor.content_hash,
-                    )
+                    self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
+                        key: ProofArtifactKey {
+                            network_pair: network_pair.clone(),
+                            pipeline_key,
+                            route,
+                            proof_ref: proof_ref.clone(),
+                        },
+                        descriptor: descriptor.clone(),
+                        lifecycle: ProofArtifactLifecycle::Invalidated,
+                    })
                     .await
                     .context("failed to invalidate orphan proof manifest")?;
                     return Err(publication_invalidated(proof_ref));
@@ -315,7 +320,7 @@ mod tests {
             "test".to_string(),
             "recover-manifest-outbox".to_string(),
         )?);
-        let first = RuntimeManager::with_store(store.clone())?;
+        let first = RuntimeManager::with_store(store.clone());
         let network_pair = "taiko_dev/ethereum";
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
@@ -363,7 +368,7 @@ mod tests {
                 .is_none()
         );
 
-        let restarted = RuntimeManager::with_store(store)?;
+        let restarted = RuntimeManager::with_store(store);
         restarted.initialize().await?;
         let recovered = restarted
             .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
@@ -419,13 +424,12 @@ mod tests {
             .try_object()
             .expect("proof publication should materialize content")
             .clone();
+        let root = runtime
+            .get_task("root-cancelled-after-commit")
+            .await?
+            .expect("registered root");
         runtime
-            .sync_status(
-                "root-cancelled-after-commit",
-                crate::RunnerStatus::Cancelled,
-                None,
-                None,
-            )
+            .cancel_task_if_current(&root.lifetime(), None)
             .await?;
         runtime
             .invalidate_pending_proof_publication(network_pair, pipeline, route, proof_ref)
@@ -437,7 +441,7 @@ mod tests {
                 .is_none()
         );
 
-        runtime.remove_task("root-cancelled-after-commit").await?;
+        runtime.remove_task_if_current(&root.lifetime()).await?;
         runtime
             .register_task(crate::TaskRegistration {
                 task_id: "replacement-root".into(),

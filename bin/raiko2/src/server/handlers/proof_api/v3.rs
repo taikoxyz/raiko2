@@ -4,8 +4,9 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
-use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, TaskRegistrationOutcome};
-use std::collections::HashSet;
+use raiko2_runtime::{
+    RunnerStatus as RuntimeRunnerStatus, RuntimeMutationOutcome, TaskRegistrationOutcome,
+};
 use tracing::{debug, info};
 
 use super::{
@@ -13,13 +14,13 @@ use super::{
     ClearProverStatus, ProofStatus, ProverStatus, ProverTaskScope, PruneStatus, ServerAclFeature,
     TaskData, TaskLookup, TaskMetadata, authorize_acl_feature_with_rate_limit,
     batch_request_fingerprint, build_canonical_batch_submission,
-    build_external_aggregate_submission, build_submission_plan, cancel_registered_tasks,
-    clear_prover_tasks, clear_task_publication_outboxes, collect_prover_status,
-    handle_created_batch_task, handle_created_external_aggregate_task, handle_existing_batch_task,
+    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
+    clear_task_publication_outboxes, collect_prover_status, handle_created_batch_task,
+    handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
     load_task_data, load_task_lookup, persist_registered_external_aggregate_inputs,
     planned_external_aggregate_task, prover_type_label, public_task_id_from_fingerprint,
-    register_batch_task, register_external_aggregate_task, remove_task_children, resolve_engine,
+    register_batch_task, register_external_aggregate_task, resolve_engine,
     zk_any_not_drawn_response,
 };
 
@@ -93,11 +94,6 @@ async fn request_batch_shasta_proof_inner(
         proposal_ids = ?proposal_ids,
         "received hoodi shasta batch request proposal ids"
     );
-    let _lifecycle_operation = state
-        .runtime
-        .acquire_lifecycle_operation()
-        .await
-        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_batch_task(&state, &submission, existing, None).await
@@ -133,12 +129,6 @@ async fn request_aggregation_proof_inner(
         submission.route.pipeline_key(),
     )?;
     let aggregate = planned_external_aggregate_task(&state.runtime, &submission).await?;
-    let _lifecycle_operation = state
-        .runtime
-        .acquire_lifecycle_operation()
-        .await
-        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
-
     info!(
         task_id = submission.public_task_id.as_str(),
         proof_type = requested_proof_type.as_str(),
@@ -184,16 +174,10 @@ pub(crate) async fn cancel_task(
     Path(id): Path<String>,
 ) -> Result<Json<ApiOk<TaskData>>, ApiError> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
-    let _lifecycle_operation = state
-        .runtime
-        .acquire_lifecycle_operation()
-        .await
-        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
-
     let TaskLookup {
         record,
         metadata,
-        engine,
+        engine: _,
     } = load_task_lookup(&state, &id).await?;
 
     if matches!(
@@ -205,16 +189,17 @@ pub(crate) async fn cancel_task(
         return get_task(State(state), Path(id)).await;
     }
 
-    cancel_registered_tasks(&state.runtime, &engine, &id, record.pipeline_key, &metadata)
+    let outcome = state
+        .lifecycle
+        .cancel(&record, &metadata, None)
         .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-    state
-        .runtime
-        .sync_status(&id, RuntimeRunnerStatus::Cancelled, None, None)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to sync runtime cancellation: {err}")))?;
-
+        .map_err(|err| ApiError::internal(format!("failed to cancel task: {err}")))?;
+    if !matches!(
+        outcome,
+        RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied
+    ) {
+        return get_task(State(state), Path(id)).await;
+    }
     get_task(State(state), Path(id)).await
 }
 
@@ -266,38 +251,27 @@ pub(crate) async fn prune_proofs(
     headers: HeaderMap,
 ) -> Result<Json<PruneStatus>, ApiError> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
-    let _lifecycle_operation = state
-        .runtime
-        .acquire_lifecycle_operation()
-        .await
-        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
-
     let records = state
         .runtime
         .list_tasks()
         .await
         .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
-    let mut removed_engine_task_ids = HashSet::new();
-
     for record in records {
         let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-        let engine = resolve_engine(&state, &metadata.network_pair, record.pipeline_key)?;
-
-        remove_task_children(
-            &engine,
-            record.pipeline_key,
-            &metadata,
-            &mut removed_engine_task_ids,
-        )
-        .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
+        state
+            .lifecycle
+            .retire(&record, &metadata, raiko2_queue::DetachMode::Remove)
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to retire task {}: {err}", record.task_id))
+            })?;
 
         clear_task_publication_outboxes(&state.runtime, &record, &metadata).await?;
 
         state
             .runtime
-            .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
+            .remove_task_if_current(&record.lifetime())
             .await
             .map_err(|err| {
                 ApiError::internal(format!("failed to prune task {}: {err}", record.task_id))

@@ -86,9 +86,7 @@ impl PipelineFactory for StaticPipelineFactory {
 mod tests {
     use super::*;
     use crate::server::state::{EngineQueueTaskView, EngineStatusView};
-    use raiko2_engine::{
-        AggregateProofInput, AggregationTaskRequest, EngineTaskId, ProposalTaskRequest,
-    };
+    use raiko2_engine::{EngineExecutionPlan, EngineTaskId, EngineTaskKey};
     use raiko2_queue::TaskStoreError;
     use std::future::Future;
     use std::pin::Pin;
@@ -102,22 +100,6 @@ mod tests {
     impl EngineHandle for MaintenanceStateEngine {
         fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
             self.ready
-        }
-
-        fn submit_proposal_proof_with_dependencies(
-            &self,
-            _request: ProposalTaskRequest,
-            _dependencies: Vec<EngineTaskId>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected proposal submission") })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            _request: AggregationTaskRequest,
-            _inputs: Vec<AggregateProofInput>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregation submission") })
         }
 
         fn get_status(
@@ -134,12 +116,21 @@ mod tests {
             Box::pin(async { panic!("unexpected task state lookup") })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { panic!("unexpected cancellation") })
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected execution attachment") })
         }
 
-        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { panic!("unexpected removal") })
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
+            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
         }
     }
 

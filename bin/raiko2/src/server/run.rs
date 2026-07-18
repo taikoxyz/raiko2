@@ -39,7 +39,7 @@ pub async fn run_server(config: Config, json_logs: bool) -> Result<()> {
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            shutdown_state.begin_shutdown();
+            shutdown_state.begin_shutdown().await;
             shutdown_started.notify_one();
         })
         .into_future();

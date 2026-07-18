@@ -160,10 +160,6 @@
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
         for (root_id, status) in [
             ("task_running", RunnerStatus::Running),
             ("task_completed", RunnerStatus::Completed),
@@ -207,13 +203,13 @@
             .expect("completed root");
         completed.proof_uri = Some(artifact.proof_uri.clone());
         runtime.upsert_task(&completed).await?;
-        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.into(), route);
-
-        let permit = observer
-            .acquire_task_cancellation_permit(&task_id)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        observer.on_task_cancelled(&task_id, &permit).await;
+        let running = runtime
+            .get_task("task_running")
+            .await?
+            .expect("running root");
+        runtime
+            .cancel_task_if_current(&running.lifetime(), None)
+            .await?;
 
         assert!(
             runtime
@@ -520,10 +516,9 @@
             .await?
             .expect("old root")
             .incarnation_id;
-        runtime
-            .sync_status("root", RunnerStatus::Cancelled, None, None)
-            .await?;
-        runtime.remove_task("root").await?;
+        let root = runtime.get_task("root").await?.expect("old root");
+        runtime.cancel_task_if_current(&root.lifetime(), None).await?;
+        runtime.remove_task_if_current(&root.lifetime()).await?;
         register_observer_task(
             runtime.as_ref(),
             "root",

@@ -12,10 +12,12 @@ pub use ready_sort::{
     zset_member_from_encoded,
 };
 pub use scheduler::{
-    NewTask, RetryPolicy, Scheduler, SchedulerConfig, TaskCompletionDisposition,
-    TaskExecutionPolicy, TaskLease, TaskView, TaskViewState,
+    AttachOutcome, DetachMode, DetachOutcome, ExecutionGraph, ExecutionNode, NewTask,
+    ProjectionTaskView, ProjectionView, RetryPolicy, Scheduler, SchedulerConfig,
+    TaskCompletionDisposition, TaskExecutionPolicy, TaskLease, TaskView, TaskViewState,
 };
 pub use store::{MemoryStore, StoreResult, TaskStore, TaskStoreError};
 pub use types::{
-    Priority, TaskId, TaskIdCodecError, TaskState, TaskStateKind, decode_task_id, encode_task_id,
+    Priority, RootOwner, TaskId, TaskIdCodecError, TaskState, TaskStateKind, decode_task_id,
+    encode_task_id,
 };

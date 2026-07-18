@@ -5,10 +5,6 @@
         ))?);
         let pipeline = PipelineKey::ShastaNative;
         let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
         register_observer_task(
             runtime.as_ref(),
             "root",
@@ -23,19 +19,10 @@
             .await?
             .context("old root")?
             .incarnation_id;
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "taiko_dev/ethereum".to_string(),
-            pipeline.route(),
-        );
-        let stale_permit = observer
-            .acquire_task_cancellation_permit(&task_id)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        runtime
-            .sync_status("root", RunnerStatus::Cancelled, None, None)
-            .await?;
-        runtime.remove_task("root").await?;
+        let stale = runtime.get_task("root").await?.context("old root")?;
+        let root = runtime.get_task("root").await?.expect("old root");
+        runtime.cancel_task_if_current(&root.lifetime(), None).await?;
+        runtime.remove_task_if_current(&root.lifetime()).await?;
         register_observer_task(
             runtime.as_ref(),
             "root",
@@ -48,7 +35,10 @@
         let replacement = runtime.get_task("root").await?.context("replacement root")?;
         assert_ne!(stale_incarnation, replacement.incarnation_id);
 
-        observer.on_task_cancelled(&task_id, &stale_permit).await;
+        assert!(matches!(
+            runtime.cancel_task_if_current(&stale.lifetime(), None).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Stale
+        ));
 
         let replacement = runtime.get_task("root").await?.context("replacement root")?;
         assert_eq!(replacement.runner_status, RunnerStatus::Running);
@@ -186,10 +176,9 @@
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-        runtime
-            .sync_status("root", RunnerStatus::Cancelled, None, None)
-            .await?;
-        runtime.remove_task("root").await?;
+        let root = runtime.get_task("root").await?.expect("old root");
+        runtime.cancel_task_if_current(&root.lifetime(), None).await?;
+        runtime.remove_task_if_current(&root.lifetime()).await?;
         register_observer_task(
             runtime.as_ref(),
             "root",

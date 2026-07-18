@@ -70,6 +70,14 @@ pub enum ProofArtifactDeleteResult {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExactInvalidationResult {
+    Invalidated(ProofArtifactDeleteResult),
+    AlreadyInvalidated,
+    Stale,
+    Missing,
+}
+
 impl ProofArtifactPutResult {
     #[must_use]
     pub const fn try_object(&self) -> Option<&ProofArtifactObject> {
@@ -92,12 +100,14 @@ pub enum RuntimeStateWriteResult {
     Conflict(Option<RuntimeStateObject>),
 }
 
-#[async_trait]
-pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
+pub trait RuntimeStoreScope: std::fmt::Debug + Send + Sync {
     fn environment(&self) -> &str;
     fn namespace(&self) -> &str;
     fn backend_name(&self) -> &'static str;
+}
 
+#[async_trait]
+pub trait ProofObjectStore: RuntimeStoreScope {
     async fn put_if_absent(
         &self,
         key: &ProofArtifactKey,
@@ -113,25 +123,25 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         key: &ProofArtifactKey,
         max_bytes: usize,
     ) -> Result<Option<ProofArtifactPrefix>>;
-    async fn mark_invalidated(
+    async fn invalidate_exact(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        content_hash: &str,
-    ) -> Result<()>;
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<ExactInvalidationResult>;
     async fn is_invalidated(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        content_hash: &str,
+        descriptor: &ProofArtifactDescriptor,
     ) -> Result<bool>;
-    async fn delete(
+    async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        expected_content_hash: &str,
+        descriptor: &ProofArtifactDescriptor,
     ) -> Result<ProofArtifactDeleteResult>;
+}
 
+#[async_trait]
+pub trait RuntimeStateStore: RuntimeStoreScope {
     async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>>;
 
     async fn store_runtime_state(
@@ -140,6 +150,10 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         expected_generation: Option<i64>,
     ) -> Result<RuntimeStateWriteResult>;
 }
+
+pub trait RuntimeStore: ProofObjectStore + RuntimeStateStore {}
+
+impl<T> RuntimeStore for T where T: ProofObjectStore + RuntimeStateStore {}
 
 #[derive(Debug)]
 pub struct MemoryProofArtifactStore {
@@ -193,8 +207,7 @@ impl MemoryProofArtifactStore {
     }
 }
 
-#[async_trait]
-impl ProofArtifactStore for MemoryProofArtifactStore {
+impl RuntimeStoreScope for MemoryProofArtifactStore {
     fn environment(&self) -> &str {
         &self.environment
     }
@@ -206,7 +219,10 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
     fn backend_name(&self) -> &'static str {
         "memory"
     }
+}
 
+#[async_trait]
+impl ProofObjectStore for MemoryProofArtifactStore {
     async fn put_if_absent(
         &self,
         key: &ProofArtifactKey,
@@ -325,42 +341,60 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
         }))
     }
 
-    async fn mark_invalidated(
+    async fn invalidate_exact(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        content_hash: &str,
-    ) -> Result<()> {
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<ExactInvalidationResult> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        inner
-            .invalidations
-            .insert((key.clone(), generation, content_hash.to_string()));
-        Ok(())
+        let invalidation = (
+            key.clone(),
+            descriptor.generation,
+            descriptor.content_hash.clone(),
+        );
+        let Some(current) = inner.manifests.get(key) else {
+            return Ok(if inner.invalidations.contains(&invalidation) {
+                ExactInvalidationResult::AlreadyInvalidated
+            } else {
+                ExactInvalidationResult::Missing
+            });
+        };
+        if Some(current.generation) != descriptor.generation
+            || current.content_hash != descriptor.content_hash
+            || self.content_uri(key, &current.content_hash) != descriptor.proof_uri
+        {
+            return Ok(ExactInvalidationResult::Stale);
+        }
+        inner.invalidations.insert(invalidation);
+        inner.manifests.remove(key);
+        Ok(ExactInvalidationResult::Invalidated(
+            ProofArtifactDeleteResult::Removed,
+        ))
     }
 
     async fn is_invalidated(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        content_hash: &str,
+        descriptor: &ProofArtifactDescriptor,
     ) -> Result<bool> {
         let inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        Ok(inner
-            .invalidations
-            .contains(&(key.clone(), generation, content_hash.to_string())))
+        Ok(inner.invalidations.contains(&(
+            key.clone(),
+            descriptor.generation,
+            descriptor.content_hash.clone(),
+        )))
     }
 
-    async fn delete(
+    async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        expected_content_hash: &str,
+        descriptor: &ProofArtifactDescriptor,
     ) -> Result<ProofArtifactDeleteResult> {
         let mut inner = self
             .inner
@@ -370,13 +404,18 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
             return Ok(ProofArtifactDeleteResult::Missing);
         };
         anyhow::ensure!(
-            Some(current.generation) == generation && current.content_hash == expected_content_hash,
+            Some(current.generation) == descriptor.generation
+                && current.content_hash == descriptor.content_hash
+                && self.content_uri(key, &current.content_hash) == descriptor.proof_uri,
             "proof artifact changed before conditional delete"
         );
         inner.manifests.remove(key);
         Ok(ProofArtifactDeleteResult::Removed)
     }
+}
 
+#[async_trait]
+impl RuntimeStateStore for MemoryProofArtifactStore {
     async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
         let inner = self
             .inner
@@ -489,9 +528,7 @@ mod tests {
             .try_object()
             .expect("proof publication should materialize content")
             .clone();
-        store
-            .delete(&key, first.generation, &first.content_hash)
-            .await?;
+        store.delete_exact(&key, &first.descriptor()).await?;
 
         let second = store
             .put_if_absent(&key, b"proof-b")
@@ -500,12 +537,7 @@ mod tests {
             .expect("proof publication should materialize content")
             .clone();
         assert_ne!(first.proof_uri, second.proof_uri);
-        assert!(
-            store
-                .delete(&key, first.generation, &first.content_hash)
-                .await
-                .is_err()
-        );
+        assert!(store.delete_exact(&key, &first.descriptor()).await.is_err());
         assert_eq!(store.get(&key).await?, Some(second));
         Ok(())
     }
@@ -522,15 +554,11 @@ mod tests {
             .clone();
 
         assert_eq!(
-            store
-                .delete(&key, object.generation, &object.content_hash)
-                .await?,
+            store.delete_exact(&key, &object.descriptor()).await?,
             ProofArtifactDeleteResult::Removed
         );
         assert_eq!(
-            store
-                .delete(&key, object.generation, &object.content_hash)
-                .await?,
+            store.delete_exact(&key, &object.descriptor()).await?,
             ProofArtifactDeleteResult::Missing
         );
         Ok(())
@@ -562,12 +590,10 @@ mod tests {
             .try_object()
             .expect("proof publication should materialize content")
             .clone();
-        store
-            .mark_invalidated(&key, first.generation, &first.content_hash)
-            .await?;
-        store
-            .delete(&key, first.generation, &first.content_hash)
-            .await?;
+        assert!(matches!(
+            store.invalidate_exact(&key, &first.descriptor()).await?,
+            ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+        ));
 
         let second = store
             .put_if_absent(&key, b"deterministic-proof")
@@ -576,16 +602,8 @@ mod tests {
             .expect("proof publication should materialize content")
             .clone();
         assert_ne!(first.generation, second.generation);
-        assert!(
-            store
-                .is_invalidated(&key, first.generation, &first.content_hash)
-                .await?
-        );
-        assert!(
-            !store
-                .is_invalidated(&key, second.generation, &second.content_hash)
-                .await?
-        );
+        assert!(store.is_invalidated(&key, &first.descriptor()).await?);
+        assert!(!store.is_invalidated(&key, &second.descriptor()).await?);
         Ok(())
     }
 

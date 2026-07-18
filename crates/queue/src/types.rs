@@ -2,6 +2,7 @@ use std::{error::Error, fmt};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId<Id>(pub Id);
@@ -19,6 +20,22 @@ impl<Id> TaskId<Id> {
 impl<Id> From<Id> for TaskId<Id> {
     fn from(id: Id) -> Self {
         Self(id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RootOwner {
+    pub task_id: String,
+    pub incarnation_id: Uuid,
+}
+
+impl RootOwner {
+    #[must_use]
+    pub fn new(task_id: impl Into<String>, incarnation_id: Uuid) -> Self {
+        Self {
+            task_id: task_id.into(),
+            incarnation_id,
+        }
     }
 }
 

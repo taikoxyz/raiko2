@@ -817,28 +817,42 @@ Full deployment and offer parameter examples live in
 Operator notes:
 
 - `raiko2` uploads guest ELFs and submits Boundless requests directly.
-- Production runtime state, provider checkpoints, publication outboxes, and proof manifests are
-  stored in the configured GCS namespace. Publication proof bytes are separate immutable objects,
-  not fields in the runtime snapshot. There are no local task workdirs.
+- Production runtime state, provider checkpoints, publication intents, pending proof blobs, and proof
+  manifests are stored in the configured GCS namespace. Proof bytes are immutable objects, not fields
+  in the runtime snapshot. The state and object repositories have separate semantics even when both
+  use that namespace. There are no local task workdirs.
 - Run exactly one live instance per namespace. Active/active replicas and rolling overlap are not
-  supported, even temporarily. Use a `Recreate`-equivalent deployment strategy: stop admissions,
-  drain work, stop and join every worker and maintenance task, and wait for the old process to exit
-  before starting a replacement against the same namespace. Namespace changes are hard cuts with no
-  cross-namespace data migration, and the in-process queue is recovered from GCS rather than Redis.
-- Treat runtime lifecycle as one global namespace fence, not a per-task lock. If
-  authoritative-store coherence or draining state makes the runtime inactive, all task mutations,
-  new provider submissions, publication, invalidation, reconciliation, and cleanup writes must stop
-  together. Only a provider request admitted before the fence may finish persisting its request-ID
-  checkpoint, within the bounded shutdown deadline. There is deliberately no owner lease, owner epoch, or ownership heartbeat. GCS
-  generations remain object-version CAS tokens for exact artifact operations.
+  supported, even temporarily. Use a `Recreate`-equivalent deployment strategy: close admission and
+  readiness, stop new dispatch and provider submission, wait only for short repository commits and
+  pre-admitted provider checkpoint permits, then stop or abort and join every worker and maintenance
+  task. Start the replacement only after the old process exits. Do not wait for every proof task or
+  publication saga to finish; restart reconciliation resumes durable work. Namespace changes are hard
+  cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
+  from GCS rather than Redis.
+- Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
+  complete lifecycle operation. A process-local lifecycle transition gate serializes only an
+  active-root decision with its one in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
+  publication steps, invalidation, reconciliation, and cleanup writes. It waits only for short
+  repository commits already admitted and request-ID checkpoints covered by permits acquired while
+  active. `Inactive` rejects every write. There is deliberately no owner lease, owner epoch, or
+  ownership heartbeat.
+- Treat `incarnation_id`, scheduler lease tokens, and GCS generations as separate stale-operation
+  domains. A `TaskLifetime` rejects callbacks for a removed and recreated runtime record; a queue
+  lease token identifies one execution attempt; a manifest generation performs exact artifact CAS.
+  None is runtime authority, and runtime-state generations remain repository-internal.
+- Submission, cancellation, terminal failure, cleanup, and invalidation commit runtime state first,
+  then apply owner-aware execution-projection and exact proof-object effects. A partial effect is
+  recovered by reconciliation; operators must not attempt to repair it by reverting the
+  authoritative root.
 - This release requires an atomic configuration cutover. Before starting the new binary, remove
   legacy `[queue]` keys `backend`, `namespace`, and `redis_url`, remove legacy `[runtime]` keys
   `root` and `inactive_ttl_secs`, and add explicit `runtime.environment`, `runtime.namespace`, and
   `[runtime.store]` settings. Apply the new ConfigMap while the old instance is drained; old and new
   schemas are not dual-read. Keep the prior ConfigMap and GCS namespace together for rollback.
-- The runtime snapshot schema is also a hard cut: task `incarnation_id` and pending-publication
-  ownership are required fields and are not reconstructed from older snapshots. Deploy with a new
-  empty namespace (or explicitly delete the old runtime snapshot after the old instance exits);
+- The runtime snapshot schema is also a hard cut: task `incarnation_id`, first-class artifact
+  identity fields, and publication intent owner/hash fields are required and are not reconstructed
+  from older snapshots. Deploy with a new empty namespace (or explicitly delete the old runtime
+  snapshot after the old instance exits);
   there is no compatibility migration or fail-open recovery for legacy checkpoint state.
 - Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
   proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must

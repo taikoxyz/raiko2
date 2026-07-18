@@ -5,8 +5,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_engine::{
-    AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProofArtifactRef,
-    ProposalTaskRequest, ProverTaskConfig,
+    AggregateProofInput, AggregationTaskRequest, EngineAggregationPlan, EngineExecutionPlan,
+    EngineTaskId, EngineTaskKey, ProofArtifactRef, ProposalTaskRequest, ProverTaskConfig,
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
@@ -17,7 +17,8 @@ use raiko2_prover::sp1_config::{
 };
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_runtime::{
-    RunnerStatus as RuntimeRunnerStatus, RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
+    RunnerStatus as RuntimeRunnerStatus, RuntimeManager, RuntimeMutationOutcome, TaskRegistration,
+    TaskRegistrationOutcome,
 };
 use std::sync::Arc;
 use std::{
@@ -54,9 +55,7 @@ use crate::server::state::{
     ProofStatus,
 };
 use crate::server::task_cleanup::{
-    cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id,
-    reconcile_runtime_task_from_artifacts, remove_task_children,
-    remove_task_children_if_unreferenced,
+    proposal_task_chain_ids, proposal_task_id, reconcile_runtime_task_from_artifacts,
 };
 use crate::server::task_metadata::{
     AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
@@ -93,7 +92,6 @@ struct PlannedProposalTask {
 #[derive(Clone)]
 struct PlannedAggregateTask {
     request: AggregationTaskRequest,
-    task_id: EngineTaskId,
     task_ref: String,
 }
 
@@ -117,7 +115,6 @@ struct ExternalAggregateSubmission {
     route: CanonicalProofRoute,
     prover_type: Option<ProverType>,
     public_task_id: String,
-    task_id: EngineTaskId,
     request: AggregationTaskRequest,
     inputs: Vec<AggregateProofInput>,
     input_artifacts: Vec<AggregateInputProofArtifact>,
@@ -588,10 +585,6 @@ async fn build_external_aggregate_submission(
         proposal_ids: req.aggregation_ids.clone(),
         prover_config,
     };
-    let task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
-        pipeline: route.pipeline_key(),
-        request: request.clone(),
-    });
     let prepared =
         prepare_external_aggregate_inputs(&pair.key, route, &request_fingerprint, &req.proofs)?;
     let _ = (&req.graffiti, &req.prover, &req.blob_proof_type);
@@ -601,7 +594,6 @@ async fn build_external_aggregate_submission(
         route,
         prover_type,
         public_task_id,
-        task_id,
         request,
         inputs: prepared.inputs,
         input_artifacts: prepared.artifacts,
@@ -677,7 +669,6 @@ async fn planned_external_aggregate_task(
     Ok(PlannedAggregateTask {
         task_ref,
         request: submission.request.clone(),
-        task_id: submission.task_id.clone(),
     })
 }
 
@@ -797,16 +788,8 @@ fn planned_batch_aggregate(
             .collect(),
         prover_config: submission.prover_config.clone(),
     };
-    let task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
-        pipeline: submission.route.pipeline_key(),
-        request: request.clone(),
-    });
     let task_ref = aggregate_task_ref(submission.route.pipeline_key(), &request);
-    Some(PlannedAggregateTask {
-        request,
-        task_id,
-        task_ref,
-    })
+    Some(PlannedAggregateTask { request, task_ref })
 }
 
 const fn proposal_task_request(
@@ -961,7 +944,7 @@ async fn persist_registered_external_aggregate_inputs(
         && record.runner_status == RuntimeRunnerStatus::Failed
     {
         reopened_failed = Some(record.clone());
-        reset_runtime_task_to_allocated(state, &record.task_id, record.runner_status).await?;
+        reset_runtime_task_to_allocated(state, record).await?;
         record.runner_status = RuntimeRunnerStatus::Allocated;
         record.error = None;
     }
@@ -988,8 +971,8 @@ async fn persist_registered_external_aggregate_inputs(
     if let Some(original) = &reopened_failed {
         state
             .runtime
-            .sync_status(
-                &original.task_id,
+            .sync_nonterminal_status_if_current(
+                &original.lifetime(),
                 original.runner_status,
                 original.error.clone(),
                 original.proof_uri.clone(),
@@ -1008,8 +991,8 @@ async fn persist_registered_external_aggregate_inputs(
         if let TaskRegistrationOutcome::Created(record) = registration {
             let _ = state
                 .runtime
-                .sync_status(
-                    &record.task_id,
+                .sync_nonterminal_status_if_current(
+                    &record.lifetime(),
                     RuntimeRunnerStatus::Failed,
                     Some(error.message.clone()),
                     None,
@@ -1056,118 +1039,39 @@ fn build_task_metadata(
     }
 }
 
-async fn enqueue_submission_plan(
-    engine: &Arc<dyn EngineHandle>,
-    plan: &SubmissionPlan,
-) -> Result<(), ApiError> {
-    let mut previous = None;
-
-    for (index, proposal) in plan.proposals.iter().enumerate() {
-        if matches!(plan.proposal_sources[index], ProposalPlanSource::Cached) {
-            continue;
-        }
-        let task_id = engine
-            .submit_proposal_proof_with_dependencies(
-                proposal.request.clone(),
-                previous.iter().cloned().collect(),
-            )
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to enqueue proposal proof: {err}"))
-            })?;
-        if task_id != proposal.task_id {
-            return Err(ApiError::internal(
-                "engine returned unexpected proposal task id",
-            ));
-        }
-        previous = Some(task_id);
-    }
-
-    if let Some(aggregate) = &plan.aggregate {
-        let task_id = engine
-            .submit_aggregation_proof_from_inputs(
-                aggregate.request.clone(),
-                plan.aggregate_inputs.clone(),
-            )
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to enqueue aggregation proof: {err}"))
-            })?;
-        if task_id != aggregate.task_id {
-            return Err(ApiError::internal(
-                "engine returned unexpected aggregation task id",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-async fn cleanup_submission_plan(
-    state: &AppState,
-    engine: &Arc<dyn EngineHandle>,
-    public_task_id: &str,
-    plan: &SubmissionPlan,
-) -> Result<(), ApiError> {
-    let metadata = TaskMetadata {
-        network_pair: String::new(),
-        network: String::new(),
-        l1_network: String::new(),
-        proof_type: ProofType::Native,
-        requested_proof_type: None,
-        prover_type: None,
-        execution_mode: None,
-        aggregate_requested: plan.aggregate.is_some(),
-        proposals: plan
-            .proposals
-            .iter()
-            .zip(plan.proposal_sources.iter())
-            .filter_map(|(proposal, source)| {
-                matches!(source, ProposalPlanSource::Pending).then_some(ProposalTask {
-                    proposal_id: proposal.proposal.proposal_id,
-                    checkpoint: proposal.proposal.checkpoint,
-                    l1_inclusion_block_number: proposal.proposal.l1_inclusion_block_number,
-                    l2_block_numbers: proposal.proposal.l2_block_numbers.clone(),
-                    last_anchor_block_number: proposal.proposal.last_anchor_block_number,
-                    task_id: proposal.task_ref.clone(),
-                    request: Some(proposal.request.clone()),
-                })
-            })
-            .collect(),
-        aggregate_task_id: plan
-            .aggregate
-            .as_ref()
-            .map(|aggregate| aggregate.task_ref.clone()),
-        aggregate_request: plan
-            .aggregate
-            .as_ref()
-            .map(|aggregate| aggregate.request.clone()),
-        aggregate_input_artifacts: Vec::new(),
-        runtime: RuntimeMetadata::default(),
-    };
-
-    let pipeline_key = plan
+fn execution_plan(plan: &SubmissionPlan) -> EngineExecutionPlan {
+    let proposals = plan
+        .proposals
+        .iter()
+        .zip(&plan.proposal_sources)
+        .filter(|(_, source)| matches!(source, ProposalPlanSource::Pending))
+        .map(|(proposal, _)| proposal.request.clone())
+        .collect();
+    let aggregate = plan
         .aggregate
         .as_ref()
-        .map(|aggregate| aggregate.task_id.0.pipeline_key())
-        .or_else(|| {
-            plan.proposals
-                .first()
-                .map(|proposal| proposal.task_id.0.pipeline_key())
-        })
-        .ok_or_else(|| ApiError::internal("submission plan must contain at least one task"))?;
+        .map(|aggregate| EngineAggregationPlan {
+            request: aggregate.request.clone(),
+            inputs: plan.aggregate_inputs.clone(),
+        });
+    EngineExecutionPlan {
+        proposals,
+        aggregate,
+    }
+}
 
-    let _ = cancel_registered_tasks(
-        &state.runtime,
-        engine,
-        public_task_id,
-        pipeline_key,
-        &metadata,
-    )
-    .await;
-    remove_task_children(engine, pipeline_key, &metadata, &mut HashSet::new())
+async fn attach_submission_plan(
+    state: &AppState,
+    engine: &Arc<dyn EngineHandle>,
+    root: &raiko2_runtime::RuntimeTaskRecord,
+    plan: &SubmissionPlan,
+) -> Result<(), ApiError> {
+    state
+        .lifecycle
+        .attach(root, engine, execution_plan(plan))
         .await
-        .map_err(|err| ApiError::internal(err.to_string()))
+        .map_err(|err| ApiError::internal(format!("failed to attach submission plan: {err}")))?;
+    Ok(())
 }
 
 async fn handle_existing_batch_task(
@@ -1321,7 +1225,7 @@ async fn reenqueue_existing_batch_task(
         Some(FailedStage::Aggregate)
     ) {
         return reenqueue_existing_batch_aggregate_task(
-            state.runtime.as_ref(),
+            state,
             &engine,
             existing,
             existing_metadata,
@@ -1332,13 +1236,12 @@ async fn reenqueue_existing_batch_task(
     let recovery_plan =
         build_recovery_plan_from_metadata(state.runtime.as_ref(), existing, existing_metadata)
             .await?;
-    enqueue_submission_plan(&engine, &recovery_plan)
+    attach_submission_plan(state, &engine, existing, &recovery_plan)
         .await
         .map_err(|err| {
             ApiError::internal(format!(
-                "failed to recover dormant task {}: {err}",
-                existing.task_id,
-                err = err.message
+                "failed to recover dormant task {}: {}",
+                existing.task_id, err.message
             ))
         })
 }
@@ -1454,19 +1357,12 @@ fn planned_recovery_aggregate(
 ) -> Option<PlannedAggregateTask> {
     metadata.aggregate_request.clone().map(|request| {
         let task_ref = aggregate_task_ref(existing.pipeline_key, &request);
-        PlannedAggregateTask {
-            task_id: EngineTaskId::new(EngineTaskKey::Aggregate {
-                pipeline: existing.pipeline_key,
-                request: request.clone(),
-            }),
-            request,
-            task_ref,
-        }
+        PlannedAggregateTask { request, task_ref }
     })
 }
 
 async fn reenqueue_existing_batch_aggregate_task(
-    runtime: &RuntimeManager,
+    state: &AppState,
     engine: &Arc<dyn EngineHandle>,
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
@@ -1475,12 +1371,19 @@ async fn reenqueue_existing_batch_aggregate_task(
         .aggregate_request
         .clone()
         .ok_or_else(|| ApiError::internal("existing batch task missing aggregate_request"))?;
-    let expected_task_id = existing_metadata
-        .aggregate_engine_task_id(existing.pipeline_key)
-        .ok_or_else(|| ApiError::internal("existing batch task missing aggregate task id"))?;
-    let inputs = existing_batch_aggregate_inputs(runtime, existing, existing_metadata).await?;
-    let actual_task_id = engine
-        .submit_aggregation_proof_from_inputs(request, inputs)
+    let inputs =
+        existing_batch_aggregate_inputs(state.runtime.as_ref(), existing, existing_metadata)
+            .await?;
+    state
+        .lifecycle
+        .attach(
+            existing,
+            engine,
+            EngineExecutionPlan {
+                proposals: Vec::new(),
+                aggregate: Some(EngineAggregationPlan { request, inputs }),
+            },
+        )
         .await
         .map_err(|err| {
             ApiError::internal(format!(
@@ -1488,11 +1391,6 @@ async fn reenqueue_existing_batch_aggregate_task(
                 existing.task_id
             ))
         })?;
-    if actual_task_id != expected_task_id {
-        return Err(ApiError::internal(
-            "engine returned unexpected aggregation task id",
-        ));
-    }
     Ok(())
 }
 
@@ -1562,20 +1460,13 @@ async fn handle_created_batch_task(
     plan: &SubmissionPlan,
 ) -> Result<Response, ApiError> {
     let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())?;
-
-    if let Err(err) = enqueue_submission_plan(&engine, plan).await {
-        let _ = cleanup_submission_plan(state, &engine, &submission.public_task_id, plan).await;
-        let _ = state
-            .runtime
-            .sync_status(
-                &submission.public_task_id,
-                RuntimeRunnerStatus::Failed,
-                Some(err.message.clone()),
-                None,
-            )
-            .await;
-        return Err(err);
-    }
+    let root = state
+        .runtime
+        .get_task(&submission.public_task_id)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load registered task: {err}")))?
+        .ok_or_else(|| ApiError::internal("registered runtime task disappeared"))?;
+    attach_submission_plan(state, &engine, &root, plan).await?;
 
     telemetry::record_request_registered(
         &MetricContext::new(
@@ -1642,6 +1533,7 @@ async fn handle_existing_external_aggregate_task(
         }
         recover_existing_task(state, &existing, || {
             reenqueue_existing_external_aggregate_task(
+                state,
                 engine,
                 Some(&submission.inputs),
                 &existing,
@@ -1662,7 +1554,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), ApiError>> + 'a,
 {
-    reset_runtime_task_to_allocated(state, &existing.task_id, existing.runner_status).await?;
+    reset_runtime_task_to_allocated(state, existing).await?;
     if let Err(err) = reenqueue().await {
         restore_runtime_task_status(state, existing, &err).await;
         return Err(err);
@@ -1672,19 +1564,22 @@ where
 
 async fn reset_runtime_task_to_allocated(
     state: &AppState,
-    task_id: &str,
-    expected_status: RuntimeRunnerStatus,
+    record: &raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<(), ApiError> {
     let reopened = state
         .runtime
-        .reopen_task_for_recovery(task_id, expected_status)
+        .reopen_task_for_recovery_if_current(&record.lifetime(), record.runner_status)
         .await
         .map_err(|err| {
-            ApiError::internal(format!("failed to reset recovered task {task_id}: {err}"))
+            ApiError::internal(format!(
+                "failed to reset recovered task {}: {err}",
+                record.task_id
+            ))
         })?;
-    if !reopened {
+    if !matches!(reopened, RuntimeMutationOutcome::Applied) {
         return Err(ApiError::internal(format!(
-            "task {task_id} is no longer eligible for failed-task recovery"
+            "task {} is no longer eligible for failed-task recovery",
+            record.task_id
         )));
     }
     Ok(())
@@ -1697,8 +1592,8 @@ async fn restore_runtime_task_status(
 ) {
     if let Err(err) = state
         .runtime
-        .sync_status(
-            &existing.task_id,
+        .sync_nonterminal_status_if_current(
+            &existing.lifetime(),
             existing.runner_status,
             existing.error.clone(),
             None,
@@ -1720,36 +1615,21 @@ async fn cleanup_stale_root_before_replacement(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
 ) -> Result<(), ApiError> {
+    state
+        .lifecycle
+        .retire(
+            existing,
+            existing_metadata,
+            raiko2_queue::DetachMode::Remove,
+        )
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to retire stale root {} before replacement: {err}",
+                existing.task_id
+            ))
+        })?;
     clear_task_publication_outboxes(state.runtime.as_ref(), existing, existing_metadata).await?;
-    let Ok(engine) = resolve_engine(
-        state,
-        &existing_metadata.network_pair,
-        existing.pipeline_key,
-    ) else {
-        warn!(
-            task_id = existing.task_id,
-            pipeline_key = %existing.pipeline_key,
-            "failed to resolve stale pipeline for root replacement cleanup"
-        );
-        return Ok(());
-    };
-
-    let _ = cancel_registered_tasks(
-        &state.runtime,
-        &engine,
-        &existing.task_id,
-        existing.pipeline_key,
-        existing_metadata,
-    )
-    .await;
-    let _ = remove_task_children_if_unreferenced(
-        &state.runtime,
-        &engine,
-        &existing.task_id,
-        existing.pipeline_key,
-        existing_metadata,
-    )
-    .await;
     Ok(())
 }
 
@@ -1782,6 +1662,7 @@ pub(crate) async fn clear_task_publication_outboxes(
 }
 
 async fn reenqueue_existing_external_aggregate_task(
+    state: &AppState,
     engine: &Arc<dyn EngineHandle>,
     fallback_inputs: Option<&[AggregateProofInput]>,
     existing: &raiko2_runtime::RuntimeTaskRecord,
@@ -1791,9 +1672,6 @@ async fn reenqueue_existing_external_aggregate_task(
         .aggregate_request
         .clone()
         .ok_or_else(|| ApiError::internal("existing aggregate task missing aggregate_request"))?;
-    let expected_task_id = existing_metadata
-        .aggregate_engine_task_id(existing.pipeline_key)
-        .ok_or_else(|| ApiError::internal("existing aggregate task missing aggregate task id"))?;
     let inputs = if existing_metadata.aggregate_input_artifacts.is_empty() {
         fallback_inputs
             .map(<[AggregateProofInput]>::to_vec)
@@ -1811,8 +1689,16 @@ async fn reenqueue_existing_external_aggregate_task(
             &existing_metadata.aggregate_input_artifacts,
         )
     };
-    let actual_task_id = engine
-        .submit_aggregation_proof_from_inputs(request, inputs)
+    state
+        .lifecycle
+        .attach(
+            existing,
+            engine,
+            EngineExecutionPlan {
+                proposals: Vec::new(),
+                aggregate: Some(EngineAggregationPlan { request, inputs }),
+            },
+        )
         .await
         .map_err(|err| {
             ApiError::internal(format!(
@@ -1820,11 +1706,6 @@ async fn reenqueue_existing_external_aggregate_task(
                 existing.task_id
             ))
         })?;
-    if actual_task_id != expected_task_id {
-        return Err(ApiError::internal(
-            "engine returned unexpected aggregation task id",
-        ));
-    }
     Ok(())
 }
 
@@ -1843,8 +1724,8 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
             Err(error) => {
                 state
                     .runtime
-                    .sync_status(
-                        &record.task_id,
+                    .sync_nonterminal_status_if_current(
+                        &record.lifetime(),
                         RuntimeRunnerStatus::Failed,
                         Some(format!("runtime recovery metadata is invalid: {error}")),
                         None,
@@ -1871,19 +1752,43 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
                 Err(error) => Err(error),
             }
         } else {
-            reenqueue_existing_batch_task(state, &record, &metadata).await
+            let mut recovery_record = record.clone();
+            if record.runner_status == RuntimeRunnerStatus::Failed {
+                let reopened = state
+                    .runtime
+                    .reopen_task_for_recovery_if_current(&record.lifetime(), record.runner_status)
+                    .await?;
+                if !matches!(reopened, RuntimeMutationOutcome::Applied) {
+                    return Err(anyhow::anyhow!(
+                        "runtime root {} is no longer eligible for recovery",
+                        record.task_id
+                    ));
+                }
+                recovery_record.runner_status = RuntimeRunnerStatus::Allocated;
+                recovery_record.error = None;
+                reopened_before_enqueue = true;
+            }
+            reenqueue_existing_batch_task(state, &recovery_record, &metadata).await
         };
         match result {
             Ok(()) => {
                 if record.runner_status == RuntimeRunnerStatus::Failed && !reopened_before_enqueue {
                     state
                         .runtime
-                        .reopen_task_for_recovery(&record.task_id, record.runner_status)
+                        .reopen_task_for_recovery_if_current(
+                            &record.lifetime(),
+                            record.runner_status,
+                        )
                         .await?;
                 } else {
                     state
                         .runtime
-                        .sync_status(&record.task_id, RuntimeRunnerStatus::Allocated, None, None)
+                        .sync_nonterminal_status_if_current(
+                            &record.lifetime(),
+                            RuntimeRunnerStatus::Allocated,
+                            None,
+                            None,
+                        )
                         .await?;
                 }
                 recovered += 1;
@@ -1891,8 +1796,8 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
             Err(error) => {
                 state
                     .runtime
-                    .sync_status(
-                        &record.task_id,
+                    .sync_nonterminal_status_if_current(
+                        &record.lifetime(),
                         RuntimeRunnerStatus::Failed,
                         Some(format!("runtime recovery failed: {}", error.message)),
                         None,
@@ -1913,12 +1818,12 @@ async fn recover_external_aggregate_runtime_task(
     let reopened = if record.runner_status == RuntimeRunnerStatus::Failed {
         let reopened = state
             .runtime
-            .reopen_task_for_recovery(&record.task_id, record.runner_status)
+            .reopen_task_for_recovery_if_current(&record.lifetime(), record.runner_status)
             .await
             .map_err(|error| {
                 ApiError::internal(format!("failed to reopen aggregate root: {error}"))
             })?;
-        if !reopened {
+        if !matches!(reopened, RuntimeMutationOutcome::Applied) {
             return Err(ApiError::internal(
                 "aggregate root is no longer eligible for recovery",
             ));
@@ -1932,7 +1837,8 @@ async fn recover_external_aggregate_runtime_task(
     recover_external_aggregate_input_artifacts(state.runtime.as_ref(), &recovery_record, metadata)
         .await?;
     let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
-    reenqueue_existing_external_aggregate_task(&engine, None, &recovery_record, metadata).await?;
+    reenqueue_existing_external_aggregate_task(state, &engine, None, &recovery_record, metadata)
+        .await?;
     Ok(reopened)
 }
 
@@ -2055,40 +1961,27 @@ async fn handle_created_external_aggregate_task(
         Some(aggregate),
     );
     metadata.aggregate_input_artifacts = submission.input_artifacts.clone();
-    let actual_task_id = engine
-        .submit_aggregation_proof_from_inputs(submission.request.clone(), submission.inputs.clone())
+    let root = state
+        .runtime
+        .get_task(&submission.public_task_id)
         .await
-        .map_err(|err| ApiError::internal(format!("failed to enqueue aggregation proof: {err}")));
-    let actual_task_id = match actual_task_id {
-        Ok(task_id) => task_id,
-        Err(err) => {
-            cleanup_external_aggregate_submission(engine, submission, &metadata).await;
-            let _ = state
-                .runtime
-                .sync_status(
-                    &submission.public_task_id,
-                    RuntimeRunnerStatus::Failed,
-                    Some(err.message.clone()),
-                    None,
-                )
-                .await;
-            return Err(err);
-        }
-    };
-    if actual_task_id != aggregate.task_id {
-        cleanup_external_aggregate_submission(engine, submission, &metadata).await;
-        let err = ApiError::internal("engine returned unexpected aggregation task id");
-        let _ = state
-            .runtime
-            .sync_status(
-                &submission.public_task_id,
-                RuntimeRunnerStatus::Failed,
-                Some(err.message.clone()),
-                None,
-            )
-            .await;
-        return Err(err);
-    }
+        .map_err(|err| ApiError::internal(format!("failed to load registered task: {err}")))?
+        .ok_or_else(|| ApiError::internal("registered runtime task disappeared"))?;
+    state
+        .lifecycle
+        .attach(
+            &root,
+            engine,
+            EngineExecutionPlan {
+                proposals: Vec::new(),
+                aggregate: Some(EngineAggregationPlan {
+                    request: submission.request.clone(),
+                    inputs: submission.inputs.clone(),
+                }),
+            },
+        )
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to attach aggregation plan: {err}")))?;
 
     telemetry::record_request_registered(
         &MetricContext::new(
@@ -2105,20 +1998,6 @@ async fn handle_created_external_aggregate_task(
         submission.public_task_id.clone(),
     )
     .into_response())
-}
-
-async fn cleanup_external_aggregate_submission(
-    engine: &Arc<dyn EngineHandle>,
-    submission: &ExternalAggregateSubmission,
-    metadata: &TaskMetadata,
-) {
-    let _ = remove_task_children(
-        engine,
-        submission.route.pipeline_key(),
-        metadata,
-        &mut HashSet::new(),
-    )
-    .await;
 }
 
 async fn load_task_data(state: &AppState, id: &str) -> Result<TaskData, ApiError> {
@@ -2473,15 +2352,11 @@ async fn collect_prover_status(
     Ok((tasks, network, skipped))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn clear_prover_tasks(
     state: &AppState,
     scope: ProverTaskScope,
 ) -> Result<ClearProverStatus, ApiError> {
-    let _lifecycle_operation = state
-        .runtime
-        .acquire_lifecycle_operation()
-        .await
-        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
     let records = state
         .runtime
         .list_tasks()
@@ -2524,13 +2399,29 @@ async fn clear_prover_tasks(
             continue;
         }
 
-        let cancelled = match state
-            .runtime
-            .cancel_nonterminal_task(&record.task_id, None)
-            .await
-        {
-            Ok(cancelled) => cancelled,
+        let cancelled = match state.lifecycle.cancel(&record, &metadata, None).await {
+            Ok(RuntimeMutationOutcome::Applied) => true,
+            Ok(
+                RuntimeMutationOutcome::AlreadyApplied
+                | RuntimeMutationOutcome::Blocked
+                | RuntimeMutationOutcome::Missing
+                | RuntimeMutationOutcome::Stale
+                | RuntimeMutationOutcome::Conflict,
+            ) => false,
             Err(err) => {
+                if state
+                    .runtime
+                    .get_task(&record.task_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| {
+                        current.incarnation_id == record.incarnation_id
+                            && current.runner_status == RuntimeRunnerStatus::Cancelled
+                    })
+                {
+                    status.cancelled = status.cancelled.saturating_add(1);
+                }
                 status.failed = status.failed.saturating_add(1);
                 warn!(
                     task_id = %record.task_id,
@@ -2540,44 +2431,18 @@ async fn clear_prover_tasks(
                 continue;
             }
         };
+        if state
+            .pipelines
+            .get(&metadata.network_pair, record.pipeline_key)
+            .is_none()
+        {
+            status.skipped.unavailable_pipeline =
+                status.skipped.unavailable_pipeline.saturating_add(1);
+        }
         if !cancelled {
             continue;
         }
         status.cancelled = status.cancelled.saturating_add(1);
-
-        let engine = match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
-            Ok(engine) => engine,
-            Err(err) if err.status == StatusCode::NOT_FOUND => {
-                status.skipped.unavailable_pipeline =
-                    status.skipped.unavailable_pipeline.saturating_add(1);
-                warn!(
-                    task_id = %record.task_id,
-                    network_pair = %metadata.network_pair,
-                    pipeline = %record.pipeline_key,
-                    error = %err.message,
-                    "skipping prover clear record with unavailable pipeline"
-                );
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-
-        if let Err(err) = cancel_registered_tasks(
-            &state.runtime,
-            &engine,
-            &record.task_id,
-            record.pipeline_key,
-            &metadata,
-        )
-        .await
-        {
-            status.failed = status.failed.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to cancel prover record"
-            );
-        }
     }
 
     status.status = operation_status(status.failed);
@@ -3738,22 +3603,6 @@ mod tests {
     struct NoopEngine;
 
     impl EngineHandle for NoopEngine {
-        fn submit_proposal_proof_with_dependencies(
-            &self,
-            _request: ProposalTaskRequest,
-            _dependencies: Vec<EngineTaskId>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected proposal submission") })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            _request: AggregationTaskRequest,
-            _inputs: Vec<AggregateProofInput>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregation input submission") })
-        }
-
         fn get_status(
             &self,
             _id: EngineTaskId,
@@ -3768,34 +3617,27 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected execution attachment") })
         }
 
-        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
+            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
         }
     }
 
     struct CancelFailEngine;
 
     impl EngineHandle for CancelFailEngine {
-        fn submit_proposal_proof_with_dependencies(
-            &self,
-            _request: ProposalTaskRequest,
-            _dependencies: Vec<EngineTaskId>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected proposal submission") })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            _request: AggregationTaskRequest,
-            _inputs: Vec<AggregateProofInput>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregation input submission") })
-        }
-
         fn get_status(
             &self,
             _id: EngineTaskId,
@@ -3810,16 +3652,25 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async {
-                Err(TaskStoreError::backend(std::io::Error::other(
-                    "cancel failed",
-                )))
-            })
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected execution attachment") })
         }
 
-        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "detach failed",
+                )))
+            })
         }
     }
 
@@ -3838,22 +3689,6 @@ mod tests {
     }
 
     impl EngineHandle for ListingEngine {
-        fn submit_proposal_proof_with_dependencies(
-            &self,
-            _request: ProposalTaskRequest,
-            _dependencies: Vec<EngineTaskId>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected proposal submission") })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            _request: AggregationTaskRequest,
-            _inputs: Vec<AggregateProofInput>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregate submission") })
-        }
-
         fn get_status(
             &self,
             _id: EngineTaskId,
@@ -3870,12 +3705,21 @@ mod tests {
             Box::pin(async move { Ok(view) })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected execution attachment") })
         }
 
-        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
+            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
         }
     }
 
@@ -3883,7 +3727,7 @@ mod tests {
         pipeline_key: PipelineKey,
         proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
         aggregate_inputs: Mutex<Vec<AggregateProofInput>>,
-        removed: Mutex<Vec<EngineTaskId>>,
+        detached: Mutex<Vec<raiko2_queue::RootOwner>>,
     }
 
     impl RecordingEngine {
@@ -3892,40 +3736,33 @@ mod tests {
                 pipeline_key,
                 proposals: Mutex::new(Vec::new()),
                 aggregate_inputs: Mutex::new(Vec::new()),
-                removed: Mutex::new(Vec::new()),
+                detached: Mutex::new(Vec::new()),
             }
         }
     }
 
     impl EngineHandle for RecordingEngine {
-        fn submit_proposal_proof_with_dependencies(
+        fn attach_execution_plan(
             &self,
-            request: ProposalTaskRequest,
-            dependencies: Vec<EngineTaskId>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            _owner: raiko2_queue::RootOwner,
+            plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
             Box::pin(async move {
-                self.proposals
-                    .lock()
-                    .expect("proposal submissions mutex")
-                    .push((request.clone(), dependencies));
-                Ok(proposal_task_id(self.pipeline_key, request))
-            })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            request: AggregationTaskRequest,
-            inputs: Vec<AggregateProofInput>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async move {
-                *self
-                    .aggregate_inputs
-                    .lock()
-                    .expect("aggregate inputs mutex") = inputs;
-                Ok(EngineTaskId::new(EngineTaskKey::Aggregate {
-                    pipeline: self.pipeline_key,
-                    request,
-                }))
+                let mut previous = None;
+                let mut proposals = self.proposals.lock().expect("proposal submissions mutex");
+                for request in plan.proposals {
+                    let task_id = proposal_task_id(self.pipeline_key, request.clone());
+                    proposals.push((request, previous.into_iter().collect()));
+                    previous = Some(task_id);
+                }
+                drop(proposals);
+                if let Some(aggregate) = plan.aggregate {
+                    *self
+                        .aggregate_inputs
+                        .lock()
+                        .expect("aggregate inputs mutex") = aggregate.inputs;
+                }
+                Ok(raiko2_queue::AttachOutcome::Attached)
             })
         }
 
@@ -3943,14 +3780,18 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+        fn detach_execution(
+            &self,
+            owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
             Box::pin(async move {
-                self.removed.lock().expect("removed tasks mutex").push(id);
-                Ok(())
+                self.detached
+                    .lock()
+                    .expect("detached owners mutex")
+                    .push(owner);
+                Ok(raiko2_queue::DetachOutcome::not_attached(mode))
             })
         }
     }
@@ -4152,6 +3993,8 @@ mod tests {
             route: "risc0/network".parse().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(42),
+            network_pair: metadata.network_pair.clone(),
+            artifact_refs: Vec::new(),
             proof_ids: vec![],
             runner_status,
             image_ref: None,
@@ -5193,6 +5036,7 @@ mod tests {
         aggregate_record.route = route;
         let aggregate_refs = publication_proof_artifact_refs(&aggregate_metadata, pipeline);
         aggregate_record.proof_ids = aggregate_refs.clone();
+        aggregate_record.artifact_refs = aggregate_refs.clone();
         runtime.upsert_task(&aggregate_record).await?;
 
         let mut proposal_metadata = task_metadata_with_stage(Some("prove"));
@@ -5205,6 +5049,7 @@ mod tests {
         proposal_record.pipeline_key = pipeline;
         proposal_record.route = route;
         proposal_record.proof_ids = vec![shared_ref.clone()];
+        proposal_record.artifact_refs = vec![shared_ref.clone()];
         runtime.upsert_task(&proposal_record).await?;
 
         for proof_ref in &aggregate_refs {
@@ -5259,7 +5104,12 @@ mod tests {
             );
         }
 
-        runtime.remove_task(&aggregate_record.task_id).await?;
+        assert!(matches!(
+            runtime
+                .remove_task_if_current(&aggregate_record.lifetime())
+                .await?,
+            RuntimeMutationOutcome::Applied
+        ));
         clear_task_publication_outboxes(&runtime, &proposal_record, &proposal_metadata)
             .await
             .map_err(|err| anyhow!(err.message))?;
@@ -5308,6 +5158,7 @@ mod tests {
         first.pipeline_key = pipeline;
         first.route = pipeline.route();
         first.proof_ids = vec![shared_task_ref.clone()];
+        first.artifact_refs = vec![shared_task_ref.clone()];
         first.request_fingerprint = Some("root-being-replaced-fingerprint".to_string());
         runtime.upsert_task(&first).await?;
 
@@ -5317,7 +5168,8 @@ mod tests {
         second.task_id = "root-still-live".to_string();
         second.pipeline_key = pipeline;
         second.route = pipeline.route();
-        second.proof_ids = vec![shared_task_ref];
+        second.proof_ids = vec![shared_task_ref.clone()];
+        second.artifact_refs = vec![shared_task_ref];
         second.request_fingerprint = Some("root-still-live-fingerprint".to_string());
         runtime.upsert_task(&second).await?;
 
@@ -5330,9 +5182,15 @@ mod tests {
             .await
             .map_err(|err| anyhow!(err.message))?;
 
-        assert!(
-            recorder.removed.lock().expect("removed tasks").is_empty(),
-            "replacement removed proposal work still referenced by another root"
+        assert_eq!(
+            recorder
+                .detached
+                .lock()
+                .expect("detached owners")
+                .iter()
+                .map(|owner| owner.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root-being-replaced"],
         );
         Ok(())
     }
@@ -5484,9 +5342,18 @@ mod tests {
             .map_err(|error| anyhow!(error.message))?;
         let task_id = registration.task_id.clone();
         runtime.register_task(registration).await?;
-        runtime
-            .sync_status(&task_id, RuntimeRunnerStatus::Running, None, None)
-            .await?;
+        let registered = runtime.get_task(&task_id).await?.expect("registered task");
+        assert!(matches!(
+            runtime
+                .sync_nonterminal_status_if_current(
+                    &registered.lifetime(),
+                    RuntimeRunnerStatus::Running,
+                    None,
+                    None,
+                )
+                .await?,
+            RuntimeMutationOutcome::Applied
+        ));
 
         let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
         let state = test_state(runtime.clone(), recorder.clone());
@@ -5506,6 +5373,136 @@ mod tests {
                 .expect("runtime task")
                 .runner_status,
             RuntimeRunnerStatus::Allocated
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_reopens_failed_runtime_task_before_attaching() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "startup-failed-recovery",
+        ))?);
+        let submission = canonical_submission(native_local_route(), false);
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let task_id = registration.task_id.clone();
+        runtime.register_task(registration).await?;
+        let registered = runtime.get_task(&task_id).await?.expect("registered task");
+        assert!(matches!(
+            runtime
+                .sync_nonterminal_status_if_current(
+                    &registered.lifetime(),
+                    RuntimeRunnerStatus::Failed,
+                    Some("recoverable fixture failure".to_string()),
+                    None,
+                )
+                .await?,
+            RuntimeMutationOutcome::Applied
+        ));
+
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let state = test_state(runtime.clone(), recorder.clone());
+        assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
+        assert_eq!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .get_task(&task_id)
+                .await?
+                .expect("runtime task")
+                .runner_status,
+            RuntimeRunnerStatus::Allocated
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_root_cannot_attach_a_recovered_execution_plan() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "cancelled-root-attach-fence",
+        ))?);
+        let submission = canonical_submission(native_local_route(), false);
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        let root = runtime
+            .register_task(
+                build_batch_task_registration(&submission, &plan, &fingerprint)
+                    .map_err(|error| anyhow!(error.message))?,
+            )
+            .await?;
+        let metadata: TaskMetadata = serde_json::from_value(root.metadata.clone())?;
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
+
+        state.lifecycle.cancel(&root, &metadata, None).await?;
+        let err = attach_submission_plan(&state, &engine, &root, &plan)
+            .await
+            .expect_err("cancelled root must not reattach execution");
+
+        assert!(err.message.contains("no longer active"));
+        assert!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .get_task(&root.task_id)
+                .await?
+                .expect("runtime task")
+                .runner_status,
+            RuntimeRunnerStatus::Cancelled
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_runtime_cannot_attach_a_recovered_execution_plan() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "draining-root-attach-fence",
+        ))?);
+        let submission = canonical_submission(native_local_route(), false);
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        let root = runtime
+            .register_task(
+                build_batch_task_registration(&submission, &plan, &fingerprint)
+                    .map_err(|error| anyhow!(error.message))?,
+            )
+            .await?;
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
+
+        state.begin_shutdown().await;
+        let err = attach_submission_plan(&state, &engine, &root, &plan)
+            .await
+            .expect_err("draining runtime must reject execution attachment");
+
+        assert!(err.message.contains("no longer active"));
+        assert!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .is_empty()
         );
         Ok(())
     }
@@ -5537,7 +5534,6 @@ mod tests {
         let first_aggregate = first.aggregate.expect("first aggregate");
         let second_aggregate = second.aggregate.expect("second aggregate");
         assert_eq!(first_aggregate.task_ref, second_aggregate.task_ref);
-        assert_eq!(first_aggregate.task_id, second_aggregate.task_id);
         assert_eq!(
             first_aggregate.request.request_id,
             aggregate_request_id(&first_fingerprint)
@@ -5604,10 +5600,13 @@ mod tests {
         ));
 
         let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
-        let engine: Arc<dyn EngineHandle> = recorder.clone();
-        enqueue_submission_plan(&engine, &plan)
+        recorder
+            .attach_execution_plan(
+                raiko2_queue::RootOwner::new("mixed-cache-root", uuid::Uuid::new_v4()),
+                execution_plan(&plan),
+            )
             .await
-            .expect("enqueue plan");
+            .expect("attach execution plan");
 
         let proposals = recorder.proposals.lock().expect("proposal submissions");
         assert_eq!(proposals.len(), 1);
@@ -5710,8 +5709,10 @@ mod tests {
     #[tokio::test]
     async fn aggregate_recovery_only_reenqueues_aggregate_from_artifacts() -> Result<()> {
         let route = native_local_route();
-        let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
-            .expect("runtime manager");
+        let runtime = Arc::new(
+            RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
+                .expect("runtime manager"),
+        );
         let submission = canonical_multi_submission(route);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
@@ -5746,10 +5747,13 @@ mod tests {
         record.task_id.clone_from(&submission.public_task_id);
         record.pipeline_key = route.pipeline_key();
         record.route = route.route;
+        record.runner_status = RuntimeRunnerStatus::Allocated;
 
         let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
         let engine: Arc<dyn EngineHandle> = recorder.clone();
-        reenqueue_existing_batch_aggregate_task(&runtime, &engine, &record, &metadata)
+        runtime.upsert_task(&record).await?;
+        let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
+        reenqueue_existing_batch_aggregate_task(&state, &engine, &record, &metadata)
             .await
             .expect("aggregate recovery should use persisted proof artifacts");
 
@@ -5772,8 +5776,10 @@ mod tests {
     #[tokio::test]
     async fn aggregate_recovery_does_not_resubmit_missing_proposal_artifacts() -> Result<()> {
         let route = native_local_route();
-        let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-missing"))
-            .expect("runtime manager");
+        let runtime = Arc::new(
+            RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-missing"))
+                .expect("runtime manager"),
+        );
         let submission = canonical_multi_submission(route);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
@@ -5801,7 +5807,8 @@ mod tests {
 
         let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
         let engine: Arc<dyn EngineHandle> = recorder.clone();
-        let err = reenqueue_existing_batch_aggregate_task(&runtime, &engine, &record, &metadata)
+        let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
+        let err = reenqueue_existing_batch_aggregate_task(&state, &engine, &record, &metadata)
             .await
             .expect_err("missing proposal artifact should fail aggregate recovery");
 
@@ -6460,6 +6467,8 @@ mod tests {
             route: "sp1/local".parse().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(42),
+            network_pair: metadata.network_pair.clone(),
+            artifact_refs: vec!["legacy-corrupt-id".to_string()],
             proof_ids: vec!["legacy-corrupt-id".to_string()],
             runner_status: RuntimeRunnerStatus::Allocated,
             image_ref: None,

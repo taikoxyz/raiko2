@@ -513,14 +513,18 @@ Response fields:
 | `proof_type` | string | Concrete proof backend targeted by the clear operation. |
 | `data.cancelled` | number | Non-terminal root tasks cancelled. |
 | `data.skipped` | object | Records skipped because they are invalid, unavailable, or already have remote progress. |
-| `data.failed` | number | Runtime tasks marked cancelled but not fully cancelled in the engine queue. |
+| `data.failed` | number | Runtime roots cancelled authoritatively whose owner-aware queue detach or exact artifact effect did not yet converge. |
 
 Idempotency:
 
 - If the selected proof type has no non-terminal backlog, the response is `200 ok` with
   `data.cancelled=0`.
-- The endpoint returns the completed counts even when some queue cancellations fail. In that case
-  the envelope uses `status="partial_failure"`; clients must inspect `data.failed` and retry or alert.
+- Cancellation commits the exact non-terminal root lifetime first, then atomically detaches that
+  root owner from the in-process execution projection. Shared stages remain while another live root
+  owns them; the last owner leaving cancels or removes the stage.
+- The endpoint returns completed counts even when a later projection or artifact effect fails. In
+  that case the envelope uses `status="partial_failure"`; clients may retry safely while background
+  reconciliation converges the already-cancelled root.
 
 Validation:
 
@@ -608,6 +612,12 @@ Scope:
   are linked to a matched runtime task.
 - If deleting a proof manifest fails, `failed` is incremented and the artifact remains
   tombstoned for a later invalidation retry. Tombstoned artifacts are not eligible for proof reuse.
+- When `dry_run=false`, runtime state reserves invalidation for the exact artifact descriptor before
+  any object-store effect. A matching live root returns a blocked result and retains its artifact.
+  An accepted reservation creates a tombstone for `(logical key, manifest generation, content
+  hash)`, removes only that manifest generation conditionally, and cleans up only the matching
+  pending publication. Immutable content bytes are retained. A dry run performs selection and
+  validation without reserving state or mutating objects.
 
 Validation:
 
@@ -977,9 +987,9 @@ POST /v3/prover/clear
 x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
 ```
 
-Requires an ACL key that allows `prover.clear` or `admin`. Marks every non-terminal root originally
-submitted with `proof_type=zk_any` as `cancelled` first, then best-effort cancels owned proposal and
-aggregation queue tasks.
+Requires an ACL key that allows `prover.clear` or `admin`. Marks every exact non-terminal root
+originally submitted with `proof_type=zk_any` as `cancelled` first, then detaches its owner from the
+proposal and aggregation execution graph.
 
 Shared child tasks still referenced by another live root are left running.
 Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipped.
@@ -1000,7 +1010,8 @@ Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipp
 ```
 
 `status` is `partial_failure` when `failed` is non-zero; callers must retry or alert on those
-incomplete queue cancellations.
+incomplete projection or artifact effects. The authoritative root remains cancelled while
+reconciliation retries the effect.
 
 ## Legacy V3 Query Root Task
 
@@ -1099,9 +1110,10 @@ x-api-key: <server.acl.keys[].key with allow=["admin"]>
 
 Requires an ACL key that allows `admin`.
 
-Cancelling a root task cascades to its proposal stage tasks and optional aggregate task. The root
-runtime is only marked `cancelled` after child-task cancellation succeeds; shared child tasks are
-left running for the other live root that still references them.
+Cancelling a root task first marks the exact non-terminal runtime lifetime `cancelled`, then detaches
+that root owner from its proposal and optional aggregation graph. Shared child tasks remain for any
+other live owner. A failed detach does not roll the root back; the request returns an error and
+reconciliation retries the incomplete effect.
 
 ## Error Envelope
 
@@ -1121,13 +1133,22 @@ All API errors use the Hoodi-style envelope:
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
-- `runtime.store.backend` selects the single authoritative runtime store. Use `gcs` with a non-empty
-  `bucket` outside `development`, `local`, or `test`. `memory` is rejected for other environments;
-  switching backends is a drain-and-cutover operator action and there is no automatic failover,
-  merge, writeback, SQLite import, or compatibility migration.
+- `runtime.store.backend` selects the backend used by both the authoritative state repository and
+  proof-object repository. Use `gcs` with a non-empty `bucket` outside `development`, `local`, or
+  `test`. `memory` is rejected for other environments; switching backends is a drain-and-cutover
+  operator action and there is no automatic failover, merge, writeback, SQLite import, or
+  compatibility migration.
 - GCS object names start with `<prefix>/<environment>/<namespace>/`. The service intentionally has no
   distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
   and replacement processes never overlap for one namespace.
+- The namespace fence is global to the process but short-lived: draining closes mutation admission
+  and readiness immediately, then waits only for repository commits already admitted and provider
+  request-ID checkpoints covered by existing permits. It is not held across a full task,
+  cancellation, or publication saga, and shutdown does not wait for all proof tasks to finish.
+- Runtime state is authoritative. Submission attaches a complete owner-aware execution graph only
+  after root registration; cancellation, terminal failure, and cleanup transition the exact
+  `TaskLifetime` before detaching its root owner. Projection failures are reconciled from runtime
+  state and do not roll an authoritative transition back.
 - Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
   pointer. Runtime snapshots use `*.runtime.json`; the suffixes allow operations to apply seven-day
   runtime retention and a minimum thirty-day retention window to generation-scoped tombstones and
@@ -1138,16 +1159,18 @@ All API errors use the Hoodi-style envelope:
   identical existing object is idempotent, while a different late object is discarded.
 - Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
   `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
-- Before the first publication attempt, a completed proof is checkpointed in the authoritative
-  runtime store. Pending proof bytes use a separate immutable artifact and manifest rather than
-  being embedded in the runtime snapshot, so state updates do not rewrite large proofs.
-  Invalidation and recovery see the same outbox after restart, and publication retries consume the
-  checkpoint without running the prover again.
-- Invalidation writes a content-bound marker to the authoritative artifact store before deleting
-  the proof object or pending publication. Recovery checks this marker during
-  reconciliation, and publication finalization, so a failed delete or concurrent registration
-  cannot make a tombstoned proof reusable. Local tombstones apply only to their recorded content
-  hash, allowing a later generation with different content at the same key.
+- Before the first canonical publication attempt, a completed proof payload is checkpointed under
+  the queue lease and written as an immutable pending blob. The authoritative runtime state then
+  records a publication intent containing the content hash, exact artifact expectation, and exact
+  `TaskLifetime` owners. State updates do not rewrite large proofs. Recovery uses the same intent and
+  pending blob after restart, and publication retries do not run the prover again.
+- Invalidation first reserves the exact artifact expectation in authoritative runtime state and
+  verifies that no live matching owner remains. It then writes a tombstone for `(logical key,
+  manifest generation, content hash)`, conditionally deletes only that manifest generation, and
+  removes only the exact pending blob. Immutable proof content is retained. Recovery checks the
+  exact marker during reconciliation and publication finalization, so a failed manifest deletion
+  cannot make that descriptor reusable. A later lifecycle may publish identical or different
+  content under a new manifest generation.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.

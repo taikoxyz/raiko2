@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
-use raiko2_runtime::RuntimeManager;
+use raiko2_runtime::{RuntimeManager, RuntimeMutationOutcome};
 use std::{collections::HashSet, sync::Arc};
 
 use super::super::proof_types::v4 as wire;
@@ -20,8 +20,8 @@ use super::{
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
     collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
     is_terminal_runtime_status, load_task_data, operation_status, parse_task_metadata,
-    proposal_proof_artifact_refs, register_batch_task, remove_task_children_if_unreferenced,
-    replace_existing_batch_task, resolve_engine, root_proof_artifact_refs,
+    proposal_proof_artifact_refs, register_batch_task, replace_existing_batch_task, resolve_engine,
+    root_proof_artifact_refs,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -173,11 +173,6 @@ async fn invalidate_artifacts_inner(
     state: &AppState,
     req: &wire::InvalidateArtifactsRequest,
 ) -> Result<wire::InvalidateArtifactsData, ApiError> {
-    let _lifecycle_operation = state
-        .runtime
-        .acquire_lifecycle_operation()
-        .await
-        .map_err(|error| ApiError::internal(format!("runtime lifecycle unavailable: {error}")))?;
     let mut data = wire::InvalidateArtifactsData {
         dry_run: req.dry_run,
         ..wire::InvalidateArtifactsData::default()
@@ -609,50 +604,25 @@ async fn remove_invalidated_tasks(
         } = task;
         let log_context = invalidation_task_log_context(&metadata);
         let mut cleanup_failed = false;
-        match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
-            Ok(engine) => {
-                if let Err(err) = remove_task_children_if_unreferenced(
-                    &state.runtime,
-                    &engine,
-                    &record.task_id,
-                    record.pipeline_key,
-                    &metadata,
-                )
-                .await
-                {
-                    data.tasks.failed = data.tasks.failed.saturating_add(1);
-                    tracing::warn!(
-                        task_id = %record.task_id,
-                        task_kind = log_context.task_kind,
-                        aggregate = log_context.aggregate,
-                        proposal_ids = %log_context.proposal_ids,
-                        proposal_count = log_context.proposal_count,
-                        network_pair = %metadata.network_pair,
-                        proof_type = %metadata.proof_type,
-                        pipeline_key = %record.pipeline_key.as_str(),
-                        error = %err,
-                        "failed to remove invalidated task children"
-                    );
-                    cleanup_failed = true;
-                }
-            }
-            Err(err) => {
-                data.tasks.failed = data.tasks.failed.saturating_add(1);
-                tracing::warn!(
-                    task_id = %record.task_id,
-                    task_kind = log_context.task_kind,
-                    aggregate = log_context.aggregate,
-                    proposal_ids = %log_context.proposal_ids,
-                    proposal_count = log_context.proposal_count,
-                    network_pair = %metadata.network_pair,
-                    proof_type = %metadata.proof_type,
-                    pipeline_key = %record.pipeline_key.as_str(),
-                    status = %err.status,
-                    error = %err.message,
-                    "skipping engine child cleanup for invalidated task"
-                );
-                cleanup_failed = true;
-            }
+        if let Err(err) = state
+            .lifecycle
+            .retire(&record, &metadata, raiko2_queue::DetachMode::Remove)
+            .await
+        {
+            data.tasks.failed = data.tasks.failed.saturating_add(1);
+            tracing::warn!(
+                task_id = %record.task_id,
+                task_kind = log_context.task_kind,
+                aggregate = log_context.aggregate,
+                proposal_ids = %log_context.proposal_ids,
+                proposal_count = log_context.proposal_count,
+                network_pair = %metadata.network_pair,
+                proof_type = %metadata.proof_type,
+                pipeline_key = %record.pipeline_key.as_str(),
+                error = %err,
+                "failed to retire invalidated task"
+            );
+            cleanup_failed = true;
         }
         if cleanup_failed {
             blocked_artifact_refs.extend(artifact_refs);
@@ -680,11 +650,19 @@ async fn remove_invalidated_tasks(
 
         match state
             .runtime
-            .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
+            .remove_task_if_current(&record.lifetime())
             .await
         {
-            Ok(true) => data.tasks.removed = data.tasks.removed.saturating_add(1),
-            Ok(false) => {}
+            Ok(RuntimeMutationOutcome::Applied) => {
+                data.tasks.removed = data.tasks.removed.saturating_add(1);
+            }
+            Ok(
+                RuntimeMutationOutcome::AlreadyApplied
+                | RuntimeMutationOutcome::Blocked
+                | RuntimeMutationOutcome::Conflict
+                | RuntimeMutationOutcome::Missing
+                | RuntimeMutationOutcome::Stale,
+            ) => {}
             Err(err) => {
                 data.tasks.failed = data.tasks.failed.saturating_add(1);
                 tracing::warn!(
@@ -1623,19 +1601,8 @@ async fn submit_submission(
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
 ) -> Result<String, Error> {
-    // Submission, recovery, replacement, and invalidation share one namespace-wide lifecycle
-    // boundary. Acquire it before even reading an existing row so no early-return recovery path
-    // can race an invalidation snapshot.
-    let _lifecycle_operation =
-        state
-            .runtime
-            .acquire_lifecycle_operation()
-            .await
-            .map_err(|error| {
-                Error::from_api_error(ApiError::internal(format!(
-                    "runtime lifecycle unavailable: {error}"
-                )))
-            })?;
+    // The authoritative runtime transition provides the linearization point. Queue and artifact
+    // effects are exact, idempotent follow-ups rather than one long-lived lifecycle lock.
     // Deterministic v4 task IDs are reusable only when the normalized request fingerprint matches.
     if let Some(existing) = state
         .runtime
@@ -1774,26 +1741,19 @@ mod tests {
     use crate::server::proof_artifact::load_proof_artifact_material;
     use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
     use crate::server::task_metadata::{ProposalTask, RuntimeMetadata};
-    use raiko2_engine::{
-        AggregateProofInput, AggregationTaskRequest, EngineTaskId, ProposalTaskRequest,
-        ProverTaskConfig,
-    };
+    use raiko2_engine::{EngineTaskId, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_primitives::L2BlockRange;
     use raiko2_primitives::Proof;
     use raiko2_queue::TaskStoreError;
+    use raiko2_runtime::test_support::{
+        ExactInvalidationResult, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
+        RuntimeStateWriteResult, RuntimeStore, RuntimeStoreScope,
+    };
     use raiko2_runtime::{
         ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, ProofArtifactRegistration,
-        ProofArtifactStore, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
-        RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
+        RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager, TaskRegistration,
     };
-    use std::{
-        future::Future,
-        path::PathBuf,
-        pin::Pin,
-        process,
-        sync::Arc,
-        time::{Duration, SystemTime},
-    };
+    use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
 
     type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1805,7 +1765,7 @@ mod tests {
     struct DeleteFailArtifactStore;
 
     #[async_trait::async_trait]
-    impl ProofArtifactStore for DeleteFailArtifactStore {
+    impl RuntimeStoreScope for DeleteFailArtifactStore {
         fn environment(&self) -> &'static str {
             "test"
         }
@@ -1817,7 +1777,10 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "test"
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ProofObjectStore for DeleteFailArtifactStore {
         async fn put_if_absent(
             &self,
             _key: &ProofArtifactKey,
@@ -1853,33 +1816,33 @@ mod tests {
             Ok(None)
         }
 
-        async fn mark_invalidated(
+        async fn invalidate_exact(
             &self,
             _key: &ProofArtifactKey,
-            _generation: Option<i64>,
-            _content_hash: &str,
-        ) -> anyhow::Result<()> {
-            Ok(())
+            _descriptor: &raiko2_runtime::ProofArtifactDescriptor,
+        ) -> anyhow::Result<ExactInvalidationResult> {
+            anyhow::bail!("injected artifact deletion failure")
         }
 
         async fn is_invalidated(
             &self,
             _key: &ProofArtifactKey,
-            _generation: Option<i64>,
-            _content_hash: &str,
+            _descriptor: &raiko2_runtime::ProofArtifactDescriptor,
         ) -> anyhow::Result<bool> {
             Ok(false)
         }
 
-        async fn delete(
+        async fn delete_exact(
             &self,
             _key: &ProofArtifactKey,
-            _generation: Option<i64>,
-            _expected_content_hash: &str,
+            _descriptor: &raiko2_runtime::ProofArtifactDescriptor,
         ) -> anyhow::Result<raiko2_runtime::ProofArtifactDeleteResult> {
-            anyhow::bail!("injected artifact deletion failure")
+            Ok(raiko2_runtime::ProofArtifactDeleteResult::Missing)
         }
+    }
 
+    #[async_trait::async_trait]
+    impl RuntimeStateStore for DeleteFailArtifactStore {
         async fn load_runtime_state(&self) -> anyhow::Result<Option<RuntimeStateObject>> {
             Ok(None)
         }
@@ -1896,22 +1859,6 @@ mod tests {
     }
 
     impl EngineHandle for TestRemoveEngine {
-        fn submit_proposal_proof_with_dependencies(
-            &self,
-            _request: ProposalTaskRequest,
-            _dependencies: Vec<EngineTaskId>,
-        ) -> TestBoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected proposal submission") })
-        }
-
-        fn submit_aggregation_proof_from_inputs(
-            &self,
-            _request: AggregationTaskRequest,
-            _inputs: Vec<AggregateProofInput>,
-        ) -> TestBoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregate submission") })
-        }
-
         fn get_status(
             &self,
             _id: EngineTaskId,
@@ -1926,18 +1873,29 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: raiko2_engine::EngineExecutionPlan,
+        ) -> TestBoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { Ok(raiko2_queue::AttachOutcome::Attached) })
         }
 
-        fn remove(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> TestBoxFuture<
+            '_,
+            Result<raiko2_queue::DetachOutcome<raiko2_engine::EngineTaskKey>, TaskStoreError>,
+        > {
             Box::pin(async move {
                 if self.fail_remove {
                     Err(TaskStoreError::backend(std::io::Error::other(
-                        "engine remove failed",
+                        "engine detach failed",
                     )))
                 } else {
-                    Ok(())
+                    Ok(raiko2_queue::DetachOutcome::not_attached(mode))
                 }
             })
         }
@@ -1968,7 +1926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_submission_waits_for_global_lifecycle_operation() {
+    async fn existing_submission_does_not_depend_on_a_global_lifecycle_operation() {
         let runtime = Arc::new(
             RuntimeManager::new(test_runtime_root("existing-submit-lifecycle"))
                 .expect("runtime manager"),
@@ -2024,37 +1982,17 @@ mod tests {
             })
             .await
             .expect("register existing task");
+        let existing = runtime
+            .get_task(&submission.public_task_id)
+            .await
+            .expect("get existing task")
+            .expect("registered task");
         runtime
-            .sync_status(
-                &submission.public_task_id,
-                RuntimeTaskRunnerStatus::Cancelled,
-                None,
-                None,
-            )
+            .cancel_task_if_current(&existing.lifetime(), None)
             .await
             .expect("cancel existing task");
 
-        let lifecycle = runtime
-            .acquire_lifecycle_operation()
-            .await
-            .expect("hold lifecycle operation");
-        let submit_state = state.clone();
-        let submit_fingerprint = fingerprint.as_str().to_string();
-        let mut submit = tokio::spawn(async move {
-            submit_submission(&submit_state, &submission, &submit_fingerprint).await
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut submit)
-                .await
-                .is_err(),
-            "existing-task submission crossed the global lifecycle boundary"
-        );
-
-        drop(lifecycle);
-        let result = tokio::time::timeout(Duration::from_secs(1), submit)
-            .await
-            .expect("submission should resume after lifecycle release")
-            .expect("submission task should not panic");
+        let result = submit_submission(&state, &submission, fingerprint.as_str()).await;
         assert!(
             result.is_err(),
             "empty test factory should reject submission"
@@ -2349,13 +2287,8 @@ mod tests {
 
     #[tokio::test]
     async fn remove_invalidated_artifacts_keeps_retryable_record_when_backing_delete_fails() {
-        let runtime = Arc::new(
-            RuntimeManager::new_with_artifact_store(
-                test_runtime_root("invalidate-backing-delete-fails"),
-                Arc::new(DeleteFailArtifactStore),
-            )
-            .expect("runtime manager"),
-        );
+        let store: Arc<dyn RuntimeStore> = Arc::new(DeleteFailArtifactStore);
+        let runtime = Arc::new(RuntimeManager::with_store(store));
         let state = AppState::from_parts(
             Arc::new(Config::default()),
             Arc::new(StaticPipelineFactory::default()),

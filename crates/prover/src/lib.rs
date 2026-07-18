@@ -66,11 +66,10 @@ use risc0_ethereum_contracts_boundless::encode_seal;
 #[cfg(feature = "risc0")]
 use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -145,24 +144,30 @@ impl std::fmt::Display for ProgressPersistenceError {
 
 impl std::error::Error for ProgressPersistenceError {}
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 const CHECKPOINT_RETRY_BASE_DELAY: Duration = if cfg!(test) {
     Duration::from_millis(1)
 } else {
     Duration::from_secs(1)
 };
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 const CHECKPOINT_RETRY_MAX_DELAY: Duration = if cfg!(test) {
     Duration::from_millis(16)
 } else {
     Duration::from_secs(30)
 };
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 const CHECKPOINT_RETRY_JITTER_SLOTS: u64 = 8;
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 static CHECKPOINT_RETRY_INVOCATION: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 #[derive(Clone, Copy)]
 struct CheckpointRetrySchedule {
     jitter_slot: u32,
 }
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 impl CheckpointRetrySchedule {
     fn new() -> Self {
         Self::from_seed(CHECKPOINT_RETRY_INVOCATION.fetch_add(1, Ordering::Relaxed))
@@ -187,6 +192,7 @@ impl CheckpointRetrySchedule {
     }
 }
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 pub(crate) async fn persist_prover_progress(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     progress: &ProverProgress,
@@ -243,6 +249,7 @@ impl SubmissionCheckpointPermit {
     }
 }
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 pub(crate) async fn acquire_submission_checkpoint_permit(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<SubmissionCheckpointPermit> {

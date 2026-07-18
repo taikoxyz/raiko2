@@ -1,5 +1,9 @@
 use crate::ready_sort::insert_ready_sorted;
-use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind};
+use crate::{
+    AttachOutcome, DetachMode, DetachOutcome, ExecutionNode, Priority, ProjectionTaskView,
+    ProjectionView, ReadyQueueSort, RootOwner, TaskExecutionPolicy, TaskId, TaskState,
+    TaskStateKind,
+};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
@@ -15,6 +19,8 @@ pub enum TaskStoreError {
     Backend(Box<dyn Error + Send + Sync>),
     /// Data is missing or cannot be decoded.
     CorruptData(Box<dyn Error + Send + Sync>),
+    InvalidGraph(String),
+    Conflict(String),
 }
 
 impl TaskStoreError {
@@ -38,6 +44,14 @@ impl TaskStoreError {
             msg.into(),
         )))
     }
+
+    pub fn invalid_graph(msg: impl Into<String>) -> Self {
+        Self::InvalidGraph(msg.into())
+    }
+
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
+    }
 }
 
 impl std::fmt::Display for TaskStoreError {
@@ -45,6 +59,12 @@ impl std::fmt::Display for TaskStoreError {
         match self {
             TaskStoreError::Backend(err) => write!(f, "task store backend error: {err}"),
             TaskStoreError::CorruptData(err) => write!(f, "task store corrupt data: {err}"),
+            TaskStoreError::InvalidGraph(message) => {
+                write!(f, "invalid execution graph: {message}")
+            }
+            TaskStoreError::Conflict(message) => {
+                write!(f, "execution projection conflict: {message}")
+            }
         }
     }
 }
@@ -53,6 +73,7 @@ impl Error for TaskStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             TaskStoreError::Backend(err) | TaskStoreError::CorruptData(err) => Some(err.as_ref()),
+            TaskStoreError::InvalidGraph(_) | TaskStoreError::Conflict(_) => None,
         }
     }
 }
@@ -64,6 +85,19 @@ where
     O: Clone,
     Id: Send + Sync + 'static,
 {
+    async fn attach_graph(
+        &self,
+        owner: RootOwner,
+        nodes: Vec<ExecutionNode<P, Id>>,
+    ) -> StoreResult<AttachOutcome>
+    where
+        P: PartialEq;
+    async fn detach_owner(
+        &self,
+        owner: &RootOwner,
+        mode: DetachMode,
+    ) -> StoreResult<DetachOutcome<Id>>;
+    async fn inspect_owner(&self, owner: &RootOwner) -> StoreResult<Option<ProjectionView<Id>>>;
     async fn insert_task(
         &self,
         id: TaskId<Id>,
@@ -101,7 +135,6 @@ where
         id: &TaskId<Id>,
         dependent_error: String,
     ) -> StoreResult<bool>;
-    async fn fail_and_fail_dependents(&self, id: &TaskId<Id>, error: String) -> StoreResult<bool>;
     async fn retry_now_if_running(
         &self,
         id: TaskId<Id>,
@@ -209,10 +242,18 @@ struct Inner<P, O, Id> {
     ready_med: VecDeque<TaskId<Id>>,
     ready_low: VecDeque<TaskId<Id>>,
     scheduled: BTreeMap<u64, VecDeque<TaskId<Id>>>,
+    owner_graphs: HashMap<RootOwner, OwnerGraph<Id>>,
+    task_owners: HashMap<TaskId<Id>, HashSet<RootOwner>>,
     next_sequence: u64,
 }
 
+struct OwnerGraph<Id> {
+    task_ids: Vec<TaskId<Id>>,
+    attached: bool,
+}
+
 struct TaskRecord<P, O, Id> {
+    definition_payload: P,
     payload: Option<P>,
     state: TaskState<O, Id>,
     priority: Priority,
@@ -220,6 +261,7 @@ struct TaskRecord<P, O, Id> {
     lease_until_ms: Option<u64>,
     lease_sequence: u64,
     execution_policy: TaskExecutionPolicy,
+    dependencies: Vec<TaskId<Id>>,
 }
 
 type TakenReadyTask<P> = (P, Priority, u32, TaskExecutionPolicy);
@@ -257,6 +299,165 @@ where
     }
 }
 
+fn normalize_and_validate_graph<P, Id>(
+    owner: &RootOwner,
+    nodes: &mut [ExecutionNode<P, Id>],
+) -> StoreResult<()>
+where
+    Id: Clone + Eq + Hash,
+{
+    if owner.task_id.trim().is_empty() {
+        return Err(TaskStoreError::invalid_graph(
+            "root owner task id must not be empty",
+        ));
+    }
+    if owner.incarnation_id.is_nil() {
+        return Err(TaskStoreError::invalid_graph(
+            "root owner incarnation must not be nil",
+        ));
+    }
+    if nodes.is_empty() {
+        return Err(TaskStoreError::invalid_graph(
+            "an execution graph must contain at least one task",
+        ));
+    }
+
+    let mut graph_ids = HashSet::with_capacity(nodes.len());
+    for node in &*nodes {
+        if !graph_ids.insert(node.id.clone()) {
+            return Err(TaskStoreError::invalid_graph(
+                "an execution graph contains duplicate task ids",
+            ));
+        }
+    }
+
+    for node in &mut *nodes {
+        let mut seen = HashSet::with_capacity(node.dependencies.len());
+        node.dependencies
+            .retain(|dependency| seen.insert(dependency.clone()));
+        if node
+            .dependencies
+            .iter()
+            .any(|dependency| !graph_ids.contains(dependency))
+        {
+            return Err(TaskStoreError::invalid_graph(
+                "every dependency must be part of the attached execution graph",
+            ));
+        }
+    }
+
+    validate_graph_is_acyclic(nodes)
+}
+
+fn validate_graph_is_acyclic<P, Id>(nodes: &[ExecutionNode<P, Id>]) -> StoreResult<()>
+where
+    Id: Clone + Eq + Hash,
+{
+    fn visit<P, Id>(
+        index: usize,
+        nodes: &[ExecutionNode<P, Id>],
+        indices: &HashMap<TaskId<Id>, usize>,
+        visiting: &mut HashSet<TaskId<Id>>,
+        visited: &mut HashSet<TaskId<Id>>,
+    ) -> bool
+    where
+        Id: Clone + Eq + Hash,
+    {
+        let id = nodes[index].id.clone();
+        if visited.contains(&id) {
+            return true;
+        }
+        if !visiting.insert(id.clone()) {
+            return false;
+        }
+        for dependency in &nodes[index].dependencies {
+            let Some(dependency_index) = indices.get(dependency).copied() else {
+                return false;
+            };
+            if !visit(dependency_index, nodes, indices, visiting, visited) {
+                return false;
+            }
+        }
+        visiting.remove(&id);
+        visited.insert(id);
+        true
+    }
+
+    let indices = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut visiting = HashSet::with_capacity(nodes.len());
+    let mut visited = HashSet::with_capacity(nodes.len());
+    for index in 0..nodes.len() {
+        if !visit(index, nodes, &indices, &mut visiting, &mut visited) {
+            return Err(TaskStoreError::invalid_graph(
+                "an execution graph must not contain dependency cycles",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn graph_task_sets_match<Id>(left: &[TaskId<Id>], right: &[TaskId<Id>]) -> bool
+where
+    Id: Clone + Eq + Hash,
+{
+    left.len() == right.len()
+        && left.iter().cloned().collect::<HashSet<_>>()
+            == right.iter().cloned().collect::<HashSet<_>>()
+}
+
+fn task_definition_matches<P, O, Id>(
+    record: &TaskRecord<P, O, Id>,
+    node: &ExecutionNode<P, Id>,
+) -> bool
+where
+    P: PartialEq,
+    Id: Clone + Eq + Hash,
+{
+    record.definition_payload == node.task.payload
+        && record.priority == node.task.priority
+        && record.execution_policy == node.execution_policy
+        && graph_task_sets_match(&record.dependencies, &node.dependencies)
+}
+
+fn graph_topological_indices<P, Id>(nodes: &[ExecutionNode<P, Id>]) -> Vec<usize>
+where
+    Id: Clone + Eq + Hash,
+{
+    fn append<P, Id>(
+        index: usize,
+        nodes: &[ExecutionNode<P, Id>],
+        indices: &HashMap<TaskId<Id>, usize>,
+        visited: &mut HashSet<TaskId<Id>>,
+        ordered: &mut Vec<usize>,
+    ) where
+        Id: Clone + Eq + Hash,
+    {
+        if !visited.insert(nodes[index].id.clone()) {
+            return;
+        }
+        for dependency in &nodes[index].dependencies {
+            append(indices[dependency], nodes, indices, visited, ordered);
+        }
+        ordered.push(index);
+    }
+
+    let indices = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut visited = HashSet::with_capacity(nodes.len());
+    let mut ordered = Vec::with_capacity(nodes.len());
+    for index in 0..nodes.len() {
+        append(index, nodes, &indices, &mut visited, &mut ordered);
+    }
+    ordered
+}
+
 impl<P, O, Id> MemoryStore<P, O, Id> {
     #[must_use]
     pub fn new() -> Self {
@@ -274,6 +475,8 @@ impl<P, O, Id> MemoryStore<P, O, Id> {
                 ready_med: VecDeque::new(),
                 ready_low: VecDeque::new(),
                 scheduled: BTreeMap::new(),
+                owner_graphs: HashMap::new(),
+                task_owners: HashMap::new(),
                 next_sequence: 0,
             }),
             lease,
@@ -391,6 +594,90 @@ fn remove_dependent_edges<Id>(
     });
 }
 
+fn reset_attached_terminal_nodes<P, O, Id>(
+    inner: &mut Inner<P, O, Id>,
+    nodes: &[ExecutionNode<P, Id>],
+    topological_indices: &[usize],
+) -> bool
+where
+    P: Clone,
+    Id: ReadyQueueSort,
+{
+    let reset_ids = topological_indices
+        .iter()
+        .filter_map(|index| {
+            let id = &nodes[*index].id;
+            inner
+                .tasks
+                .get(id)
+                .is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        TaskState::Failed { .. } | TaskState::Cancelled
+                    )
+                })
+                .then(|| id.clone())
+        })
+        .collect::<HashSet<_>>();
+    if reset_ids.is_empty() {
+        return false;
+    }
+
+    for task_id in &reset_ids {
+        remove_queue_memberships(inner, task_id);
+        remove_dependent_edges(&mut inner.dependents, task_id);
+    }
+
+    for index in topological_indices {
+        let node = &nodes[*index];
+        if !reset_ids.contains(&node.id) {
+            continue;
+        }
+        let dependency_state =
+            resolve_dependency_insert_state(&inner.tasks, node.dependencies.clone());
+        let (remaining, state, unresolved_dependencies) = match dependency_state {
+            DependencyInsertState::Pending {
+                remaining,
+                unresolved_deps,
+            } => {
+                let state = if remaining == 0 {
+                    TaskState::Ready
+                } else {
+                    TaskState::pending(remaining)
+                };
+                (remaining, state, unresolved_deps)
+            }
+            DependencyInsertState::Failed | DependencyInsertState::Cancelled => {
+                unreachable!("all terminal dependencies in the attached graph are reset together")
+            }
+        };
+        for dependency in unresolved_dependencies {
+            inner
+                .dependents
+                .entry(dependency)
+                .or_default()
+                .push(node.id.clone());
+        }
+        let ready = matches!(state, TaskState::Ready);
+        let priority = {
+            let record = inner
+                .tasks
+                .get_mut(&node.id)
+                .expect("attached graph task was checked before recovery reset");
+            record.payload = Some(node.task.payload.clone());
+            record.state = state;
+            record.lease_until_ms = None;
+            record.dependencies.clone_from(&node.dependencies);
+            record.priority
+        };
+        inner.remaining.insert(node.id.clone(), remaining);
+        if ready {
+            push_ready_locked(inner, priority, node.id.clone());
+        }
+    }
+    true
+}
+
 fn running_lease_matches<P, O, Id>(
     inner: &Inner<P, O, Id>,
     id: &TaskId<Id>,
@@ -479,6 +766,31 @@ where
     }
 }
 
+fn cancel_task_locked<P, O, Id>(inner: &mut Inner<P, O, Id>, id: &TaskId<Id>) -> StoreResult<bool>
+where
+    Id: ReadyQueueSort,
+{
+    let Some(record) = inner.tasks.get(id) else {
+        return Ok(false);
+    };
+    if matches!(
+        record.state,
+        TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
+    ) {
+        return Ok(false);
+    }
+    remove_queue_memberships(inner, id);
+    let record = inner
+        .tasks
+        .get_mut(id)
+        .ok_or_else(|| TaskStoreError::corrupt_msg("task disappeared during cancellation"))?;
+    record.state = TaskState::Cancelled;
+    record.lease_until_ms = None;
+    fail_dependents_locked(inner, id, "dependency cancelled");
+    Ok(true)
+}
+
+#[allow(clippy::too_many_lines)]
 #[async_trait]
 impl<P, O, Id> TaskStore<P, O, Id> for MemoryStore<P, O, Id>
 where
@@ -486,6 +798,265 @@ where
     O: Clone + Send + 'static,
     Id: ReadyQueueSort,
 {
+    async fn attach_graph(
+        &self,
+        owner: RootOwner,
+        mut nodes: Vec<ExecutionNode<P, Id>>,
+    ) -> StoreResult<AttachOutcome>
+    where
+        P: PartialEq,
+    {
+        normalize_and_validate_graph(&owner, &mut nodes)?;
+        let topological_indices = graph_topological_indices(&nodes);
+        let graph_ids = topological_indices
+            .iter()
+            .map(|index| nodes[*index].id.clone())
+            .collect::<Vec<_>>();
+        let mut inner = self.inner.lock().await;
+
+        if let Some(existing_graph) = inner.owner_graphs.get(&owner) {
+            if !existing_graph.attached {
+                return Err(TaskStoreError::conflict(
+                    "a retired root owner cannot be attached again",
+                ));
+            }
+            if !graph_task_sets_match(&existing_graph.task_ids, &graph_ids) {
+                return Err(TaskStoreError::conflict(
+                    "the same root owner is already attached to a different graph",
+                ));
+            }
+            for node in &nodes {
+                let Some(record) = inner.tasks.get(&node.id) else {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "an attached root owner references a missing task",
+                    ));
+                };
+                if !task_definition_matches(record, node) {
+                    return Err(TaskStoreError::conflict(
+                        "an attached task id has a different execution definition",
+                    ));
+                }
+                if !inner
+                    .task_owners
+                    .get(&node.id)
+                    .is_some_and(|owners| owners.contains(&owner))
+                {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "owner and task ownership indexes disagree",
+                    ));
+                }
+            }
+            return Ok(
+                if reset_attached_terminal_nodes(&mut inner, &nodes, &topological_indices) {
+                    AttachOutcome::Attached
+                } else {
+                    AttachOutcome::AlreadyAttached
+                },
+            );
+        }
+
+        for node in &nodes {
+            if let Some(record) = inner.tasks.get(&node.id)
+                && !task_definition_matches(record, node)
+            {
+                return Err(TaskStoreError::conflict(
+                    "a task id is already attached with a different execution definition",
+                ));
+            }
+        }
+
+        for index in topological_indices {
+            let node = &nodes[index];
+            let reset_unowned_terminal = inner.tasks.get(&node.id).is_some_and(|record| {
+                matches!(
+                    record.state,
+                    TaskState::Failed { .. } | TaskState::Cancelled
+                ) && inner
+                    .task_owners
+                    .get(&node.id)
+                    .is_none_or(HashSet::is_empty)
+            });
+            if !inner.tasks.contains_key(&node.id) || reset_unowned_terminal {
+                let dependency_state =
+                    resolve_dependency_insert_state(&inner.tasks, node.dependencies.clone());
+                let (remaining, state, unresolved_dependencies) = match dependency_state {
+                    DependencyInsertState::Pending {
+                        remaining,
+                        unresolved_deps,
+                    } => {
+                        let state = if remaining == 0 {
+                            TaskState::Ready
+                        } else {
+                            TaskState::pending(remaining)
+                        };
+                        (remaining, state, unresolved_deps)
+                    }
+                    DependencyInsertState::Failed => (
+                        0,
+                        TaskState::Failed {
+                            error: "dependency failed".to_string(),
+                            caused_by_dep: None,
+                        },
+                        Vec::new(),
+                    ),
+                    DependencyInsertState::Cancelled => (0, TaskState::Cancelled, Vec::new()),
+                };
+                if reset_unowned_terminal {
+                    remove_dependent_edges(&mut inner.dependents, &node.id);
+                    remove_queue_memberships(&mut inner, &node.id);
+                }
+                for dependency in unresolved_dependencies {
+                    inner
+                        .dependents
+                        .entry(dependency)
+                        .or_default()
+                        .push(node.id.clone());
+                }
+                inner.remaining.insert(node.id.clone(), remaining);
+                inner.tasks.insert(
+                    node.id.clone(),
+                    TaskRecord {
+                        definition_payload: node.task.payload.clone(),
+                        payload: Some(node.task.payload.clone()),
+                        state: state.clone(),
+                        priority: node.task.priority,
+                        attempt: 0,
+                        lease_until_ms: None,
+                        lease_sequence: 0,
+                        execution_policy: node.execution_policy.clone(),
+                        dependencies: node.dependencies.clone(),
+                    },
+                );
+                if matches!(state, TaskState::Ready) {
+                    push_ready_locked(&mut inner, node.task.priority, node.id.clone());
+                }
+            }
+            inner
+                .task_owners
+                .entry(node.id.clone())
+                .or_default()
+                .insert(owner.clone());
+        }
+        inner.owner_graphs.insert(
+            owner,
+            OwnerGraph {
+                task_ids: graph_ids,
+                attached: true,
+            },
+        );
+        Ok(AttachOutcome::Attached)
+    }
+
+    async fn detach_owner(
+        &self,
+        owner: &RootOwner,
+        mode: DetachMode,
+    ) -> StoreResult<DetachOutcome<Id>> {
+        let mut inner = self.inner.lock().await;
+        let Some(owner_graph) = inner.owner_graphs.get(owner) else {
+            return Ok(DetachOutcome::not_attached(mode));
+        };
+        let task_ids = owner_graph.task_ids.clone();
+        let was_attached = owner_graph.attached;
+        if !was_attached && mode == DetachMode::Cancel {
+            return Ok(DetachOutcome::not_attached(mode));
+        }
+        let mut retired = Vec::new();
+        let mut retained = Vec::new();
+        if was_attached {
+            for task_id in &task_ids {
+                if !inner.tasks.contains_key(task_id)
+                    || !inner
+                        .task_owners
+                        .get(task_id)
+                        .is_some_and(|owners| owners.contains(owner))
+                {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "owner and task ownership indexes disagree",
+                    ));
+                }
+            }
+            for task_id in &task_ids {
+                if let Some(owners) = inner.task_owners.get_mut(task_id) {
+                    owners.remove(owner);
+                }
+            }
+        }
+        for task_id in &task_ids {
+            if inner
+                .task_owners
+                .get(task_id)
+                .is_some_and(|owners| !owners.is_empty())
+            {
+                retained.push(task_id.clone());
+            } else {
+                inner.task_owners.remove(task_id);
+                retired.push(task_id.clone());
+            }
+        }
+        match mode {
+            DetachMode::Cancel => {
+                for task_id in &retired {
+                    let _ = cancel_task_locked(&mut inner, task_id)?;
+                }
+            }
+            DetachMode::Remove => {
+                for task_id in &retired {
+                    inner.tasks.remove(task_id);
+                    inner.remaining.remove(task_id);
+                    inner.dependents.remove(task_id);
+                    remove_dependent_edges(&mut inner.dependents, task_id);
+                    remove_queue_memberships(&mut inner, task_id);
+                }
+            }
+        }
+        match mode {
+            DetachMode::Cancel => {
+                if let Some(owner_graph) = inner.owner_graphs.get_mut(owner) {
+                    owner_graph.attached = false;
+                }
+            }
+            DetachMode::Remove => {
+                inner.owner_graphs.remove(owner);
+            }
+        }
+        Ok(DetachOutcome {
+            detached: true,
+            mode,
+            retired,
+            retained,
+        })
+    }
+
+    async fn inspect_owner(&self, owner: &RootOwner) -> StoreResult<Option<ProjectionView<Id>>> {
+        let inner = self.inner.lock().await;
+        let Some(owner_graph) = inner.owner_graphs.get(owner) else {
+            return Ok(None);
+        };
+        if !owner_graph.attached {
+            return Ok(None);
+        }
+        let task_ids = &owner_graph.task_ids;
+        let mut tasks = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            let record = inner.tasks.get(task_id).ok_or_else(|| {
+                TaskStoreError::corrupt_msg("an attached root owner references a missing task")
+            })?;
+            let owners = inner.task_owners.get(task_id).ok_or_else(|| {
+                TaskStoreError::corrupt_msg("owner and task ownership indexes disagree")
+            })?;
+            tasks.push(ProjectionTaskView {
+                id: task_id.clone(),
+                state: TaskStateKind::from(&record.state),
+                owner_count: owners.len(),
+            });
+        }
+        Ok(Some(ProjectionView {
+            owner: owner.clone(),
+            tasks,
+        }))
+    }
+
     async fn insert_task(
         &self,
         id: TaskId<Id>,
@@ -495,11 +1066,16 @@ where
         execution_policy: TaskExecutionPolicy,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
+        let task_dependencies = deps.clone();
         let dependency_state = resolve_dependency_insert_state(&g.tasks, deps);
+        let is_owned = g
+            .task_owners
+            .get(&id)
+            .is_some_and(|owners| !owners.is_empty());
         let should_reset = matches!(
             g.tasks.get(&id).map(|record| &record.state),
             Some(TaskState::Failed { .. } | TaskState::Cancelled)
-        );
+        ) && !is_owned;
         if should_reset {
             let (remaining, next_state) = match &dependency_state {
                 DependencyInsertState::Pending { remaining, .. } => {
@@ -517,15 +1093,19 @@ where
             remove_dependent_edges(&mut g.dependents, &id);
             if let DependencyInsertState::Pending {
                 unresolved_deps, ..
-            } = dependency_state
+            } = &dependency_state
             {
                 for dep in unresolved_deps {
-                    g.dependents.entry(dep).or_default().push(id.clone());
+                    g.dependents
+                        .entry(dep.clone())
+                        .or_default()
+                        .push(id.clone());
                 }
             }
             g.remaining.insert(id.clone(), remaining);
             remove_queue_memberships(&mut g, &id);
             if let Some(existing) = g.tasks.get_mut(&id) {
+                existing.definition_payload = payload.clone();
                 existing.payload = Some(payload);
                 existing.priority = prio;
                 existing.attempt = 0;
@@ -533,6 +1113,7 @@ where
                 existing.lease_sequence = 0;
                 existing.state = next_state;
                 existing.execution_policy = execution_policy;
+                existing.dependencies = task_dependencies;
             }
             return Ok(true);
         }
@@ -562,6 +1143,7 @@ where
         g.tasks.insert(
             id,
             TaskRecord {
+                definition_payload: payload.clone(),
                 payload: Some(payload),
                 state: next_state,
                 priority: prio,
@@ -569,6 +1151,7 @@ where
                 lease_until_ms: None,
                 lease_sequence: 0,
                 execution_policy,
+                dependencies: task_dependencies,
             },
         );
 
@@ -667,49 +1250,16 @@ where
         dependent_error: String,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
-        let Some(record) = g.tasks.get(id) else {
-            return Ok(false);
-        };
-        if matches!(
-            record.state,
-            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
-        ) {
-            return Ok(false);
+        if g.task_owners
+            .get(id)
+            .is_some_and(|owners| !owners.is_empty())
+        {
+            return Err(TaskStoreError::conflict(
+                "an owned task must be cancelled by detaching its root owner",
+            ));
         }
-        remove_queue_memberships(&mut g, id);
-        let record = g
-            .tasks
-            .get_mut(id)
-            .ok_or_else(|| TaskStoreError::corrupt_msg("task disappeared during cancellation"))?;
-        record.state = TaskState::Cancelled;
-        record.lease_until_ms = None;
-        fail_dependents_locked(&mut g, id, &dependent_error);
-        Ok(true)
-    }
-
-    async fn fail_and_fail_dependents(&self, id: &TaskId<Id>, error: String) -> StoreResult<bool> {
-        let mut g = self.inner.lock().await;
-        let Some(record) = g.tasks.get(id) else {
-            return Ok(false);
-        };
-        if matches!(
-            record.state,
-            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
-        ) {
-            return Ok(false);
-        }
-        remove_queue_memberships(&mut g, id);
-        let record = g
-            .tasks
-            .get_mut(id)
-            .ok_or_else(|| TaskStoreError::corrupt_msg("task disappeared during failure"))?;
-        record.state = TaskState::Failed {
-            error: error.clone(),
-            caused_by_dep: None,
-        };
-        record.lease_until_ms = None;
-        fail_dependents_locked(&mut g, id, &error);
-        Ok(true)
+        let _ = dependent_error;
+        cancel_task_locked(&mut g, id)
     }
 
     async fn retry_now_if_running(
@@ -1016,6 +1566,14 @@ where
 
     async fn remove_task(&self, id: &TaskId<Id>) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
+        if g.task_owners
+            .get(id)
+            .is_some_and(|owners| !owners.is_empty())
+        {
+            return Err(TaskStoreError::conflict(
+                "an owned task must be removed by detaching its root owner",
+            ));
+        }
         if g.tasks.remove(id).is_none() {
             return Ok(false);
         }

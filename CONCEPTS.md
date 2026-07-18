@@ -34,46 +34,78 @@ at a time, old and replacement processes never overlap, and namespaces never sha
 deployment invariant; the application has no distributed owner lease or owner epoch. Both
 environment and namespace participate in task fingerprints and object names.
 
-### Global Runtime Fence
-The process-wide shutdown authority for every task and external-store mutation in one namespace. It
-allows writes while active and rejects ordinary writes as soon as draining starts. A remote request
-accepted before that transition carries the sole capability that may persist its request-ID
-checkpoint during the bounded drain. It is not a task-local lock or multi-instance coordination
-protocol.
+### Namespace Fence
+The process-wide mutation authority for one namespace. It admits short authoritative commits and
+external writes while active, rejects new work as soon as draining starts, and rejects every write
+when inactive. Drain waits only for repository commits already admitted and request-ID checkpoints
+covered by provider permits acquired while active. A separate process-local lifecycle transition gate
+serializes only the active-root decision with one in-memory queue attach or detach. Neither is held
+across a complete task, provider call, external storage operation, or saga; neither is a
+multi-instance coordination protocol.
 
-### Lifecycle Operation Gate
-The process-local serialization boundary for a lifecycle operation that spans the authoritative
-runtime, scheduler queue, and proof artifact store. Admission, replacement, cancellation, cleanup,
-invalidation, and proof completion enter this gate before committing a cross-component change.
-Snapshots taken before entry are revalidated with the task incarnation or artifact descriptor.
-This gate prevents local ABA races; it is not a distributed lock or namespace ownership mechanism.
+### Proof Lifecycle
+The concrete application service that handles submission, cancellation, cleanup, invalidation, and
+restart reconciliation. It commits authoritative runtime state first, then applies owner-aware queue
+and exact proof-object effects idempotently. It coordinates sagas; it is not a cross-component lock
+and does not hide storage operations behind a single generic interface.
+
+### Runtime State Repository
+The sole authority for task records, remote checkpoints, publication intents, artifact
+registrations, and lifecycle transitions in one namespace. It validates typed preconditions,
+performs short atomic mutations, handles runtime-state compare-and-swap and ambiguous-write
+readback, and returns explicit lifecycle outcomes. Its storage revision is internal.
+
+### Proof Object Repository
+The boundary for immutable pending and canonical proof bytes, create-only manifests, validated
+reads, tombstones, and exact conditional deletion. It owns all use of artifact object generations
+and content hashes. GCS and memory are alternative adapters, not concurrent backends.
+
+### Execution Projection
+The in-memory owner-aware task graph derived from authoritative runtime state. Attaching a root owner
+and its complete DAG is atomic, as is detaching that owner. A shared stage remains while any live
+root owns it; the last owner leaving cancels or removes the stage. Cancellation and terminal failure
+persist their exact root transition before detaching the owner; terminal failure holds the local
+lifecycle transition gate until its detach finishes. Restart reconciliation rebuilds the projection
+instead of treating it as durable authority.
+
+### Root Owner
+The exact `TaskLifetime` whose root currently requires an execution graph. Root owners are local
+queue relationships, not namespace owners. They allow distinct roots to share a stage without one
+root's cancellation deleting work still required by another.
 
 ### GCS Generation
-The native object-version token used for runtime-state compare-and-swap and exact manifest
-invalidation or deletion. It versions one object and is not an instance epoch or ownership token.
+The native storage version of one GCS object. Runtime-state generations are hidden inside the state
+repository's compare-and-swap loop. A manifest generation appears only in an exact artifact
+descriptor used for invalidation or conditional deletion. It is not an instance epoch, task
+lifetime, or ownership token.
 
-### Task Incarnation
-The immutable UUID of one runtime task-record lifetime. It prevents a delayed worker from attaching
-a checkpoint to a replacement that reuses the same deterministic task ID. Pending proof outboxes
-and completion permits bind to exact task incarnations until artifact activation commits. It does
-not coordinate instances or grant namespace ownership.
+### Task Lifetime
+The tuple of a deterministic task ID and the immutable `incarnation_id` of one runtime record
+lifetime. It prevents a delayed worker, cancellation, cleanup, or publication callback from mutating
+a replacement that reused the same task ID. Publication intents bind to exact task lifetimes until
+activation commits. It does not coordinate instances or grant namespace ownership.
 
 ### Stage Lease
 The in-memory scheduler ownership of one executable stage. It remains held through provider
 execution, proof checkpointing, durable artifact publication, and terminal runtime synchronization.
 Every acquired lease has an opaque, non-reused lease token, so an old worker cannot complete a task
 that was removed and recreated with the same deterministic ID, worker label, and attempt number.
-The token is local execution identity, not runtime authority. Losing the lease while the process is
-running fails the stage.
+The token is local execution identity, not runtime authority. Observer events also carry exact task
+lifetimes; both the lease and lifetime must still match before a callback is accepted.
 
-### Task Execution Permit
-An in-process capability captured from the runtime immediately after a queue lease is acquired. It
-maps each existing runtime task ID to the exact incarnation that the lease may observe or mutate. The
-engine revalidates the queue lease token after capture, and every observer write checks the permit.
-After the completed proof payload is conditionally checkpointed under that lease, a distinct shared
-root that joined during execution may enter the proof completion owner set; a replacement using an
-already captured task ID may not. The permit is a stale-callback guard, not namespace authority; the
-global runtime lifecycle fence still decides whether any write is allowed.
+### Artifact Descriptor
+The exact selected artifact version: logical key, content hash, and manifest object generation. It
+identifies one publication for reads, activation, tombstones, and conditional manifest deletion.
+
+### Artifact Expectation
+A typed precondition containing an artifact key, expected descriptor, and expected lifecycle state.
+It prevents a delayed read, cancellation, cleanup, or invalidation effect from acting on a newer
+publication at the same logical key.
+
+### Lifecycle Outcome
+An explicit repository result such as `Applied`, `AlreadyApplied`, `Stale`,
+`BlockedByLiveOwner`, `Missing`, or `Conflict`. Callers use the outcome to continue, stop, retry, or
+reconcile instead of interpreting an ambiguous boolean.
 
 ### Pending Network Proof
 A Boundless or SP1 provider request that has been durably checkpointed but has not reached a final
@@ -103,10 +135,11 @@ The transition that makes a successfully computed proof durably available to cal
 completion boundary of a proof task, not a separate public task status; the task remains
 non-terminal until publication succeeds.
 
-### Runtime Store
-The single authoritative backend for task state, remote checkpoints, publication state, manifests,
-and proof artifacts. A deployment selects GCS or ephemeral memory; dual-write and automatic
-failover are unsupported.
+### Publication Intent
+The authoritative runtime record between pending proof persistence and canonical publication. It
+binds a content hash and artifact expectation to the exact task lifetimes eligible for completion.
+Restart reconciliation uses it to resume publication, activate the canonical descriptor, or
+invalidate an ownerless result without rerunning the prover.
 
 ### Proof URI
 The backend-neutral location of a published proof artifact exposed as `proof_uri`. GCS stores use

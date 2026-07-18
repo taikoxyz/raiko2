@@ -67,7 +67,7 @@ local-provers = [
     "raiko2-engine/local-provers",
     "raiko2-prover/risc0",
 ]
-fixture-server = ["local-provers"]
+fixture-server = ["local-provers", "raiko2-runtime/test-utils"]
 
 [dev-dependencies]
 tower.workspace = true

@@ -99,10 +99,13 @@ async fn load_proof_artifact_material_inner(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use raiko2_runtime::test_support::{
+        ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
+        RuntimeStateStore, RuntimeStateWriteResult, RuntimeStoreScope,
+    };
     use raiko2_runtime::{
-        MemoryProofArtifactStore, ProofArtifactDeleteResult, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore,
-        RuntimeStateObject, RuntimeStateWriteResult,
+        ProofArtifactDeleteResult, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
+        ProofArtifactPutResult, ProofArtifactRegistration,
     };
     use std::sync::{
         Arc,
@@ -118,7 +121,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ProofArtifactStore for PauseAfterInvalidationCheckStore {
+    impl RuntimeStoreScope for PauseAfterInvalidationCheckStore {
         fn environment(&self) -> &str {
             self.inner.environment()
         }
@@ -130,7 +133,10 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "test"
         }
+    }
 
+    #[async_trait]
+    impl ProofObjectStore for PauseAfterInvalidationCheckStore {
         async fn put_if_absent(
             &self,
             key: &ProofArtifactKey,
@@ -158,27 +164,20 @@ mod tests {
             self.inner.get_prefix(key, max_bytes).await
         }
 
-        async fn mark_invalidated(
+        async fn invalidate_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
-        ) -> Result<()> {
-            self.inner
-                .mark_invalidated(key, generation, content_hash)
-                .await
+            descriptor: &raiko2_runtime::ProofArtifactDescriptor,
+        ) -> Result<ExactInvalidationResult> {
+            self.inner.invalidate_exact(key, descriptor).await
         }
 
         async fn is_invalidated(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
+            descriptor: &raiko2_runtime::ProofArtifactDescriptor,
         ) -> Result<bool> {
-            let invalidated = self
-                .inner
-                .is_invalidated(key, generation, content_hash)
-                .await?;
+            let invalidated = self.inner.is_invalidated(key, descriptor).await?;
             if self.checks.fetch_add(1, Ordering::SeqCst) == 0 {
                 self.check_completed.notify_one();
                 self.allow_return.notified().await;
@@ -186,17 +185,17 @@ mod tests {
             Ok(invalidated)
         }
 
-        async fn delete(
+        async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            expected_content_hash: &str,
+            descriptor: &raiko2_runtime::ProofArtifactDescriptor,
         ) -> Result<ProofArtifactDeleteResult> {
-            self.inner
-                .delete(key, generation, expected_content_hash)
-                .await
+            self.inner.delete_exact(key, descriptor).await
         }
+    }
 
+    #[async_trait]
+    impl RuntimeStateStore for PauseAfterInvalidationCheckStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             self.inner.load_runtime_state().await
         }
@@ -221,10 +220,7 @@ mod tests {
             check_completed: tokio::sync::Notify::new(),
             allow_return: tokio::sync::Notify::new(),
         });
-        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
-            std::env::temp_dir().join(namespace),
-            store.clone(),
-        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let network_pair = "taiko_dev/ethereum";
         let pipeline_key = PipelineKey::ShastaNative;
         let route = pipeline_key.route();

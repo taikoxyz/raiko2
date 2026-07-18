@@ -1,8 +1,8 @@
-use raiko2_engine::{
-    AggregateProofInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
-    ProposalTaskRequest,
+use raiko2_engine::{Engine, EngineExecutionPlan, EngineTaskId, EngineTaskKey};
+use raiko2_queue::{
+    AttachOutcome, DetachMode, DetachOutcome, RootOwner, TaskState, TaskStateKind, TaskStoreError,
+    TaskView,
 };
-use raiko2_queue::{TaskState, TaskStateKind, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -19,16 +19,6 @@ pub trait EngineHandle: Send + Sync {
     fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
         true
     }
-    fn submit_proposal_proof_with_dependencies(
-        &self,
-        request: ProposalTaskRequest,
-        dependencies: Vec<EngineTaskId>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
-    fn submit_aggregation_proof_from_inputs(
-        &self,
-        request: AggregationTaskRequest,
-        inputs: Vec<AggregateProofInput>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
         id: EngineTaskId,
@@ -37,14 +27,16 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
-    fn dependents_of(
+    fn attach_execution_plan(
         &self,
-        _id: EngineTaskId,
-    ) -> BoxFuture<'_, Result<Vec<EngineTaskId>, TaskStoreError>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-    fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
-    fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
+        owner: RootOwner,
+        plan: EngineExecutionPlan,
+    ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>>;
+    fn detach_execution(
+        &self,
+        owner: RootOwner,
+        mode: DetachMode,
+    ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>>;
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
@@ -135,28 +127,6 @@ where
         Engine::queue_maintenance_ready(self, max_age)
     }
 
-    fn submit_proposal_proof_with_dependencies(
-        &self,
-        request: ProposalTaskRequest,
-        dependencies: Vec<EngineTaskId>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move {
-            self.submit_proposal_proof_with_dependencies(request, dependencies)
-                .await
-        })
-    }
-
-    fn submit_aggregation_proof_from_inputs(
-        &self,
-        request: AggregationTaskRequest,
-        inputs: Vec<AggregateProofInput>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move {
-            self.submit_aggregation_proof_from_inputs(request, inputs)
-                .await
-        })
-    }
-
     fn get_status(
         &self,
         id: EngineTaskId,
@@ -181,23 +151,24 @@ where
         })
     }
 
-    fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-        Box::pin(async move { self.cancel(id).await })
+    fn attach_execution_plan(
+        &self,
+        owner: RootOwner,
+        plan: EngineExecutionPlan,
+    ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>> {
+        Box::pin(async move { self.attach_execution_plan(owner, plan).await })
+    }
+
+    fn detach_execution(
+        &self,
+        owner: RootOwner,
+        mode: DetachMode,
+    ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>> {
+        Box::pin(async move { self.detach_execution(&owner, mode).await })
     }
 
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { self.shutdown_workers().await })
-    }
-
-    fn dependents_of(
-        &self,
-        id: EngineTaskId,
-    ) -> BoxFuture<'_, Result<Vec<EngineTaskId>, TaskStoreError>> {
-        Box::pin(async move { self.dependents_of(&id).await })
-    }
-
-    fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-        Box::pin(async move { self.remove(id).await })
     }
 }
 

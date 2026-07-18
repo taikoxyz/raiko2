@@ -4,9 +4,12 @@ mod types;
 
 pub use config::{SchedulerConfig, TaskExecutionPolicy};
 pub use retry::RetryPolicy;
-pub use types::{NewTask, TaskLease, TaskView, TaskViewState};
+pub use types::{
+    AttachOutcome, DetachMode, DetachOutcome, ExecutionGraph, ExecutionNode, NewTask,
+    ProjectionTaskView, ProjectionView, TaskLease, TaskView, TaskViewState,
+};
 
-use crate::{Priority, TaskId, TaskStore, TaskStoreError};
+use crate::{Priority, RootOwner, TaskId, TaskStore, TaskStoreError};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,6 +112,55 @@ where
     O: Clone + Send + 'static,
     Id: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
 {
+    /// Atomically attaches one runtime root to its complete execution graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the graph is invalid or conflicts with an existing task definition.
+    pub async fn attach(
+        &self,
+        owner: RootOwner,
+        graph: ExecutionGraph<P, Id>,
+    ) -> Result<AttachOutcome, TaskStoreError>
+    where
+        P: PartialEq,
+    {
+        let outcome = self.store.attach_graph(owner, graph.nodes).await?;
+        if outcome == AttachOutcome::Attached {
+            self.notify.notify_one();
+        }
+        Ok(outcome)
+    }
+
+    /// Atomically detaches one exact runtime-root incarnation from its execution graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the projection ownership indexes are inconsistent.
+    pub async fn detach(
+        &self,
+        owner: &RootOwner,
+        mode: DetachMode,
+    ) -> Result<DetachOutcome<Id>, TaskStoreError> {
+        let outcome = self.store.detach_owner(owner, mode).await?;
+        if outcome.detached {
+            self.notify.notify_waiters();
+        }
+        Ok(outcome)
+    }
+
+    /// Reads the process-local execution graph owned by one exact runtime-root incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the projection ownership indexes are inconsistent.
+    pub async fn inspect(
+        &self,
+        owner: &RootOwner,
+    ) -> Result<Option<ProjectionView<Id>>, TaskStoreError> {
+        self.store.inspect_owner(owner).await
+    }
+
     /// # Errors
     ///
     /// Returns `TaskStoreError` if the underlying store fails.
@@ -394,20 +446,6 @@ where
         Ok(())
     }
 
-    /// Forces a non-terminal task into a failed state, independent of lease ownership.
-    ///
-    /// This is reserved for process-local ownership loss where retrying the same stage would
-    /// violate the external side-effect contract.
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error when the task state or its dependent states cannot be updated.
-    pub async fn fail(&self, id: TaskId<Id>, error: String) -> Result<(), TaskStoreError> {
-        self.store.fail_and_fail_dependents(&id, error).await?;
-        self.notify.notify_one();
-        Ok(())
-    }
-
     /// # Errors
     ///
     /// Returns `TaskStoreError` if the underlying store fails.
@@ -541,6 +579,9 @@ fn retry_schedule(delay: Duration) -> RetrySchedule {
 }
 
 #[cfg(test)]
+mod projection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::MemoryStore;
@@ -574,6 +615,32 @@ mod tests {
     impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O, TestId>
         for BuggyTakeStore<P, O>
     {
+        async fn attach_graph(
+            &self,
+            owner: RootOwner,
+            nodes: Vec<ExecutionNode<P, TestId>>,
+        ) -> crate::StoreResult<AttachOutcome>
+        where
+            P: PartialEq,
+        {
+            self.inner.attach_graph(owner, nodes).await
+        }
+
+        async fn detach_owner(
+            &self,
+            owner: &RootOwner,
+            mode: DetachMode,
+        ) -> crate::StoreResult<DetachOutcome<TestId>> {
+            self.inner.detach_owner(owner, mode).await
+        }
+
+        async fn inspect_owner(
+            &self,
+            owner: &RootOwner,
+        ) -> crate::StoreResult<Option<ProjectionView<TestId>>> {
+            self.inner.inspect_owner(owner).await
+        }
+
         async fn insert_task(
             &self,
             id: TestTaskId,
@@ -646,14 +713,6 @@ mod tests {
             self.inner
                 .cancel_and_fail_dependents(id, dependent_error)
                 .await
-        }
-
-        async fn fail_and_fail_dependents(
-            &self,
-            id: &TestTaskId,
-            error: String,
-        ) -> crate::StoreResult<bool> {
-            self.inner.fail_and_fail_dependents(id, error).await
         }
 
         async fn get_view(

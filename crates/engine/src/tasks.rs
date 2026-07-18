@@ -43,6 +43,22 @@ pub struct AggregationTaskRequest {
     pub prover_config: ProverTaskConfig,
 }
 
+/// A root-owned proving execution submitted as one in-memory queue projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineExecutionPlan {
+    /// Proposal requests in execution order.
+    pub proposals: Vec<ProposalTaskRequest>,
+    /// Optional aggregate task consuming the proposal artifacts.
+    pub aggregate: Option<EngineAggregationPlan>,
+}
+
+/// Aggregate node included in an [`EngineExecutionPlan`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineAggregationPlan {
+    pub request: AggregationTaskRequest,
+    pub inputs: Vec<AggregateProofInput>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregationSource {
     Inputs(Vec<AggregateProofInput>),
@@ -115,7 +131,7 @@ impl ReadyQueueSort for EngineTaskKey {
 
 pub type EngineTaskId = TaskId<EngineTaskKey>;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineTask {
     Proposal {
         request: ProposalTaskRequest,

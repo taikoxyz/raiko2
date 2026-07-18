@@ -25,9 +25,7 @@ use raiko2_primitives::ProofType;
 use raiko2_prover::gaiko2::Gaiko2Prover;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
-use raiko2_runtime::{
-    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactStore, RuntimeManager,
-};
+use raiko2_runtime::RuntimeManager;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -61,6 +59,7 @@ type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
 #[cfg(feature = "host")]
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
+use super::lifecycle::ProofLifecycle;
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
 
@@ -96,19 +95,20 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub pipelines: Arc<dyn PipelineFactory>,
     pub runtime: Arc<RuntimeManager>,
+    pub(crate) lifecycle: ProofLifecycle,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
     pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
     background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
-async fn build_artifact_store(config: &Config) -> Result<Arc<dyn ProofArtifactStore>> {
+async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
     match config.runtime.store.backend {
-        RuntimeStoreBackend::Memory => Ok(Arc::new(MemoryProofArtifactStore::new(
+        RuntimeStoreBackend::Memory => RuntimeManager::new_memory(
             config.runtime.environment.clone(),
             config.runtime.namespace.clone(),
-        )?)),
-        RuntimeStoreBackend::Gcs => Ok(Arc::new(
-            GcsProofArtifactStore::new(
+        ),
+        RuntimeStoreBackend::Gcs => {
+            RuntimeManager::new_gcs(
                 config.runtime.environment.clone(),
                 config.runtime.namespace.clone(),
                 config
@@ -119,8 +119,8 @@ async fn build_artifact_store(config: &Config) -> Result<Arc<dyn ProofArtifactSt
                     .context("runtime.store.bucket is required for GCS")?,
                 config.runtime.store.prefix.clone(),
             )
-            .await?,
-        )),
+            .await
+        }
     }
 }
 
@@ -129,8 +129,7 @@ impl AppState {
     pub async fn new(mut config: Config) -> Result<Self> {
         config.normalize();
         config.validate()?;
-        let artifact_store = build_artifact_store(&config).await?;
-        let runtime = Arc::new(RuntimeManager::with_store(artifact_store)?);
+        let runtime = Arc::new(build_runtime(&config).await?);
         let scheduler_config = setup::scheduler_config(&config);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         #[cfg(feature = "local-provers")]
@@ -235,10 +234,12 @@ impl AppState {
         runtime: Arc<RuntimeManager>,
     ) -> Self {
         let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+        let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
         Self {
             config,
             pipelines,
             runtime,
+            lifecycle,
             zk_any_sampler,
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
             background_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -269,8 +270,8 @@ impl AppState {
         }
     }
 
-    pub(crate) fn begin_shutdown(&self) {
-        self.runtime.start_draining();
+    pub(crate) async fn begin_shutdown(&self) {
+        self.lifecycle.begin_shutdown().await;
     }
 }
 

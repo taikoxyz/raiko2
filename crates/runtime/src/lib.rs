@@ -9,18 +9,34 @@ mod artifact_store;
 mod publication;
 
 pub use artifact_store::{
-    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactConflict,
-    ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
-    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject,
-    RuntimeStateWriteResult, validate_scope_component,
+    ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
+    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, validate_scope_component,
 };
 pub use publication::ProofArtifactPublicationInvalidated;
 
+/// Test-only exports of the same storage interfaces used in production.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support {
+    pub use crate::artifact_store::{
+        ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
+        RuntimeStateStore, RuntimeStateWriteResult, RuntimeStore, RuntimeStoreScope,
+    };
+    pub use crate::{
+        ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
+        ProofArtifactPrefix, ProofArtifactPutResult,
+    };
+}
+
 use anyhow::{Context, Result};
+use artifact_store::{
+    ExactInvalidationResult, GcsProofArtifactStore, MemoryProofArtifactStore, RuntimeStateObject,
+    RuntimeStateWriteResult, RuntimeStore,
+};
+#[cfg(test)]
+use artifact_store::{ProofObjectStore, RuntimeStateStore, RuntimeStoreScope};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -154,14 +170,14 @@ impl Drop for RuntimeSubmissionCheckpointPermit {
 
 #[derive(Debug)]
 pub struct RuntimeManager {
-    store: Arc<dyn ProofArtifactStore>,
+    store: Arc<dyn RuntimeStore>,
     state: RwLock<RuntimeState>,
     generation: StdMutex<Option<i64>>,
     lifecycle_commit: StdMutex<()>,
     mutation: Mutex<()>,
     pending_publication_mutation: Mutex<()>,
-    lifecycle_operation: Arc<Mutex<()>>,
-    lifecycle_gate: Arc<RwLock<()>>,
+    execution_lifecycle_gate: Arc<Mutex<()>>,
+    namespace_commit_fence: RwLock<()>,
     submission_checkpoints: Arc<SubmissionCheckpointAdmission>,
     active: AtomicBool,
     draining: AtomicBool,
@@ -172,6 +188,24 @@ pub struct RuntimeManager {
 pub struct ExpiredTaskCursor {
     pub updated_at: i64,
     pub task_id: String,
+}
+
+/// Exact identity of one authoritative runtime-task lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskLifetime {
+    pub task_id: String,
+    pub incarnation_id: uuid::Uuid,
+}
+
+/// Explicit outcome of a conditional authoritative runtime mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMutationOutcome {
+    Applied,
+    AlreadyApplied,
+    Stale,
+    Blocked,
+    Missing,
+    Conflict,
 }
 
 #[derive(Debug, Clone)]
@@ -200,11 +234,11 @@ pub struct ProofArtifactPrecondition {
     pub descriptor: ProofArtifactDescriptor,
 }
 
-/// Process-local guard serializing lifecycle operations that span runtime and queue state.
-#[derive(Debug)]
-pub struct RuntimeLifecycleOperationGuard {
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    _lifecycle: tokio::sync::OwnedRwLockReadGuard<()>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactExpectation {
+    pub key: ProofArtifactKey,
+    pub descriptor: ProofArtifactDescriptor,
+    pub lifecycle: ProofArtifactLifecycle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +307,20 @@ impl ProofArtifactRecord {
             pipeline_key: self.pipeline_key,
             route: self.route,
             descriptor: self.descriptor(),
+        }
+    }
+
+    #[must_use]
+    pub fn expectation(&self) -> ArtifactExpectation {
+        ArtifactExpectation {
+            key: ProofArtifactKey {
+                network_pair: self.network_pair.clone(),
+                pipeline_key: self.pipeline_key,
+                route: self.route,
+                proof_ref: self.proof_ref.clone(),
+            },
+            descriptor: self.descriptor(),
+            lifecycle: self.lifecycle,
         }
     }
 }
@@ -360,56 +408,75 @@ impl RuntimeManager {
             "local".to_string(),
             namespace,
         )?);
-        Self::with_store(store)
+        Ok(Self::with_store(store))
     }
 
     pub fn new_memory(environment: String, namespace: String) -> Result<Self> {
         let store = Arc::new(MemoryProofArtifactStore::new(environment, namespace)?);
-        Self::with_store(store)
+        Ok(Self::with_store(store))
     }
 
-    pub fn with_store(store: Arc<dyn ProofArtifactStore>) -> Result<Self> {
-        Ok(Self {
+    #[cfg_attr(
+        any(test, feature = "test-utils"),
+        doc = "Constructs a runtime from a test store."
+    )]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_store(store: Arc<dyn RuntimeStore>) -> Self {
+        Self {
             store,
             state: RwLock::new(RuntimeState::default()),
             generation: StdMutex::new(None),
             lifecycle_commit: StdMutex::new(()),
             mutation: Mutex::new(()),
             pending_publication_mutation: Mutex::new(()),
-            lifecycle_operation: Arc::new(Mutex::new(())),
-            lifecycle_gate: Arc::new(RwLock::new(())),
+            execution_lifecycle_gate: Arc::new(Mutex::new(())),
+            namespace_commit_fence: RwLock::new(()),
             submission_checkpoints: Arc::new(SubmissionCheckpointAdmission::default()),
             active: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             state_coherence: AtomicU8::new(StateCoherence::Coherent as u8),
-        })
+        }
     }
 
-    /// Starts one process-local lifecycle operation spanning runtime, queue, and artifact work.
-    pub async fn acquire_lifecycle_operation(&self) -> Result<RuntimeLifecycleOperationGuard> {
-        self.ensure_active()?;
-        let operation = Arc::clone(&self.lifecycle_operation).lock_owned().await;
-        let lifecycle = Arc::clone(&self.lifecycle_gate).read_owned().await;
-        self.ensure_active()?;
-        Ok(RuntimeLifecycleOperationGuard {
-            _guard: operation,
-            _lifecycle: lifecycle,
-        })
+    #[cfg(not(any(test, feature = "test-utils")))]
+    fn with_store(store: Arc<dyn RuntimeStore>) -> Self {
+        Self {
+            store,
+            state: RwLock::new(RuntimeState::default()),
+            generation: StdMutex::new(None),
+            lifecycle_commit: StdMutex::new(()),
+            mutation: Mutex::new(()),
+            pending_publication_mutation: Mutex::new(()),
+            execution_lifecycle_gate: Arc::new(Mutex::new(())),
+            namespace_commit_fence: RwLock::new(()),
+            submission_checkpoints: Arc::new(SubmissionCheckpointAdmission::default()),
+            active: AtomicBool::new(true),
+            draining: AtomicBool::new(false),
+            state_coherence: AtomicU8::new(StateCoherence::Coherent as u8),
+        }
     }
 
-    #[doc(hidden)]
-    pub fn new_with_artifact_store(
-        _test_identity: PathBuf,
-        store: Arc<dyn ProofArtifactStore>,
+    pub async fn new_gcs(
+        environment: String,
+        namespace: String,
+        bucket_id: String,
+        prefix: String,
     ) -> Result<Self> {
-        Self::with_store(store)
+        let store =
+            Arc::new(GcsProofArtifactStore::new(environment, namespace, bucket_id, prefix).await?);
+        Ok(Self::with_store(store))
     }
 
     pub async fn begin_draining(&self) {
         self.start_draining();
-        let _lifecycle = self.lifecycle_gate.write().await;
+        let _commits = self.namespace_commit_fence.write().await;
         self.submission_checkpoints.wait_until_drained().await;
         self.deactivate();
+    }
+
+    #[must_use]
+    pub fn execution_lifecycle_gate(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.execution_lifecycle_gate)
     }
 
     /// Closes provider-submission admission, waits until `deadline` for accepted checkpoints, then
@@ -419,7 +486,7 @@ impl RuntimeManager {
     pub async fn begin_draining_with_deadline(&self, deadline: Instant) -> bool {
         self.start_draining();
         let drained = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-            let _lifecycle = self.lifecycle_gate.write().await;
+            let _commits = self.namespace_commit_fence.write().await;
             self.submission_checkpoints.wait_until_drained().await;
         })
         .await
@@ -611,11 +678,11 @@ impl RuntimeManager {
         const MAX_ATTEMPTS: usize = 3;
 
         self.ensure_authoritative_write_allowed(checkpoint_permit)?;
-        let _lifecycle = if checkpoint_permit.is_some() {
+        let _commit = if checkpoint_permit.is_some() {
             None
         } else {
             Some(
-                self.lifecycle_gate
+                self.namespace_commit_fence
                     .try_read()
                     .context("runtime is draining")?,
             )
@@ -800,14 +867,14 @@ impl RuntimeManager {
         self.install_runtime_state_object(stored).await
     }
 
-    fn fence_external_mutation(&self) -> Result<tokio::sync::RwLockReadGuard<'_, ()>> {
+    fn begin_object_commit(&self) -> Result<tokio::sync::RwLockReadGuard<'_, ()>> {
         self.ensure_active()?;
-        let lifecycle = self
-            .lifecycle_gate
+        let commit = self
+            .namespace_commit_fence
             .try_read()
             .context("runtime is draining")?;
         self.ensure_active()?;
-        Ok(lifecycle)
+        Ok(commit)
     }
 
     fn artifact_key(
@@ -851,12 +918,11 @@ impl RuntimeManager {
         proof_ref: &str,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
-        let lifecycle = self.fence_external_mutation()?;
         let key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let commit = self.begin_object_commit()?;
         let publication = self.store.put_if_absent(&key, bytes).await?;
-        drop(lifecycle);
-        let _lifecycle = self
-            .fence_external_mutation()
+        drop(commit);
+        self.ensure_active()
             .context("global runtime fence changed during artifact publication")?;
         Ok(publication)
     }
@@ -1001,14 +1067,17 @@ impl RuntimeManager {
         generation: Option<i64>,
         expected_content_hash: &str,
     ) -> Result<ProofArtifactDeleteResult> {
-        let _lifecycle = self.fence_external_mutation()?;
-        self.store
-            .delete(
-                &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
-                generation,
-                expected_content_hash,
-            )
-            .await
+        self.ensure_active()?;
+        let key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let Some(descriptor) = self.store.get_descriptor(&key).await? else {
+            return Ok(ProofArtifactDeleteResult::Missing);
+        };
+        anyhow::ensure!(
+            descriptor.generation == generation && descriptor.content_hash == expected_content_hash,
+            "proof artifact changed before conditional delete"
+        );
+        let _commit = self.begin_object_commit()?;
+        self.store.delete_exact(&key, &descriptor).await
     }
 
     pub const fn ensure_layout(&self) -> Result<()> {
@@ -1189,31 +1258,6 @@ impl RuntimeManager {
         Ok(tasks)
     }
 
-    pub async fn sync_status(
-        &self,
-        task_id: &str,
-        runner_status: RunnerStatus,
-        error: Option<String>,
-        proof_uri: Option<String>,
-    ) -> Result<()> {
-        let task_id = task_id.to_string();
-        self.mutate(move |state| {
-            if let Some(task) = state.tasks.get_mut(&task_id) {
-                if task.runner_status.is_terminal() {
-                    return Ok(());
-                }
-                task.runner_status = runner_status;
-                task.error.clone_from(&error);
-                if proof_uri.is_some() {
-                    task.proof_uri.clone_from(&proof_uri);
-                }
-                task.updated_at = now_ts();
-            }
-            Ok(())
-        })
-        .await
-    }
-
     /// Completes one concrete task lifetime only while every proof artifact it consumed remains
     /// the exact active registration validated by the caller.
     pub async fn complete_nonterminal_task(
@@ -1249,93 +1293,134 @@ impl RuntimeManager {
         .await
     }
 
-    pub async fn reopen_task_for_recovery(
+    /// Reopens exactly one task lifetime for recovery.
+    pub async fn reopen_task_for_recovery_if_current(
         &self,
-        task_id: &str,
+        lifetime: &TaskLifetime,
         expected_status: RunnerStatus,
-    ) -> Result<bool> {
+    ) -> Result<RuntimeMutationOutcome> {
         let _pending_publication = self.pending_publication_mutation.lock().await;
-        let task_id = task_id.to_string();
+        let task_id = lifetime.task_id.clone();
+        let incarnation_id = lifetime.incarnation_id;
         self.mutate(move |state| {
             let Some(task) = state.tasks.get_mut(&task_id) else {
-                return Ok(false);
+                return Ok(RuntimeMutationOutcome::Missing);
             };
+            if task.incarnation_id != incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
+            }
             if task.runner_status != expected_status {
-                return Ok(false);
+                return Ok(RuntimeMutationOutcome::Blocked);
             }
             task.runner_status = RunnerStatus::Allocated;
             task.error = None;
             task.updated_at = now_ts();
-            Ok(true)
+            Ok(RuntimeMutationOutcome::Applied)
         })
         .await
     }
 
-    pub async fn cancel_nonterminal_task(
+    /// Updates a non-terminal task only when its exact lifetime is still current.
+    pub async fn sync_nonterminal_status_if_current(
         &self,
-        task_id: &str,
+        lifetime: &TaskLifetime,
+        runner_status: RunnerStatus,
         error: Option<String>,
-    ) -> Result<bool> {
-        self.cancel_nonterminal_task_matching(task_id, error, None)
-            .await
-    }
-
-    pub async fn cancel_nonterminal_task_if_stale(
-        &self,
-        task_id: &str,
-        updated_at_or_before: i64,
-        error: Option<String>,
-    ) -> Result<bool> {
-        self.cancel_nonterminal_task_matching(task_id, error, Some(updated_at_or_before))
-            .await
-    }
-
-    pub async fn cancel_nonterminal_task_if_incarnation_and_stale(
-        &self,
-        task_id: &str,
-        expected_incarnation: uuid::Uuid,
-        updated_at_or_before: i64,
-        error: Option<String>,
-    ) -> Result<bool> {
-        let task_id = task_id.to_string();
+        proof_uri: Option<String>,
+    ) -> Result<RuntimeMutationOutcome> {
+        let task_id = lifetime.task_id.clone();
+        let incarnation_id = lifetime.incarnation_id;
         self.mutate(move |state| {
             let Some(task) = state.tasks.get_mut(&task_id) else {
-                return Ok(false);
+                return Ok(RuntimeMutationOutcome::Missing);
             };
-            if task.incarnation_id != expected_incarnation
-                || task.runner_status.is_terminal()
-                || task.updated_at > updated_at_or_before
-            {
-                return Ok(false);
+            if task.incarnation_id != incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
             }
-            task.runner_status = RunnerStatus::Cancelled;
+            if task.runner_status.is_terminal() {
+                return Ok(RuntimeMutationOutcome::Blocked);
+            }
+            task.runner_status = runner_status;
             task.error.clone_from(&error);
+            if proof_uri.is_some() {
+                task.proof_uri.clone_from(&proof_uri);
+            }
             task.updated_at = now_ts();
-            Ok(true)
+            Ok(RuntimeMutationOutcome::Applied)
         })
         .await
     }
 
-    async fn cancel_nonterminal_task_matching(
+    /// Returns whether this exact task lifetime may still own an execution graph.
+    pub async fn is_task_active_if_current(&self, lifetime: &TaskLifetime) -> Result<bool> {
+        let state = self.state.read().await;
+        Ok(state.tasks.get(&lifetime.task_id).is_some_and(|task| {
+            task.incarnation_id == lifetime.incarnation_id
+                && matches!(
+                    task.runner_status,
+                    RunnerStatus::Allocated | RunnerStatus::Running
+                )
+        }))
+    }
+
+    /// Cancels exactly one task lifetime without affecting a replacement task.
+    pub async fn cancel_task_if_current(
         &self,
-        task_id: &str,
+        lifetime: &TaskLifetime,
         error: Option<String>,
-        updated_at_or_before: Option<i64>,
-    ) -> Result<bool> {
-        let task_id = task_id.to_string();
+    ) -> Result<RuntimeMutationOutcome> {
+        let task_id = lifetime.task_id.clone();
+        let incarnation_id = lifetime.incarnation_id;
         self.mutate(move |state| {
             let Some(task) = state.tasks.get_mut(&task_id) else {
-                return Ok(false);
+                return Ok(RuntimeMutationOutcome::Missing);
             };
-            if task.runner_status.is_terminal()
-                || updated_at_or_before.is_some_and(|cutoff| task.updated_at > cutoff)
-            {
-                return Ok(false);
+            if task.incarnation_id != incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
+            }
+            match task.runner_status {
+                RunnerStatus::Cancelled => Ok(RuntimeMutationOutcome::AlreadyApplied),
+                RunnerStatus::Completed | RunnerStatus::Failed => {
+                    Ok(RuntimeMutationOutcome::Blocked)
+                }
+                RunnerStatus::Allocated | RunnerStatus::Running => {
+                    task.runner_status = RunnerStatus::Cancelled;
+                    task.error.clone_from(&error);
+                    task.updated_at = now_ts();
+                    Ok(RuntimeMutationOutcome::Applied)
+                }
+            }
+        })
+        .await
+    }
+
+    /// Retires exactly one task lifetime before destructive queue cleanup.
+    ///
+    /// Unlike cancellation, retirement also applies to completed and failed roots because the
+    /// caller is about to remove the root and must prevent a concurrent recovery from attaching
+    /// a new execution graph.
+    pub async fn retire_task_if_current(
+        &self,
+        lifetime: &TaskLifetime,
+        error: Option<String>,
+    ) -> Result<RuntimeMutationOutcome> {
+        let task_id = lifetime.task_id.clone();
+        let incarnation_id = lifetime.incarnation_id;
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(RuntimeMutationOutcome::Missing);
+            };
+            if task.incarnation_id != incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
+            }
+            if task.runner_status == RunnerStatus::Cancelled {
+                return Ok(RuntimeMutationOutcome::AlreadyApplied);
             }
             task.runner_status = RunnerStatus::Cancelled;
             task.error.clone_from(&error);
+            task.proof_uri = None;
             task.updated_at = now_ts();
-            Ok(true)
+            Ok(RuntimeMutationOutcome::Applied)
         })
         .await
     }
@@ -1791,17 +1876,14 @@ impl RuntimeManager {
                 Ok(Some(record.generation))
             })
             .await?;
-        let Some(generation) = invalidated_generation else {
+        let Some(_generation) = invalidated_generation else {
             return Ok(None);
         };
-        self.finalize_proof_artifact_invalidation(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            generation,
-            &descriptor.content_hash,
-        )
+        self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
+            key: Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
+            descriptor: descriptor.clone(),
+            lifecycle: ProofArtifactLifecycle::Invalidated,
+        })
         .await
         .map(Some)
     }
@@ -1866,14 +1948,11 @@ impl RuntimeManager {
         }
 
         let delete_result = self
-            .finalize_proof_artifact_invalidation(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                descriptor.generation,
-                &descriptor.content_hash,
-            )
+            .finalize_proof_artifact_invalidation(&ArtifactExpectation {
+                key: Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
+                descriptor: descriptor.clone(),
+                lifecycle: ProofArtifactLifecycle::Invalidated,
+            })
             .await?;
         self.remove_proof_artifact_if_descriptor(
             network_pair,
@@ -1888,21 +1967,26 @@ impl RuntimeManager {
 
     pub async fn finalize_proof_artifact_invalidation(
         &self,
-        network_pair: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        proof_ref: &str,
-        generation: Option<i64>,
-        content_hash: &str,
+        expectation: &ArtifactExpectation,
     ) -> Result<ProofArtifactDeleteResult> {
-        let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
-        let _lifecycle = self.fence_external_mutation()?;
-        self.store
-            .mark_invalidated(&object_key, generation, content_hash)
-            .await?;
-        self.store
-            .delete(&object_key, generation, content_hash)
-            .await
+        anyhow::ensure!(
+            expectation.lifecycle == ProofArtifactLifecycle::Invalidated,
+            "proof artifact must be durably invalidated before external finalization"
+        );
+        let _commit = self.begin_object_commit()?;
+        match self
+            .store
+            .invalidate_exact(&expectation.key, &expectation.descriptor)
+            .await?
+        {
+            ExactInvalidationResult::Invalidated(result) => Ok(result),
+            ExactInvalidationResult::AlreadyInvalidated | ExactInvalidationResult::Missing => {
+                Ok(ProofArtifactDeleteResult::Missing)
+            }
+            ExactInvalidationResult::Stale => {
+                anyhow::bail!("proof artifact changed before exact invalidation")
+            }
+        }
     }
 
     /// Completes external tombstone/delete work for invalidations committed before a crash.
@@ -1917,15 +2001,8 @@ impl RuntimeManager {
             .cloned()
             .collect::<Vec<_>>();
         for record in &invalidated {
-            self.finalize_proof_artifact_invalidation(
-                &record.network_pair,
-                record.pipeline_key,
-                record.route,
-                &record.proof_ref,
-                record.generation,
-                &record.content_hash,
-            )
-            .await?;
+            self.finalize_proof_artifact_invalidation(&record.expectation())
+                .await?;
             if self
                 .get_recoverable_pending_proof_publication(
                     &record.network_pair,
@@ -1990,9 +2067,7 @@ impl RuntimeManager {
             return Ok(true);
         }
         let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
-        self.store
-            .is_invalidated(&object_key, descriptor.generation, &descriptor.content_hash)
-            .await
+        self.store.is_invalidated(&object_key, descriptor).await
     }
 
     pub async fn proof_artifact_descriptor_is_current(
@@ -2049,8 +2124,8 @@ impl RuntimeManager {
         proof_ref: &str,
         proof_bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
-        let _lifecycle = self.fence_external_mutation()?;
         let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let _commit = self.begin_object_commit()?;
         self.store.put_if_absent(&key, proof_bytes).await
     }
 
@@ -2313,10 +2388,8 @@ impl RuntimeManager {
         let Some(object) = self.store.get(&key).await? else {
             return Ok(false);
         };
-        let _lifecycle = self.fence_external_mutation()?;
-        self.store
-            .delete(&key, object.generation, &object.content_hash)
-            .await?;
+        let _commit = self.begin_object_commit()?;
+        self.store.delete_exact(&key, &object.descriptor()).await?;
         Ok(true)
     }
 
@@ -2393,22 +2466,19 @@ impl RuntimeManager {
         }
 
         if let Some(object) = canonical.as_ref() {
-            self.finalize_proof_artifact_invalidation(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                object.generation,
-                &object.content_hash,
-            )
+            self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
+                key: object_key,
+                descriptor: object.descriptor(),
+                lifecycle: ProofArtifactLifecycle::Invalidated,
+            })
             .await?;
         }
         let pending_key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
         let pending = self.store.get(&pending_key).await?;
         if let Some(pending) = pending.as_ref() {
-            let _lifecycle = self.fence_external_mutation()?;
+            let _commit = self.begin_object_commit()?;
             self.store
-                .delete(&pending_key, pending.generation, &pending.content_hash)
+                .delete_exact(&pending_key, &pending.descriptor())
                 .await?;
         }
         Ok(true)
@@ -2505,37 +2575,24 @@ impl RuntimeManager {
         Ok(tasks)
     }
 
-    pub async fn remove_task(&self, task_id: &str) -> Result<bool> {
-        self.remove_task_matching_incarnation(task_id, None).await
-    }
-
-    pub async fn remove_task_if_incarnation(
+    /// Removes exactly one task lifetime and its pending-publication ownership.
+    pub async fn remove_task_if_current(
         &self,
-        task_id: &str,
-        expected_incarnation: uuid::Uuid,
-    ) -> Result<bool> {
-        self.remove_task_matching_incarnation(task_id, Some(expected_incarnation))
-            .await
-    }
-
-    async fn remove_task_matching_incarnation(
-        &self,
-        task_id: &str,
-        expected_incarnation: Option<uuid::Uuid>,
-    ) -> Result<bool> {
+        lifetime: &TaskLifetime,
+    ) -> Result<RuntimeMutationOutcome> {
         let _pending_publication = self.pending_publication_mutation.lock().await;
-        let task_id = task_id.to_string();
+        let task_id = lifetime.task_id.clone();
+        let incarnation_id = lifetime.incarnation_id;
         self.mutate(move |state| {
             let Some(current) = state.tasks.get(&task_id) else {
-                return Ok(false);
+                return Ok(RuntimeMutationOutcome::Missing);
             };
-            if expected_incarnation.is_some_and(|expected| current.incarnation_id != expected) {
-                return Ok(false);
+            if current.incarnation_id != incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
             }
-            let removed = state
-                .tasks
-                .remove(&task_id)
-                .expect("task checked above must still exist during mutation");
+            let Some(removed) = state.tasks.remove(&task_id) else {
+                return Ok(RuntimeMutationOutcome::Conflict);
+            };
             for pending in state.pending_publications.values_mut() {
                 pending
                     .owner_incarnations
@@ -2544,7 +2601,7 @@ impl RuntimeManager {
             state
                 .pending_publications
                 .retain(|_, pending| !pending.owner_incarnations.is_empty());
-            Ok(true)
+            Ok(RuntimeMutationOutcome::Applied)
         })
         .await
     }
@@ -2575,6 +2632,10 @@ pub struct RuntimeTaskRecord {
     pub route: PipelineRoute,
     pub task_kind: String,
     pub proposal_id: Option<u64>,
+    /// Canonical network-pair scope for every artifact and task ownership decision.
+    pub network_pair: String,
+    /// Canonical proof references consumed or produced by this root.
+    pub artifact_refs: Vec<String>,
     pub proof_ids: Vec<String>,
     pub runner_status: RunnerStatus,
     pub image_ref: Option<String>,
@@ -2584,6 +2645,16 @@ pub struct RuntimeTaskRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_fingerprint: Option<String>,
     pub updated_at: i64,
+}
+
+impl RuntimeTaskRecord {
+    #[must_use]
+    pub fn lifetime(&self) -> TaskLifetime {
+        TaskLifetime {
+            task_id: self.task_id.clone(),
+            incarnation_id: self.incarnation_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2643,6 +2714,13 @@ fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecor
         route: registration.route,
         task_kind: registration.task_kind.clone(),
         proposal_id: registration.proposal_id,
+        network_pair: registration
+            .metadata
+            .get("network_pair")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        artifact_refs: task_artifact_refs(&registration.metadata, &registration.proof_ids),
         proof_ids: registration.proof_ids.clone(),
         runner_status: RunnerStatus::Allocated,
         image_ref: None,
@@ -2717,33 +2795,38 @@ fn ensure_task_fingerprint_available(
     Ok(())
 }
 
+fn task_artifact_refs(metadata: &serde_json::Value, proof_ids: &[String]) -> Vec<String> {
+    let mut refs = proof_ids.to_vec();
+    if let Some(aggregate_task_id) = metadata
+        .get("aggregate_task_id")
+        .and_then(serde_json::Value::as_str)
+        && !refs.iter().any(|proof_ref| proof_ref == aggregate_task_id)
+    {
+        refs.push(aggregate_task_id.to_string());
+    }
+    if let Some(artifacts) = metadata
+        .get("aggregate_input_artifacts")
+        .and_then(serde_json::Value::as_array)
+    {
+        for proof_ref in artifacts.iter().filter_map(|artifact| {
+            artifact
+                .get("proof_ref")
+                .and_then(serde_json::Value::as_str)
+        }) {
+            if !refs.iter().any(|existing| existing == proof_ref) {
+                refs.push(proof_ref.to_string());
+            }
+        }
+    }
+    refs
+}
+
 fn task_references(record: &RuntimeTaskRecord, task_ref: &str) -> bool {
-    record.task_id == task_ref
-        || record.proof_ids.iter().any(|id| id == task_ref)
-        || record
-            .metadata
-            .get("aggregate_task_id")
-            .and_then(serde_json::Value::as_str)
-            == Some(task_ref)
-        || record
-            .metadata
-            .get("aggregate_input_artifacts")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|artifacts| {
-                artifacts.iter().any(|artifact| {
-                    artifact
-                        .get("proof_ref")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(task_ref)
-                })
-            })
+    record.task_id == task_ref || record.artifact_refs.iter().any(|id| id == task_ref)
 }
 
 fn task_network_pair(record: &RuntimeTaskRecord) -> Option<&str> {
-    record
-        .metadata
-        .get("network_pair")
-        .and_then(serde_json::Value::as_str)
+    (!record.network_pair.is_empty()).then_some(record.network_pair.as_str())
 }
 
 fn task_matches_artifact_identity(
@@ -2824,6 +2907,83 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    async fn current_test_task(
+        runtime: &RuntimeManager,
+        task_id: &str,
+    ) -> Result<RuntimeTaskRecord> {
+        runtime
+            .get_task(task_id)
+            .await?
+            .with_context(|| format!("missing test runtime task {task_id}"))
+    }
+
+    async fn set_test_status(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        status: RunnerStatus,
+        error: Option<String>,
+        proof_uri: Option<String>,
+    ) -> Result<RuntimeMutationOutcome> {
+        let record = current_test_task(runtime, task_id).await?;
+        runtime
+            .sync_nonterminal_status_if_current(&record.lifetime(), status, error, proof_uri)
+            .await
+    }
+
+    async fn cancel_test_task(
+        runtime: &RuntimeManager,
+        task_id: &str,
+    ) -> Result<RuntimeMutationOutcome> {
+        let record = current_test_task(runtime, task_id).await?;
+        runtime
+            .cancel_task_if_current(&record.lifetime(), None)
+            .await
+    }
+
+    async fn remove_test_task(
+        runtime: &RuntimeManager,
+        task_id: &str,
+    ) -> Result<RuntimeMutationOutcome> {
+        let record = current_test_task(runtime, task_id).await?;
+        runtime.remove_task_if_current(&record.lifetime()).await
+    }
+
+    #[tokio::test]
+    async fn exact_root_commands_do_not_touch_a_replacement() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "exact-root-commands".into())?;
+        let registration = TaskRegistration {
+            task_id: "root".into(),
+            pipeline_key: Some(PipelineKey::ShastaNative),
+            route: PipelineKey::ShastaNative.route(),
+            task_kind: "proposal".into(),
+            proposal_id: Some(1),
+            proof_ids: Vec::new(),
+            metadata: serde_json::json!({}),
+            request_fingerprint: Some("root-request".into()),
+        };
+        let first = runtime.register_task(registration.clone()).await?;
+        assert_eq!(
+            runtime
+                .cancel_task_if_current(&first.lifetime(), None)
+                .await?,
+            RuntimeMutationOutcome::Applied
+        );
+        let replacement = runtime.register_task(registration).await?;
+        assert_ne!(first.incarnation_id, replacement.incarnation_id);
+        assert_eq!(
+            runtime.remove_task_if_current(&first.lifetime()).await?,
+            RuntimeMutationOutcome::Stale
+        );
+        assert_eq!(
+            runtime
+                .get_task("root")
+                .await?
+                .map(|task| task.incarnation_id),
+            Some(replacement.incarnation_id)
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn legacy_runtime_state_missing_required_lifecycle_fields_fails_closed() -> Result<()> {
         let record = build_task_record(&TaskRegistration {
@@ -2866,6 +3026,16 @@ mod tests {
             .as_object_mut()
             .context("legacy task must be an object")?
             .remove("incarnation_id");
+        let mut missing_network_pair = current_state.clone();
+        missing_network_pair["tasks"]["legacy-root"]
+            .as_object_mut()
+            .context("legacy task must be an object")?
+            .remove("network_pair");
+        let mut missing_artifact_refs = current_state.clone();
+        missing_artifact_refs["tasks"]["legacy-root"]
+            .as_object_mut()
+            .context("legacy task must be an object")?
+            .remove("artifact_refs");
         let mut missing_artifact_lifecycle = current_state;
         missing_artifact_lifecycle["artifacts"]
             .get_mut(&legacy_artifact_key)
@@ -2879,6 +3049,8 @@ mod tests {
                 "legacy-missing-artifact-lifecycle",
                 missing_artifact_lifecycle,
             ),
+            ("legacy-missing-network-pair", missing_network_pair),
+            ("legacy-missing-artifact-refs", missing_artifact_refs),
         ] {
             let store = Arc::new(MemoryProofArtifactStore::new(
                 "test".into(),
@@ -2890,7 +3062,7 @@ mod tests {
                     .await?,
                 RuntimeStateWriteResult::Stored { .. }
             ));
-            let runtime = RuntimeManager::with_store(store)?;
+            let runtime = RuntimeManager::with_store(store);
             runtime
                 .initialize()
                 .await
@@ -2940,8 +3112,7 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl ProofArtifactStore for RuntimeStateProbeStore {
+    impl RuntimeStoreScope for RuntimeStateProbeStore {
         fn environment(&self) -> &str {
             self.inner.environment()
         }
@@ -2953,7 +3124,10 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "test"
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ProofObjectStore for RuntimeStateProbeStore {
         async fn put_if_absent(
             &self,
             key: &ProofArtifactKey,
@@ -2985,38 +3159,12 @@ mod tests {
             self.inner.get_prefix(key, max_bytes).await
         }
 
-        async fn mark_invalidated(
+        async fn invalidate_exact(
             &self,
             key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
-        ) -> Result<()> {
-            self.inner
-                .mark_invalidated(key, generation, content_hash)
-                .await
-        }
-
-        async fn is_invalidated(
-            &self,
-            key: &ProofArtifactKey,
-            generation: Option<i64>,
-            content_hash: &str,
-        ) -> Result<bool> {
-            self.inner
-                .is_invalidated(key, generation, content_hash)
-                .await
-        }
-
-        async fn delete(
-            &self,
-            key: &ProofArtifactKey,
-            generation: Option<i64>,
-            expected_content_hash: &str,
-        ) -> Result<ProofArtifactDeleteResult> {
-            let result = self
-                .inner
-                .delete(key, generation, expected_content_hash)
-                .await?;
+            descriptor: &ProofArtifactDescriptor,
+        ) -> Result<ExactInvalidationResult> {
+            let result = self.inner.invalidate_exact(key, descriptor).await?;
             if self
                 .block_next_artifact_delete
                 .swap(false, Ordering::SeqCst)
@@ -3027,6 +3175,33 @@ mod tests {
             Ok(result)
         }
 
+        async fn is_invalidated(
+            &self,
+            key: &ProofArtifactKey,
+            descriptor: &ProofArtifactDescriptor,
+        ) -> Result<bool> {
+            self.inner.is_invalidated(key, descriptor).await
+        }
+
+        async fn delete_exact(
+            &self,
+            key: &ProofArtifactKey,
+            descriptor: &ProofArtifactDescriptor,
+        ) -> Result<ProofArtifactDeleteResult> {
+            let result = self.inner.delete_exact(key, descriptor).await?;
+            if self
+                .block_next_artifact_delete
+                .swap(false, Ordering::SeqCst)
+            {
+                self.artifact_delete_completed.notify_one();
+                self.allow_artifact_delete_return.notified().await;
+            }
+            Ok(result)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStateStore for RuntimeStateProbeStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             self.inner.load_runtime_state().await
         }
@@ -3158,7 +3333,13 @@ mod tests {
         }
         assert!(admission_closed);
         assert!(!runtime.accepts_mutations());
-        assert!(runtime.remove_task("checkpoint-root").await.is_err());
+        let root = current_test_task(runtime.as_ref(), "checkpoint-root").await?;
+        assert!(
+            runtime
+                .remove_task_if_current(&root.lifetime())
+                .await
+                .is_err()
+        );
         runtime
             .checkpoint_tasks_by_ref(&first, "checkpoint-root", |records| {
                 records[0].image_ref = Some("checkpoint-persisted".into());
@@ -3188,12 +3369,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draining_waits_for_global_lifecycle_operation() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new_memory(
-            "test".into(),
-            "lifecycle-operation-drain".into(),
-        )?);
-        let operation = runtime.acquire_lifecycle_operation().await?;
+    async fn draining_waits_for_in_flight_object_commit() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("object-commit-drain")?);
+        store.block_next_artifact_put.store(true, Ordering::SeqCst);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let publication = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .publish_proof_artifact_bytes(
+                        "l1-l2",
+                        PipelineKey::ShastaSp1,
+                        PipelineKey::ShastaSp1.route(),
+                        "proof",
+                        b"proof",
+                    )
+                    .await
+            }
+        });
+        store.artifact_put_entered.notified().await;
         let mut draining = tokio::spawn({
             let runtime = Arc::clone(&runtime);
             async move { runtime.begin_draining().await }
@@ -3203,16 +3397,37 @@ mod tests {
                 .await
                 .is_err()
         );
-        drop(operation);
+        store.allow_artifact_put.notify_one();
+        publication
+            .await?
+            .expect_err("draining must reject the post-commit saga step");
         draining.await?;
-        assert!(runtime.acquire_lifecycle_operation().await.is_err());
+        assert!(!runtime.accepts_mutations());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_does_not_wait_for_saga_between_commits() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            "between-commits-drain".into(),
+        )?);
+        let saga = runtime.pending_publication_mutation.lock().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), {
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.begin_draining().await }
+        })
+        .await
+        .context("drain waited for a lifecycle saga outside a storage commit")?;
+        drop(saga);
+        assert!(!runtime.accepts_mutations());
         Ok(())
     }
 
     #[tokio::test]
     async fn pre_admitted_checkpoint_recovers_while_runtime_is_draining() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("checkpoint-drain-retry")?);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
@@ -3281,7 +3496,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_finishing_after_drain_deadline_is_not_installed() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("checkpoint-write-timeout")?);
-        let runtime = Arc::new(RuntimeManager::with_store(store.clone())?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
@@ -3546,7 +3761,7 @@ mod tests {
     #[tokio::test]
     async fn external_mutation_fence_does_not_write_runtime_state() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("external-fence")?);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
 
         runtime
             .upsert_pending_proof_publication(
@@ -3566,10 +3781,10 @@ mod tests {
     async fn runtime_state_conflict_fails_closed_without_installing_foreign_state() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("state-conflict")?);
         store.force_conflict.store(true, Ordering::SeqCst);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
 
         let error = runtime
-            .remove_task("missing")
+            .mutate(|_| Ok(()))
             .await
             .expect_err("a true generation conflict must fail closed");
 
@@ -3585,7 +3800,7 @@ mod tests {
     async fn runtime_state_transport_error_recovers_committed_write_by_readback() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("state-readback")?);
         store.commit_then_error.store(true, Ordering::SeqCst);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
 
         runtime
             .register_task(TaskRegistration {
@@ -3612,7 +3827,7 @@ mod tests {
         store
             .foreign_commit_then_error
             .store(true, Ordering::SeqCst);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
 
         let error = runtime
             .register_task(TaskRegistration {
@@ -3639,10 +3854,10 @@ mod tests {
     async fn transient_runtime_state_failure_is_readiness_recoverable() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("state-recoverable")?);
         store.fail_before_commit.store(3, Ordering::SeqCst);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
 
         runtime
-            .remove_task("missing")
+            .mutate(|_| Ok(()))
             .await
             .expect_err("three transient writes must exhaust the mutation retry");
 
@@ -3683,14 +3898,17 @@ mod tests {
             )
             .await?;
 
-        runtime
-            .sync_status(
+        assert!(matches!(
+            set_test_status(
+                &runtime,
                 "completed-task",
                 RunnerStatus::Allocated,
                 Some("late retry".into()),
                 None,
             )
-            .await?;
+            .await?,
+            RuntimeMutationOutcome::Blocked
+        ));
 
         let record = runtime
             .get_task("completed-task")
@@ -3708,7 +3926,10 @@ mod tests {
         let first = register_native_task(&runtime, "root", 1).await?;
         let precondition = active_artifact_precondition(&runtime, "stale-task-proof").await?;
 
-        assert!(runtime.remove_task("root").await?);
+        assert!(matches!(
+            remove_test_task(&runtime, "root").await?,
+            RuntimeMutationOutcome::Applied
+        ));
         let replacement = register_native_task(&runtime, "root", 2).await?;
 
         assert!(
@@ -3821,7 +4042,7 @@ mod tests {
             "test".into(),
             "pending-proof".into(),
         )?);
-        let first = RuntimeManager::with_store(store.clone())?;
+        let first = RuntimeManager::with_store(store.clone());
         first
             .register_task(TaskRegistration {
                 task_id: "task-a".into(),
@@ -3857,7 +4078,7 @@ mod tests {
                 .any(|window| window == proof)
         );
 
-        let recovered = RuntimeManager::with_store(store)?;
+        let recovered = RuntimeManager::with_store(store);
         recovered.initialize().await?;
         assert_eq!(
             recovered
@@ -3878,7 +4099,7 @@ mod tests {
         let runtime = RuntimeManager::with_store(Arc::new(MemoryProofArtifactStore::new(
             "test".into(),
             "descriptor-fence".into(),
-        )?))?;
+        )?));
         let current = ProofArtifactRegistration {
             network_pair: "l1-l2".into(),
             proof_ref: "proposal-1".into(),
@@ -3924,7 +4145,7 @@ mod tests {
             "test".into(),
             "restart-invalidation".into(),
         )?);
-        let first = RuntimeManager::with_store(store.clone())?;
+        let first = RuntimeManager::with_store(store.clone());
         let publication = first
             .publish_proof_artifact_bytes(
                 "l1-l2",
@@ -3971,7 +4192,7 @@ mod tests {
             )
             .await?;
 
-        let restarted = RuntimeManager::with_store(store)?;
+        let restarted = RuntimeManager::with_store(store);
         restarted.initialize().await?;
         assert_eq!(restarted.reconcile_invalidated_proof_artifacts().await?, 1);
         assert!(
@@ -4051,10 +4272,8 @@ mod tests {
                 )
                 .await?
         );
-        runtime
-            .sync_status("root", RunnerStatus::Cancelled, None, None)
-            .await?;
-        runtime.remove_task("root").await?;
+        cancel_test_task(&runtime, "root").await?;
+        remove_test_task(&runtime, "root").await?;
         let second = match runtime.register_task_if_absent(registration).await? {
             TaskRegistrationOutcome::Created(record) => record,
             TaskRegistrationOutcome::Existing(_) => anyhow::bail!("unexpected existing task"),
@@ -4238,7 +4457,7 @@ mod tests {
             "test".into(),
             "pending-hash-mismatch".into(),
         )?);
-        let runtime = RuntimeManager::with_store(store.clone())?;
+        let runtime = RuntimeManager::with_store(store.clone());
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
         let proof_ref = "external-input-0";
@@ -4273,9 +4492,7 @@ mod tests {
 
         let key = RuntimeManager::pending_artifact_key("l1-l2", pipeline, route, proof_ref);
         let original = store.get(&key).await?.context("pending object")?;
-        store
-            .delete(&key, original.generation, &original.content_hash)
-            .await?;
+        store.delete_exact(&key, &original.descriptor()).await?;
         store.put_if_absent(&key, b"corrupted").await?;
 
         let error = runtime
@@ -4386,10 +4603,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test keeps the invalidation and admission race in one deterministic trace"
+    )]
     async fn descriptor_invalidation_serializes_new_task_admission_until_delete_finishes()
     -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("artifact-admission-fence")?);
-        let runtime = Arc::new(RuntimeManager::with_store(store.clone())?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let network_pair = "l1-l2";
         let pipeline = PipelineKey::ShastaSp1;
         let route = pipeline.route();
@@ -4423,9 +4644,7 @@ mod tests {
                 request_fingerprint: None,
             })
             .await?;
-        runtime
-            .sync_status("recoverable-root", RunnerStatus::Cancelled, None, None)
-            .await?;
+        cancel_test_task(runtime.as_ref(), "recoverable-root").await?;
 
         store
             .block_next_artifact_delete
@@ -4480,11 +4699,15 @@ mod tests {
                 .is_err(),
             "new task admission bypassed the artifact invalidation fence"
         );
+        let recovery_root = current_test_task(runtime.as_ref(), "recoverable-root").await?;
         let mut recovery = tokio::spawn({
             let runtime = Arc::clone(&runtime);
             async move {
                 runtime
-                    .reopen_task_for_recovery("recoverable-root", RunnerStatus::Cancelled)
+                    .reopen_task_for_recovery_if_current(
+                        &recovery_root.lifetime(),
+                        RunnerStatus::Cancelled,
+                    )
                     .await
             }
         });
@@ -4501,7 +4724,7 @@ mod tests {
             ProofArtifactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
         );
         assert!(admission.await?.is_err());
-        assert!(recovery.await??);
+        assert!(matches!(recovery.await??, RuntimeMutationOutcome::Applied));
         assert!(
             runtime
                 .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref,)
@@ -4611,7 +4834,7 @@ mod tests {
             metadata: serde_json::json!({}),
             request_fingerprint: Some("same-request".into()),
         };
-        let first = RuntimeManager::with_store(store.clone())?;
+        let first = RuntimeManager::with_store(store.clone());
         let first_owner = first
             .register_task(registration.clone())
             .await?
@@ -4628,13 +4851,14 @@ mod tests {
                 )
                 .await?
         );
-        first
-            .sync_status("root", RunnerStatus::Cancelled, None, None)
-            .await?;
-        assert!(first.remove_task("root").await?);
+        cancel_test_task(&first, "root").await?;
+        assert!(matches!(
+            remove_test_task(&first, "root").await?,
+            RuntimeMutationOutcome::Applied
+        ));
         drop(first);
 
-        let replacement = RuntimeManager::with_store(store)?;
+        let replacement = RuntimeManager::with_store(store);
         replacement.initialize().await?;
         let replacement_owner = replacement
             .register_task(registration)
@@ -4680,14 +4904,16 @@ mod tests {
             request_fingerprint: None,
         };
         let first = runtime.register_task(registration.clone()).await?;
-        assert!(runtime.remove_task("root").await?);
+        assert!(matches!(
+            remove_test_task(&runtime, "root").await?,
+            RuntimeMutationOutcome::Applied
+        ));
         let replacement = runtime.register_task(registration).await?;
 
-        assert!(
-            !runtime
-                .remove_task_if_incarnation("root", first.incarnation_id)
-                .await?
-        );
+        assert!(matches!(
+            runtime.remove_task_if_current(&first.lifetime()).await?,
+            RuntimeMutationOutcome::Stale
+        ));
         assert_eq!(
             runtime
                 .get_task("root")
@@ -4702,7 +4928,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_owner_cleans_outbox_that_finishes_put_late() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("cancel-during-outbox-put")?);
-        let runtime = Arc::new(RuntimeManager::with_store(store.clone())?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let registration = TaskRegistration {
             task_id: "root".into(),
             pipeline_key: Some(PipelineKey::ShastaSp1),
@@ -4736,9 +4962,7 @@ mod tests {
             }
         });
         store.artifact_put_entered.notified().await;
-        runtime
-            .sync_status("root", RunnerStatus::Cancelled, None, None)
-            .await?;
+        cancel_test_task(runtime.as_ref(), "root").await?;
         let cleanup = tokio::spawn({
             let runtime = Arc::clone(&runtime);
             async move {
@@ -4769,7 +4993,7 @@ mod tests {
                 .is_none()
         );
 
-        runtime.remove_task("root").await?;
+        remove_test_task(runtime.as_ref(), "root").await?;
         runtime.register_task(registration).await?;
         let replacement = runtime
             .get_task("root")

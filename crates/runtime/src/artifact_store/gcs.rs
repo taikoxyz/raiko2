@@ -1,7 +1,8 @@
 use super::{
-    ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
-    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore,
-    RuntimeStateObject, RuntimeStateWriteResult, content_hash, encode_component,
+    ExactInvalidationResult, ProofArtifactConflict, ProofArtifactDeleteResult,
+    ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
+    ProofArtifactPutResult, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
+    RuntimeStateWriteResult, RuntimeStoreScope, content_hash, encode_component,
     validate_scope_component,
 };
 use anyhow::{Context, Result};
@@ -322,8 +323,7 @@ impl GcsProofArtifactStore {
     }
 }
 
-#[async_trait]
-impl ProofArtifactStore for GcsProofArtifactStore {
+impl RuntimeStoreScope for GcsProofArtifactStore {
     fn environment(&self) -> &str {
         &self.environment
     }
@@ -335,7 +335,10 @@ impl ProofArtifactStore for GcsProofArtifactStore {
     fn backend_name(&self) -> &'static str {
         "gcs"
     }
+}
 
+#[async_trait]
+impl ProofObjectStore for GcsProofArtifactStore {
     async fn put_if_absent(
         &self,
         key: &ProofArtifactKey,
@@ -490,51 +493,92 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         }))
     }
 
-    async fn mark_invalidated(
+    async fn invalidate_exact(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        content_hash: &str,
-    ) -> Result<()> {
-        let name = self.invalidation_name(key, generation, content_hash);
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<ExactInvalidationResult> {
+        let Some((manifest, generation)) = self.read_manifest(key).await? else {
+            return Ok(if self.is_invalidated(key, descriptor).await? {
+                ExactInvalidationResult::AlreadyInvalidated
+            } else {
+                ExactInvalidationResult::Missing
+            });
+        };
+        let current = ProofArtifactDescriptor {
+            proof_uri: self.content_uri(key, &manifest.content_hash),
+            content_hash: manifest.content_hash,
+            generation: Some(generation),
+        };
+        if current != *descriptor {
+            return Ok(ExactInvalidationResult::Stale);
+        }
+        let name = self.invalidation_name(key, descriptor.generation, &descriptor.content_hash);
         self.transport
             .create(&name, &[])
             .await
             .context("failed to publish GCS invalidation marker")?;
-        Ok(())
+        match self
+            .delete_named(&self.manifest_name(key), descriptor.generation)
+            .await
+        {
+            Ok(deleted) => Ok(ExactInvalidationResult::Invalidated(deleted)),
+            Err(delete_error) => match self.read_manifest(key).await {
+                Ok(None) => Ok(ExactInvalidationResult::AlreadyInvalidated),
+                Ok(Some((manifest, generation))) => {
+                    let observed = ProofArtifactDescriptor {
+                        proof_uri: self.content_uri(key, &manifest.content_hash),
+                        content_hash: manifest.content_hash,
+                        generation: Some(generation),
+                    };
+                    if observed == *descriptor {
+                        Err(delete_error).context(
+                            "proof manifest delete failed before commit; exact invalidation can be retried",
+                        )
+                    } else {
+                        Ok(ExactInvalidationResult::Stale)
+                    }
+                }
+                Err(read_error) => Err(delete_error).context(format!(
+                    "proof manifest delete outcome is unknown and read-back failed: {read_error:#}"
+                )),
+            },
+        }
     }
 
     async fn is_invalidated(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        content_hash: &str,
+        descriptor: &ProofArtifactDescriptor,
     ) -> Result<bool> {
-        let name = self.invalidation_name(key, generation, content_hash);
+        let name = self.invalidation_name(key, descriptor.generation, &descriptor.content_hash);
         Ok(self.transport.read(&name, None).await?.is_some())
     }
 
-    async fn delete(
+    async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
-        generation: Option<i64>,
-        expected_content_hash: &str,
+        descriptor: &ProofArtifactDescriptor,
     ) -> Result<ProofArtifactDeleteResult> {
         let Some((manifest, current_generation)) = self.read_manifest(key).await? else {
             return Ok(ProofArtifactDeleteResult::Missing);
         };
         anyhow::ensure!(
-            manifest.content_hash == expected_content_hash,
+            manifest.content_hash == descriptor.content_hash
+                && self.content_uri(key, &manifest.content_hash) == descriptor.proof_uri,
             "proof artifact content changed before conditional delete"
         );
         anyhow::ensure!(
-            generation == Some(current_generation),
+            descriptor.generation == Some(current_generation),
             "proof artifact generation changed before conditional delete"
         );
         self.delete_named(&self.manifest_name(key), Some(current_generation))
             .await
     }
+}
 
+#[async_trait]
+impl RuntimeStateStore for GcsProofArtifactStore {
     async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
         let name = self.runtime_state_name();
         Ok(self

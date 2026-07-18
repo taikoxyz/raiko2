@@ -104,9 +104,9 @@ jobs:
         with:
           shared-key: ci-rust
 
-      # Keep clippy on fast foundational crates plus preflight. The default
-      # test lanes below exercise backend-neutral engine core and the fixture
-      # server; full prover-stack checks remain in the manual heavy workflow.
+      # Keep clippy on fast foundational crates plus the backend-neutral engine
+      # core and preflight. Full prover-stack checks remain in the manual heavy
+      # workflow.
       - name: clippy
         run: >
           cargo clippy
@@ -124,6 +124,9 @@ jobs:
           -p preflight
           --
           -D warnings
+
+      - name: clippy engine core
+        run: cargo clippy -p raiko2-engine --no-default-features -- -D warnings
 
   rust-test-foundation:
     needs: changes

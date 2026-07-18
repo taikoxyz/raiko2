@@ -44,6 +44,7 @@ impl std::fmt::Display for PendingProofPublicationRemoved {
 impl std::error::Error for PendingProofPublicationRemoved {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 struct RuntimeState {
     tasks: HashMap<String, RuntimeTaskRecord>,
     artifacts: HashMap<String, ProofArtifactRecord>,
@@ -232,10 +233,11 @@ impl ProofArtifactRegistration {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProofArtifactLifecycle {
     Pending,
+    #[default]
     Active,
     Invalidated,
 }
@@ -250,6 +252,7 @@ pub struct ProofArtifactRecord {
     pub proof_uri: String,
     pub content_hash: String,
     pub generation: Option<i64>,
+    #[serde(default)]
     pub lifecycle: ProofArtifactLifecycle,
     pub invalidated_at: Option<i64>,
     pub updated_at: i64,
@@ -2811,7 +2814,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     #[tokio::test]
-    async fn legacy_runtime_state_assigns_and_persists_task_incarnation_ids() -> Result<()> {
+    async fn legacy_runtime_state_migrates_and_persists_new_fields() -> Result<()> {
         let store = Arc::new(MemoryProofArtifactStore::new(
             "test".into(),
             "legacy-incarnation".into(),
@@ -2831,10 +2834,32 @@ mod tests {
             .as_object_mut()
             .context("serialize legacy runtime task record as an object")?
             .remove("incarnation_id");
+        let mut legacy_artifact = serde_json::to_value(ProofArtifactRecord {
+            environment: "test".into(),
+            network_pair: "taiko_dev/taiko_dev_l1".into(),
+            proof_ref: "legacy-proof".into(),
+            pipeline_key: PipelineKey::ShastaRisc0Network,
+            route: PipelineKey::ShastaRisc0Network.route(),
+            proof_uri: "memory://legacy-proof".into(),
+            content_hash: "legacy-hash".into(),
+            generation: None,
+            lifecycle: ProofArtifactLifecycle::Active,
+            invalidated_at: None,
+            updated_at: 1,
+        })?;
+        legacy_artifact
+            .as_object_mut()
+            .context("serialize legacy proof artifact as an object")?
+            .remove("lifecycle");
+        let legacy_artifact_key = artifact_record_key(
+            "taiko_dev/taiko_dev_l1",
+            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaRisc0Network.route(),
+            "legacy-proof",
+        );
         let legacy_state = serde_json::json!({
             "tasks": { "legacy-root": legacy_record },
-            "artifacts": {},
-            "pending_publications": {},
+            "artifacts": { legacy_artifact_key.clone(): legacy_artifact },
         });
         let bytes = serde_json::to_vec(&legacy_state)?;
         assert!(matches!(
@@ -2849,6 +2874,19 @@ mod tests {
             .await?
             .context("legacy runtime task should load")?;
         assert_ne!(restored.incarnation_id, uuid::Uuid::nil());
+        assert_eq!(
+            runtime
+                .get_proof_artifact(
+                    "taiko_dev/taiko_dev_l1",
+                    PipelineKey::ShastaRisc0Network,
+                    PipelineKey::ShastaRisc0Network.route(),
+                    "legacy-proof",
+                )
+                .await?
+                .context("legacy proof artifact should load")?
+                .lifecycle,
+            ProofArtifactLifecycle::Active
+        );
 
         runtime
             .sync_status("legacy-root", RunnerStatus::Running, None, None)
@@ -2861,6 +2899,10 @@ mod tests {
         assert_eq!(
             persisted_state["tasks"]["legacy-root"]["incarnation_id"],
             serde_json::Value::String(restored.incarnation_id.to_string())
+        );
+        assert_eq!(
+            persisted_state["artifacts"][legacy_artifact_key]["lifecycle"],
+            serde_json::Value::String("active".into())
         );
         Ok(())
     }

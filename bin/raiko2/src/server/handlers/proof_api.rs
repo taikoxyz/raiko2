@@ -746,13 +746,7 @@ async fn build_submission_plan(
                 load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
             {
                 proposal_sources.push(ProposalPlanSource::Cached);
-                cached_artifact_preconditions.push(raiko2_runtime::ProofArtifactPrecondition {
-                    network_pair: material.record.network_pair.clone(),
-                    proof_ref: material.record.proof_ref.clone(),
-                    pipeline_key: material.record.pipeline_key,
-                    route: material.record.route,
-                    descriptor: material.record.descriptor(),
-                });
+                cached_artifact_preconditions.push(material.record.precondition());
                 aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                     network_pair: material.record.network_pair,
                     pipeline_key: material.record.pipeline_key,
@@ -1372,13 +1366,7 @@ async fn build_recovery_plan_from_metadata(
             .await?
             {
                 proposal_sources.push(ProposalPlanSource::Cached);
-                cached_artifact_preconditions.push(raiko2_runtime::ProofArtifactPrecondition {
-                    network_pair: material.record.network_pair.clone(),
-                    proof_ref: material.record.proof_ref.clone(),
-                    pipeline_key: material.record.pipeline_key,
-                    route: material.record.route,
-                    descriptor: material.record.descriptor(),
-                });
+                cached_artifact_preconditions.push(material.record.precondition());
                 aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
                     network_pair: material.record.network_pair,
                     pipeline_key: material.record.pipeline_key,

@@ -8,7 +8,9 @@ use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
 use raiko2_queue::{TaskStoreError, encode_task_id};
-use raiko2_runtime::{ExpiredTaskCursor, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
+use raiko2_runtime::{
+    ExpiredTaskCursor, ProofArtifactRecord, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -277,25 +279,38 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
         return Ok(None);
     }
 
-    let proof_uri = if let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key)
-    {
-        load_first_artifact_uri(runtime, record, metadata, &root_refs.refs).await?
+    let mut artifacts = Vec::new();
+    if let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
+        let Some(artifact) =
+            load_first_artifact(runtime, record, metadata, &root_refs.refs).await?
+        else {
+            return Ok(None);
+        };
+        artifacts.push(artifact);
     } else {
-        let mut final_uri = None;
         for proposal in &metadata.proposals {
             let refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
-            let Some(uri) = load_first_artifact_uri(runtime, record, metadata, &refs).await? else {
+            let Some(artifact) = load_first_artifact(runtime, record, metadata, &refs).await?
+            else {
                 return Ok(None);
             };
-            final_uri = Some(uri);
+            artifacts.push(artifact);
         }
-        final_uri
-    };
-    let Some(proof_uri) = proof_uri else {
+    }
+    let Some(proof_uri) = artifacts.last().map(|artifact| artifact.proof_uri.clone()) else {
         return Ok(None);
     };
+    let artifact_preconditions = artifacts
+        .into_iter()
+        .map(|artifact| artifact.precondition())
+        .collect::<Vec<_>>();
     if runtime
-        .complete_nonterminal_task(&record.task_id, &proof_uri)
+        .complete_nonterminal_task(
+            &record.task_id,
+            record.incarnation_id,
+            &proof_uri,
+            &artifact_preconditions,
+        )
         .await?
     {
         return Ok(Some(proof_uri));
@@ -303,16 +318,19 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
 
     let current = runtime.get_task(&record.task_id).await?;
     Ok(current
-        .filter(|current| current.runner_status == RunnerStatus::Completed)
+        .filter(|current| {
+            current.incarnation_id == record.incarnation_id
+                && current.runner_status == RunnerStatus::Completed
+        })
         .and_then(|current| current.proof_uri))
 }
 
-async fn load_first_artifact_uri(
+async fn load_first_artifact(
     runtime: &RuntimeManager,
     record: &RuntimeTaskRecord,
     metadata: &TaskMetadata,
     proof_refs: &[String],
-) -> Result<Option<String>> {
+) -> Result<Option<ProofArtifactRecord>> {
     for proof_ref in proof_refs {
         if let Some(material) = crate::server::proof_artifact::load_proof_artifact_material(
             runtime,
@@ -323,7 +341,7 @@ async fn load_first_artifact_uri(
         )
         .await?
         {
-            return Ok(Some(material.record.proof_uri));
+            return Ok(Some(material.record));
         }
     }
     Ok(None)

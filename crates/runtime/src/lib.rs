@@ -264,6 +264,17 @@ impl ProofArtifactRecord {
             generation: self.generation,
         }
     }
+
+    #[must_use]
+    pub fn precondition(&self) -> ProofArtifactPrecondition {
+        ProofArtifactPrecondition {
+            network_pair: self.network_pair.clone(),
+            proof_ref: self.proof_ref.clone(),
+            pipeline_key: self.pipeline_key,
+            route: self.route,
+            descriptor: self.descriptor(),
+        }
+    }
 }
 
 impl RuntimeManager {
@@ -1203,16 +1214,32 @@ impl RuntimeManager {
         .await
     }
 
-    pub async fn complete_nonterminal_task(&self, task_id: &str, proof_uri: &str) -> Result<bool> {
+    /// Completes one concrete task lifetime only while every proof artifact it consumed remains
+    /// the exact active registration validated by the caller.
+    pub async fn complete_nonterminal_task(
+        &self,
+        task_id: &str,
+        expected_incarnation: uuid::Uuid,
+        proof_uri: &str,
+        artifact_preconditions: &[ProofArtifactPrecondition],
+    ) -> Result<bool> {
         let task_id = task_id.to_string();
         let proof_uri = proof_uri.to_string();
+        let artifact_preconditions = artifact_preconditions.to_vec();
         self.mutate(move |state| {
-            let Some(task) = state.tasks.get_mut(&task_id) else {
+            let Some(task) = state.tasks.get(&task_id) else {
                 return Ok(false);
             };
-            if task.runner_status.is_terminal() {
+            if task.incarnation_id != expected_incarnation || task.runner_status.is_terminal() {
                 return Ok(false);
             }
+            if ensure_artifact_preconditions(state, &artifact_preconditions).is_err() {
+                return Ok(false);
+            }
+            let task = state
+                .tasks
+                .get_mut(&task_id)
+                .context("runtime task disappeared during artifact completion")?;
             task.runner_status = RunnerStatus::Completed;
             task.proof_uri = Some(proof_uri.clone());
             task.error = None;
@@ -3644,7 +3671,16 @@ mod tests {
             })
             .await?;
         runtime
-            .complete_nonterminal_task("completed-task", "memory://proof")
+            .complete_nonterminal_task(
+                "completed-task",
+                runtime
+                    .get_task("completed-task")
+                    .await?
+                    .context("registered task")?
+                    .incarnation_id,
+                "memory://proof",
+                &[],
+            )
             .await?;
 
         runtime
@@ -3664,6 +3700,119 @@ mod tests {
         assert_eq!(record.proof_uri.as_deref(), Some("memory://proof"));
         assert_eq!(record.error, None);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_artifact_completion_cannot_complete_replacement_task() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "stale-artifact-task".into())?;
+        let first = register_native_task(&runtime, "root", 1).await?;
+        let precondition = active_artifact_precondition(&runtime, "stale-task-proof").await?;
+
+        assert!(runtime.remove_task("root").await?);
+        let replacement = register_native_task(&runtime, "root", 2).await?;
+
+        assert!(
+            !runtime
+                .complete_nonterminal_task(
+                    "root",
+                    first.incarnation_id,
+                    "memory://stale-task-proof",
+                    &[precondition],
+                )
+                .await?
+        );
+        let current = runtime.get_task("root").await?.expect("replacement task");
+        assert_eq!(current.incarnation_id, replacement.incarnation_id);
+        assert_eq!(current.runner_status, RunnerStatus::Allocated);
+        assert_eq!(current.proof_uri, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_artifact_completion_requires_exact_active_descriptor() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "stale-artifact-record".into())?;
+        let task = register_native_task(&runtime, "root", 1).await?;
+        let precondition = active_artifact_precondition(&runtime, "stale-record-proof").await?;
+        runtime
+            .mark_proof_artifact_descriptor_invalidated(
+                &precondition.network_pair,
+                precondition.pipeline_key,
+                precondition.route,
+                &precondition.proof_ref,
+                &precondition.descriptor,
+            )
+            .await?;
+        let proof_uri = precondition.descriptor.proof_uri.clone();
+
+        assert!(!runtime
+            .complete_nonterminal_task(
+                "root",
+                task.incarnation_id,
+                &proof_uri,
+                &[precondition],
+            )
+            .await?);
+        let current = runtime.get_task("root").await?.expect("runtime task");
+        assert_eq!(current.runner_status, RunnerStatus::Allocated);
+        assert_eq!(current.proof_uri, None);
+        Ok(())
+    }
+
+    async fn register_native_task(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        proposal_id: u64,
+    ) -> Result<RuntimeTaskRecord> {
+        runtime
+            .register_task(TaskRegistration {
+                task_id: task_id.into(),
+                pipeline_key: Some(PipelineKey::ShastaNative),
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                proposal_id: Some(proposal_id),
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: None,
+            })
+            .await
+    }
+
+    async fn active_artifact_precondition(
+        runtime: &RuntimeManager,
+        proof_ref: &str,
+    ) -> Result<ProofArtifactPrecondition> {
+        let pipeline_key = PipelineKey::ShastaNative;
+        let route = pipeline_key.route();
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline_key,
+                route,
+                proof_ref,
+                br#"{"proof":"0x01"}"#,
+            )
+            .await?
+            .try_object()
+            .context("expected proof artifact object")?
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        Ok(ProofArtifactPrecondition {
+            network_pair: "taiko_dev/ethereum".into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key,
+            route,
+            descriptor: object.descriptor(),
+        })
     }
 
     #[tokio::test]

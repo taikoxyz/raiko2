@@ -33,7 +33,11 @@
             "taiko_dev/ethereum".to_string(),
             route,
         );
-
+        let owners = publication_owner_incarnations(
+            runtime.as_ref(),
+            &proposal_task_ref(pipeline, &request),
+        )
+        .await;
         observer
             .mark_proof_publication_failed(
                 &task_id,
@@ -41,6 +45,7 @@
                 "proof invalidated during completion",
                 PublicationFailureDisposition::Invalidated,
                 None,
+                &owners,
             )
             .await;
 
@@ -120,6 +125,11 @@
                 generation: Some(1),
             },
         };
+        let owners = publication_owner_incarnations(
+            runtime.as_ref(),
+            &proposal_task_ref(pipeline, &request),
+        )
+        .await;
 
         observer
             .mark_proof_publication_failed(
@@ -128,6 +138,7 @@
                 "canonical proof invalidated",
                 PublicationFailureDisposition::Invalidated,
                 Some(&publication),
+                &owners,
             )
             .await;
 
@@ -179,6 +190,17 @@
             )
             .await?;
         let artifact = publication.object();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: artifact.proof_uri.clone(),
+                content_hash: artifact.content_hash.clone(),
+                generation: artifact.generation,
+            })
+            .await?;
         let mut completed = runtime
             .get_task("task_completed")
             .await?
@@ -189,6 +211,13 @@
 
         observer.on_task_cancelled(&task_id).await;
 
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, pipeline, route, &proof_ref)
+                .await?
+                .is_some(),
+            "shared active artifact must remain readable"
+        );
         assert!(
             runtime
                 .read_proof_artifact_bytes(network_pair, pipeline, route, &proof_ref)
@@ -240,6 +269,15 @@
             "taiko_dev/ethereum".to_string(),
             route,
         );
+        checkpoint_proof_fixture(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: task_id.clone(),
+            },
+        )
+        .await?;
 
         observer
             .on_task_succeeded(
@@ -326,6 +364,11 @@
             "taiko_dev/ethereum".to_string(),
             pipeline.route(),
         );
+        let owners = publication_owner_incarnations(
+            runtime.as_ref(),
+            &proposal_task_ref(pipeline, &request),
+        )
+        .await;
 
         observer
             .mark_proof_publication_failed(
@@ -334,6 +377,7 @@
                 "transient artifact store failure",
                 PublicationFailureDisposition::Retryable,
                 None,
+                &owners,
             )
             .await;
 
@@ -400,6 +444,15 @@
             "taiko_dev/ethereum".to_string(),
             PipelineKey::ShastaNative.route(),
         );
+        checkpoint_proof_fixture(
+            &observer,
+            &proposal_task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: proposal_task_id.clone(),
+            },
+        )
+        .await?;
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -434,6 +487,96 @@
             .expect("completed task");
         assert_eq!(completed.runner_status, RunnerStatus::Completed);
         assert!(completed.proof_uri.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_completion_failure_cannot_cancel_replacement_incarnation() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-stale-completion-failure",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let stale_owner = runtime
+            .get_task("root")
+            .await?
+            .expect("old root")
+            .incarnation_id;
+        runtime
+            .sync_status("root", RunnerStatus::Cancelled, None, None)
+            .await?;
+        runtime.remove_task("root").await?;
+        register_observer_task(
+            runtime.as_ref(),
+            "root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let replacement = runtime
+            .get_task("root")
+            .await?
+            .expect("replacement root");
+        assert_ne!(stale_owner, replacement.incarnation_id);
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &proof_ref,
+                    &[replacement.incarnation_id],
+                    b"replacement-proof",
+                )
+                .await?
+        );
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+
+        observer
+            .mark_proof_publication_failed(
+                &task_id,
+                "prove",
+                "stale worker invalidation",
+                PublicationFailureDisposition::Invalidated,
+                None,
+                &[stale_owner],
+            )
+            .await;
+
+        let replacement = runtime.get_task("root").await?.expect("replacement root");
+        assert_eq!(replacement.runner_status, RunnerStatus::Running);
+        assert_eq!(replacement.error, None);
+        assert!(
+            runtime
+                .get_recoverable_pending_proof_publication(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    pipeline.route(),
+                    &proof_ref,
+                )
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 
@@ -532,4 +675,192 @@
                 .is_none()
         );
         Ok(())
+    }
+    #[tokio::test]
+    async fn stale_execution_permit_cannot_mutate_replacement_incarnation() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-stale-execution-permit",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let stage_task = EngineTask::Preflight {
+            request: request.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let stale_permit = EngineObserver::acquire_task_execution_permit(
+            &observer,
+            &task_id,
+            &stage_task,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        runtime
+            .sync_status("root", RunnerStatus::Cancelled, None, None)
+            .await?;
+        runtime.remove_task("root").await?;
+        register_observer_task(
+            runtime.as_ref(),
+            "root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let before = runtime.get_task("root").await?.context("replacement root")?;
+
+        let Err(checkpoint_error) = EngineObserver::checkpoint_completed_proof(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: task_id.clone(),
+            },
+            &proof_fixture(),
+            &stale_permit,
+        )
+        .await
+        else {
+            anyhow::bail!("stale proof checkpoint claimed the replacement");
+        };
+        assert!(matches!(checkpoint_error, EngineObserverError::RuntimeSync(_)));
+
+        EngineObserver::on_task_started(
+            &observer,
+            &task_id,
+            &stage_task,
+            "stale-worker",
+            &stale_permit,
+        )
+        .await;
+        let error = EngineObserver::on_task_succeeded(
+            &observer,
+            &task_id,
+            &stage_task,
+            &EngineTaskSuccess::GuestInput {
+                stage: raiko2_pipeline::PipelineStage::Preflight,
+            },
+            None,
+            &stale_permit,
+        )
+        .await
+        .expect_err("stale completion must be rejected");
+        assert!(matches!(error, EngineObserverError::RuntimeSync(_)));
+
+        let after = runtime.get_task("root").await?.context("replacement root")?;
+        assert_eq!(after.incarnation_id, before.incarnation_id);
+        assert_eq!(after.runner_status, before.runner_status);
+        assert_eq!(after.error, before.error);
+        assert_eq!(after.metadata, before.metadata);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proof_checkpoint_includes_late_joining_shared_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-late-shared-root",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: task_id.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "root-a",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let execution_permit = EngineObserver::acquire_task_execution_permit(
+            &observer,
+            &task_id,
+            &proof_task,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        register_observer_task(
+            runtime.as_ref(),
+            "root-b",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let completion_permit = EngineObserver::checkpoint_completed_proof(
+            &observer,
+            &task_id,
+            &proof_task,
+            &proof_fixture(),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        EngineObserver::on_task_succeeded(
+            &observer,
+            &task_id,
+            &proof_task,
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof_fixture(),
+            },
+            Some(&completion_permit),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        for root in ["root-a", "root-b"] {
+            let record = runtime.get_task(root).await?.context("shared root")?;
+            assert_eq!(record.runner_status, RunnerStatus::Completed, "{root}");
+            assert!(record.proof_uri.is_some(), "{root}");
+        }
+        Ok(())
+    }
+
+    async fn publication_owner_incarnations(
+        runtime: &RuntimeManager,
+        proof_ref: &str,
+    ) -> Vec<uuid::Uuid> {
+        runtime
+            .get_tasks_by_ref(proof_ref)
+            .await
+            .into_iter()
+            .filter(|record| {
+                !matches!(record.runner_status, RunnerStatus::Failed | RunnerStatus::Cancelled)
+            })
+            .map(|record| record.incarnation_id)
+            .collect()
     }

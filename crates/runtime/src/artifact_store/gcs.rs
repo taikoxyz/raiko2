@@ -1,7 +1,7 @@
 use super::{
-    ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult,
-    ProofArtifactStore, RuntimeStateObject, RuntimeStateWriteResult, content_hash,
-    encode_component, validate_scope_component,
+    ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
+    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject,
+    RuntimeStateWriteResult, content_hash, encode_component, validate_scope_component,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -43,7 +43,11 @@ trait GcsTransport: std::fmt::Debug + Send + Sync {
         bytes: &[u8],
         expected_generation: Option<i64>,
     ) -> Result<GcsWriteResult>;
-    async fn delete_if_generation(&self, name: &str, generation: Option<i64>) -> Result<()>;
+    async fn delete_if_generation(
+        &self,
+        name: &str,
+        generation: Option<i64>,
+    ) -> Result<ProofArtifactDeleteResult>;
 }
 
 #[derive(Debug)]
@@ -123,7 +127,11 @@ impl GcsTransport for GoogleGcsTransport {
         }
     }
 
-    async fn delete_if_generation(&self, name: &str, generation: Option<i64>) -> Result<()> {
+    async fn delete_if_generation(
+        &self,
+        name: &str,
+        generation: Option<i64>,
+    ) -> Result<ProofArtifactDeleteResult> {
         let mut request = self
             .control
             .delete_object()
@@ -133,8 +141,10 @@ impl GcsTransport for GoogleGcsTransport {
             request = request.set_if_generation_match(generation);
         }
         match request.send().await {
-            Ok(()) => Ok(()),
-            Err(error) if error.http_status_code() == Some(404) => Ok(()),
+            Ok(()) => Ok(ProofArtifactDeleteResult::Removed),
+            Err(error) if error.http_status_code() == Some(404) => {
+                Ok(ProofArtifactDeleteResult::Missing)
+            }
             Err(error) => Err(error).context("failed to conditionally delete GCS object"),
         }
     }
@@ -265,7 +275,11 @@ impl GcsProofArtifactStore {
         }))
     }
 
-    async fn delete_named(&self, name: &str, generation: Option<i64>) -> Result<()> {
+    async fn delete_named(
+        &self,
+        name: &str,
+        generation: Option<i64>,
+    ) -> Result<ProofArtifactDeleteResult> {
         self.transport.delete_if_generation(name, generation).await
     }
 
@@ -370,6 +384,25 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         self.read_manifest_object(key).await
     }
 
+    async fn get_descriptor(
+        &self,
+        key: &ProofArtifactKey,
+    ) -> Result<Option<ProofArtifactDescriptor>> {
+        let Some((manifest, generation)) = self.read_manifest(key).await? else {
+            return Ok(None);
+        };
+        let content_name = self.content_name(key, &manifest.content_hash);
+        self.transport
+            .read(&content_name, Some(1))
+            .await?
+            .context("proof manifest references missing content")?;
+        Ok(Some(ProofArtifactDescriptor {
+            proof_uri: self.content_uri(key, &manifest.content_hash),
+            content_hash: manifest.content_hash,
+            generation: Some(generation),
+        }))
+    }
+
     async fn get_prefix(
         &self,
         key: &ProofArtifactKey,
@@ -384,9 +417,11 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         };
         let length = u64::try_from(max_bytes).context("proof prefix limit is too large")?;
         let content_name = self.content_name(key, &manifest.content_hash);
-        let Some(object) = self.transport.read(&content_name, Some(length)).await? else {
-            return Ok(None);
-        };
+        let object = self
+            .transport
+            .read(&content_name, Some(length))
+            .await?
+            .context("proof manifest references missing content")?;
         Ok(Some(ProofArtifactPrefix {
             proof_uri: self.content_uri(key, &manifest.content_hash),
             generation: Some(manifest_generation),
@@ -423,9 +458,9 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         key: &ProofArtifactKey,
         generation: Option<i64>,
         expected_content_hash: &str,
-    ) -> Result<()> {
+    ) -> Result<ProofArtifactDeleteResult> {
         let Some((manifest, current_generation)) = self.read_manifest(key).await? else {
-            return Ok(());
+            return Ok(ProofArtifactDeleteResult::Missing);
         };
         anyhow::ensure!(
             manifest.content_hash == expected_content_hash,
@@ -566,20 +601,24 @@ mod tests {
             Ok(GcsWriteResult::Stored(generation))
         }
 
-        async fn delete_if_generation(&self, name: &str, generation: Option<i64>) -> Result<()> {
+        async fn delete_if_generation(
+            &self,
+            name: &str,
+            generation: Option<i64>,
+        ) -> Result<ProofArtifactDeleteResult> {
             let mut objects = self
                 .objects
                 .lock()
                 .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?;
             let Some(current) = objects.get(name) else {
-                return Ok(());
+                return Ok(ProofArtifactDeleteResult::Missing);
             };
             anyhow::ensure!(
                 generation.is_none_or(|generation| generation == current.generation),
                 "fake GCS generation precondition failed"
             );
             objects.remove(name);
-            Ok(())
+            Ok(ProofArtifactDeleteResult::Removed)
         }
     }
 
@@ -615,6 +654,24 @@ mod tests {
 
         assert!(matches!(repaired, ProofArtifactPutResult::AlreadyExists(_)));
         assert_eq!(store.get(&key).await?.expect("repaired proof").bytes, proof);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prefix_read_rejects_manifest_with_missing_content() -> Result<()> {
+        let transport = Arc::new(FakeGcsTransport::default());
+        let store = store(Arc::clone(&transport))?;
+        let key = key();
+        let proof = br#"{"proof":"0x01"}"#;
+        let first = store.put_if_absent(&key, proof).await?.object().clone();
+
+        transport.remove(&store.content_name(&key, &first.content_hash))?;
+
+        let error = store
+            .get_prefix(&key, 64)
+            .await
+            .expect_err("dangling manifest must be reported as corruption");
+        assert!(error.to_string().contains("missing content"));
         Ok(())
     }
 
@@ -659,6 +716,32 @@ mod tests {
                 .expect("replacement proof")
                 .generation,
             second.generation
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_reports_removed_then_missing_through_gcs_seam() -> Result<()> {
+        let transport = Arc::new(FakeGcsTransport::default());
+        let store = store(transport)?;
+        let key = key();
+        let object = store
+            .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+            .await?
+            .object()
+            .clone();
+
+        assert_eq!(
+            store
+                .delete(&key, object.generation, &object.content_hash)
+                .await?,
+            ProofArtifactDeleteResult::Removed
+        );
+        assert_eq!(
+            store
+                .delete(&key, object.generation, &object.content_hash)
+                .await?,
+            ProofArtifactDeleteResult::Missing
         );
         Ok(())
     }

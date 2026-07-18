@@ -509,6 +509,7 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
+| `status` | string | `ok` when every selected operation completed; `partial_failure` when `data.failed` is non-zero. |
 | `proof_type` | string | Concrete proof backend targeted by the clear operation. |
 | `data.cancelled` | number | Non-terminal root tasks cancelled. |
 | `data.skipped` | object | Records skipped because they are invalid, unavailable, or already have remote progress. |
@@ -518,6 +519,8 @@ Idempotency:
 
 - If the selected proof type has no non-terminal backlog, the response is `200 ok` with
   `data.cancelled=0`.
+- The endpoint returns the completed counts even when some queue cancellations fail. In that case
+  the envelope uses `status="partial_failure"`; clients must inspect `data.failed` and retry or alert.
 
 Validation:
 
@@ -560,7 +563,7 @@ Request fields:
 | `proof_prefix` | string | no | Optional `0x`-prefixed hex prefix matched against cached proof payloads. Maximum length is 130 characters, including `0x`. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
 | `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
 | `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |
-| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof files. |
+| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof manifests. |
 
 Response:
 
@@ -573,8 +576,8 @@ Response:
     "artifacts": {
       "matched": 10,
       "removed": 0,
-      "files_removed": 0,
-      "files_missing": 0,
+      "manifests_removed": 0,
+      "manifests_missing": 0,
       "failed": 0
     },
     "tasks": {
@@ -588,6 +591,11 @@ Response:
 }
 ```
 
+`manifests_removed` and `manifests_missing` report the exact result of deleting the canonical
+manifest. Immutable content objects are retained and are not counted as removed files.
+The response envelope uses `status="partial_failure"` when either `data.artifacts.failed` or
+`data.tasks.failed` is non-zero; clients must not treat that response as a complete invalidation.
+
 Scope:
 
 - The endpoint invalidates completed, failed, or cancelled local runtime tasks and matching proof
@@ -598,7 +606,7 @@ Scope:
 - If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
   are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
   are linked to a matched runtime task.
-- If deleting a backing proof object fails, `failed` is incremented and the artifact remains
+- If deleting a proof manifest fails, `failed` is incremented and the artifact remains
   tombstoned for a later invalidation retry. Tombstoned artifacts are not eligible for proof reuse.
 
 Validation:
@@ -991,6 +999,9 @@ Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipp
 }
 ```
 
+`status` is `partial_failure` when `failed` is non-zero; callers must retry or alert on those
+incomplete queue cancellations.
+
 ## Legacy V3 Query Root Task
 
 This legacy route is not mounted by the default server router.
@@ -1070,9 +1081,10 @@ Returns the root-task view derived from the original batch request.
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
-- Terminal root tasks and remote inputs use a seven-day retention policy. Published proof and
-  program objects use a thirty-day retention policy, while active manifests must not have a bucket
-  age rule. Active root tasks are never removed by runtime cleanup.
+- Terminal root tasks and remote inputs use a seven-day retention policy. Active manifests must not
+  have a bucket age rule, and immutable proof or program content must remain available until every
+  manifest that references it is gone. Generation-scoped tombstones and unreferenced content use a
+  minimum thirty-day retention window. Active root tasks are never removed by runtime cleanup.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1117,9 +1129,10 @@ All API errors use the Hoodi-style envelope:
   distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
   and replacement processes never overlap for one namespace.
 - Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
-  pointer. Runtime snapshots use `*.runtime.json`; the suffixes allow operations to apply 7-day
-  runtime retention and 30-day proof/manifest/tombstone retention
-  without a bucket-wide age rule.
+  pointer. Runtime snapshots use `*.runtime.json`; the suffixes allow operations to apply seven-day
+  runtime retention and a minimum thirty-day retention window to generation-scoped tombstones and
+  unreferenced content without a bucket-wide age rule. Active manifests must not be deleted by age,
+  and immutable content must remain available while any active manifest references it.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and contains a non-null proof payload. Publication is create-only: an
   identical existing object is idempotent, while a different late object is discarded.

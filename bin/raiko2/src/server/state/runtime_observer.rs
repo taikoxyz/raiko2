@@ -2,16 +2,18 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
     EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
-    ProposalStage,
+    ProofCompletionPermit, ProposalStage, TaskExecutionPermit,
     tasks::{EngineTask, ProofArtifactRef},
 };
 use raiko2_pipeline::PipelineRoute;
 use raiko2_prover::{
-    BoundlessSubmissionResume, NetworkProverBackend, PendingProofCheckpoint, ProverProgress,
+    BoundlessSubmissionResume, NetworkProverBackend, PendingProofCheckpoint,
+    ProgressPersistenceError, ProverProgress, Sp1NetworkSubmissionProgress,
+    SubmissionCheckpointPermit,
 };
 use raiko2_runtime::{
     ProofArtifactDescriptor, ProofArtifactPublicationInvalidated, ProofArtifactPutResult,
-    RunnerStatus, RuntimeManager, RuntimeTaskRecord,
+    ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -29,7 +31,6 @@ pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
     route: PipelineRoute,
-    root_updates: Arc<tokio::sync::Mutex<()>>,
 }
 
 static STARTED_STAGE_TASKS: LazyLock<Mutex<HashSet<String>>> =
@@ -40,6 +41,13 @@ enum TerminalRootPolicy {
     Exclude,
     IncludeFailed,
     IncludeCompleted,
+    IncludeAll,
+}
+
+#[derive(Clone)]
+struct RuntimeExecutionOwners {
+    by_task_id: HashMap<String, uuid::Uuid>,
+    incarnations: Vec<uuid::Uuid>,
 }
 
 #[derive(Clone)]
@@ -93,7 +101,21 @@ fn publication_observer_error(error: &anyhow::Error) -> EngineObserverError {
 }
 
 impl RuntimeObserver {
-    pub(crate) fn new(
+    fn progress_sync_error(
+        &self,
+        id: &EngineTaskId,
+        permit: &raiko2_runtime::RuntimeSubmissionCheckpointPermit,
+        error: &anyhow::Error,
+    ) -> EngineObserverError {
+        tracing::warn!(task = ?id, %error, "failed to sync runtime task progress");
+        let message = format!("failed to sync runtime task progress: {error}");
+        if !self.runtime.checkpoint_failure_is_retryable(permit) {
+            return EngineObserverError::RuntimeInactive(message);
+        }
+        EngineObserverError::RuntimeSync(message)
+    }
+
+    pub(crate) const fn new(
         runtime: Arc<RuntimeManager>,
         network_pair: String,
         route: PipelineRoute,
@@ -102,7 +124,6 @@ impl RuntimeObserver {
             runtime,
             network_pair,
             route,
-            root_updates: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -115,6 +136,16 @@ impl RuntimeObserver {
                 crate::server::task_metadata::aggregate_task_ref(*pipeline, request)
             }
         }
+    }
+
+    fn execution_owners(
+        permit: &TaskExecutionPermit,
+    ) -> std::result::Result<&RuntimeExecutionOwners, EngineObserverError> {
+        permit.guard::<RuntimeExecutionOwners>().ok_or_else(|| {
+            EngineObserverError::RuntimeInactive(
+                "task execution permit does not belong to the runtime".to_string(),
+            )
+        })
     }
 
     async fn find_root_records(&self, id: &EngineTaskId) -> Result<Vec<RuntimeTaskRecord>> {
@@ -136,54 +167,83 @@ impl RuntimeObserver {
         }
     }
 
-    async fn update_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
-    where
-        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
-    {
-        self.update_root_records_with_policy(id, TerminalRootPolicy::Exclude, mutator)
-            .await
-    }
-
-    async fn update_retry_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
-    where
-        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
-    {
-        self.update_root_records_with_policy(id, TerminalRootPolicy::IncludeFailed, mutator)
-            .await
-    }
-
-    async fn update_root_records_with_policy<F>(
+    async fn update_execution_root_records<F>(
         &self,
         id: &EngineTaskId,
-        terminal_policy: TerminalRootPolicy,
+        owner_incarnations: &[uuid::Uuid],
         mutator: F,
     ) -> Result<()>
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
-        self.update_root_records_with_policy_count(id, terminal_policy, mutator)
-            .await
-            .map(|_| ())
-    }
-
-    async fn update_root_records_with_policy_count<F>(
-        &self,
-        id: &EngineTaskId,
-        terminal_policy: TerminalRootPolicy,
-        mutator: F,
-    ) -> Result<usize>
-    where
-        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
-    {
-        self.update_root_records_with_policy_filter_count(
+        self.update_root_records_with_policy_filter_count_mode(
             id,
-            terminal_policy,
+            TerminalRootPolicy::Exclude,
             |record, updated_at, observed_at_ms| {
                 mutator(record, updated_at, observed_at_ms)?;
                 Ok(true)
             },
+            Some(owner_incarnations),
+            None,
         )
         .await
+        .and_then(|updated| {
+            anyhow::ensure!(updated != 0, "execution permit matched no runtime root");
+            Ok(())
+        })
+    }
+
+    async fn update_retry_execution_root_records<F>(
+        &self,
+        id: &EngineTaskId,
+        owner_incarnations: &[uuid::Uuid],
+        mutator: F,
+    ) -> Result<()>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+    {
+        self.update_root_records_with_policy_filter_count_mode(
+            id,
+            TerminalRootPolicy::IncludeFailed,
+            |record, updated_at, observed_at_ms| {
+                mutator(record, updated_at, observed_at_ms)?;
+                Ok(true)
+            },
+            Some(owner_incarnations),
+            None,
+        )
+        .await
+        .and_then(|updated| {
+            anyhow::ensure!(updated != 0, "execution permit matched no runtime root");
+            Ok(())
+        })
+    }
+
+    async fn checkpoint_retry_root_records<F>(
+        &self,
+        id: &EngineTaskId,
+        owner_incarnations: &[uuid::Uuid],
+        permit: &raiko2_runtime::RuntimeSubmissionCheckpointPermit,
+        mutator: F,
+    ) -> Result<()>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+    {
+        self.update_root_records_with_policy_filter_count_mode(
+            id,
+            TerminalRootPolicy::IncludeAll,
+            |record, updated_at, observed_at_ms| {
+                mutator(record, updated_at, observed_at_ms)?;
+                Ok(true)
+            },
+            Some(owner_incarnations),
+            Some(permit),
+        )
+        .await
+        .and_then(|updated| {
+            anyhow::ensure!(updated != 0, "provider checkpoint matched no runtime root");
+            Ok(())
+        })
     }
 
     async fn update_root_records_with_policy_filter_count<F>(
@@ -195,25 +255,67 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<bool>,
     {
-        let _guard = self.root_updates.lock().await;
+        self.update_root_records_with_policy_filter_count_mode(
+            id,
+            terminal_policy,
+            mutator,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn update_root_records_with_policy_filter_count_mode<F>(
+        &self,
+        id: &EngineTaskId,
+        terminal_policy: TerminalRootPolicy,
+        mutator: F,
+        owner_incarnations: Option<&[uuid::Uuid]>,
+        checkpoint_permit: Option<&raiko2_runtime::RuntimeSubmissionCheckpointPermit>,
+    ) -> Result<usize>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<bool>,
+    {
         let root_ref = Self::root_task_ref(id);
-        let records = self.find_root_records(id).await?;
-        if records.is_empty() {
-            anyhow::bail!("runtime task not registered for task ref {root_ref}");
-        }
-        let mut records = self.matching_root_records(id, records, terminal_policy)?;
-        let updated_at = now_ts();
-        let observed_at_ms = now_ms();
-        let mut updated_records = 0;
-        for record in &mut records {
-            if !mutator(record, updated_at, observed_at_ms)? {
-                continue;
+        let update = |records: &mut Vec<RuntimeTaskRecord>| {
+            if records.is_empty() {
+                anyhow::bail!("runtime task not registered for task ref {root_ref}");
             }
-            record.updated_at = updated_at;
-            self.runtime.upsert_task(record).await?;
-            updated_records += 1;
+            let updated_at = now_ts();
+            let observed_at_ms = now_ms();
+            let mut updated_records = 0;
+            for record in records {
+                if !self.record_matches_observer(id, record)?
+                    || owner_incarnations
+                        .is_some_and(|owners| !owners.contains(&record.incarnation_id))
+                    || (is_terminal_status(record.runner_status)
+                        && !matches!(
+                            (terminal_policy, record.runner_status),
+                            (TerminalRootPolicy::IncludeFailed, RunnerStatus::Failed)
+                                | (
+                                    TerminalRootPolicy::IncludeCompleted,
+                                    RunnerStatus::Completed
+                                )
+                                | (TerminalRootPolicy::IncludeAll, _)
+                        ))
+                {
+                    continue;
+                }
+                if !mutator(record, updated_at, observed_at_ms)? {
+                    continue;
+                }
+                record.updated_at = updated_at;
+                updated_records += 1;
+            }
+            Ok(updated_records)
+        };
+        if let Some(permit) = checkpoint_permit {
+            self.runtime
+                .checkpoint_tasks_by_ref(permit, &root_ref, update)
+                .await
+        } else {
+            self.runtime.update_tasks_by_ref(&root_ref, update).await
         }
-        Ok(updated_records)
     }
 
     async fn load_root_record(&self, id: &EngineTaskId) -> Result<Option<RuntimeTaskRecord>> {
@@ -499,7 +601,8 @@ impl RuntimeObserver {
             "refusing to publish proof artifact without a proof payload"
         );
         if records.is_empty() {
-            self.runtime
+            let invalidated = self
+                .runtime
                 .invalidate_pending_proof_publication(
                     &self.network_pair,
                     id.0.pipeline_key(),
@@ -508,6 +611,10 @@ impl RuntimeObserver {
                 )
                 .await
                 .context("failed to invalidate detached proof publication")?;
+            anyhow::ensure!(
+                invalidated,
+                "runtime owner appeared while invalidating detached proof publication"
+            );
             return Err(ProofInvalidatedError(format!(
                 "proof task {root_ref} no longer has an active runtime owner"
             ))
@@ -565,65 +672,34 @@ impl RuntimeObserver {
         message: &str,
         disposition: PublicationFailureDisposition,
         publication: Option<&PublishedProofCommit>,
+        owner_incarnations: &[uuid::Uuid],
     ) {
         let message = message.to_string();
         if matches!(disposition, PublicationFailureDisposition::Invalidated) {
-            let root_ref = Self::root_task_ref(id);
-            if let Err(error) = self
-                .runtime
-                .invalidate_pending_proof_publication(
-                    &self.network_pair,
-                    id.0.pipeline_key(),
-                    self.route,
-                    &root_ref,
-                )
-                .await
-            {
-                tracing::warn!(
-                    task = ?id,
-                    stage,
-                    %error,
-                    "failed to invalidate pending proof publication"
-                );
-            }
+            self.invalidate_failed_publication(id, stage, message, publication, owner_incarnations)
+                .await;
+            return;
         }
-        let terminal_policy = match disposition {
-            PublicationFailureDisposition::Retryable => TerminalRootPolicy::Exclude,
-            PublicationFailureDisposition::Invalidated => TerminalRootPolicy::IncludeCompleted,
-        };
         if let Err(sync_err) = self
-            .update_root_records_with_policy(
+            .update_root_records_with_policy_filter_count(
                 id,
-                terminal_policy,
+                TerminalRootPolicy::Exclude,
                 |record, updated_at, observed_at_ms| {
-                    if record.runner_status == RunnerStatus::Completed
-                        && publication.is_none_or(|publication| {
-                            !publication.synchronized_roots.contains(&record.task_id)
-                        })
-                    {
-                        return Ok(());
+                    if !owner_incarnations.contains(&record.incarnation_id) {
+                        return Ok(false);
                     }
-                    record.runner_status = match disposition {
-                        PublicationFailureDisposition::Retryable => RunnerStatus::Allocated,
-                        PublicationFailureDisposition::Invalidated => RunnerStatus::Cancelled,
-                    };
+                    record.runner_status = RunnerStatus::Allocated;
                     record.proof_uri = None;
                     record.error = Some(message.clone());
                     let task_id = Self::timing_key_for_stage_name(id, stage);
                     update_task_metadata(record, |metadata| {
-                        let (terminal, active_stage) = match disposition {
-                            PublicationFailureDisposition::Retryable => {
-                                ("failed", Some(stage.to_string()))
-                            }
-                            PublicationFailureDisposition::Invalidated => ("cancelled", None),
-                        };
-                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, terminal);
-                        metadata.runtime.active_stage = active_stage;
-                        metadata.runtime.last_event = Some(terminal.to_string());
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some("failed".to_string());
                         metadata.runtime.proof_artifact = None;
                     })?;
                     record.updated_at = updated_at;
-                    Ok(())
+                    Ok(true)
                 },
             )
             .await
@@ -637,6 +713,97 @@ impl RuntimeObserver {
         }
     }
 
+    async fn invalidate_failed_publication(
+        &self,
+        id: &EngineTaskId,
+        stage: &'static str,
+        message: String,
+        publication: Option<&PublishedProofCommit>,
+        owner_incarnations: &[uuid::Uuid],
+    ) {
+        let root_ref = Self::root_task_ref(id);
+        let transition = self
+            .runtime
+            .update_tasks_and_invalidate_artifact(
+                &root_ref,
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                |records| {
+                    let updated_at = now_ts();
+                    let observed_at_ms = now_ms();
+                    let mut completed_root_preserves_artifact = false;
+                    let mut matched_owner = false;
+                    for record in records {
+                        if !owner_incarnations.contains(&record.incarnation_id)
+                            || !self.record_matches_observer(id, record)?
+                            || (is_terminal_status(record.runner_status)
+                                && record.runner_status != RunnerStatus::Completed)
+                        {
+                            continue;
+                        }
+                        matched_owner = true;
+                        if record.runner_status == RunnerStatus::Completed
+                            && publication.is_none_or(|publication| {
+                                !publication.synchronized_roots.contains(&record.task_id)
+                            })
+                        {
+                            completed_root_preserves_artifact = true;
+                            continue;
+                        }
+                        record.runner_status = RunnerStatus::Cancelled;
+                        record.proof_uri = None;
+                        record.error = Some(message.clone());
+                        let task_id = Self::timing_key_for_stage_name(id, stage);
+                        update_task_metadata(record, |metadata| {
+                            metadata.mark_stage_terminal(
+                                &task_id,
+                                stage,
+                                observed_at_ms,
+                                "cancelled",
+                            );
+                            metadata.runtime.active_stage = None;
+                            metadata.runtime.last_event = Some("cancelled".to_string());
+                            metadata.runtime.proof_artifact = None;
+                        })?;
+                        record.updated_at = updated_at;
+                    }
+                    let invalidate = matched_owner && !completed_root_preserves_artifact;
+                    Ok((invalidate, invalidate))
+                },
+            )
+            .await;
+        let should_invalidate = match transition {
+            Ok((_, should_invalidate, _)) => should_invalidate,
+            Err(error) => {
+                tracing::warn!(task = ?id, stage, %error, "failed to atomically invalidate proof publication and runtime roots");
+                return;
+            }
+        };
+        let cleanup = if should_invalidate {
+            self.runtime
+                .invalidate_pending_proof_publication(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &root_ref,
+                )
+                .await
+        } else {
+            self.runtime
+                .remove_pending_proof_publication_if_unowned(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &root_ref,
+                )
+                .await
+        };
+        if let Err(error) = cleanup {
+            tracing::warn!(task = ?id, stage, %error, "failed to finalize proof invalidation");
+        }
+    }
+
     async fn handle_proof_success(
         &self,
         id: &EngineTaskId,
@@ -644,11 +811,15 @@ impl RuntimeObserver {
         stage: &'static str,
         finished_at_ms: i64,
         proof: &raiko2_primitives::Proof,
+        owner_incarnations: &[uuid::Uuid],
     ) -> Result<()> {
         let task_id = Self::timing_key_for_task(id, task);
         let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
         for attempt in 0..=publication_delays.len() {
-            match self.commit_proof_attempt(id, task, stage, proof).await {
+            match self
+                .commit_proof_attempt(id, task, stage, proof, owner_incarnations)
+                .await
+            {
                 ProofCommitAttempt::Committed => {
                     self.observe_stage_terminal_metrics(
                         id,
@@ -679,6 +850,7 @@ impl RuntimeObserver {
                         message.as_str(),
                         PublicationFailureDisposition::Invalidated,
                         publication.as_ref(),
+                        owner_incarnations,
                     )
                     .await;
                     return Err(ProofInvalidatedError(message).into());
@@ -713,6 +885,7 @@ impl RuntimeObserver {
                         message.as_str(),
                         PublicationFailureDisposition::Retryable,
                         None,
+                        owner_incarnations,
                     )
                     .await;
                     anyhow::bail!(message);
@@ -728,8 +901,9 @@ impl RuntimeObserver {
         task: &EngineTask,
         stage: &'static str,
         proof: &raiko2_primitives::Proof,
+        owner_incarnations: &[uuid::Uuid],
     ) -> ProofCommitAttempt {
-        let mut publication = match self
+        let publication = match self
             .publish_final_proof_artifact(id, task, stage, proof)
             .await
         {
@@ -777,11 +951,24 @@ impl RuntimeObserver {
             }
             Err(error) => return ProofCommitAttempt::Retryable(error),
         }
-        let (updated_roots, synchronized_roots) =
-            match self.sync_proof_success(id, task, stage, &publication).await {
-                Ok(updated_roots) => updated_roots,
-                Err(error) => return ProofCommitAttempt::Retryable(error),
-            };
+        let (updated_roots, synchronized_roots) = match self
+            .sync_proof_success(id, task, stage, &publication, owner_incarnations)
+            .await
+        {
+            Ok(updated_roots) => updated_roots,
+            Err(error) => return ProofCommitAttempt::Retryable(error),
+        };
+        self.finalize_committed_publication(id, publication, updated_roots, synchronized_roots)
+            .await
+    }
+
+    async fn finalize_committed_publication(
+        &self,
+        id: &EngineTaskId,
+        mut publication: PublishedProofCommit,
+        updated_roots: usize,
+        synchronized_roots: HashSet<String>,
+    ) -> ProofCommitAttempt {
         if updated_roots == 0 {
             let invalidation = self
                 .runtime
@@ -794,15 +981,32 @@ impl RuntimeObserver {
                 .await
                 .context("failed to invalidate proof publication without an active runtime owner");
             return match invalidation {
-                Ok(_) => ProofCommitAttempt::Invalidated {
+                Ok(true) => ProofCommitAttempt::Invalidated {
                     error: anyhow::anyhow!(
                         "proof task {} no longer has an active runtime owner",
                         publication.root_ref
                     ),
                     publication: Some(publication),
                 },
+                Ok(false) => ProofCommitAttempt::Retryable(anyhow::anyhow!(
+                    "runtime owner appeared while invalidating proof publication {}",
+                    publication.root_ref
+                )),
                 Err(error) => ProofCommitAttempt::Retryable(error),
             };
+        }
+        if let Err(error) = self
+            .runtime
+            .remove_pending_proof_publication_if_unowned(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &publication.root_ref,
+            )
+            .await
+            .context("failed to clear committed proof publication outbox")
+        {
+            return ProofCommitAttempt::Retryable(error);
         }
         publication.synchronized_roots = synchronized_roots;
         match self
@@ -835,76 +1039,95 @@ impl RuntimeObserver {
         task: &EngineTask,
         stage: &'static str,
         publication: &PublishedProofCommit,
+        owner_incarnations: &[uuid::Uuid],
     ) -> Result<(usize, HashSet<String>)> {
-        let synchronized_roots = Mutex::new(HashSet::new());
-        let updated_roots = self
-            .update_root_records_with_policy_filter_count(
-                id,
-                TerminalRootPolicy::IncludeCompleted,
-                |record, updated_at, observed_at_ms| {
-                    record.error = None;
-                    let task_id = Self::timing_key_for_task(id, task);
-                    let mut metadata: TaskMetadata =
-                        serde_json::from_value(record.metadata.clone())
-                            .context("failed to parse task metadata")?;
-                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
-                    let root_completed =
-                        Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
-                    if record.runner_status == RunnerStatus::Completed {
-                        if !root_completed {
-                            return Ok(false);
-                        }
-                        let expected_uri = publication.proof_uris.get(&record.task_id);
-                        if record.proof_uri.as_ref() == expected_uri
-                            && expected_uri.is_some()
-                            && metadata.runtime.proof_artifact.as_ref()
-                                == Some(&publication.descriptor)
+        let registration = ProofArtifactRegistration {
+            network_pair: self.network_pair.clone(),
+            proof_ref: publication.root_ref.clone(),
+            pipeline_key: id.0.pipeline_key(),
+            route: self.route,
+            proof_uri: publication.descriptor.proof_uri.clone(),
+            content_hash: publication.descriptor.content_hash.clone(),
+            generation: publication.descriptor.generation,
+        };
+        let committed = self
+            .runtime
+            .activate_proof_artifact_with_tasks(
+                &publication.root_ref,
+                registration,
+                owner_incarnations,
+                |records| {
+                    let updated_at = now_ts();
+                    let observed_at_ms = now_ms();
+                    let mut synchronized_roots = HashSet::new();
+                    let mut updated_roots = 0usize;
+                    for record in records {
+                        if !owner_incarnations.contains(&record.incarnation_id)
+                            || !self.record_matches_observer(id, record)?
+                            || (is_terminal_status(record.runner_status)
+                                && record.runner_status != RunnerStatus::Completed)
                         {
-                            synchronized_roots
-                                .lock()
-                                .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
-                                .insert(record.task_id.clone());
-                            return Ok(true);
+                            continue;
                         }
-                        if record.proof_uri.is_some() {
-                            return Ok(false);
+                        record.error = None;
+                        let task_id = Self::timing_key_for_task(id, task);
+                        let mut metadata: TaskMetadata =
+                            serde_json::from_value(record.metadata.clone())
+                                .context("failed to parse task metadata")?;
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
+                        let root_completed = Self::root_completed_by_proof_success(
+                            id,
+                            &metadata,
+                            record.pipeline_key,
+                        );
+                        if record.runner_status == RunnerStatus::Completed {
+                            if !root_completed {
+                                continue;
+                            }
+                            let expected_uri = publication.proof_uris.get(&record.task_id);
+                            if record.proof_uri.as_ref() == expected_uri
+                                && expected_uri.is_some()
+                                && metadata.runtime.proof_artifact.as_ref()
+                                    == Some(&publication.descriptor)
+                            {
+                                synchronized_roots.insert(record.task_id.clone());
+                                updated_roots += 1;
+                                continue;
+                            }
+                            if record.proof_uri.is_some() {
+                                continue;
+                            }
                         }
-                    }
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some(
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some(
+                            if root_completed {
+                                "completed"
+                            } else {
+                                "stage_completed"
+                            }
+                            .to_string(),
+                        );
+                        metadata.runtime.proof_artifact =
+                            root_completed.then(|| publication.descriptor.clone());
+                        record.metadata = serde_json::to_value(metadata)
+                            .context("failed to serialize task metadata")?;
                         if root_completed {
-                            "completed"
+                            synchronized_roots.insert(record.task_id.clone());
+                            record.runner_status = RunnerStatus::Completed;
+                            record.proof_uri = publication.proof_uris.get(&record.task_id).cloned();
                         } else {
-                            "stage_completed"
+                            record.runner_status = RunnerStatus::Allocated;
+                            record.proof_uri = None;
                         }
-                        .to_string(),
-                    );
-                    metadata.runtime.proof_artifact =
-                        root_completed.then(|| publication.descriptor.clone());
-                    record.metadata = serde_json::to_value(metadata)
-                        .context("failed to serialize task metadata")?;
-                    if root_completed {
-                        synchronized_roots
-                            .lock()
-                            .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
-                            .insert(record.task_id.clone());
-                        record.runner_status = RunnerStatus::Completed;
-                        record.proof_uri = publication.proof_uris.get(&record.task_id).cloned();
-                    } else {
-                        record.runner_status = RunnerStatus::Allocated;
-                        record.proof_uri = None;
+                        record.updated_at = updated_at;
+                        updated_roots += 1;
                     }
-                    record.updated_at = updated_at;
-                    Ok(true)
+                    Ok((updated_roots > 0).then_some((updated_roots, synchronized_roots)))
                 },
             )
             .await
             .context("failed to sync runtime task success")?;
-        let synchronized_roots = synchronized_roots
-            .lock()
-            .map_err(|_| anyhow::anyhow!("synchronized root lock poisoned"))?
-            .clone();
-        Ok((updated_roots, synchronized_roots))
+        Ok(committed.unwrap_or_else(|| (0, HashSet::new())))
     }
 
     fn root_completed_by_proof_success(
@@ -938,28 +1161,145 @@ impl RuntimeObserver {
 
 #[async_trait]
 impl EngineObserver for RuntimeObserver {
+    async fn acquire_task_execution_permit(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> std::result::Result<TaskExecutionPermit, EngineObserverError> {
+        let proof_ref = Self::root_task_ref(id);
+        let owner_records = self
+            .runtime
+            .get_tasks_by_ref(&proof_ref)
+            .await
+            .into_iter()
+            .filter_map(|record| {
+                (record.runner_status != RunnerStatus::Cancelled
+                    && self.record_matches_observer(id, &record).unwrap_or(false))
+                .then_some((record.task_id, record.incarnation_id))
+            })
+            .collect::<Vec<_>>();
+        let mut owner_incarnations = owner_records
+            .iter()
+            .map(|(_, incarnation)| *incarnation)
+            .collect::<Vec<_>>();
+        owner_incarnations.sort_unstable();
+        owner_incarnations.dedup();
+        if owner_incarnations.is_empty() {
+            if matches!(
+                task.publication_source(),
+                EngineTask::ProveProposal { .. }
+                    | EngineTask::Aggregate { .. }
+                    | EngineTask::PublishProof { .. }
+            ) {
+                let invalidated = self
+                    .runtime
+                    .invalidate_pending_proof_publication(
+                        &self.network_pair,
+                        id.0.pipeline_key(),
+                        self.route,
+                        &proof_ref,
+                    )
+                    .await
+                    .map_err(|error| publication_observer_error(&error))?;
+                if !invalidated {
+                    return Err(EngineObserverError::RuntimeSync(format!(
+                        "runtime owner appeared while invalidating detached task {proof_ref}"
+                    )));
+                }
+            }
+            return Err(EngineObserverError::ProofInvalidated(format!(
+                "task {proof_ref} has no active runtime owner"
+            )));
+        }
+        Ok(TaskExecutionPermit::tracked(RuntimeExecutionOwners {
+            by_task_id: owner_records.into_iter().collect(),
+            incarnations: owner_incarnations,
+        }))
+    }
+
+    async fn acquire_submission_checkpoint_permit(
+        &self,
+    ) -> std::result::Result<SubmissionCheckpointPermit, ProgressPersistenceError> {
+        self.runtime
+            .acquire_submission_checkpoint_permit()
+            .map(SubmissionCheckpointPermit::tracked)
+            .map_err(|error| ProgressPersistenceError::Permanent(error.to_string()))
+    }
+
     async fn checkpoint_completed_proof(
         &self,
         id: &EngineTaskId,
         _task: &EngineTask,
         proof: &raiko2_primitives::Proof,
-    ) -> std::result::Result<(), EngineObserverError> {
+        execution_permit: &TaskExecutionPermit,
+    ) -> std::result::Result<ProofCompletionPermit, EngineObserverError> {
         let proof_ref = Self::root_task_ref(id);
+        let execution_owners = Self::execution_owners(execution_permit)?;
+        let active_incarnations = self
+            .runtime
+            .get_tasks_by_ref(&proof_ref)
+            .await
+            .into_iter()
+            .filter_map(|record| {
+                (!matches!(
+                    record.runner_status,
+                    RunnerStatus::Failed | RunnerStatus::Cancelled
+                ) && execution_owners
+                    .by_task_id
+                    .get(&record.task_id)
+                    .is_none_or(|incarnation| *incarnation == record.incarnation_id)
+                    && self.record_matches_observer(id, &record).unwrap_or(false))
+                .then_some((record.task_id, record.incarnation_id))
+            })
+            .collect::<HashSet<_>>();
+        if active_incarnations.is_empty() {
+            let invalidated = self
+                .runtime
+                .invalidate_pending_proof_publication(
+                    &self.network_pair,
+                    id.0.pipeline_key(),
+                    self.route,
+                    &proof_ref,
+                )
+                .await
+                .map_err(|error| publication_observer_error(&error))?;
+            if !invalidated {
+                return Err(EngineObserverError::RuntimeSync(format!(
+                    "runtime owner appeared while invalidating completed proof {proof_ref}"
+                )));
+            }
+            return Err(EngineObserverError::ProofInvalidated(format!(
+                "proof task {proof_ref} has no active runtime owner"
+            )));
+        }
         let bytes = serde_json::to_vec(proof).map_err(|error| {
             EngineObserverError::ProofPublication(format!(
                 "failed to serialize pending proof publication: {error}"
             ))
         })?;
-        self.runtime
-            .upsert_pending_proof_publication(
+        let mut owner_incarnations = active_incarnations
+            .iter()
+            .map(|(_, incarnation)| *incarnation)
+            .collect::<Vec<_>>();
+        owner_incarnations.sort_unstable();
+        let checkpointed = self
+            .runtime
+            .checkpoint_pending_proof_publication(
                 &self.network_pair,
                 id.0.pipeline_key(),
                 self.route,
                 &proof_ref,
+                &owner_incarnations,
                 &bytes,
             )
             .await
-            .map_err(|error| publication_observer_error(&error))
+            .map_err(|error| publication_observer_error(&error))?;
+        if checkpointed {
+            return Ok(ProofCompletionPermit::tracked(owner_incarnations));
+        }
+        Err(EngineObserverError::ProofInvalidated(format!(
+            "proof task {proof_ref} lost its runtime owner during checkpoint"
+        )))
     }
 
     async fn load_completed_proof(
@@ -984,9 +1324,9 @@ impl EngineObserver for RuntimeObserver {
         let proof = if let Some(material) = material {
             material.proof
         } else {
-            let Some(bytes) = self
+            let Some(pending) = self
                 .runtime
-                .get_pending_proof_publication(
+                .get_recoverable_pending_proof_publication(
                     &self.network_pair,
                     pipeline_key,
                     self.route,
@@ -997,7 +1337,7 @@ impl EngineObserver for RuntimeObserver {
             else {
                 return Ok(None);
             };
-            serde_json::from_slice(&bytes).map_err(|error| {
+            serde_json::from_slice(&pending.bytes).map_err(|error| {
                 format!("invalid pending proof publication {proof_ref}: {error}")
             })?
         };
@@ -1009,7 +1349,20 @@ impl EngineObserver for RuntimeObserver {
         Ok(Some(proof))
     }
 
-    async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
+    async fn on_task_started(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        worker: &str,
+        execution_permit: &TaskExecutionPermit,
+    ) {
+        let owner_incarnations = match Self::execution_owners(execution_permit) {
+            Ok(owners) => &owners.incarnations,
+            Err(error) => {
+                tracing::warn!(task = ?id, %error, "rejected foreign task execution permit");
+                return;
+            }
+        };
         let stage = Self::stage_name(task);
         let should_increment = self.mark_stage_started_for_metrics(id, task);
         match self.load_root_record(id).await {
@@ -1033,18 +1386,22 @@ impl EngineObserver for RuntimeObserver {
             }
         }
         if let Err(err) = self
-            .update_retry_root_records(id, |record, updated_at, observed_at_ms| {
-                record.runner_status = RunnerStatus::Allocated;
-                record.error = None;
-                let task_id = Self::timing_key_for_task(id, task);
-                update_task_metadata(record, |metadata| {
-                    metadata.mark_stage_started(&task_id, stage, observed_at_ms);
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some(format!("started:{worker}"));
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
+            .update_retry_execution_root_records(
+                id,
+                owner_incarnations,
+                |record, updated_at, observed_at_ms| {
+                    record.runner_status = RunnerStatus::Allocated;
+                    record.error = None;
+                    let task_id = Self::timing_key_for_task(id, task);
+                    update_task_metadata(record, |metadata| {
+                        metadata.mark_stage_started(&task_id, stage, observed_at_ms);
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some(format!("started:{worker}"));
+                    })?;
+                    record.updated_at = updated_at;
+                    Ok(())
+                },
+            )
             .await
         {
             tracing::warn!(task = ?id, error = %err, "failed to sync runtime task start");
@@ -1056,7 +1413,10 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         progress: &ProverProgress,
+        permit: &SubmissionCheckpointPermit,
+        execution_permit: &TaskExecutionPermit,
     ) -> std::result::Result<(), EngineObserverError> {
+        let owner_incarnations = &Self::execution_owners(execution_permit)?.incarnations;
         let stage = Self::stage_name(task);
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
@@ -1078,77 +1438,75 @@ impl EngineObserver for RuntimeObserver {
                 );
             }
         }
+        let runtime_permit = permit
+            .guard::<raiko2_runtime::RuntimeSubmissionCheckpointPermit>()
+            .ok_or_else(|| {
+                EngineObserverError::RuntimeInactive(
+                    "submission checkpoint permit does not belong to the runtime".to_string(),
+                )
+            })?;
         let result = self
-            .update_retry_root_records(id, |record, updated_at, _observed_at_ms| {
-                record.runner_status = RunnerStatus::Allocated;
-                record.error = None;
-                record.provider_request_id = match progress {
-                    ProverProgress::BoundlessSubmission(submission) => {
-                        Some(submission.provider_request_id.clone())
+            .checkpoint_retry_root_records(
+                id,
+                owner_incarnations,
+                runtime_permit,
+                |record, updated_at, _observed_at_ms| {
+                    if !is_terminal_status(record.runner_status) {
+                        record.runner_status = RunnerStatus::Allocated;
+                        record.error = None;
                     }
-                    ProverProgress::Sp1NetworkSubmission(submission) => {
-                        Some(submission.provider_request_id.clone())
-                    }
-                };
-                let task_id = Self::root_task_ref(id);
-                update_task_metadata(record, |metadata| {
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some("submission_registered".to_string());
-                    match progress {
-                        ProverProgress::BoundlessSubmission(submission) => {
-                            match task.publication_source() {
-                                EngineTask::ProveProposal { .. } => {
-                                    metadata
-                                        .upsert_proposal_runtime(&task_id, submission, updated_at);
+                    let task_id = Self::root_task_ref(id);
+                    update_task_metadata(record, |metadata| {
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some("submission_registered".to_string());
+                        match progress {
+                            ProverProgress::BoundlessSubmission(submission) => {
+                                match task.publication_source() {
+                                    EngineTask::ProveProposal { .. } => {
+                                        metadata.upsert_proposal_runtime(
+                                            &task_id, submission, updated_at,
+                                        );
+                                    }
+                                    EngineTask::Aggregate { .. } => {
+                                        metadata.upsert_aggregate_runtime(submission, updated_at);
+                                    }
+                                    EngineTask::Preflight { .. }
+                                    | EngineTask::Validate { .. }
+                                    | EngineTask::Encode { .. }
+                                    | EngineTask::Proposal { .. } => {}
+                                    EngineTask::PublishProof { .. } => unreachable!(),
                                 }
-                                EngineTask::Aggregate { .. } => {
-                                    metadata.upsert_aggregate_runtime(submission, updated_at);
+                            }
+                            ProverProgress::Sp1NetworkSubmission(submission) => {
+                                match task.publication_source() {
+                                    EngineTask::ProveProposal { .. } => {
+                                        metadata.upsert_proposal_sp1_network_runtime(
+                                            &task_id, submission, updated_at,
+                                        );
+                                    }
+                                    EngineTask::Aggregate { .. } => {
+                                        metadata.upsert_aggregate_sp1_network_runtime(
+                                            submission, updated_at,
+                                        );
+                                    }
+                                    EngineTask::Preflight { .. }
+                                    | EngineTask::Validate { .. }
+                                    | EngineTask::Encode { .. }
+                                    | EngineTask::Proposal { .. } => {}
+                                    EngineTask::PublishProof { .. } => unreachable!(),
                                 }
-                                EngineTask::Preflight { .. }
-                                | EngineTask::Validate { .. }
-                                | EngineTask::Encode { .. }
-                                | EngineTask::Proposal { .. } => {}
-                                EngineTask::PublishProof { .. } => unreachable!(),
                             }
                         }
-                        ProverProgress::Sp1NetworkSubmission(submission) => {
-                            match task.publication_source() {
-                                EngineTask::ProveProposal { .. } => {
-                                    metadata.upsert_proposal_sp1_network_runtime(
-                                        &task_id, submission, updated_at,
-                                    );
-                                }
-                                EngineTask::Aggregate { .. } => {
-                                    metadata.upsert_aggregate_sp1_network_runtime(
-                                        submission, updated_at,
-                                    );
-                                }
-                                EngineTask::Preflight { .. }
-                                | EngineTask::Validate { .. }
-                                | EngineTask::Encode { .. }
-                                | EngineTask::Proposal { .. } => {}
-                                EngineTask::PublishProof { .. } => unreachable!(),
-                            }
-                        }
-                    }
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
+                    })?;
+                    record.updated_at = updated_at;
+                    Ok(())
+                },
+            )
             .await;
-        result.map_err(|err| {
-            tracing::warn!(
-                task = ?id,
-                error = %err,
-                "failed to sync runtime task progress"
-            );
-            let message = format!("failed to sync runtime task progress: {err}");
-            if self.runtime.accepts_mutations() {
-                EngineObserverError::RuntimeSync(message)
-            } else {
-                EngineObserverError::RuntimeInactive(message)
-            }
-        })
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.progress_sync_error(id, runtime_permit, &error)),
+        }
     }
 
     async fn load_proof_artifact(
@@ -1172,14 +1530,35 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         success: &EngineTaskSuccess,
+        permit: Option<&ProofCompletionPermit>,
+        execution_permit: &TaskExecutionPermit,
     ) -> std::result::Result<(), EngineObserverError> {
+        let execution_owners = &Self::execution_owners(execution_permit)?.incarnations;
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
         let task_id = Self::timing_key_for_task(id, task);
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
+                let permit = permit.ok_or_else(|| {
+                    EngineObserverError::RuntimeInactive(
+                        "proof completion requires its pre-issued permit".to_string(),
+                    )
+                })?;
+                let owner_incarnations =
+                    permit.guard::<Vec<uuid::Uuid>>().cloned().ok_or_else(|| {
+                        EngineObserverError::RuntimeInactive(
+                            "proof completion permit does not belong to the runtime".to_string(),
+                        )
+                    })?;
                 return self
-                    .handle_proof_success(id, task, stage, finished_at_ms, proof)
+                    .handle_proof_success(
+                        id,
+                        task,
+                        stage,
+                        finished_at_ms,
+                        proof,
+                        &owner_incarnations,
+                    )
                     .await
                     .map_err(|error| publication_observer_error(&error));
             }
@@ -1193,24 +1572,28 @@ impl EngineObserver for RuntimeObserver {
                     None,
                 )
                 .await;
-                self.update_root_records(id, |record, updated_at, observed_at_ms| {
-                    record.runner_status = RunnerStatus::Allocated;
-                    record.error = None;
-                    let task_id = Self::timing_key_for_task(id, task);
-                    update_task_metadata(record, |metadata| {
-                        metadata.mark_stage_terminal(
-                            &task_id,
-                            Self::stage_name(task),
-                            observed_at_ms,
-                            "completed",
-                        );
-                        metadata.runtime.active_stage =
-                            Some(stage_name_from_pipeline_stage(*stage).to_string());
-                        metadata.runtime.last_event = Some("stage_completed".to_string());
-                    })?;
-                    record.updated_at = updated_at;
-                    Ok(())
-                })
+                self.update_execution_root_records(
+                    id,
+                    execution_owners,
+                    |record, updated_at, observed_at_ms| {
+                        record.runner_status = RunnerStatus::Allocated;
+                        record.error = None;
+                        let task_id = Self::timing_key_for_task(id, task);
+                        update_task_metadata(record, |metadata| {
+                            metadata.mark_stage_terminal(
+                                &task_id,
+                                Self::stage_name(task),
+                                observed_at_ms,
+                                "completed",
+                            );
+                            metadata.runtime.active_stage =
+                                Some(stage_name_from_pipeline_stage(*stage).to_string());
+                            metadata.runtime.last_event = Some("stage_completed".to_string());
+                        })?;
+                        record.updated_at = updated_at;
+                        Ok(())
+                    },
+                )
                 .await
             }
         };
@@ -1226,7 +1609,20 @@ impl EngineObserver for RuntimeObserver {
         })
     }
 
-    async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
+    async fn on_task_failed(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        error: &str,
+        execution_permit: &TaskExecutionPermit,
+    ) {
+        let owner_incarnations = match Self::execution_owners(execution_permit) {
+            Ok(owners) => &owners.incarnations,
+            Err(permit_error) => {
+                tracing::warn!(task = ?id, error = %permit_error, "rejected foreign task execution permit");
+                return;
+            }
+        };
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
         let task_id = Self::timing_key_for_task(id, task);
@@ -1240,17 +1636,21 @@ impl EngineObserver for RuntimeObserver {
         )
         .await;
         if let Err(err) = self
-            .update_root_records(id, |record, updated_at, observed_at_ms| {
-                record.runner_status = RunnerStatus::Failed;
-                record.error = Some(error.to_string());
-                update_task_metadata(record, |metadata| {
-                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some("failed".to_string());
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
+            .update_execution_root_records(
+                id,
+                owner_incarnations,
+                |record, updated_at, observed_at_ms| {
+                    record.runner_status = RunnerStatus::Failed;
+                    record.error = Some(error.to_string());
+                    update_task_metadata(record, |metadata| {
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some("failed".to_string());
+                    })?;
+                    record.updated_at = updated_at;
+                    Ok(())
+                },
+            )
             .await
         {
             tracing::warn!(task = ?id, error = %err, "failed to sync runtime task failure");
@@ -1264,45 +1664,69 @@ impl EngineObserver for RuntimeObserver {
         self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms, None)
             .await;
         let root_ref = Self::root_task_ref(id);
-        let completed_root_exists = match self.find_root_records(id).await {
-            Ok(records) => {
-                let mut completed_root_exists = false;
-                for record in records {
-                    if record.runner_status != RunnerStatus::Completed {
-                        continue;
-                    }
-                    match self.record_matches_observer(id, &record) {
-                        Ok(matches) => completed_root_exists |= matches,
-                        Err(error) => {
-                            tracing::warn!(
-                                task = ?id,
-                                runtime_task_id = record.task_id,
-                                %error,
-                                "skipping cancellation invalidation because a completed root could not be classified"
-                            );
-                            completed_root_exists = true;
+        let cancelled = self
+            .runtime
+            .update_tasks_and_invalidate_artifact(
+                &root_ref,
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                |records| {
+                    let mut completed_root_exists = false;
+                    let mut matching_root_exists = false;
+                    let updated_at = now_ts();
+                    let observed_at_ms = now_ms();
+                    for record in records {
+                        if !self.record_matches_observer(id, record)? {
+                            continue;
                         }
+                        matching_root_exists = true;
+                        if record.runner_status == RunnerStatus::Completed {
+                            completed_root_exists = true;
+                            continue;
+                        }
+                        if is_terminal_status(record.runner_status) {
+                            continue;
+                        }
+                        record.runner_status = RunnerStatus::Cancelled;
+                        record.error = None;
+                        update_task_metadata(record, |metadata| {
+                            metadata.mark_stage_terminal(
+                                &task_id,
+                                stage,
+                                observed_at_ms,
+                                "cancelled",
+                            );
+                            metadata.runtime.active_stage = Some(stage.to_string());
+                            metadata.runtime.last_event = Some("cancelled".to_string());
+                        })?;
+                        record.updated_at = updated_at;
                     }
-                }
-                completed_root_exists
-            }
+                    Ok(((), matching_root_exists && !completed_root_exists))
+                },
+            )
+            .await;
+        let descriptor = match cancelled {
+            Ok(((), _, descriptor)) => descriptor,
             Err(error) => {
                 tracing::warn!(
                     task = ?id,
                     %error,
-                    "skipping cancellation invalidation because runtime roots could not be read"
+                    "failed to atomically cancel runtime roots"
                 );
-                true
+                return;
             }
         };
-        if !completed_root_exists
+        if let Some(descriptor) = descriptor
             && let Err(err) = self
                 .runtime
-                .invalidate_pending_proof_publication(
+                .finalize_proof_artifact_invalidation(
                     &self.network_pair,
                     id.0.pipeline_key(),
                     self.route,
                     &root_ref,
+                    descriptor.generation,
+                    &descriptor.content_hash,
                 )
                 .await
         {
@@ -1313,23 +1737,19 @@ impl EngineObserver for RuntimeObserver {
             );
         }
         if let Err(err) = self
-            .update_root_records(id, |record, updated_at, observed_at_ms| {
-                record.runner_status = RunnerStatus::Cancelled;
-                record.error = None;
-                update_task_metadata(record, |metadata| {
-                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "cancelled");
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some("cancelled".to_string());
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
+            .runtime
+            .remove_pending_proof_publication_if_unowned(
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                &root_ref,
+            )
             .await
         {
             tracing::warn!(
                 task = ?id,
                 error = %err,
-                "failed to sync runtime task cancellation"
+                "failed to clear cancelled proof publication outbox"
             );
         }
     }
@@ -1339,24 +1759,31 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         backend: NetworkProverBackend,
-    ) -> Option<PendingProofCheckpoint> {
+    ) -> std::result::Result<Option<PendingProofCheckpoint>, ProgressPersistenceError> {
+        let permanent = |message: String| ProgressPersistenceError::Permanent(message);
         let source = task.publication_source();
         let record = match source {
             EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
                 .load_root_record_for_resume(id, source)
                 .await
-                .ok()
-                .flatten(),
+                .map_err(|error| {
+                    permanent(format!("failed to load runtime checkpoint: {error}"))
+                })?,
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => None,
+            | EngineTask::Proposal { .. } => return Ok(None),
             EngineTask::PublishProof { .. } => {
                 unreachable!()
             }
-        }?;
+        }
+        .ok_or_else(|| {
+            permanent("runtime task record is missing while loading checkpoint".into())
+        })?;
 
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata).map_err(|error| {
+            permanent(format!("runtime checkpoint metadata is invalid: {error}"))
+        })?;
         let task_id = Self::root_task_ref(id);
         let runtime = match source {
             EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
@@ -1368,48 +1795,99 @@ impl EngineObserver for RuntimeObserver {
             EngineTask::PublishProof { .. } => {
                 unreachable!()
             }
-        }?;
-        match backend {
-            NetworkProverBackend::Sp1 => {
-                #[derive(serde::Serialize)]
-                struct Sp1Resume<'a> {
-                    provider_request_id: &'a str,
-                }
-                PendingProofCheckpoint::from_payload(
-                    backend,
-                    std::num::NonZeroU32::new(runtime.rebid_attempt.unwrap_or(1).max(1))?,
-                    runtime.submitted_at.unwrap_or(0),
-                    runtime.expires_at.unwrap_or(0),
-                    0,
-                    &Sp1Resume {
-                        provider_request_id: runtime.provider_request_id.as_deref()?,
-                    },
-                )
-                .ok()
-            }
-            NetworkProverBackend::Boundless => {
-                let now = now_secs();
-                let expires_at = runtime.expires_at?;
-                let resume = BoundlessSubmissionResume {
-                    provider_request_id: runtime.provider_request_id.clone()?,
-                    remote_tx_hash: runtime.remote_tx_hash.clone(),
-                    expires_at,
-                    lock_expires_at: runtime.lock_expires_at.unwrap_or(0),
-                    submitted_at: runtime.submitted_at.unwrap_or(now),
-                    max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
-                    max_price_wei: runtime.max_price_wei.clone(),
-                    rebid_attempt: runtime.rebid_attempt.unwrap_or(0),
-                };
-                PendingProofCheckpoint::from_payload(
-                    backend,
-                    std::num::NonZeroU32::new(resume.rebid_attempt.max(1))?,
-                    resume.submitted_at,
-                    resume.expires_at,
-                    0,
-                    &resume,
-                )
-                .ok()
-            }
+        };
+        let Some(runtime) = runtime else {
+            return Ok(None);
+        };
+        if !runtime.has_remote_submission_progress() {
+            return Ok(None);
+        }
+
+        build_pending_proof_checkpoint(runtime, backend).map(Some)
+    }
+}
+
+fn checkpoint_error(message: impl Into<String>) -> ProgressPersistenceError {
+    ProgressPersistenceError::Permanent(message.into())
+}
+
+fn build_pending_proof_checkpoint(
+    runtime: &TaskRuntimeMetadata,
+    backend: NetworkProverBackend,
+) -> std::result::Result<PendingProofCheckpoint, ProgressPersistenceError> {
+    let required = |value: Option<u64>, field: &str| {
+        value.ok_or_else(|| checkpoint_error(format!("checkpoint is missing {field}")))
+    };
+    match backend {
+        NetworkProverBackend::Sp1 => {
+            let attempt = std::num::NonZeroU32::new(
+                runtime
+                    .rebid_attempt
+                    .ok_or_else(|| checkpoint_error("SP1 checkpoint is missing rebid_attempt"))?,
+            )
+            .ok_or_else(|| checkpoint_error("SP1 checkpoint rebid_attempt must be non-zero"))?;
+            let resume = Sp1NetworkSubmissionProgress {
+                provider_request_id: runtime.provider_request_id.clone().ok_or_else(|| {
+                    checkpoint_error("SP1 checkpoint is missing provider_request_id")
+                })?,
+                network_mode: runtime
+                    .sp1_network_mode
+                    .ok_or_else(|| checkpoint_error("SP1 checkpoint is missing network_mode"))?,
+                fulfillment_strategy: runtime.sp1_fulfillment_strategy.ok_or_else(|| {
+                    checkpoint_error("SP1 checkpoint is missing fulfillment_strategy")
+                })?,
+                skip_simulation: runtime
+                    .sp1_skip_simulation
+                    .ok_or_else(|| checkpoint_error("SP1 checkpoint is missing skip_simulation"))?,
+                cycle_limit: runtime
+                    .sp1_cycle_limit
+                    .ok_or_else(|| checkpoint_error("SP1 checkpoint is missing cycle_limit"))?,
+                timeout_secs: runtime
+                    .sp1_timeout_secs
+                    .ok_or_else(|| checkpoint_error("SP1 checkpoint is missing timeout_secs"))?,
+                attempt: attempt.get(),
+                max_price_per_pgu: runtime.sp1_max_price_per_pgu,
+                auction_timeout_secs: runtime.sp1_auction_timeout_secs,
+            };
+            PendingProofCheckpoint::from_payload(
+                backend,
+                attempt,
+                required(runtime.submitted_at, "submitted_at")?,
+                required(runtime.expires_at, "expires_at")?,
+                &resume,
+            )
+            .map_err(|error| checkpoint_error(error.to_string()))
+        }
+        NetworkProverBackend::Boundless => {
+            let resume = BoundlessSubmissionResume {
+                provider_request_id: runtime.provider_request_id.clone().ok_or_else(|| {
+                    checkpoint_error("Boundless checkpoint is missing provider_request_id")
+                })?,
+                remote_tx_hash: runtime.remote_tx_hash.clone(),
+                expires_at: required(runtime.expires_at, "expires_at")?,
+                lock_expires_at: required(runtime.lock_expires_at, "lock_expires_at")?,
+                submitted_at: required(runtime.submitted_at, "submitted_at")?,
+                max_price_multiplier: runtime.max_price_multiplier.ok_or_else(|| {
+                    checkpoint_error("Boundless checkpoint is missing max_price_multiplier")
+                })?,
+                max_price_wei: Some(runtime.max_price_wei.clone().ok_or_else(|| {
+                    checkpoint_error("Boundless checkpoint is missing max_price_wei")
+                })?),
+                rebid_attempt: runtime.rebid_attempt.ok_or_else(|| {
+                    checkpoint_error("Boundless checkpoint is missing rebid_attempt")
+                })?,
+            };
+            let attempt = std::num::NonZeroU32::new(resume.rebid_attempt).ok_or_else(|| {
+                checkpoint_error("Boundless checkpoint rebid_attempt must be non-zero")
+            })?;
+            PendingProofCheckpoint::from_payload(
+                backend,
+                attempt,
+                resume.submitted_at,
+                resume.expires_at,
+                &resume,
+            )
+            .map_err(|error| checkpoint_error(error.to_string()))
         }
     }
 }
@@ -1451,6 +1929,7 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
+#[cfg(test)]
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1470,18 +1949,89 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 impl RuntimeObserver {
+    async fn test_execution_permit(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> std::result::Result<TaskExecutionPermit, EngineObserverError> {
+        EngineObserver::acquire_task_execution_permit(self, id, task).await
+    }
+
+    async fn checkpoint_completed_proof(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        proof: &raiko2_primitives::Proof,
+    ) -> std::result::Result<ProofCompletionPermit, EngineObserverError> {
+        let execution_permit = self.test_execution_permit(id, task).await?;
+        EngineObserver::checkpoint_completed_proof(self, id, task, proof, &execution_permit).await
+    }
+
+    async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
+        let Ok(execution_permit) = self.test_execution_permit(id, task).await else {
+            return;
+        };
+        EngineObserver::on_task_started(self, id, task, worker, &execution_permit).await;
+    }
+
+    async fn on_task_progress(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        progress: &ProverProgress,
+        permit: &SubmissionCheckpointPermit,
+    ) -> std::result::Result<(), EngineObserverError> {
+        let execution_permit = self.test_execution_permit(id, task).await?;
+        EngineObserver::on_task_progress(self, id, task, progress, permit, &execution_permit).await
+    }
+
+    async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
+        let Ok(execution_permit) = self.test_execution_permit(id, task).await else {
+            return;
+        };
+        EngineObserver::on_task_failed(self, id, task, error, &execution_permit).await;
+    }
+
+    async fn on_task_succeeded(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        success: &EngineTaskSuccess,
+    ) -> std::result::Result<(), EngineObserverError> {
+        let execution_permit = self.test_execution_permit(id, task).await?;
+        let permit = match success {
+            EngineTaskSuccess::Proof { proof, .. } => Some(
+                EngineObserver::checkpoint_completed_proof(
+                    self,
+                    id,
+                    task,
+                    proof,
+                    &execution_permit,
+                )
+                .await?,
+            ),
+            EngineTaskSuccess::GuestInput { .. } | EngineTaskSuccess::EncodedInput { .. } => None,
+        };
+        EngineObserver::on_task_succeeded(
+            self,
+            id,
+            task,
+            success,
+            permit.as_ref(),
+            &execution_permit,
+        )
+        .await
+    }
+
     async fn load_sp1_network_request_id(
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> Option<String> {
-        #[derive(serde::Deserialize)]
-        struct Sp1Resume {
-            provider_request_id: String,
-        }
         self.load_pending_proof_checkpoint(id, task, NetworkProverBackend::Sp1)
-            .await?
-            .decode_payload::<Sp1Resume>()
+            .await
+            .ok()??
+            .decode_payload::<Sp1NetworkSubmissionProgress>()
             .ok()
             .map(|resume| resume.provider_request_id)
     }
@@ -1492,7 +2042,8 @@ impl RuntimeObserver {
         task: &EngineTask,
     ) -> Option<BoundlessSubmissionResume> {
         self.load_pending_proof_checkpoint(id, task, NetworkProverBackend::Boundless)
-            .await?
+            .await
+            .ok()??
             .decode_payload()
             .ok()
     }
@@ -1514,9 +2065,9 @@ mod tests {
         Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
     use raiko2_runtime::{
-        MemoryProofArtifactStore, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-        ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore, RuntimeStateObject,
-        RuntimeStateWriteResult, TaskRegistration,
+        MemoryProofArtifactStore, ProofArtifactDeleteResult, ProofArtifactKey, ProofArtifactObject,
+        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, ProofArtifactStore,
+        RuntimeStateObject, RuntimeStateWriteResult, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1562,8 +2113,10 @@ mod tests {
             key: &ProofArtifactKey,
             bytes: &[u8],
         ) -> Result<ProofArtifactPutResult> {
-            self.put_entered.notify_one();
-            self.allow_put.notified().await;
+            if !key.proof_ref.starts_with("__pending__:") {
+                self.put_entered.notify_one();
+                self.allow_put.notified().await;
+            }
             self.inner.put_if_absent(key, bytes).await
         }
 
@@ -1606,7 +2159,7 @@ mod tests {
             key: &ProofArtifactKey,
             generation: Option<i64>,
             expected_content_hash: &str,
-        ) -> Result<()> {
+        ) -> Result<ProofArtifactDeleteResult> {
             self.inner
                 .delete(key, generation, expected_content_hash)
                 .await
@@ -1692,7 +2245,7 @@ mod tests {
             key: &ProofArtifactKey,
             generation: Option<i64>,
             expected_content_hash: &str,
-        ) -> Result<()> {
+        ) -> Result<ProofArtifactDeleteResult> {
             self.inner
                 .delete(key, generation, expected_content_hash)
                 .await
@@ -1771,8 +2324,8 @@ mod tests {
             _key: &ProofArtifactKey,
             _generation: Option<i64>,
             _expected_content_hash: &str,
-        ) -> Result<()> {
-            Ok(())
+        ) -> Result<ProofArtifactDeleteResult> {
+            Ok(ProofArtifactDeleteResult::Missing)
         }
 
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
@@ -1798,6 +2351,14 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    fn checkpoint_permit(runtime: &RuntimeManager) -> SubmissionCheckpointPermit {
+        SubmissionCheckpointPermit::tracked(
+            runtime
+                .acquire_submission_checkpoint_permit()
+                .expect("checkpoint permit"),
+        )
     }
 
     fn proposal_request() -> ProposalTaskRequest {
@@ -1848,6 +2409,18 @@ mod tests {
         }
     }
 
+    async fn checkpoint_proof_fixture(
+        observer: &RuntimeObserver,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Result<()> {
+        observer
+            .checkpoint_completed_proof(id, task, &proof_fixture())
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
     async fn register_observer_task(
         runtime: &RuntimeManager,
         task_id: &str,
@@ -1864,9 +2437,7 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
                 pipeline_key: Some(pipeline),
-                route: "native/local"
-                    .parse::<PipelineRoute>()
-                    .expect("parse route"),
+                route: pipeline.route(),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(request.proposal_id),
                 proof_ids: vec![task_ref.clone()],
@@ -1970,6 +2541,7 @@ mod tests {
                     max_price_wei: Some("9000000000000".to_string()),
                     rebid_attempt: 3,
                 }),
+                &checkpoint_permit(&runtime),
             )
             .await
             .expect("persist Boundless submission progress");
@@ -2041,24 +2613,21 @@ mod tests {
         runtime_entry.lock_expires_at = None;
         record.metadata = serde_json::to_value(metadata)?;
         runtime.upsert_task(&record).await?;
-        let before_legacy_resume = now_secs();
-        let resumed = observer
-            .load_boundless_submission(
+        let checkpoint_error = observer
+            .load_pending_proof_checkpoint(
                 &proposal_task_id,
                 &EngineTask::ProveProposal {
                     request: proposal_request(),
                     input_task: proposal_task_id.clone(),
                 },
+                NetworkProverBackend::Boundless,
             )
             .await
-            .expect("legacy boundless submission can resume");
-        let after_legacy_resume = now_secs();
-        assert_eq!(resumed.provider_request_id, "0x1234");
-        assert_eq!(resumed.expires_at, future_expires_at);
-        assert_eq!(resumed.lock_expires_at, 0);
-        assert!((before_legacy_resume..=after_legacy_resume).contains(&resumed.submitted_at));
-        assert_eq!(resumed.max_price_multiplier, 1);
-        assert_eq!(resumed.rebid_attempt, 0);
+            .expect_err("incomplete checkpoint must fail closed");
+        assert!(matches!(
+            checkpoint_error,
+            ProgressPersistenceError::Permanent(_)
+        ));
 
         let mut record = runtime
             .get_task("task_public")
@@ -2073,6 +2642,9 @@ mod tests {
                 .get_mut(&task_ref)
                 .expect("proposal runtime exists");
             runtime_entry.expires_at = Some(expired_at);
+            runtime_entry.lock_expires_at = Some(future_expires_at - 600);
+            runtime_entry.submitted_at = Some(future_expires_at - 300);
+            runtime_entry.max_price_multiplier = Some(4);
             runtime_entry.rebid_attempt = Some(5);
         }
         record.metadata = serde_json::to_value(metadata)?;
@@ -2096,6 +2668,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_keeps_aggregate_root_allocated_after_proposal_proof() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-aggregate-pending",
@@ -2145,6 +2718,15 @@ mod tests {
             "taiko_dev/ethereum".to_string(),
             PipelineKey::ShastaSp1.route(),
         );
+        checkpoint_proof_fixture(
+            &observer,
+            &proposal_task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: proposal_task_id.clone(),
+            },
+        )
+        .await?;
         observer
             .on_task_succeeded(
                 &proposal_task_id,
@@ -2251,22 +2833,30 @@ mod tests {
             pipeline,
             request: request.clone(),
         });
-        let proof_ref = proposal_task_ref(pipeline, &request);
         let proof = proof_fixture();
-        runtime
-            .upsert_pending_proof_publication(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &serde_json::to_vec(&proof)?,
-            )
-            .await?;
+        register_observer_task(
+            runtime.as_ref(),
+            "task_publication_outbox",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
             route,
         );
+        checkpoint_proof_fixture(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: task_id.clone(),
+            },
+        )
+        .await?;
 
         assert_eq!(
             observer
@@ -2291,7 +2881,7 @@ mod tests {
                     .into_owned(),
             )?,
             checks: AtomicUsize::new(0),
-            block_on_check: 0,
+            block_on_check: 1,
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
@@ -2320,6 +2910,15 @@ mod tests {
             "taiko_dev/ethereum".to_string(),
             route,
         );
+        checkpoint_proof_fixture(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: task_id.clone(),
+            },
+        )
+        .await?;
         let publication = tokio::spawn(async move {
             observer
                 .on_task_succeeded(
@@ -2629,6 +3228,17 @@ mod tests {
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
         let object = publication.object().clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
         let loading_runtime = Arc::clone(&runtime);
         let loading_ref = proof_ref.clone();
         let loading = tokio::spawn(async move {
@@ -2642,17 +3252,6 @@ mod tests {
             .await
         });
         store.recheck_entered.notified().await;
-        runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: proof_ref.clone(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: object.proof_uri.clone(),
-                content_hash: object.content_hash.clone(),
-                generation: object.generation,
-            })
-            .await?;
         runtime
             .mark_proof_artifact_invalidated(
                 "taiko_dev/ethereum",
@@ -2681,7 +3280,7 @@ mod tests {
                     .into_owned(),
             )?,
             checks: AtomicUsize::new(0),
-            block_on_check: 1,
+            block_on_check: 0,
             recheck_entered: tokio::sync::Notify::new(),
             allow_recheck: tokio::sync::Notify::new(),
         });
@@ -2697,6 +3296,17 @@ mod tests {
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
         let object = publication.object().clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
         let loading_runtime = Arc::clone(&runtime);
         let loading_ref = proof_ref.clone();
         let loading = tokio::spawn(async move {
@@ -3047,6 +3657,15 @@ mod tests {
             "taiko_dev/ethereum".to_string(),
             PipelineKey::ShastaSp1.route(),
         );
+        checkpoint_proof_fixture(
+            &observer,
+            &first_task_id,
+            &EngineTask::ProveProposal {
+                request: first_request.clone(),
+                input_task: first_task_id.clone(),
+            },
+        )
+        .await?;
         observer
             .on_task_succeeded(
                 &first_task_id,
@@ -3085,6 +3704,15 @@ mod tests {
                 .is_some()
         );
 
+        checkpoint_proof_fixture(
+            &observer,
+            &second_task_id,
+            &EngineTask::ProveProposal {
+                request: second_request.clone(),
+                input_task: second_task_id.clone(),
+            },
+        )
+        .await?;
         observer
             .on_task_succeeded(
                 &second_task_id,
@@ -3192,6 +3820,7 @@ mod tests {
                     max_price_per_pgu: Some(42),
                     auction_timeout_secs: Some(120),
                 }),
+                &checkpoint_permit(&runtime),
             )
             .await
             .expect("persist SP1 submission progress");
@@ -3237,6 +3866,143 @@ mod tests {
                 .as_deref(),
             Some("0xsp1")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_generation_conflict_is_permanent() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "progress-conflict".into(),
+        )?);
+        let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-progress-conflict"),
+            store.clone(),
+        )?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_progress_conflict",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let permit = checkpoint_permit(&runtime);
+
+        let competing_runtime = RuntimeManager::new_with_artifact_store(
+            unique_runtime_root("runtime-observer-progress-conflict-other"),
+            store,
+        )?;
+        competing_runtime.initialize().await?;
+        competing_runtime
+            .register_task(TaskRegistration {
+                task_id: "other-task".into(),
+                pipeline_key: Some(PipelineKey::ShastaNative),
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                proposal_id: Some(99),
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: None,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let error = observer
+            .on_task_progress(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request,
+                    input_task: proposal_task_id.clone(),
+                },
+                &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    attempt: 1,
+                    provider_request_id: "0xaccepted".to_string(),
+                    network_mode: Sp1NetworkMode::Reserved,
+                    fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                    skip_simulation: true,
+                    cycle_limit: 1_000_000,
+                    timeout_secs: 3_600,
+                    max_price_per_pgu: None,
+                    auction_timeout_secs: None,
+                }),
+                &permit,
+            )
+            .await
+            .expect_err("the stale runtime generation must reject progress");
+
+        assert!(runtime.is_lifecycle_active());
+        assert!(!runtime.accepts_mutations());
+        assert!(matches!(error, EngineObserverError::RuntimeInactive(_)));
+        assert!(runtime.check_readiness().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_lifecycle_allows_pre_admitted_checkpoint() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-progress-draining",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_progress_draining",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let permit = checkpoint_permit(&runtime);
+        runtime.start_draining();
+
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        observer
+            .on_task_progress(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request,
+                    input_task: proposal_task_id.clone(),
+                },
+                &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    attempt: 1,
+                    provider_request_id: "0xaccepted".to_string(),
+                    network_mode: Sp1NetworkMode::Reserved,
+                    fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                    skip_simulation: true,
+                    cycle_limit: 1_000_000,
+                    timeout_secs: 3_600,
+                    max_price_per_pgu: None,
+                    auction_timeout_secs: None,
+                }),
+                &permit,
+            )
+            .await
+            .expect("pre-admitted checkpoint must persist while draining");
+
+        drop(permit);
+        runtime.begin_draining().await;
+        assert!(!runtime.is_lifecycle_active());
         Ok(())
     }
 
@@ -3329,6 +4095,7 @@ mod tests {
                     max_price_per_pgu: Some(42),
                     auction_timeout_secs: Some(120),
                 }),
+                &checkpoint_permit(&runtime),
             )
             .await
             .expect("persist proposal SP1 submission progress");
@@ -3404,13 +4171,6 @@ mod tests {
             })
             .await?;
 
-        let mut record = runtime
-            .get_task("task_public_sp1_aggregate")
-            .await?
-            .expect("runtime task exists");
-        record.provider_request_id = Some("0xsp1-proposal".to_string());
-        runtime.upsert_task(&record).await?;
-
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
@@ -3447,6 +4207,7 @@ mod tests {
                     max_price_per_pgu: Some(42),
                     auction_timeout_secs: Some(120),
                 }),
+                &checkpoint_permit(&runtime),
             )
             .await
             .expect("persist aggregate SP1 submission progress");
@@ -3594,7 +4355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_observer_records_proof_persistence_failure_metrics() -> Result<()> {
+    async fn runtime_observer_fails_closed_when_outbox_checkpoint_cannot_persist() -> Result<()> {
         let store = Arc::new(FailingArtifactStore::default());
         let runtime = Arc::new(RuntimeManager::new_with_artifact_store(
             unique_runtime_root("runtime-observer-proof-persistence"),
@@ -3641,35 +4402,17 @@ mod tests {
             matches!(error, EngineObserverError::ProofPublication(_)),
             "{error}"
         );
-        assert_eq!(store.attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
 
         let record = runtime
             .get_task("task_proof_persistence_failure")
             .await?
             .expect("runtime task exists");
         assert_eq!(record.runner_status, RunnerStatus::Allocated);
-        assert!(
-            record
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("failed to publish proof artifact")),
-            "{record:?}"
-        );
+        assert_eq!(record.error, None);
 
         let (_, body) = telemetry::render().expect("render telemetry");
         let body = String::from_utf8(body).expect("utf8 telemetry");
-        assert!(
-            body.contains(
-                "raiko2_stage_task_terminal_total{aggregate=\"false\",pair=\"metrics_proof_persistence/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"prove\",status=\"failed\"}"
-            ),
-            "{body}"
-        );
-        assert!(
-            body.contains(
-                "raiko2_stage_task_failures_total{aggregate=\"false\",error_kind=\"proof_persistence\",pair=\"metrics_proof_persistence/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"prove\"}"
-            ),
-            "{body}"
-        );
         assert!(
             !body.contains(
                 "raiko2_stage_task_terminal_total{aggregate=\"false\",pair=\"metrics_proof_persistence/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"prove\",status=\"completed\"}"

@@ -166,14 +166,16 @@ where
         worker: &str,
     ) -> Result<Option<TaskLease<P, Id>>, TaskStoreError> {
         for prio in [Priority::High, Priority::Medium, Priority::Low] {
+            let lease_token = format!("{worker}/{}", uuid::Uuid::new_v4());
             if let Some((id, payload, priority, attempt, execution_policy)) =
-                self.store.pop_ready_and_take(prio, worker).await?
+                self.store.pop_ready_and_take(prio, &lease_token).await?
             {
                 return Ok(Some(TaskLease {
                     id,
                     payload,
                     priority,
                     attempt,
+                    lease_token,
                     worker: worker.to_string(),
                     execution_policy,
                 }));
@@ -238,13 +240,19 @@ where
         let TaskLease {
             id,
             attempt,
-            worker,
+            lease_token,
             ..
         } = lease;
 
         let updated = self
             .store
-            .set_state_if_running(&id, &worker, attempt, TaskState::Succeeded { output }, None)
+            .set_state_if_running(
+                &id,
+                &lease_token,
+                attempt,
+                TaskState::Succeeded { output },
+                None,
+            )
             .await?;
         if !updated {
             self.notify.notify_one();
@@ -288,7 +296,7 @@ where
             .store
             .retry_now_if_running(
                 lease.id,
-                &lease.worker,
+                &lease.lease_token,
                 lease.attempt,
                 lease.priority,
                 lease.payload,
@@ -312,7 +320,7 @@ where
             .store
             .retry_later_if_running(
                 lease.id,
-                &lease.worker,
+                &lease.lease_token,
                 lease.attempt,
                 error,
                 lease.payload,
@@ -336,7 +344,7 @@ where
             .store
             .set_state_if_running(
                 &lease.id,
-                &lease.worker,
+                &lease.lease_token,
                 lease.attempt,
                 TaskState::Failed {
                     error,
@@ -360,7 +368,7 @@ where
     /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn renew_lease(&self, lease: &TaskLease<P, Id>) -> Result<bool, TaskStoreError> {
         self.store
-            .renew_lease(&lease.id, &lease.worker, lease.attempt)
+            .renew_lease(&lease.id, &lease.lease_token, lease.attempt)
             .await
     }
 
@@ -378,7 +386,7 @@ where
         self.store
             .checkpoint_payload_if_running(
                 &lease.id,
-                &lease.worker,
+                &lease.lease_token,
                 lease.attempt,
                 payload,
                 execution_policy,
@@ -2082,6 +2090,63 @@ mod tests {
         assert_eq!(lease2.priority, Priority::High);
         assert_eq!(lease2.payload, "second");
         assert_eq!(lease2.attempt, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_lease_cannot_complete_removed_and_recreated_task() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
+        let id = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "first",
+                },
+                vec![],
+            )
+            .await?;
+        let stale = sched
+            .next_ready("same-worker")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected stale lease"))?;
+
+        sched.remove(id.clone()).await?;
+        sched
+            .submit(
+                id.clone(),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "replacement",
+                },
+                vec![],
+            )
+            .await?;
+        let replacement = sched
+            .next_ready("same-worker")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected replacement lease"))?;
+        assert_ne!(stale.lease_token, replacement.lease_token);
+
+        assert_eq!(
+            sched
+                .complete_with_disposition(stale, Err("stale failure".to_string()))
+                .await?,
+            TaskCompletionDisposition::Stale
+        );
+        let view = sched
+            .get(id.clone())
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected replacement task"))?;
+        assert!(matches!(view.state, TaskState::Running { .. }));
+
+        assert_eq!(
+            sched
+                .complete_with_disposition(replacement, Ok("replacement-output"))
+                .await?,
+            TaskCompletionDisposition::Succeeded
+        );
         Ok(())
     }
 

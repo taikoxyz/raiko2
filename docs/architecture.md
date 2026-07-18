@@ -4,8 +4,10 @@ Raiko2 is a Shasta proof orchestration service. It turns a normalized v4 proof r
 durable proposal or aggregation proof while keeping request identity, execution state, remote
 provider checkpoints, and published proof artifacts recoverable across process restarts.
 
-This document describes the current runtime architecture. Historical plans under `docs/plans/`
-explain how individual changes were developed but are not the source of truth for current behavior.
+This document expands the normative architecture and operator contract in [README.md](../README.md)
+with component boundaries, state transitions, and operational diagrams. If this document conflicts
+with README.md, README.md governs. Historical plans under `docs/plans/` explain how individual
+changes were developed but are not the source of truth for current behavior.
 
 ## Design Invariants
 
@@ -136,11 +138,31 @@ permanently strand a non-terminal runtime root.
 ## Runtime Lifecycle And Fencing
 
 The runtime uses one process-local lifecycle fence for the entire namespace. It has no distributed
-owner record, lease renewal, owner epoch, or task-local fence. `Active` permits mutations;
-`Draining` rejects every admission, runtime mutation, checkpoint write, publication, invalidation,
-reconciliation, and cleanup write. Runtime-state and artifact-manifest GCS generations are retained
+owner record, lease renewal, owner epoch, or task-scoped lifecycle fence. Immutable runtime-task
+incarnations and scheduler lease tokens only reject stale callbacks; they never grant write authority
+or bypass the namespace lifecycle state. `Active` permits mutations;
+`Draining` rejects every new admission, ordinary runtime mutation, publication, invalidation,
+reconciliation, and cleanup write. The sole exception is the request-ID checkpoint covered by a
+provider-submission permit acquired while `Active`; shutdown waits for those permits up to its
+deadline. Runtime-state and artifact-manifest GCS generations are retained
 because they provide exact object-version compare-and-swap and conditional deletion; they do not
 coordinate multiple instances.
+
+After leasing a queue task, the engine captures a runtime-issued execution capability mapping every
+existing runtime task ID to its incarnation, then revalidates the unique queue lease token before
+invoking any observer callback. Start, progress, intermediate success, failure, proof checkpoint, and
+terminal success mutations all filter existing roots by that capability. At proof checkpoint, the
+engine has also conditionally persisted the completed payload under the same queue lease token, so the
+runtime may add a newly joined, distinct shared root to the completion owner set. It never substitutes
+a new incarnation for a task ID already captured by the execution capability. A remove/recreate race
+therefore fails either the queue-token check or the runtime-incarnation check, while a legitimate
+late-joining shared root receives the already-computed proof.
+
+An admitted provider checkpoint may write while the runtime is `Draining`, but completion is checked
+again after every authoritative store await. Local installation and deadline deactivation share a
+non-awaiting commit fence, giving them one linearization order. If the bounded drain deadline wins,
+the call does not install or report the late state and marks local coherence recoverable for the next
+authoritative reload.
 
 Startup loads authoritative state before recovery:
 
@@ -159,8 +181,9 @@ flowchart TD
 ```
 
 Every external artifact mutation crosses the global lifecycle and authoritative-state coherence
-fence. Draining takes the write side of that global gate, waits for any in-flight runtime or external
-store mutation to leave it, and rejects every later mutation. If authoritative state cannot be
+fence. Draining closes the gate immediately, waits for any in-flight runtime or external store
+mutation to leave it, and rejects every later ordinary mutation. A pre-admitted provider request may
+use only the checkpoint persistence path until its permit is released. If authoritative state cannot be
 reloaded, later mutations and request admissions fail closed. Memory mode is an explicit ephemeral backend
 accepted only for `development`, `local`, and `test`, not an automatic GCS fallback.
 
@@ -211,7 +234,18 @@ so a dangling manifest remains inspectable even when normal proof reads fail.
 ## Publication Transaction
 
 The pending publication object is the durable outbox between proof computation and artifact
-registration. It is retained until the canonical proof is validated, published, and registered.
+registration. Its runtime record binds the proof hash to the exact eligible task incarnations. It is
+retained until the canonical proof is validated, published, registered, and activated for that same
+incarnation set.
+Within the single process, raw outbox writes, ownership mutations, task removal, activation, and
+conditional cleanup pass through one namespace-wide publication boundary. This closes the
+put-before-owner and remove-before-put races without introducing a distributed lock or owner epoch.
+No-owner invalidation uses the same boundary and an authoritative state CAS: it rechecks all live
+roots for the complete artifact identity `(network_pair, pipeline_key, route, proof_ref)` before
+marking an exact descriptor invalid, then performs generation/hash-conditional external tombstone and
+delete work. A root for another network pair cannot block or receive this lifecycle transition. A
+concurrently registered matching root therefore either prevents invalidation or starts after the
+invalidated lifecycle state is durable.
 Runtime root synchronization follows that storage commit; if it fails, the engine retains the
 normalized proof in its publication-retry payload and repeats the idempotent commit before retrying
 root synchronization.
@@ -224,18 +258,20 @@ sequenceDiagram
   participant Runtime as RuntimeManager
   participant Store as Artifact store
 
-  Engine->>Observer: on_task_succeeded(normalized proof)
-  Observer->>Runtime: Upsert pending publication outbox
+  Engine->>Observer: checkpoint_completed_proof(normalized proof)
+  Observer->>Runtime: Upsert outbox + incarnation ownership
   Runtime->>Store: Globally fenced create-if-absent
+  Runtime-->>Engine: Completion permit with incarnation set
+  Engine->>Observer: on_task_succeeded(proof, completion permit)
   Observer->>Runtime: Commit proof publication
   Runtime->>Store: Validate and publish canonical content + manifest
   Store-->>Runtime: Created, AlreadyExists, or Conflict
   Runtime->>Store: Check generation-scoped invalidation
   Runtime->>Runtime: CAS artifact registration
   Runtime->>Store: Recheck invalidation after registration
-  Runtime->>Store: Remove committed pending outbox
-  Runtime-->>Observer: Publication durable
-  Observer->>Runtime: Synchronize root success
+  Observer->>Runtime: CAS artifact activation + exact-incarnation root success
+  Runtime->>Store: Remove committed unowned outbox
+  Runtime-->>Observer: Publication and root state durable
   Observer-->>Engine: Terminal callback accepted
 ```
 
@@ -246,8 +282,9 @@ terminal outcome and is not retried as a successful artifact.
 ## Cancellation And Generation-Scoped Invalidation
 
 Invalidation is not a content-wide ban. It records the tuple `(logical key, manifest generation,
-content hash)`, then conditionally deletes only that manifest generation. Immutable content may remain
-for retention or later deduplication.
+content hash)`, then conditionally deletes only that manifest generation. Immutable content is never
+deleted while a manifest references it; once unreferenced, it remains for at least the minimum
+30-day retention window for recovery or later deduplication.
 
 ```mermaid
 sequenceDiagram
@@ -336,8 +373,10 @@ sequenceDiagram
 ```
 
 A newly returned provider request ID is never treated as resumable before checkpoint persistence.
-Legacy SP1 checkpoints whose deadline is zero or absent reuse the full configured timeout while
-retaining their request ID and attempt. An expired SP1 checkpoint performs a status read against the
+Checkpoint fields are strict: zero deadlines, zero attempts, missing Boundless lock deadlines, and
+missing exact bid data fail closed instead of entering a compatibility fallback. SP1 also persists
+and verifies the network mode, fulfillment strategy, timeout, simulation policy, cycle limit, and
+price target before polling a stored request ID. An expired SP1 checkpoint performs a status read against the
 recorded request before any replacement can be submitted, allowing an already-paid fulfillment to be
 recovered. Boundless never changes to a fresh request ID after an ambiguous reused-ID submission
 failure. The effective SP1 request attempt limit is:
@@ -407,10 +446,9 @@ operator can identify the failed boundary without inferring it from the aggregat
 ## Retention And Operational Boundaries
 
 - Active manifests must not be removed by age-based lifecycle rules.
-- Content must remain while any active manifest references it. Unreferenced content may be retained
-  for at least the invalidation window before garbage collection.
-- Generation-scoped invalidation markers must outlive the longest retry, recovery, and cleanup window;
-  the current operational minimum is 30 days.
+- Immutable content must remain available until every manifest that references it is gone.
+- Generation-scoped invalidation markers and unreferenced content must outlive the longest retry,
+  recovery, and cleanup window; the current operational minimum is 30 days.
 - Runtime state is control-plane data and must not share artifact garbage-collection rules.
 - GCS and memory are alternative authoritative backends. The server does not dual-write or fail over
   automatically between them.

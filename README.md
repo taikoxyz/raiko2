@@ -50,10 +50,49 @@ otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally w
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
 
+## Architecture And Operator Contract
+
+This README is the normative source for Raiko2 architecture and operator workflow. The detailed
+[Architecture](docs/architecture.md) and [Operations](docs/operations.md) documents expand this
+contract; if they conflict with this section, this README governs.
+
+The runtime is governed by these invariants:
+
+1. The configured runtime store is authoritative for task state, artifact registration, and remote
+   submission checkpoints. The in-process queue is an execution projection of that state.
+2. Each `(runtime.environment, runtime.namespace)` has exactly one live process. Replacements never
+   overlap, and the application has no distributed owner lease, owner epoch, or ownership heartbeat.
+3. Namespaces are isolated persistence domains. They never share tasks, artifacts, checkpoints, or
+   invalidation markers, although roots inside one namespace may reuse one canonical artifact.
+4. The runtime fence covers every task mutation and external-store write for the whole instance and
+   namespace. Inactive or draining runtimes reject new mutations and wait for in-flight writes. The
+   only draining-time write is the request-ID checkpoint authorized by a provider-submission permit
+   acquired before the fence closed; it must finish within the bounded shutdown deadline.
+5. Proof computation is not task completion. Completion requires a normalized proof to be durably
+   published, registered, readable, and synchronized to the runtime root.
+6. Proof manifests are create-only and first-valid-wins. Content is immutable and addressed by
+   SHA-256; invalidation binds to one manifest generation and content hash.
+7. Remote proving resumes a request identifier only after its submission checkpoint is durable.
+   Request-level retry settings may lower, but never raise, operator-owned limits.
+8. Durable deployments use one GCS runtime store; memory mode is explicitly ephemeral. The service
+   does not dual-write or automatically fail over between runtime stores.
+9. A replacement starts only after the old process has stopped admissions, drained work, stopped
+   workers, and exited. Deployment configuration must enforce this non-overlapping sequence.
+10. Each runtime task lifetime has an immutable `incarnation_id`. It rejects a delayed worker
+    checkpoint after a replacement reuses the same deterministic task ID. Pending proof outboxes
+    persist the exact eligible incarnations, and the completion permit carries that set through the
+    artifact/root CAS; it is not a namespace owner epoch, lease, or distributed lock.
+11. Each scheduler lease also carries a non-reused local token. This prevents remove/recreate ABA
+    from accepting an old completion even when task ID, worker label, and attempt number repeat.
+    The runtime additionally issues an execution permit mapping task IDs to the incarnations present
+    when execution starts. Proof checkpointing may add a distinct late-joining shared root, but never
+    a replacement incarnation for an already captured task ID. The permit does not authorize runtime
+    writes; the namespace lifecycle fence remains authoritative.
+
 ## Core Flow
 
-The complete runtime lifecycle, publication, and recovery design is documented in
-[Architecture](docs/architecture.md).
+The detailed runtime lifecycle, publication transaction, recovery flow, and deployment sequence are
+illustrated in [Architecture](docs/architecture.md).
 
 1. `Preflight` resolves canonical Shasta inputs from L1 and L2 RPC.
 2. `Validation` checks request invariants and witness-derived data.

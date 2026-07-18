@@ -269,7 +269,7 @@ pub(crate) async fn prune_proofs(
         .await
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
-        clear_task_publication_outboxes(&state.runtime, &record, &metadata, false).await?;
+        clear_task_publication_outboxes(&state.runtime, &record, &metadata).await?;
 
         state
             .runtime

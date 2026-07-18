@@ -12,6 +12,8 @@ pub struct TaskLease<P, Id> {
     pub payload: P,
     pub priority: Priority,
     pub attempt: u32,
+    /// Opaque identity for this exact lease; never reused after task replacement.
+    pub lease_token: String,
     pub worker: String,
     pub execution_policy: TaskExecutionPolicy,
 }

@@ -1,4 +1,6 @@
-use crate::{ProofArtifactPutResult, ProofArtifactRegistration, RuntimeManager};
+use crate::{
+    ProofArtifactLifecycle, ProofArtifactPutResult, ProofArtifactRegistration, RuntimeManager,
+};
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
@@ -21,11 +23,11 @@ impl std::fmt::Display for ProofArtifactPublicationInvalidated {
 impl std::error::Error for ProofArtifactPublicationInvalidated {}
 
 impl RuntimeManager {
-    /// Atomically advances a checkpointed proof through durable publication and registration.
+    /// Publishes a checkpointed proof and records a durable, unreadable pending lifecycle.
     ///
     /// The canonical object remains first-write-wins. Publication is rejected when invalidation
-    /// races either side of the local registration, and the shared outbox is cleared only after
-    /// the canonical artifact is durable and registered.
+    /// races either side of the local registration. Root success activates the exact descriptor
+    /// in a later single runtime-state CAS; this method never clears the shared outbox.
     ///
     /// # Errors
     ///
@@ -65,7 +67,7 @@ impl RuntimeManager {
             .into());
         }
 
-        self.upsert_proof_artifact(ProofArtifactRegistration {
+        let registration = ProofArtifactRegistration {
             network_pair: network_pair.to_string(),
             proof_ref: proof_ref.to_string(),
             pipeline_key,
@@ -73,9 +75,9 @@ impl RuntimeManager {
             proof_uri: artifact.proof_uri.clone(),
             content_hash: artifact.content_hash.clone(),
             generation: artifact.generation,
-        })
-        .await
-        .context("failed to register proof artifact")?;
+        };
+        self.register_publication_lifecycle(&publication, &registration)
+            .await?;
 
         if self
             .proof_artifact_descriptor_is_invalidated(
@@ -97,23 +99,106 @@ impl RuntimeManager {
             )
             .await
             .context("failed to retain local proof invalidation state")?;
-            return Err(ProofArtifactPublicationInvalidated {
-                proof_ref: proof_ref.to_string(),
-            }
-            .into());
+            return Err(publication_invalidated(proof_ref));
         }
-
-        self.remove_committed_pending_proof_publication(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-        )
-        .await
-        .context("failed to clear pending proof publication")?;
 
         Ok(publication)
     }
+
+    async fn register_publication_lifecycle(
+        &self,
+        publication: &ProofArtifactPutResult,
+        registration: &ProofArtifactRegistration,
+    ) -> Result<()> {
+        let descriptor = registration.descriptor();
+        let network_pair = &registration.network_pair;
+        let pipeline_key = registration.pipeline_key;
+        let route = registration.route;
+        let proof_ref = &registration.proof_ref;
+        match publication {
+            ProofArtifactPutResult::Created(_) => {
+                let lifecycle = self
+                    .register_pending_proof_artifact(registration.clone())
+                    .await
+                    .context("failed to register pending proof artifact")?;
+                if lifecycle == ProofArtifactLifecycle::Invalidated {
+                    self.finalize_proof_artifact_invalidation(
+                        network_pair,
+                        pipeline_key,
+                        route,
+                        proof_ref,
+                        descriptor.generation,
+                        &descriptor.content_hash,
+                    )
+                    .await
+                    .context("failed to invalidate detached proof manifest")?;
+                    return Err(publication_invalidated(proof_ref));
+                }
+            }
+            ProofArtifactPutResult::AlreadyExists(_) | ProofArtifactPutResult::Conflict(_) => {
+                let registered = self
+                    .get_proof_artifact_including_invalidated(
+                        network_pair,
+                        pipeline_key,
+                        route,
+                        proof_ref,
+                    )
+                    .await?
+                    .is_some_and(|record| {
+                        record.descriptor() == descriptor
+                            && matches!(
+                                record.lifecycle,
+                                ProofArtifactLifecycle::Pending | ProofArtifactLifecycle::Active
+                            )
+                    });
+                if !registered {
+                    let recoverable_outbox = self
+                        .get_recoverable_pending_proof_publication(
+                            network_pair,
+                            pipeline_key,
+                            route,
+                            proof_ref,
+                        )
+                        .await?
+                        .is_some_and(|pending| {
+                            crate::artifact_store::content_hash(&pending.bytes)
+                                == descriptor.content_hash
+                        });
+                    if recoverable_outbox {
+                        let lifecycle = self
+                            .register_pending_proof_artifact(registration.clone())
+                            .await
+                            .context("failed to recover pending proof artifact lifecycle")?;
+                        if lifecycle != ProofArtifactLifecycle::Invalidated {
+                            return Ok(());
+                        }
+                    }
+                    self.register_invalidated_proof_artifact(registration.clone())
+                        .await
+                        .context("failed to record orphan proof invalidation")?;
+                    self.finalize_proof_artifact_invalidation(
+                        network_pair,
+                        pipeline_key,
+                        route,
+                        proof_ref,
+                        descriptor.generation,
+                        &descriptor.content_hash,
+                    )
+                    .await
+                    .context("failed to invalidate orphan proof manifest")?;
+                    return Err(publication_invalidated(proof_ref));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn publication_invalidated(proof_ref: &str) -> anyhow::Error {
+    ProofArtifactPublicationInvalidated {
+        proof_ref: proof_ref.to_string(),
+    }
+    .into()
 }
 
 fn validate_canonical_proof(bytes: &[u8]) -> Result<()> {
@@ -129,6 +214,8 @@ fn validate_canonical_proof(bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemoryProofArtifactStore;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]
@@ -215,6 +302,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_recovers_manifest_from_matching_durable_outbox() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".to_string(),
+            "recover-manifest-outbox".to_string(),
+        )?);
+        let first = RuntimeManager::with_store(store.clone())?;
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-recover-manifest";
+        let proof = br#"{"proof":"0x01"}"#;
+        first
+            .register_task(crate::TaskRegistration {
+                task_id: "root-recover-manifest".into(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "proposal".into(),
+                proposal_id: Some(1),
+                proof_ids: vec![proof_ref.into()],
+                metadata: serde_json::json!({ "network_pair": network_pair }),
+                request_fingerprint: None,
+            })
+            .await?;
+        let owner = first
+            .get_task("root-recover-manifest")
+            .await?
+            .expect("runtime owner")
+            .incarnation_id;
+        assert!(
+            first
+                .checkpoint_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    proof,
+                )
+                .await?
+        );
+        let created = first
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, proof)
+            .await?
+            .object()
+            .clone();
+        assert!(
+            first
+                .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref,)
+                .await?
+                .is_none()
+        );
+
+        let restarted = RuntimeManager::with_store(store)?;
+        restarted.initialize().await?;
+        let recovered = restarted
+            .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
+            .await?
+            .object()
+            .clone();
+
+        assert_eq!(recovered.generation, created.generation);
+        let record = restarted
+            .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref)
+            .await?
+            .expect("recovered pending lifecycle");
+        assert_eq!(record.lifecycle, ProofArtifactLifecycle::Pending);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelled_committed_publication_can_be_reproved_identically() -> Result<()> {
         let root = std::env::temp_dir().join(format!(
             "runtime-cancelled-committed-publication-{}",
@@ -231,6 +388,19 @@ mod tests {
         let proof = br#"{"proof":"0x01"}"#;
 
         runtime
+            .register_task(crate::TaskRegistration {
+                task_id: "root-cancelled-after-commit".into(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "proposal".into(),
+                proposal_id: Some(1),
+                proof_ids: vec![proof_ref.into()],
+                metadata: serde_json::json!({ "network_pair": network_pair }),
+                request_fingerprint: None,
+            })
+            .await?;
+
+        runtime
             .upsert_pending_proof_publication(network_pair, pipeline, route, proof_ref, proof)
             .await?;
         let first = runtime
@@ -238,6 +408,14 @@ mod tests {
             .await?
             .object()
             .clone();
+        runtime
+            .sync_status(
+                "root-cancelled-after-commit",
+                crate::RunnerStatus::Cancelled,
+                None,
+                None,
+            )
+            .await?;
         runtime
             .invalidate_pending_proof_publication(network_pair, pipeline, route, proof_ref)
             .await?;
@@ -247,6 +425,20 @@ mod tests {
                 .await?
                 .is_none()
         );
+
+        runtime.remove_task("root-cancelled-after-commit").await?;
+        runtime
+            .register_task(crate::TaskRegistration {
+                task_id: "replacement-root".into(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "proposal".into(),
+                proposal_id: Some(1),
+                proof_ids: vec![proof_ref.into()],
+                metadata: serde_json::json!({ "network_pair": network_pair }),
+                request_fingerprint: None,
+            })
+            .await?;
 
         runtime
             .upsert_pending_proof_publication(network_pair, pipeline, route, proof_ref, proof)
@@ -259,11 +451,17 @@ mod tests {
 
         assert_ne!(first.generation, second.generation);
         assert_eq!(first.content_hash, second.content_hash);
+        let record = runtime
+            .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref)
+            .await?
+            .expect("republication lifecycle");
+        assert_eq!(record.lifecycle, ProofArtifactLifecycle::Pending);
         assert!(
             runtime
                 .get_proof_artifact(network_pair, pipeline, route, proof_ref)
                 .await?
-                .is_some()
+                .is_none(),
+            "republished proof remains unreadable until root success activates it"
         );
         Ok(())
     }

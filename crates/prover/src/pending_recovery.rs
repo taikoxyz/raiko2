@@ -15,7 +15,6 @@ pub struct PendingProofCheckpoint {
     pub attempt: NonZeroU32,
     pub submitted_at_secs: u64,
     pub deadline_secs: u64,
-    pub revision: u64,
     pub payload: Box<RawValue>,
 }
 
@@ -34,7 +33,7 @@ pub enum PendingProofRecoveryError {
 }
 
 impl PendingProofCheckpoint {
-    /// Builds a versioned backend checkpoint from a serializable provider payload.
+    /// Builds a backend checkpoint from a serializable provider payload.
     ///
     /// # Errors
     ///
@@ -45,7 +44,6 @@ impl PendingProofCheckpoint {
         attempt: NonZeroU32,
         submitted_at_secs: u64,
         deadline_secs: u64,
-        revision: u64,
         payload: &T,
     ) -> Result<Self, PendingProofRecoveryError> {
         let payload = serde_json::value::to_raw_value(payload).map_err(|error| {
@@ -59,7 +57,6 @@ impl PendingProofCheckpoint {
             attempt,
             submitted_at_secs,
             deadline_secs,
-            revision,
             payload,
         })
     }
@@ -79,5 +76,24 @@ impl PendingProofCheckpoint {
                 message: error.to_string(),
             }
         })
+    }
+
+    /// Decodes a payload only when the checkpoint belongs to `expected`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PendingProofRecoveryError::BackendMismatch`] for another backend, or
+    /// [`PendingProofRecoveryError::InvalidCheckpoint`] for malformed provider data.
+    pub fn decode_payload_for<T: serde::de::DeserializeOwned>(
+        &self,
+        expected: NetworkProverBackend,
+    ) -> Result<T, PendingProofRecoveryError> {
+        if self.backend != expected {
+            return Err(PendingProofRecoveryError::BackendMismatch {
+                expected,
+                actual: self.backend,
+            });
+        }
+        self.decode_payload()
     }
 }

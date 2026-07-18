@@ -827,19 +827,23 @@ Operator notes:
   cross-namespace data migration, and the in-process queue is recovered from GCS rather than Redis.
 - Treat runtime lifecycle as one global namespace fence, not a per-task lock. If
   authoritative-store coherence or draining state makes the runtime inactive, all task mutations,
-  checkpoint writes, publication, invalidation, reconciliation, and cleanup writes must stop
-  together. There is deliberately no owner lease, owner epoch, or ownership heartbeat. GCS
+  new provider submissions, publication, invalidation, reconciliation, and cleanup writes must stop
+  together. Only a provider request admitted before the fence may finish persisting its request-ID
+  checkpoint, within the bounded shutdown deadline. There is deliberately no owner lease, owner epoch, or ownership heartbeat. GCS
   generations remain object-version CAS tokens for exact artifact operations.
 - This release requires an atomic configuration cutover. Before starting the new binary, remove
   legacy `[queue]` keys `backend`, `namespace`, and `redis_url`, remove legacy `[runtime]` keys
   `root` and `inactive_ttl_secs`, and add explicit `runtime.environment`, `runtime.namespace`, and
   `[runtime.store]` settings. Apply the new ConfigMap while the old instance is drained; old and new
   schemas are not dual-read. Keep the prior ConfigMap and GCS namespace together for rollback.
+- The runtime snapshot schema is also a hard cut: task `incarnation_id` and pending-publication
+  ownership are required fields and are not reconstructed from older snapshots. Deploy with a new
+  empty namespace (or explicitly delete the old runtime snapshot after the old instance exits);
+  there is no compatibility migration or fail-open recovery for legacy checkpoint state.
 - Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
   proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must
-  remain available for as long as any active manifest references it. Generation-scoped
-  invalidation markers should be retained for at least 30 days; unreferenced content may use the
-  same retention window.
+  remain available until every manifest that references it is gone. Generation-scoped invalidation
+  markers and unreferenced content use a minimum 30-day retention window.
 - Proposal requests are sized by `prover.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`

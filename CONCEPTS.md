@@ -36,17 +36,37 @@ environment and namespace participate in task fingerprints and object names.
 
 ### Global Runtime Fence
 The process-wide lifecycle gate for every task and external-store mutation in one namespace. It
-allows writes while active and waits for in-flight writes before entering draining. It is not a
-task-local lock or multi-instance coordination protocol.
+allows writes while active and rejects ordinary writes as soon as draining starts. A remote request
+accepted before that transition carries the sole capability that may persist its request-ID
+checkpoint during the bounded drain. It is not a task-local lock or multi-instance coordination
+protocol.
 
 ### GCS Generation
 The native object-version token used for runtime-state compare-and-swap and exact manifest
 invalidation or deletion. It versions one object and is not an instance epoch or ownership token.
 
+### Task Incarnation
+The immutable UUID of one runtime task-record lifetime. It prevents a delayed worker from attaching
+a checkpoint to a replacement that reuses the same deterministic task ID. Pending proof outboxes
+and completion permits bind to exact task incarnations until artifact activation commits. It does
+not coordinate instances or grant namespace ownership.
+
 ### Stage Lease
 The in-memory scheduler ownership of one executable stage. It remains held through provider
 execution, proof checkpointing, durable artifact publication, and terminal runtime synchronization.
-Losing it while the process is running fails the stage.
+Every acquired lease has an opaque, non-reused lease token, so an old worker cannot complete a task
+that was removed and recreated with the same deterministic ID, worker label, and attempt number.
+The token is local execution identity, not runtime authority. Losing the lease while the process is
+running fails the stage.
+
+### Task Execution Permit
+An in-process capability captured from the runtime immediately after a queue lease is acquired. It
+maps each existing runtime task ID to the exact incarnation that the lease may observe or mutate. The
+engine revalidates the queue lease token after capture, and every observer write checks the permit.
+After the completed proof payload is conditionally checkpointed under that lease, a distinct shared
+root that joined during execution may enter the proof completion owner set; a replacement using an
+already captured task ID may not. The permit is a stale-callback guard, not namespace authority; the
+global runtime lifecycle fence still decides whether any write is allowed.
 
 ### Pending Network Proof
 A Boundless or SP1 provider request that has been durably checkpointed but has not reached a final
@@ -56,3 +76,31 @@ of submitting a duplicate request.
 ### Proof Manifest
 A create-only pointer from a logical proof reference to an immutable content-hash object. Identical
 publication is idempotent; different bytes cannot replace the selected proof.
+
+### Proof Task Identity
+The identity of proof work for one normalized request, concrete proof type, execution route,
+environment, runtime namespace, and effective prover configuration.
+
+### Proof Artifact Identity
+The identity of one published proof for a concrete proof type, execution route, environment, and
+proof request. Artifacts are never shared across concrete proof types, execution routes, or
+environments. The first valid publication wins; a later conflicting artifact is discarded without
+replacing the canonical artifact or regressing a completed task.
+
+### Completed Proof Task
+A proof task whose normalized final proof is durably published, registered, readable, and
+synchronized to its runtime root. Successful proof computation alone does not complete the task.
+
+### Proof Publication
+The transition that makes a successfully computed proof durably available to callers. It is the
+completion boundary of a proof task, not a separate public task status; the task remains
+non-terminal until publication succeeds.
+
+### Runtime Store
+The single authoritative backend for task state, remote checkpoints, publication state, manifests,
+and proof artifacts. A deployment selects GCS or ephemeral memory; dual-write and automatic
+failover are unsupported.
+
+### Proof URI
+The backend-neutral location of a published proof artifact exposed as `proof_uri`. GCS stores use
+`gs://`; memory mode uses `memory://`. `proof_path` is not part of the API.

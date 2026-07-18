@@ -21,19 +21,19 @@ use crate::config::{Config, ResolvedNetworkPair, RuntimeStoreBackend};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{NativeBackend, PipelineKey, forks::shasta::ShastaSpec};
-use raiko2_primitives::{Proof, ProofType};
+use raiko2_primitives::ProofType;
 use raiko2_prover::gaiko2::Gaiko2Prover;
-use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{
-    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactRegistration, ProofArtifactStore,
-    RunnerStatus, RuntimeManager,
+    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactStore, RuntimeManager,
 };
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::warn;
+
+const SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "local-provers")]
 use raiko2_pipeline::forks::shasta::{ShastaBackends, load_shasta_backends};
@@ -63,10 +63,6 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::task_metadata::{
-    ProofArtifactKind, TaskMetadata, aggregate_task_ref, proposal_task_ref,
-    root_proof_artifact_refs,
-};
 
 /// In-memory sliding-window limiter for ACL-protected endpoints.
 /// Buckets use config indexes so each configured ACL entry gets an independent quota.
@@ -173,8 +169,6 @@ impl AppState {
 
         async {
             runtime.initialize().await?;
-            restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
-
             let mut factory = StaticPipelineFactory::default();
             for pair in &resolved_pairs {
                 let registration = PairPipelineRegistration {
@@ -204,6 +198,13 @@ impl AppState {
     }
 
     async fn finish_initialization(self) -> Result<Self> {
+        let reconciled = self.runtime.reconcile_invalidated_proof_artifacts().await?;
+        if reconciled > 0 {
+            tracing::info!(
+                reconciled,
+                "reconciled invalidated proof artifacts after runtime restart"
+            );
+        }
         let recovered = crate::server::handlers::recover_pending_runtime_tasks(&self).await?;
         if recovered > 0 {
             tracing::info!(
@@ -245,7 +246,17 @@ impl AppState {
     }
 
     pub(crate) async fn shutdown(&self) {
-        self.runtime.begin_draining().await;
+        let checkpoint_deadline = Instant::now() + SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT;
+        if !self
+            .runtime
+            .begin_draining_with_deadline(checkpoint_deadline)
+            .await
+        {
+            warn!(
+                timeout_secs = SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT.as_secs(),
+                "timed out waiting for accepted provider submissions to checkpoint"
+            );
+        }
         self.pipelines.shutdown().await;
         let handles = self
             .background_tasks
@@ -256,6 +267,10 @@ impl AppState {
             handle.abort();
             let _ = handle.await;
         }
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        self.runtime.start_draining();
     }
 }
 
@@ -529,244 +544,6 @@ fn register_remote_sgx_engine(
     Ok(())
 }
 
-async fn restore_proof_artifacts_from_runtime_tasks(runtime: &Arc<RuntimeManager>) -> Result<()> {
-    for record in runtime.list_tasks().await? {
-        if let Err(err) = restore_proof_artifacts_from_runtime_task(runtime, &record).await {
-            warn!(
-                task_id = record.task_id,
-                error = %err,
-                "failed to restore proof artifact from runtime task; skipping"
-            );
-        }
-    }
-    Ok(())
-}
-
-async fn restore_proof_artifacts_from_runtime_task(
-    runtime: &RuntimeManager,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-) -> Result<()> {
-    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-        .context("failed to parse runtime task metadata for proof artifact restore")?;
-    restore_cached_proof_artifacts_from_metadata(runtime, record, &metadata).await;
-
-    if record.runner_status != RunnerStatus::Completed {
-        return Ok(());
-    }
-    let Some(restored_refs) = root_proof_artifact_refs(&metadata, record.pipeline_key) else {
-        return Ok(());
-    };
-    let mut missing_refs = Vec::new();
-    for proof_ref in &restored_refs.refs {
-        if runtime
-            .get_proof_artifact(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                proof_ref,
-            )
-            .await?
-            .is_none()
-        {
-            missing_refs.push(proof_ref.clone());
-        }
-    }
-    if missing_refs.is_empty() {
-        return Ok(());
-    }
-    let mut proof_bytes = None;
-    for proof_ref in &restored_refs.refs {
-        if let Some(object) = runtime
-            .read_proof_artifact_bytes(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                proof_ref,
-            )
-            .await?
-        {
-            proof_bytes = Some(object.bytes);
-            break;
-        }
-    }
-    let Some(proof_bytes) = proof_bytes else {
-        return Ok(());
-    };
-    let proof: Proof =
-        serde_json::from_slice(&proof_bytes).context("failed to parse restored proof artifact")?;
-
-    if restored_refs.kind == ProofArtifactKind::Proposal
-        && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
-    {
-        warn!(
-            task_id = record.task_id,
-            proof_uri = record.proof_uri.as_deref().unwrap_or_default(),
-            error = %err,
-            "completed proposal proof is not aggregatable; skipping artifact restore"
-        );
-        return Ok(());
-    }
-
-    for proof_ref in missing_refs {
-        let publication = runtime
-            .publish_proof_artifact_bytes(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                &proof_ref,
-                &proof_bytes,
-            )
-            .await
-            .with_context(|| format!("failed to publish proof artifact for {proof_ref}"))?;
-        let artifact = publication.object();
-        runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: metadata.network_pair.clone(),
-                proof_ref,
-                pipeline_key: record.pipeline_key,
-                route: record.route,
-                proof_uri: artifact.proof_uri.clone(),
-                content_hash: artifact.content_hash.clone(),
-                generation: artifact.generation,
-            })
-            .await?;
-    }
-    Ok(())
-}
-
-async fn restore_cached_proof_artifacts_from_metadata(
-    runtime: &RuntimeManager,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &TaskMetadata,
-) {
-    for (proof_ref, kind) in persisted_child_proof_refs(metadata, record.pipeline_key) {
-        if let Err(err) =
-            restore_cached_proof_artifact(runtime, record, metadata, &proof_ref, kind).await
-        {
-            warn!(
-                task_id = record.task_id,
-                proof_ref,
-                error = %err,
-                "failed to restore cached proof artifact; skipping"
-            );
-        }
-    }
-}
-
-async fn restore_cached_proof_artifact(
-    runtime: &RuntimeManager,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &TaskMetadata,
-    proof_ref: &str,
-    kind: ProofArtifactKind,
-) -> Result<()> {
-    if runtime
-        .get_proof_artifact(
-            &metadata.network_pair,
-            record.pipeline_key,
-            record.route,
-            proof_ref,
-        )
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let Some(artifact) = runtime
-        .read_proof_artifact_bytes(
-            &metadata.network_pair,
-            record.pipeline_key,
-            record.route,
-            proof_ref,
-        )
-        .await?
-    else {
-        return Ok(());
-    };
-    let proof: Proof = serde_json::from_slice(&artifact.bytes)
-        .with_context(|| format!("failed to parse proof artifact for {proof_ref}"))?;
-    if kind == ProofArtifactKind::Proposal
-        && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
-    {
-        warn!(
-            task_id = record.task_id,
-            proof_ref,
-            error = %err,
-            "cached proposal proof is not aggregatable; skipping artifact restore"
-        );
-        return Ok(());
-    }
-
-    runtime
-        .upsert_proof_artifact(ProofArtifactRegistration {
-            network_pair: metadata.network_pair.clone(),
-            proof_ref: proof_ref.to_string(),
-            pipeline_key: record.pipeline_key,
-            route: record.route,
-            proof_uri: artifact.proof_uri,
-            content_hash: artifact.content_hash,
-            generation: artifact.generation,
-        })
-        .await?;
-    Ok(())
-}
-
-fn persisted_child_proof_refs(
-    metadata: &TaskMetadata,
-    pipeline_key: PipelineKey,
-) -> Vec<(String, ProofArtifactKind)> {
-    let mut seen = BTreeSet::new();
-    let mut refs = Vec::new();
-
-    for proposal in &metadata.proposals {
-        if let Some(request) = proposal.request.as_ref() {
-            push_restored_ref(
-                &mut refs,
-                &mut seen,
-                proposal_task_ref(pipeline_key, request),
-                ProofArtifactKind::Proposal,
-            );
-        }
-        push_restored_ref(
-            &mut refs,
-            &mut seen,
-            proposal.task_id.clone(),
-            ProofArtifactKind::Proposal,
-        );
-    }
-
-    if let Some(request) = metadata.aggregate_request.as_ref() {
-        push_restored_ref(
-            &mut refs,
-            &mut seen,
-            aggregate_task_ref(pipeline_key, request),
-            ProofArtifactKind::Aggregate,
-        );
-    }
-    if let Some(task_id) = metadata.aggregate_task_id.as_ref() {
-        push_restored_ref(
-            &mut refs,
-            &mut seen,
-            task_id.clone(),
-            ProofArtifactKind::Aggregate,
-        );
-    }
-
-    refs
-}
-
-fn push_restored_ref(
-    refs: &mut Vec<(String, ProofArtifactKind)>,
-    seen: &mut BTreeSet<String>,
-    proof_ref: String,
-    kind: ProofArtifactKind,
-) {
-    if proof_ref.is_empty() || !seen.insert(proof_ref.clone()) {
-        return;
-    }
-    refs.push((proof_ref, kind));
-}
-
 #[cfg(feature = "local-provers")]
 fn build_risc0_engine(
     config: &Config,
@@ -905,113 +682,86 @@ fn build_remote_sgx_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, proposal_task_ref};
-    use raiko2_engine::{ProposalTaskRequest, ProverTaskConfig};
-    use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
-    use raiko2_runtime::RuntimeTaskRecord;
-    #[tokio::test]
-    async fn restore_proof_artifacts_registers_cached_child_proposal_refs() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
-            "restore-child-proposal",
-        ))?);
-        let request = ProposalTaskRequest {
-            proposal_id: 9,
-            l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 9, end: 9 }),
-            l1_inclusion_block_number: 20,
-            last_anchor_block_number: 8,
-            checkpoint: None,
-            blob_proof_type: None,
-            prover: None,
-            graffiti: None,
-            prover_config: ProverTaskConfig::default(),
-        };
-        let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
-        runtime
-            .publish_proof_artifact_bytes(
-                "taiko_dev/ethereum",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
-                &proposal_ref,
-                &serde_json::to_vec_pretty(&valid_native_proof())?,
-            )
-            .await?;
+    use raiko2_pipeline::{GuestSystem, RunnerKind};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-        let metadata = TaskMetadata {
-            network_pair: "taiko_dev/ethereum".to_string(),
-            network: "taiko_dev".to_string(),
-            l1_network: "ethereum".to_string(),
-            proof_type: ProofType::Native,
-            requested_proof_type: None,
-            prover_type: None,
-            execution_mode: None,
-            aggregate_requested: true,
-            proposals: vec![ProposalTask {
-                proposal_id: 9,
-                checkpoint: None,
-                l1_inclusion_block_number: 20,
-                l2_block_numbers: vec![9],
-                last_anchor_block_number: 8,
-                task_id: proposal_ref.clone(),
-                request: Some(request),
-            }],
-            aggregate_task_id: None,
-            aggregate_request: None,
-            aggregate_input_artifacts: Vec::new(),
-            runtime: RuntimeMetadata::default(),
-        };
-        runtime
-            .upsert_task(&runtime_record(
-                "aggregate-root",
-                PipelineKey::ShastaNative,
-                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-                RunnerStatus::Allocated,
-                None,
-                serde_json::to_value(metadata)?,
-            ))
-            .await?;
+    struct ShutdownProbeFactory {
+        shutdown_called: Arc<AtomicBool>,
+    }
 
-        restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+    impl PipelineFactory for ShutdownProbeFactory {
+        fn get(&self, _network_pair: &str, _key: PipelineKey) -> Option<Arc<dyn EngineHandle>> {
+            None
+        }
 
-        runtime
-            .get_proof_artifact(
-                "taiko_dev/ethereum",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
-                &proposal_ref,
-            )
-            .await?
-            .expect("proposal proof artifact");
-        assert!(
-            runtime
-                .read_proof_artifact_bytes(
-                    "taiko_dev/ethereum",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
-                    &proposal_ref,
-                )
-                .await?
-                .is_some()
-        );
-        Ok(())
+        fn shutdown(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                self.shutdown_called.store(true, Ordering::Release);
+            })
+        }
     }
 
     #[tokio::test]
-    async fn restore_proof_artifacts_skips_bad_metadata() -> Result<()> {
+    async fn multiple_engine_observers_share_runtime_checkpoint_drain() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
-            "restore-bad-metadata",
+            "shutdown-checkpoint-order",
         ))?);
-        runtime
-            .upsert_task(&runtime_record(
-                "bad-root",
-                PipelineKey::ShastaNative,
-                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-                RunnerStatus::Completed,
-                Some("/tmp/nonexistent-proof.json".to_string()),
-                serde_json::json!({ "bad": true }),
-            ))
+        let first_observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaSp1.route(),
+        );
+        let second_observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let first_permit = first_observer
+            .acquire_submission_checkpoint_permit()
             .await?;
+        let second_permit = second_observer
+            .acquire_submission_checkpoint_permit()
+            .await?;
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let factory = ShutdownProbeFactory {
+            shutdown_called: Arc::clone(&shutdown_called),
+        };
+        let state = Arc::new(AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        ));
 
-        restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+        let mut shutdown = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.shutdown().await }
+        });
+        let mut admission_closed = false;
+        for _ in 0..100 {
+            if let Ok(permit) = runtime.acquire_submission_checkpoint_permit() {
+                drop(permit);
+            } else {
+                admission_closed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(admission_closed);
+        assert!(!runtime.accepts_mutations());
+        assert!(!shutdown_called.load(Ordering::Acquire));
+        drop(first_permit);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must wait for every engine observer's checkpoint permit"
+        );
+
+        drop(second_permit);
+        shutdown.await?;
+        assert!(!runtime.accepts_mutations());
+        assert!(shutdown_called.load(Ordering::Acquire));
         Ok(())
     }
 
@@ -1040,42 +790,6 @@ mod tests {
         config.prover.runner = RunnerKind::Network;
 
         assert!(should_create_sp1_prover(&config));
-    }
-
-    fn valid_native_proof() -> Proof {
-        Proof {
-            proof: Some("0xproof".to_string()),
-            input: Some(alloy_primitives::B256::ZERO),
-            extra_data: Some(serde_json::json!({ "native": true })),
-            ..Proof::default()
-        }
-    }
-
-    fn runtime_record(
-        task_id: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        runner_status: RunnerStatus,
-        proof_uri: Option<String>,
-        metadata: serde_json::Value,
-    ) -> RuntimeTaskRecord {
-        RuntimeTaskRecord {
-            task_id: task_id.to_string(),
-            pipeline_key,
-            route,
-            task_kind: "hoodi_batch".to_string(),
-            proposal_id: None,
-            proof_ids: vec![],
-            runner_status,
-            image_ref: None,
-            provider_request_id: None,
-            remote_tx_hash: None,
-            proof_uri,
-            error: None,
-            metadata,
-            request_fingerprint: None,
-            updated_at: 1,
-        }
     }
 
     fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {

@@ -654,7 +654,9 @@ mod tests {
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
-    use raiko2_runtime::{RunnerStatus, RuntimeManager, TaskRegistration};
+    use raiko2_runtime::{
+        ProofArtifactRegistration, RunnerStatus, RuntimeManager, TaskRegistration,
+    };
     use std::collections::HashSet;
     use std::future::Future;
     use std::pin::Pin;
@@ -954,7 +956,7 @@ mod tests {
                 .as_ref()
                 .expect("proposal request"),
         );
-        runtime
+        let artifact = runtime
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
                 PipelineKey::ShastaRisc0,
@@ -962,6 +964,19 @@ mod tests {
                 &proof_ref,
                 br#"{"proof":"0xcomplete"}"#,
             )
+            .await?
+            .object()
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: PipelineKey::ShastaRisc0,
+                route: PipelineKey::ShastaRisc0.route(),
+                proof_uri: artifact.proof_uri,
+                content_hash: artifact.content_hash,
+                generation: artifact.generation,
+            })
             .await?;
 
         let mut orphan_cursor = None;

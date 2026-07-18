@@ -33,6 +33,7 @@ use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
 use raiko2_prover::{
     NetworkProverBackend, PendingProofCheckpoint, Prover, ProverProgress, ProverProgressObserver,
+    SubmissionCheckpointPermit,
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -98,7 +99,14 @@ impl std::error::Error for EngineObserverError {}
 #[derive(Debug)]
 enum TaskExecutionError {
     Retryable(String),
-    ProofPublication { error: String, proof: Box<Proof> },
+    Stage {
+        error: String,
+        observer_task: Box<EngineTask>,
+    },
+    ProofPublication {
+        error: String,
+        proof: Box<Proof>,
+    },
     ProofInvalidated(String),
 }
 
@@ -106,8 +114,23 @@ impl TaskExecutionError {
     fn message(&self) -> &str {
         match self {
             Self::Retryable(error)
+            | Self::Stage { error, .. }
             | Self::ProofPublication { error, .. }
             | Self::ProofInvalidated(error) => error,
+        }
+    }
+
+    fn observer_task(&self) -> Option<&EngineTask> {
+        match self {
+            Self::Stage { observer_task, .. } => Some(observer_task),
+            _ => None,
+        }
+    }
+
+    fn stage(error: String, observer_task: EngineTask) -> Self {
+        Self::Stage {
+            error,
+            observer_task: Box::new(observer_task),
         }
     }
 }
@@ -166,6 +189,7 @@ fn should_notify_queue_task<I>(
 ) -> bool {
     recovered_output
         || !matches!(payload.publication_source(), EngineTask::Proposal { .. })
+        || matches!(execution_result, Err(TaskExecutionError::Stage { .. }))
         || matches!(execution_result, Ok(EngineOutput::Proof(_)))
         || execution_result
             .as_ref()
@@ -199,15 +223,80 @@ fn proof_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
     }
 }
 
+pub struct ProofCompletionPermit {
+    guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
+pub struct TaskExecutionPermit {
+    guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl TaskExecutionPermit {
+    pub fn tracked(guard: impl std::any::Any + Send + Sync + 'static) -> Self {
+        Self {
+            guard: Box::new(guard),
+        }
+    }
+
+    #[must_use]
+    pub fn guard<T: std::any::Any>(&self) -> Option<&T> {
+        self.guard.downcast_ref()
+    }
+
+    fn untracked() -> Self {
+        Self::tracked(())
+    }
+}
+
+impl ProofCompletionPermit {
+    pub fn tracked(guard: impl std::any::Any + Send + Sync + 'static) -> Self {
+        Self {
+            guard: Box::new(guard),
+        }
+    }
+
+    #[must_use]
+    pub fn guard<T: std::any::Any>(&self) -> Option<&T> {
+        self.guard.downcast_ref()
+    }
+
+    fn untracked() -> Self {
+        Self::tracked(())
+    }
+}
+
 #[async_trait]
 pub trait EngineObserver: Send + Sync {
-    async fn on_task_started(&self, _id: &EngineTaskId, _task: &EngineTask, _worker: &str) {}
+    async fn acquire_task_execution_permit(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+    ) -> Result<TaskExecutionPermit, EngineObserverError> {
+        Ok(TaskExecutionPermit::untracked())
+    }
+
+    async fn acquire_submission_checkpoint_permit(
+        &self,
+    ) -> Result<SubmissionCheckpointPermit, raiko2_prover::ProgressPersistenceError> {
+        Ok(SubmissionCheckpointPermit::tracked(()))
+    }
+
+    async fn on_task_started(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _worker: &str,
+        _execution_permit: &TaskExecutionPermit,
+    ) {
+    }
 
     async fn on_task_progress(
         &self,
         _id: &EngineTaskId,
         _task: &EngineTask,
         _progress: &ProverProgress,
+        _permit: &SubmissionCheckpointPermit,
+        _execution_permit: &TaskExecutionPermit,
     ) -> Result<(), EngineObserverError> {
         Ok(())
     }
@@ -217,8 +306,9 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _proof: &Proof,
-    ) -> Result<(), EngineObserverError> {
-        Ok(())
+        _execution_permit: &TaskExecutionPermit,
+    ) -> Result<ProofCompletionPermit, EngineObserverError> {
+        Ok(ProofCompletionPermit::untracked())
     }
 
     async fn on_task_succeeded(
@@ -226,11 +316,20 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _success: &EngineTaskSuccess,
+        _permit: Option<&ProofCompletionPermit>,
+        _execution_permit: &TaskExecutionPermit,
     ) -> Result<(), EngineObserverError> {
         Ok(())
     }
 
-    async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {}
+    async fn on_task_failed(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _error: &str,
+        _execution_permit: &TaskExecutionPermit,
+    ) {
+    }
 
     async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
 
@@ -239,8 +338,8 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _backend: NetworkProverBackend,
-    ) -> Option<PendingProofCheckpoint> {
-        None
+    ) -> Result<Option<PendingProofCheckpoint>, raiko2_prover::ProgressPersistenceError> {
+        Ok(None)
     }
 
     async fn load_proof_artifact(
@@ -264,9 +363,12 @@ async fn notify_stage_started(
     id: &EngineTaskId,
     task: &EngineTask,
     worker: &str,
+    execution_permit: &TaskExecutionPermit,
 ) {
     if let Some(observer) = observer {
-        observer.on_task_started(id, task, worker).await;
+        observer
+            .on_task_started(id, task, worker, execution_permit)
+            .await;
     }
 }
 
@@ -275,28 +377,22 @@ async fn notify_stage_succeeded(
     id: &EngineTaskId,
     task: &EngineTask,
     success: &EngineTaskSuccess,
+    permit: Option<&ProofCompletionPermit>,
+    execution_permit: &TaskExecutionPermit,
 ) -> Result<(), EngineObserverError> {
     if let Some(observer) = observer {
-        observer.on_task_succeeded(id, task, success).await?;
+        observer
+            .on_task_succeeded(id, task, success, permit, execution_permit)
+            .await?;
     }
     Ok(())
-}
-
-async fn notify_stage_failed(
-    observer: Option<&Arc<dyn EngineObserver>>,
-    id: &EngineTaskId,
-    task: &EngineTask,
-    error: &str,
-) {
-    if let Some(observer) = observer {
-        observer.on_task_failed(id, task, error).await;
-    }
 }
 
 struct EngineProgressObserver {
     observer: Arc<dyn EngineObserver>,
     task_id: EngineTaskId,
     task: EngineTask,
+    execution_permit: Arc<TaskExecutionPermit>,
 }
 
 enum LeaseInterruption {
@@ -304,15 +400,51 @@ enum LeaseInterruption {
     Lost,
 }
 
+struct AbortOnDropTask(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDropTask {
+    const fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    async fn abort_and_wait(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 #[async_trait]
 impl ProverProgressObserver for EngineProgressObserver {
+    async fn acquire_submission_checkpoint_permit(
+        &self,
+    ) -> Result<SubmissionCheckpointPermit, raiko2_prover::ProgressPersistenceError> {
+        self.observer.acquire_submission_checkpoint_permit().await
+    }
+
     async fn on_progress(
         &self,
         progress: &ProverProgress,
+        permit: &SubmissionCheckpointPermit,
     ) -> Result<(), raiko2_prover::ProgressPersistenceError> {
         match self
             .observer
-            .on_task_progress(&self.task_id, &self.task, progress)
+            .on_task_progress(
+                &self.task_id,
+                &self.task,
+                progress,
+                permit,
+                &self.execution_permit,
+            )
             .await
         {
             Ok(()) => Ok(()),
@@ -328,7 +460,7 @@ impl ProverProgressObserver for EngineProgressObserver {
     async fn load_pending_proof_checkpoint(
         &self,
         backend: NetworkProverBackend,
-    ) -> Option<PendingProofCheckpoint> {
+    ) -> Result<Option<PendingProofCheckpoint>, raiko2_prover::ProgressPersistenceError> {
         self.observer
             .load_pending_proof_checkpoint(&self.task_id, &self.task, backend)
             .await
@@ -443,6 +575,22 @@ where
         let mut ctx = self.inner.context.clone();
         Self::apply_prover_config(&mut ctx.config, &request.prover_config);
         ctx
+    }
+
+    fn progress_observer(
+        &self,
+        task_id: &EngineTaskId,
+        task: &EngineTask,
+        execution_permit: &Arc<TaskExecutionPermit>,
+    ) -> Option<Arc<dyn ProverProgressObserver>> {
+        self.inner.observer.as_ref().map(|observer| {
+            Arc::new(EngineProgressObserver {
+                observer: Arc::clone(observer),
+                task_id: task_id.clone(),
+                task: task.clone(),
+                execution_permit: Arc::clone(execution_permit),
+            }) as Arc<dyn ProverProgressObserver>
+        })
     }
 
     fn apply_prover_config(config: &mut serde_json::Value, request: &ProverTaskConfig) {
@@ -645,9 +793,10 @@ where
         payload: &EngineTask,
         terminal_observer_task: &mut EngineTask,
         execution_result: &mut Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
-    ) -> Result<(), TaskStoreError> {
+        execution_permit: &TaskExecutionPermit,
+    ) -> Result<Option<ProofCompletionPermit>, TaskStoreError> {
         let Ok(EngineOutput::Proof(proof)) = execution_result else {
-            return Ok(());
+            return Ok(None);
         };
         *terminal_observer_task = proof_observer_task(&lease.id, payload);
         let completed_proof = proof.output.clone();
@@ -668,19 +817,31 @@ where
             lease.execution_policy = checkpoint_policy;
         } else {
             *execution_result = Err(task_lease_lost_error().into());
-            return Ok(());
+            return Ok(None);
         }
-        if let Some(observer) = &self.inner.observer
-            && let Err(error) = observer
-                .checkpoint_completed_proof(&lease.id, terminal_observer_task, &completed_proof)
+        if let Some(observer) = &self.inner.observer {
+            match observer
+                .checkpoint_completed_proof(
+                    &lease.id,
+                    terminal_observer_task,
+                    &completed_proof,
+                    execution_permit,
+                )
                 .await
-        {
-            *execution_result = Err(TaskExecutionError::ProofPublication {
-                error: error.to_string(),
-                proof: Box::new(completed_proof),
-            });
+            {
+                Ok(permit) => return Ok(Some(permit)),
+                Err(EngineObserverError::ProofInvalidated(error)) => {
+                    *execution_result = Err(TaskExecutionError::ProofInvalidated(error));
+                }
+                Err(error) => {
+                    *execution_result = Err(TaskExecutionError::ProofPublication {
+                        error: error.to_string(),
+                        proof: Box::new(completed_proof),
+                    });
+                }
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     async fn notify_execution_success(
@@ -688,13 +849,22 @@ where
         id: &EngineTaskId,
         task: &EngineTask,
         execution_result: &mut Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+        permit: Option<&ProofCompletionPermit>,
+        execution_permit: &TaskExecutionPermit,
     ) {
         let Ok(output) = execution_result else {
             return;
         };
         let success = task_success_from_output(output);
-        if let Err(error) =
-            notify_stage_succeeded(self.inner.observer.as_ref(), id, task, &success).await
+        if let Err(error) = notify_stage_succeeded(
+            self.inner.observer.as_ref(),
+            id,
+            task,
+            &success,
+            permit,
+            execution_permit,
+        )
+        .await
         {
             *execution_result = Err(match (success, error) {
                 (EngineTaskSuccess::Proof { .. }, EngineObserverError::ProofInvalidated(error)) => {
@@ -755,6 +925,7 @@ where
         &self,
         lease: &TaskLease<EngineTask, EngineTaskKey>,
         observer_task: &EngineTask,
+        execution_permit: &TaskExecutionPermit,
     ) -> Result<(), TaskStoreError> {
         let error = task_lease_lost_error();
         let failed = self
@@ -764,10 +935,91 @@ where
             .await?;
         if failed && let Some(observer) = &self.inner.observer {
             observer
-                .on_task_failed(&lease.id, observer_task, &error)
+                .on_task_failed(&lease.id, observer_task, &error, execution_permit)
                 .await;
         }
         Ok(())
+    }
+
+    async fn execute_leased_task(
+        &self,
+        lease: &TaskLease<EngineTask, EngineTaskKey>,
+        payload: &EngineTask,
+        terminal_observer_task: &EngineTask,
+        worker: &str,
+        execution_permit: &Arc<TaskExecutionPermit>,
+        permit_error: Option<EngineObserverError>,
+    ) -> (
+        Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+        bool,
+    ) {
+        if let Some(error) = permit_error {
+            return (Err(error.into()), false);
+        }
+        if let Some(observer) = &self.inner.observer
+            && !matches!(payload.publication_source(), EngineTask::Proposal { .. })
+        {
+            observer
+                .on_task_started(&lease.id, terminal_observer_task, worker, execution_permit)
+                .await;
+        }
+        match self.recover_completed_output(&lease.id, payload).await {
+            Ok(Some(output)) => (Ok(output), true),
+            Ok(None) => (
+                self.execute_with_task_controls(
+                    &lease.id,
+                    lease,
+                    payload.clone(),
+                    Arc::clone(execution_permit),
+                )
+                .await,
+                false,
+            ),
+            Err(error) => (Err(error), false),
+        }
+    }
+
+    async fn notify_applied_terminal_failure(
+        &self,
+        completion: raiko2_queue::TaskCompletionDisposition,
+        should_notify: bool,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        error: Option<&str>,
+        execution_permit: &TaskExecutionPermit,
+    ) {
+        if completion == raiko2_queue::TaskCompletionDisposition::Failed
+            && should_notify
+            && let Some(observer) = &self.inner.observer
+            && let Some(error) = error
+        {
+            observer
+                .on_task_failed(id, task, error, execution_permit)
+                .await;
+        }
+    }
+
+    async fn acquire_current_execution_permit(
+        &self,
+        lease: &TaskLease<EngineTask, EngineTaskKey>,
+        payload: &EngineTask,
+    ) -> Result<Option<(Arc<TaskExecutionPermit>, Option<EngineObserverError>)>, TaskStoreError>
+    {
+        let permit = match &self.inner.observer {
+            Some(observer) => {
+                observer
+                    .acquire_task_execution_permit(&lease.id, payload)
+                    .await
+            }
+            None => Ok(TaskExecutionPermit::untracked()),
+        };
+        if !self.inner.scheduler.renew_lease(lease).await? {
+            return Ok(None);
+        }
+        Ok(Some(match permit {
+            Ok(permit) => (Arc::new(permit), None),
+            Err(error) => (Arc::new(TaskExecutionPermit::untracked()), Some(error)),
+        }))
     }
 
     /// # Errors
@@ -779,50 +1031,60 @@ where
         };
 
         let payload = lease.payload.clone();
-        let renew_task = self.spawn_lease_renewal(&lease);
+        let mut renew_task = AbortOnDropTask::new(self.spawn_lease_renewal(&lease));
+        let Some((execution_permit, permit_error)) = self
+            .acquire_current_execution_permit(&lease, &payload)
+            .await?
+        else {
+            renew_task.abort_and_wait().await;
+            return Ok(true);
+        };
 
         let mut terminal_observer_task = payload.clone();
         if matches!(payload, EngineTask::PublishProof { .. }) {
             terminal_observer_task = proof_observer_task(&lease.id, &payload);
         }
-        if let Some(observer) = &self.inner.observer
-            && !matches!(payload.publication_source(), EngineTask::Proposal { .. })
+        let (mut execution_result, recovered_output) = self
+            .execute_leased_task(
+                &lease,
+                &payload,
+                &terminal_observer_task,
+                worker,
+                &execution_permit,
+                permit_error,
+            )
+            .await;
+        if let Some(observer_task) = execution_result
+            .as_ref()
+            .err()
+            .and_then(TaskExecutionError::observer_task)
         {
-            observer
-                .on_task_started(&lease.id, &terminal_observer_task, worker)
-                .await;
+            terminal_observer_task = observer_task.clone();
         }
-
-        let (mut execution_result, recovered_output) =
-            match self.recover_completed_output(&lease.id, &payload).await {
-                Ok(Some(output)) => (Ok(output), true),
-                Ok(None) => (
-                    self.execute_with_task_controls(&lease.id, &lease, payload.clone())
-                        .await,
-                    false,
-                ),
-                Err(error) => (Err(error), false),
-            };
         log_execution_failure(worker, &payload, &execution_result);
-        if let Err(error) = self
+        let proof_completion_permit = match self
             .checkpoint_completed_proof(
                 &mut lease,
                 &payload,
                 &mut terminal_observer_task,
                 &mut execution_result,
+                &execution_permit,
             )
             .await
         {
-            renew_task.abort();
-            return Err(error);
-        }
+            Ok(permit) => permit,
+            Err(error) => {
+                renew_task.abort_and_wait().await;
+                return Err(error);
+            }
+        };
         let lease_was_lost = execution_result
             .as_ref()
             .err()
             .is_some_and(|error| error.message() == task_lease_lost_error());
         if lease_was_lost {
-            renew_task.abort();
-            self.fail_task_after_lease_loss(&lease, &terminal_observer_task)
+            renew_task.abort_and_wait().await;
+            self.fail_task_after_lease_loss(&lease, &terminal_observer_task, &execution_permit)
                 .await?;
             return Ok(true);
         }
@@ -833,12 +1095,13 @@ where
                 &lease.id,
                 &terminal_observer_task,
                 &mut execution_result,
+                proof_completion_permit.as_ref(),
+                &execution_permit,
             )
             .await;
         }
         apply_proof_completion_policy(&mut lease, &payload, &execution_result);
         let result = execution_result.map_err(|error| error.to_string());
-        let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
         let completed_id = lease.id.clone();
         let completion = self
@@ -846,18 +1109,17 @@ where
             .scheduler
             .complete_with_disposition(lease, result)
             .await;
-        renew_task.abort();
+        renew_task.abort_and_wait().await;
         let completion = completion?;
-        if completion == raiko2_queue::TaskCompletionDisposition::Failed
-            && should_notify_queue_task
-            && let Some(observer) = &self.inner.observer
-            && success.is_none()
-            && let Some(error) = error.as_deref()
-        {
-            observer
-                .on_task_failed(&completed_id, &terminal_observer_task, error)
-                .await;
-        }
+        self.notify_applied_terminal_failure(
+            completion,
+            should_notify_queue_task,
+            &completed_id,
+            &terminal_observer_task,
+            error.as_deref(),
+            &execution_permit,
+        )
+        .await;
         Ok(true)
     }
 
@@ -964,9 +1226,11 @@ where
         task_id: &EngineTaskId,
         lease: &raiko2_queue::TaskLease<EngineTask, EngineTaskKey>,
         payload: EngineTask,
+        execution_permit: Arc<TaskExecutionPermit>,
     ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
-        let execute = self.execute(task_id, payload, &lease.worker);
-        let interrupted = self.wait_lease_interruption(&lease.id, &lease.worker, lease.attempt);
+        let execute = self.execute(task_id, payload, &lease.worker, execution_permit);
+        let interrupted =
+            self.wait_lease_interruption(&lease.id, &lease.lease_token, lease.attempt);
         tokio::pin!(execute);
         tokio::pin!(interrupted);
 
@@ -1107,9 +1371,17 @@ where
         task: &EngineTask,
         worker: &str,
         stage: PipelineStage,
+        execution_permit: &Arc<TaskExecutionPermit>,
         execute: impl std::future::Future<Output = Result<PipelineStageResult<T>, String>>,
     ) -> Result<PipelineStageResult<T>, TaskExecutionError> {
-        notify_stage_started(self.inner.observer.as_ref(), task_id, task, worker).await;
+        notify_stage_started(
+            self.inner.observer.as_ref(),
+            task_id,
+            task,
+            worker,
+            execution_permit,
+        )
+        .await;
         match execute.await {
             Ok(output) => {
                 let success = match stage {
@@ -1121,15 +1393,19 @@ where
                         EngineTaskSuccess::GuestInput { stage }
                     }
                 };
-                notify_stage_succeeded(self.inner.observer.as_ref(), task_id, task, &success)
-                    .await
-                    .map_err(TaskExecutionError::from)?;
+                notify_stage_succeeded(
+                    self.inner.observer.as_ref(),
+                    task_id,
+                    task,
+                    &success,
+                    None,
+                    execution_permit,
+                )
+                .await
+                .map_err(TaskExecutionError::from)?;
                 Ok(output)
             }
-            Err(error) => {
-                notify_stage_failed(self.inner.observer.as_ref(), task_id, task, &error).await;
-                Err(error.into())
-            }
+            Err(error) => Err(TaskExecutionError::stage(error, task.clone())),
         }
     }
 
@@ -1138,6 +1414,7 @@ where
         task_id: &EngineTaskId,
         request: ProposalTaskRequest,
         worker: &str,
+        execution_permit: &Arc<TaskExecutionPermit>,
     ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         let ctx = self.context_for_proposal(&request);
         let pipeline = Pipeline::new(&self.inner.spec);
@@ -1151,6 +1428,7 @@ where
                 &preflight_task,
                 worker,
                 PipelineStage::Preflight,
+                execution_permit,
                 async { pipeline.preflight(&ctx).await.map_err(|e| e.to_string()) },
             )
             .await?;
@@ -1165,6 +1443,7 @@ where
                 &validation_task,
                 worker,
                 PipelineStage::Validation,
+                execution_permit,
                 async {
                     pipeline
                         .validate(&ctx, preflight.output)
@@ -1177,7 +1456,14 @@ where
             request: request.clone(),
             input_task: task_id.clone(),
         };
-        notify_stage_started(self.inner.observer.as_ref(), task_id, &encode_task, worker).await;
+        notify_stage_started(
+            self.inner.observer.as_ref(),
+            task_id,
+            &encode_task,
+            worker,
+            execution_permit,
+        )
+        .await;
         let encoded = match self
             .inner
             .spec
@@ -1194,20 +1480,25 @@ where
                     &EngineTaskSuccess::EncodedInput {
                         stage: PipelineStage::Encode,
                     },
+                    None,
+                    execution_permit,
                 )
                 .await
                 .map_err(TaskExecutionError::from)?;
                 encoded
             }
-            Err(error) => {
-                notify_stage_failed(self.inner.observer.as_ref(), task_id, &encode_task, &error)
-                    .await;
-                return Err(error.into());
-            }
+            Err(error) => return Err(TaskExecutionError::stage(error, encode_task)),
         };
 
-        self.prove_proposal_encoded(task_id, request, task_id.clone(), encoded.output, worker)
-            .await
+        self.prove_proposal_encoded(
+            task_id,
+            request,
+            task_id.clone(),
+            encoded.output,
+            worker,
+            execution_permit,
+        )
+        .await
     }
 
     async fn prove_proposal(
@@ -1215,6 +1506,7 @@ where
         task_id: &EngineTaskId,
         request: ProposalTaskRequest,
         input_task: EngineTaskId,
+        execution_permit: &Arc<TaskExecutionPermit>,
     ) -> Result<EngineOutput<S::GuestInput>, String> {
         let progress_task = EngineTask::ProveProposal {
             request: request.clone(),
@@ -1232,13 +1524,7 @@ where
                 encoded,
                 &ctx.config,
                 self.inner.spec.backend(),
-                self.inner.observer.as_ref().map(|observer| {
-                    Arc::new(EngineProgressObserver {
-                        observer: Arc::clone(observer),
-                        task_id: task_id.clone(),
-                        task: progress_task.clone(),
-                    }) as Arc<dyn ProverProgressObserver>
-                }),
+                self.progress_observer(task_id, &progress_task, execution_permit),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -1255,6 +1541,7 @@ where
         input_task: EngineTaskId,
         encoded: EncodedGuestInput,
         worker: &str,
+        execution_permit: &Arc<TaskExecutionPermit>,
     ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         let progress_task = EngineTask::ProveProposal {
             request: request.clone(),
@@ -1265,6 +1552,7 @@ where
             task_id,
             &progress_task,
             worker,
+            execution_permit,
         )
         .await;
         let ctx = self.context_for_proposal(&request);
@@ -1276,28 +1564,13 @@ where
                 encoded,
                 &ctx.config,
                 self.inner.spec.backend(),
-                self.inner.observer.as_ref().map(|observer| {
-                    Arc::new(EngineProgressObserver {
-                        observer: Arc::clone(observer),
-                        task_id: task_id.clone(),
-                        task: progress_task.clone(),
-                    }) as Arc<dyn ProverProgressObserver>
-                }),
+                self.progress_observer(task_id, &progress_task, execution_permit),
             )
             .await
             .map_err(|e| e.to_string())
         {
             Ok(proof) => proof,
-            Err(error) => {
-                notify_stage_failed(
-                    self.inner.observer.as_ref(),
-                    task_id,
-                    &progress_task,
-                    &error,
-                )
-                .await;
-                return Err(error.into());
-            }
+            Err(error) => return Err(TaskExecutionError::stage(error, progress_task)),
         };
         Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
             PipelineStage::Prove,
@@ -1310,10 +1583,12 @@ where
         task_id: &EngineTaskId,
         task: EngineTask,
         worker: &str,
+        execution_permit: Arc<TaskExecutionPermit>,
     ) -> Result<EngineOutput<S::GuestInput>, TaskExecutionError> {
         match task {
             EngineTask::Proposal { request } => {
-                self.execute_proposal(task_id, request, worker).await
+                self.execute_proposal(task_id, request, worker, &execution_permit)
+                    .await
             }
             EngineTask::Preflight { request } => {
                 let ctx = self.context_for_proposal(&request);
@@ -1363,7 +1638,7 @@ where
                 request,
                 input_task,
             } => self
-                .prove_proposal(task_id, request, input_task)
+                .prove_proposal(task_id, request, input_task, &execution_permit)
                 .await
                 .map_err(TaskExecutionError::from),
             EngineTask::Aggregate { request, source } => {
@@ -1381,13 +1656,7 @@ where
                         AggregationGuestInput { proofs },
                         &ctx.config,
                         self.inner.spec.backend(),
-                        self.inner.observer.as_ref().map(|observer| {
-                            Arc::new(EngineProgressObserver {
-                                observer: Arc::clone(observer),
-                                task_id: task_id.clone(),
-                                task: progress_task.clone(),
-                            }) as Arc<dyn ProverProgressObserver>
-                        }),
+                        self.progress_observer(task_id, &progress_task, &execution_permit),
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -1498,9 +1767,43 @@ mod tests {
         ProposalTaskRequest, ProverTaskConfig,
     };
     use crate::{
-        Engine, EngineObserver, EngineObserverError, EngineTask, EngineTaskId, EngineTaskKey,
-        EngineTaskSuccess, PROPOSAL_TASK_PRIORITY,
+        AbortOnDropTask, Engine, EngineObserver, EngineObserverError, EngineTask, EngineTaskId,
+        EngineTaskKey, EngineTaskSuccess, PROPOSAL_TASK_PRIORITY,
     };
+
+    struct TaskDropSignal(Arc<AtomicUsize>);
+
+    impl Drop for TaskDropSignal {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_lease_renewal_guard_aborts_task() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let dropped = Arc::clone(&dropped);
+            let started = Arc::clone(&started);
+            async move {
+                let _drop_signal = TaskDropSignal(dropped);
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        started.notified().await;
+
+        drop(AbortOnDropTask::new(task));
+        for _ in 0..100 {
+            if dropped.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
 
     struct PublicationFailingObserver {
         proof_successes: AtomicUsize,
@@ -1525,6 +1828,8 @@ mod tests {
             _id: &EngineTaskId,
             _task: &EngineTask,
             success: &EngineTaskSuccess,
+            _permit: Option<&crate::ProofCompletionPermit>,
+            _execution_permit: &crate::TaskExecutionPermit,
         ) -> Result<(), EngineObserverError> {
             if matches!(success, EngineTaskSuccess::Proof { .. }) {
                 let attempt = self.proof_successes.fetch_add(1, Ordering::SeqCst);
@@ -1537,7 +1842,13 @@ mod tests {
             Ok(())
         }
 
-        async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {
+        async fn on_task_failed(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            _error: &str,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) {
             self.task_failures.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -1546,18 +1857,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EngineObserver for PublicationInvalidatingObserver {
-        async fn on_task_succeeded(
+        async fn checkpoint_completed_proof(
             &self,
             _id: &EngineTaskId,
             _task: &EngineTask,
-            success: &EngineTaskSuccess,
-        ) -> Result<(), EngineObserverError> {
-            if matches!(success, EngineTaskSuccess::Proof { .. }) {
-                return Err(EngineObserverError::ProofInvalidated(
-                    "injected invalidation".to_string(),
-                ));
-            }
-            Ok(())
+            _proof: &Proof,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) -> Result<crate::ProofCompletionPermit, EngineObserverError> {
+            Err(EngineObserverError::ProofInvalidated(
+                "injected invalidation".to_string(),
+            ))
         }
     }
 
@@ -1583,6 +1892,8 @@ mod tests {
             _id: &EngineTaskId,
             _task: &EngineTask,
             success: &EngineTaskSuccess,
+            _permit: Option<&crate::ProofCompletionPermit>,
+            _execution_permit: &crate::TaskExecutionPermit,
         ) -> Result<(), EngineObserverError> {
             if matches!(success, EngineTaskSuccess::Proof { .. }) {
                 self.proof_successes.fetch_add(1, Ordering::SeqCst);
@@ -2288,7 +2599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_lease_failure_does_not_overwrite_terminal_state_or_notify_observer()
+    async fn stale_lease_failure_does_not_overwrite_recreated_task_or_notify_observer()
     -> Result<(), Box<dyn std::error::Error>> {
         let observer = Arc::new(PublicationFailingObserver::new(0));
         let engine = Engine::with_store_scheduler_config_and_observer(
@@ -2308,25 +2619,35 @@ mod tests {
             .next_ready("old-worker")
             .await?
             .ok_or_else(|| std::io::Error::other("expected running lease"))?;
-        engine
+        engine.remove(job_id.clone()).await?;
+        let replacement_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+        assert_eq!(replacement_id, job_id);
+        let replacement = engine
             .inner
             .scheduler
-            .fail(job_id.clone(), "newer terminal failure".into())
-            .await?;
+            .next_ready("old-worker")
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected replacement lease"))?;
+        assert_ne!(lease.lease_token, replacement.lease_token);
 
+        let execution_permit = crate::TaskExecutionPermit::untracked();
         engine
-            .fail_task_after_lease_loss(&lease, &lease.payload)
+            .fail_task_after_lease_loss(&lease, &lease.payload, &execution_permit)
             .await?;
 
         let view = engine
             .get(job_id)
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
-        assert!(matches!(
-            view.state,
-            TaskState::Failed { ref error, .. } if error == "newer terminal failure"
-        ));
+        assert!(matches!(view.state, TaskState::Running { .. }));
         assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
+        assert!(
+            engine
+                .inner
+                .scheduler
+                .complete(replacement, Err("test cleanup".to_string()))
+                .await?
+        );
         Ok(())
     }
 
@@ -2508,6 +2829,7 @@ mod tests {
                     preflight_task: preflight_id,
                 },
                 "w1",
+                Arc::new(crate::TaskExecutionPermit::untracked()),
             )
             .await;
 
@@ -2590,6 +2912,7 @@ mod tests {
                     input_task: validation_id,
                 },
                 "w1",
+                Arc::new(crate::TaskExecutionPermit::untracked()),
             )
             .await;
 

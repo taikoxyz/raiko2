@@ -1100,7 +1100,8 @@ async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
     assert_eq!(invalidated["data"]["dry_run"], false);
     assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
     assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
-    assert_eq!(invalidated["data"]["artifacts"]["files_removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["manifests_removed"], 0);
+    assert_eq!(invalidated["data"]["artifacts"]["manifests_missing"], 1);
     assert_eq!(invalidated["data"]["tasks"]["matched"], 1);
     assert_eq!(invalidated["data"]["tasks"]["removed"], 1);
 
@@ -1173,11 +1174,14 @@ async fn e2e_ready_fails_after_runtime_begins_draining() {
             .expect("memory artifact store"),
     );
     let runtime = Arc::new(RuntimeManager::with_store(store).expect("runtime manager"));
-    runtime.begin_draining().await;
+    let permit = runtime
+        .acquire_submission_checkpoint_permit()
+        .expect("pre-drain checkpoint permit");
+    runtime.start_draining();
     let state = AppState::from_parts(
         Arc::new(config),
         Arc::new(StaticPipelineFactory::default()),
-        runtime,
+        Arc::clone(&runtime),
     );
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
@@ -1194,6 +1198,12 @@ async fn e2e_ready_fails_after_runtime_begins_draining() {
     assert_eq!(body["reth"]["ok"], true);
     assert_eq!(body["queue"]["ok"], true);
     assert_eq!(body["prover"]["ok"], true);
+
+    drop(permit);
+    runtime.begin_draining().await;
+    let (status, body) = get_json(&app, "/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["runtime"]["ok"], false);
 
     l1_handle.abort();
     l2_handle.abort();

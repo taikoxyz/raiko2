@@ -13,6 +13,7 @@ async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
 base64.workspace = true
 bincode.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

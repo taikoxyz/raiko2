@@ -58,6 +58,12 @@ pub enum ProofArtifactPutResult {
     Conflict(ProofArtifactObject),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofArtifactDeleteResult {
+    Removed,
+    Missing,
+}
+
 impl ProofArtifactPutResult {
     #[must_use]
     pub const fn object(&self) -> &ProofArtifactObject {
@@ -91,6 +97,12 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult>;
     async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>>;
+    async fn get_descriptor(
+        &self,
+        key: &ProofArtifactKey,
+    ) -> Result<Option<ProofArtifactDescriptor>> {
+        Ok(self.get(key).await?.map(|object| object.descriptor()))
+    }
     async fn get_prefix(
         &self,
         key: &ProofArtifactKey,
@@ -113,7 +125,7 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
         key: &ProofArtifactKey,
         generation: Option<i64>,
         expected_content_hash: &str,
-    ) -> Result<()>;
+    ) -> Result<ProofArtifactDeleteResult>;
 
     async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>>;
 
@@ -267,6 +279,30 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
         }))
     }
 
+    async fn get_descriptor(
+        &self,
+        key: &ProofArtifactKey,
+    ) -> Result<Option<ProofArtifactDescriptor>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let Some(manifest) = inner.manifests.get(key) else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            inner
+                .contents
+                .contains_key(&(key.clone(), manifest.content_hash.clone())),
+            "proof manifest references missing content"
+        );
+        Ok(Some(ProofArtifactDescriptor {
+            proof_uri: self.content_uri(key, &manifest.content_hash),
+            content_hash: manifest.content_hash.clone(),
+            generation: Some(manifest.generation),
+        }))
+    }
+
     async fn get_prefix(
         &self,
         key: &ProofArtifactKey,
@@ -319,20 +355,20 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
         key: &ProofArtifactKey,
         generation: Option<i64>,
         expected_content_hash: &str,
-    ) -> Result<()> {
+    ) -> Result<ProofArtifactDeleteResult> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        if let Some(current) = inner.manifests.get(key) {
-            anyhow::ensure!(
-                Some(current.generation) == generation
-                    && current.content_hash == expected_content_hash,
-                "proof artifact changed before conditional delete"
-            );
-            inner.manifests.remove(key);
-        }
-        Ok(())
+        let Some(current) = inner.manifests.get(key) else {
+            return Ok(ProofArtifactDeleteResult::Missing);
+        };
+        anyhow::ensure!(
+            Some(current.generation) == generation && current.content_hash == expected_content_hash,
+            "proof artifact changed before conditional delete"
+        );
+        inner.manifests.remove(key);
+        Ok(ProofArtifactDeleteResult::Removed)
     }
 
     async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
@@ -463,6 +499,31 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.get(&key).await?, Some(second));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_reports_removed_then_missing() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-delete-result".into())?;
+        let key = key();
+        let object = store
+            .put_if_absent(&key, b"proof-a")
+            .await?
+            .object()
+            .clone();
+
+        assert_eq!(
+            store
+                .delete(&key, object.generation, &object.content_hash)
+                .await?,
+            ProofArtifactDeleteResult::Removed
+        );
+        assert_eq!(
+            store
+                .delete(&key, object.generation, &object.content_hash)
+                .await?,
+            ProofArtifactDeleteResult::Missing
+        );
         Ok(())
     }
 

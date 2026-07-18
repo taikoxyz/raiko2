@@ -851,8 +851,10 @@ impl RuntimeManager {
     async fn install_runtime_state_object(&self, stored: Option<RuntimeStateObject>) -> Result<()> {
         match stored {
             Some(stored) => {
-                let state = serde_json::from_slice(&stored.bytes)
+                let mut state = serde_json::from_slice(&stored.bytes)
                     .context("decode authoritative runtime store state")?;
+                migrate_legacy_task_indexes(&mut state)
+                    .context("migrate authoritative runtime task indexes")?;
                 self.install_runtime_state(state, stored.generation).await
             }
             None => {
@@ -2633,8 +2635,10 @@ pub struct RuntimeTaskRecord {
     pub task_kind: String,
     pub proposal_id: Option<u64>,
     /// Canonical network-pair scope for every artifact and task ownership decision.
+    #[serde(default = "missing_task_network_pair")]
     pub network_pair: String,
     /// Canonical proof references consumed or produced by this root.
+    #[serde(default)]
     pub artifact_refs: Vec<String>,
     pub proof_ids: Vec<String>,
     pub runner_status: RunnerStatus,
@@ -2730,6 +2734,28 @@ fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecor
         request_fingerprint: registration.request_fingerprint.clone(),
         updated_at: now_ts(),
     })
+}
+
+fn migrate_legacy_task_indexes(state: &mut RuntimeState) -> Result<()> {
+    for record in state.tasks.values_mut() {
+        if record.network_pair == missing_task_network_pair() {
+            record.network_pair = record
+                .metadata
+                .get("network_pair")
+                .and_then(serde_json::Value::as_str)
+                .filter(|network_pair| !network_pair.is_empty())
+                .context("legacy runtime task is missing network_pair metadata")?
+                .to_string();
+        }
+        if record.artifact_refs.is_empty() {
+            record.artifact_refs = task_artifact_refs(&record.metadata, &record.proof_ids);
+        }
+    }
+    Ok(())
+}
+
+fn missing_task_network_pair() -> String {
+    "\0missing-network-pair".to_string()
 }
 
 fn pipeline_key_matches_route(pipeline_key: PipelineKey, route: PipelineRoute) -> bool {
@@ -2985,7 +3011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_runtime_state_missing_required_lifecycle_fields_fails_closed() -> Result<()> {
+    async fn legacy_runtime_state_missing_unrecoverable_fields_fails_closed() -> Result<()> {
         let record = build_task_record(&TaskRegistration {
             task_id: "legacy-root".into(),
             pipeline_key: Some(PipelineKey::ShastaRisc0Network),
@@ -3026,16 +3052,15 @@ mod tests {
             .as_object_mut()
             .context("legacy task must be an object")?
             .remove("incarnation_id");
-        let mut missing_network_pair = current_state.clone();
-        missing_network_pair["tasks"]["legacy-root"]
+        let mut missing_network_pair_metadata = current_state.clone();
+        let task = missing_network_pair_metadata["tasks"]["legacy-root"]
             .as_object_mut()
-            .context("legacy task must be an object")?
+            .context("legacy task must be an object")?;
+        task.remove("network_pair");
+        task.get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .context("legacy task metadata must be an object")?
             .remove("network_pair");
-        let mut missing_artifact_refs = current_state.clone();
-        missing_artifact_refs["tasks"]["legacy-root"]
-            .as_object_mut()
-            .context("legacy task must be an object")?
-            .remove("artifact_refs");
         let mut missing_artifact_lifecycle = current_state;
         missing_artifact_lifecycle["artifacts"]
             .get_mut(&legacy_artifact_key)
@@ -3046,11 +3071,13 @@ mod tests {
         for (namespace, legacy_state) in [
             ("legacy-missing-incarnation", missing_incarnation),
             (
+                "legacy-missing-network-pair-metadata",
+                missing_network_pair_metadata,
+            ),
+            (
                 "legacy-missing-artifact-lifecycle",
                 missing_artifact_lifecycle,
             ),
-            ("legacy-missing-network-pair", missing_network_pair),
-            ("legacy-missing-artifact-refs", missing_artifact_refs),
         ] {
             let store = Arc::new(MemoryProofArtifactStore::new(
                 "test".into(),
@@ -3068,6 +3095,57 @@ mod tests {
                 .await
                 .expect_err("legacy runtime state must require an empty namespace cutover");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_runtime_state_derives_task_indexes_from_canonical_metadata() -> Result<()> {
+        let record = build_task_record(&TaskRegistration {
+            task_id: "legacy-root".into(),
+            pipeline_key: Some(PipelineKey::ShastaRisc0Network),
+            route: PipelineKey::ShastaRisc0Network.route(),
+            task_kind: "aggregate".into(),
+            proposal_id: Some(1),
+            proof_ids: vec!["proposal-proof".into()],
+            metadata: serde_json::json!({
+                "network_pair": "taiko_dev/taiko_dev_l1",
+                "aggregate_task_id": "aggregate-proof",
+            }),
+            request_fingerprint: Some("legacy-request".into()),
+        })?;
+        let mut state = serde_json::json!({
+            "tasks": { "legacy-root": serde_json::to_value(record)? },
+            "artifacts": {},
+            "pending_publications": {},
+        });
+        let task = state["tasks"]["legacy-root"]
+            .as_object_mut()
+            .context("legacy task must be an object")?;
+        task.remove("network_pair");
+        task.remove("artifact_refs");
+
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "legacy-task-indexes".into(),
+        )?);
+        assert!(matches!(
+            store
+                .store_runtime_state(&serde_json::to_vec(&state)?, None)
+                .await?,
+            RuntimeStateWriteResult::Stored { .. }
+        ));
+        let runtime = RuntimeManager::with_store(store);
+        runtime.initialize().await?;
+
+        let migrated = runtime
+            .get_task("legacy-root")
+            .await?
+            .context("migrated task should exist")?;
+        assert_eq!(migrated.network_pair, "taiko_dev/taiko_dev_l1");
+        assert_eq!(
+            migrated.artifact_refs,
+            vec!["proposal-proof", "aggregate-proof"]
+        );
         Ok(())
     }
 

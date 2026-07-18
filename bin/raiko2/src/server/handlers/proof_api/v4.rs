@@ -510,6 +510,30 @@ fn invalidation_artifact_refs(
     proposal_range: Option<(u64, u64)>,
 ) -> HashSet<ProofArtifactIdentity> {
     let mut refs = root_invalidation_artifact_refs(metadata, pipeline_key, route);
+    refs.extend(
+        metadata
+            .aggregate_input_artifacts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, artifact)| {
+                let proposal_matches = match proposal_range {
+                    None => true,
+                    Some(_) => metadata
+                        .aggregate_request
+                        .as_ref()
+                        .and_then(|request| request.proposal_ids.get(index))
+                        .is_some_and(|proposal_id| {
+                            proposal_matches_range(*proposal_id, proposal_range)
+                        }),
+                };
+                proposal_matches.then(|| ProofArtifactIdentity {
+                    network_pair: metadata.network_pair.clone(),
+                    pipeline_key,
+                    route,
+                    proof_ref: artifact.proof_ref.clone(),
+                })
+            }),
+    );
     for proposal in &metadata.proposals {
         if !proposal_matches_range(proposal.proposal_id, proposal_range) {
             continue;
@@ -888,6 +912,12 @@ fn metadata_matches_proposal_range(metadata: &TaskMetadata, range: Option<(u64, 
         .proposals
         .iter()
         .any(|proposal| (start..=end).contains(&proposal.proposal_id))
+        || metadata.aggregate_request.as_ref().is_some_and(|request| {
+            request
+                .proposal_ids
+                .iter()
+                .any(|proposal_id| (start..=end).contains(proposal_id))
+        })
 }
 
 async fn task_matches_proof_prefix(

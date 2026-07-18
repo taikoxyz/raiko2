@@ -384,6 +384,112 @@ async fn e2e_v4_invalidate_artifacts_prefix_removes_only_matched_aggregate_input
 }
 
 #[tokio::test]
+async fn e2e_v4_invalidate_external_aggregate_input_removes_dependent_output() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    let matched_proof = format!("0x{}", "aa".repeat(32));
+    let unmatched_proof = format!("0x{}", "cc".repeat(32));
+    let (status, submitted) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "aggregation_ids": [81, 82],
+            "proofs": [
+                sp1_external_proof(matched_proof.clone()),
+                sp1_external_proof(unmatched_proof)
+            ],
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    Box::pin(drive_engine_to_idle(&engine)).await;
+
+    let record = state
+        .runtime
+        .list_tasks()
+        .await
+        .expect("list tasks")
+        .into_iter()
+        .find(|record| {
+            serde_json::from_value::<TaskMetadata>(record.metadata.clone())
+                .expect("parse task metadata")
+                .aggregate_input_artifacts
+                .len()
+                == 2
+        })
+        .expect("external aggregate runtime task");
+    assert_eq!(record.runner_status, RunnerStatus::Completed);
+    let metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+    let root_ref = root_proof_artifact_refs(&metadata, record.pipeline_key)
+        .expect("external aggregate root ref")
+        .refs
+        .into_iter()
+        .next()
+        .expect("external aggregate root ref");
+    let input_refs = metadata
+        .aggregate_input_artifacts
+        .iter()
+        .map(|artifact| artifact.proof_ref.clone())
+        .collect::<Vec<_>>();
+
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        json!({
+            "proof_type": "sp1",
+            "proposal_id_start": 81,
+            "proposal_id_end": 81
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
+    assert!(
+        state
+            .runtime
+            .get_task(&record.task_id)
+            .await
+            .expect("get external aggregate task")
+            .is_none(),
+        "dependent external aggregate root remained registered"
+    );
+    for removed_ref in [&root_ref, &input_refs[0]] {
+        assert!(
+            state
+                .runtime
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    removed_ref,
+                )
+                .await
+                .expect("get invalidated artifact")
+                .is_none(),
+            "dependent artifact {removed_ref} remained active"
+        );
+    }
+    assert!(
+        state
+            .runtime
+            .get_proof_artifact(
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                &input_refs[1],
+            )
+            .await
+            .expect("get unmatched external aggregate input")
+            .is_some(),
+        "unmatched external aggregate input was removed"
+    );
+}
+
+#[tokio::test]
 async fn e2e_v4_invalidate_artifacts_keeps_shared_artifact_for_nonterminal_root() {
     let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
     complete_v4_sp1_proposal(&app, &engine, 61).await;

@@ -393,6 +393,11 @@ pub(crate) fn publication_proof_artifact_refs(
             }
         }
     }
+    for artifact in &metadata.aggregate_input_artifacts {
+        if !refs.contains(&artifact.proof_ref) {
+            refs.push(artifact.proof_ref.clone());
+        }
+    }
     refs
 }
 
@@ -583,6 +588,32 @@ mod tests {
         let roundtrip: TaskMetadata = serde_json::from_value(json).expect("deserialize metadata");
 
         assert_eq!(roundtrip.proof_type, ProofType::Risc0);
+    }
+
+    #[test]
+    fn publication_refs_include_external_aggregate_inputs() {
+        let metadata = TaskMetadata {
+            network_pair: "taiko_hoodi/hoodi".to_string(),
+            network: "taiko_hoodi".to_string(),
+            l1_network: "hoodi".to_string(),
+            proof_type: ProofType::Sp1,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: vec![AggregateInputProofArtifact {
+                proof_ref: "external-input".to_string(),
+            }],
+            runtime: RuntimeMetadata::default(),
+        };
+
+        assert_eq!(
+            publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1),
+            vec!["external-input"]
+        );
     }
 
     #[test]

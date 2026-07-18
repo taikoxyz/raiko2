@@ -570,7 +570,6 @@ async fn remove_invalidated_tasks(
     data: &mut wire::InvalidateArtifactsData,
 ) -> HashSet<ProofArtifactIdentity> {
     let mut blocked_artifact_refs = HashSet::new();
-    let mut cleared_outbox_refs = HashSet::new();
     for task in matched_tasks {
         let MatchedInvalidationTask {
             record,
@@ -635,7 +634,7 @@ async fn remove_invalidated_tasks(
         if let Err(err) = clear_matched_publication_outboxes(
             state.runtime.as_ref(),
             &outbox_refs_to_invalidate,
-            &mut cleared_outbox_refs,
+            record.incarnation_id,
         )
         .await
         {
@@ -678,18 +677,16 @@ async fn remove_invalidated_tasks(
 async fn clear_matched_publication_outboxes(
     runtime: &RuntimeManager,
     artifact_refs: &HashSet<ProofArtifactIdentity>,
-    cleared_artifact_refs: &mut HashSet<ProofArtifactIdentity>,
+    owner_incarnation: uuid::Uuid,
 ) -> Result<(), ApiError> {
     for artifact_ref in artifact_refs {
-        if cleared_artifact_refs.contains(artifact_ref) {
-            continue;
-        }
         runtime
-            .invalidate_pending_proof_publication(
+            .release_pending_proof_publication_owner(
                 &artifact_ref.network_pair,
                 artifact_ref.pipeline_key,
                 artifact_ref.route,
                 &artifact_ref.proof_ref,
+                owner_incarnation,
             )
             .await
             .map_err(|err| {
@@ -698,7 +695,6 @@ async fn clear_matched_publication_outboxes(
                     artifact_ref.proof_ref
                 ))
             })?;
-        cleared_artifact_refs.insert(artifact_ref.clone());
     }
     Ok(())
 }
@@ -709,9 +705,20 @@ async fn remove_invalidated_artifacts(
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
+        let identity = ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            pipeline_key: artifact.pipeline_key,
+            route: artifact.route,
+            proof_ref: artifact.proof_ref.clone(),
+        };
+        let blocked_artifact_refs = recheck_artifact_consumers(state, &identity, data).await;
+        if blocked_artifact_refs.contains(&identity) {
+            continue;
+        }
+
         let delete_result = match state
             .runtime
-            .mark_proof_artifact_descriptor_invalidated(
+            .invalidate_proof_artifact_descriptor_if_unowned(
                 &artifact.network_pair,
                 artifact.pipeline_key,
                 artifact.route,
@@ -720,70 +727,39 @@ async fn remove_invalidated_artifacts(
             )
             .await
         {
-            Ok(Some(result)) => result,
-            Ok(None) => continue,
+            Ok(raiko2_runtime::ProofArtifactInvalidationResult::Invalidated(result)) => result,
+            Ok(raiko2_runtime::ProofArtifactInvalidationResult::BlockedByLiveTask) => {
+                data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
+                continue;
+            }
+            Ok(raiko2_runtime::ProofArtifactInvalidationResult::MissingOrChanged) => continue,
             Err(err) => {
                 data.artifacts.failed = data.artifacts.failed.saturating_add(1);
                 tracing::warn!(
                     network_pair = %artifact.network_pair,
                     proof_ref = %artifact.proof_ref,
                     error = %err,
-                    "failed to mark proof artifact invalidated"
+                    "failed to invalidate proof artifact"
                 );
                 continue;
             }
         };
 
-        let identity = ProofArtifactIdentity {
-            network_pair: artifact.network_pair.clone(),
-            pipeline_key: artifact.pipeline_key,
-            route: artifact.route,
-            proof_ref: artifact.proof_ref.clone(),
-        };
-        let blocked_artifact_refs =
-            remove_late_terminal_tasks_for_artifact(state, &identity, data).await;
-        if blocked_artifact_refs.contains(&identity) {
-            continue;
-        }
-
-        match state
-            .runtime
-            .remove_proof_artifact(
-                &artifact.network_pair,
-                artifact.pipeline_key,
-                artifact.route,
-                &artifact.proof_ref,
-            )
-            .await
-        {
-            Ok(Some(_record)) => {
-                data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                match delete_result {
-                    raiko2_runtime::ProofArtifactDeleteResult::Removed => {
-                        data.artifacts.manifests_removed =
-                            data.artifacts.manifests_removed.saturating_add(1);
-                    }
-                    raiko2_runtime::ProofArtifactDeleteResult::Missing => {
-                        data.artifacts.manifests_missing =
-                            data.artifacts.manifests_missing.saturating_add(1);
-                    }
-                }
+        data.artifacts.removed = data.artifacts.removed.saturating_add(1);
+        match delete_result {
+            raiko2_runtime::ProofArtifactDeleteResult::Removed => {
+                data.artifacts.manifests_removed =
+                    data.artifacts.manifests_removed.saturating_add(1);
             }
-            Ok(None) => {}
-            Err(err) => {
-                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
-                tracing::warn!(
-                    network_pair = %artifact.network_pair,
-                    proof_ref = %artifact.proof_ref,
-                    error = %err,
-                    "failed to remove invalidated proof artifact record"
-                );
+            raiko2_runtime::ProofArtifactDeleteResult::Missing => {
+                data.artifacts.manifests_missing =
+                    data.artifacts.manifests_missing.saturating_add(1);
             }
         }
     }
 }
 
-async fn remove_late_terminal_tasks_for_artifact(
+async fn recheck_artifact_consumers(
     state: &AppState,
     artifact: &ProofArtifactIdentity,
     data: &mut wire::InvalidateArtifactsData,
@@ -805,11 +781,9 @@ async fn remove_late_terminal_tasks_for_artifact(
         }
     };
     let mut matched_tasks = Vec::new();
+    let mut blocked_artifact_refs = HashSet::new();
     for record in records {
-        if !is_terminal_runtime_status(record.runner_status)
-            || record.pipeline_key != artifact.pipeline_key
-            || record.route != artifact.route
-        {
+        if record.pipeline_key != artifact.pipeline_key || record.route != artifact.route {
             continue;
         }
         let metadata = match parse_task_metadata(&record) {
@@ -834,6 +808,11 @@ async fn remove_late_terminal_tasks_for_artifact(
         if !artifact_refs.contains(artifact) {
             continue;
         }
+        if !is_terminal_runtime_status(record.runner_status) {
+            data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
+            blocked_artifact_refs.insert(artifact.clone());
+            continue;
+        }
         data.tasks.matched = data.tasks.matched.saturating_add(1);
         let mut outbox_refs_to_invalidate = HashSet::from([artifact.clone()]);
         outbox_refs_to_invalidate.extend(root_artifact_refs.iter().cloned());
@@ -845,7 +824,8 @@ async fn remove_late_terminal_tasks_for_artifact(
             outbox_refs_to_invalidate,
         });
     }
-    remove_invalidated_tasks(state, matched_tasks, data).await
+    blocked_artifact_refs.extend(remove_invalidated_tasks(state, matched_tasks, data).await);
+    blocked_artifact_refs
 }
 
 fn validate_invalidate_artifacts_request(
@@ -1799,6 +1779,13 @@ mod tests {
             }))
         }
 
+        async fn get_descriptor(
+            &self,
+            key: &ProofArtifactKey,
+        ) -> anyhow::Result<Option<raiko2_runtime::ProofArtifactDescriptor>> {
+            Ok(self.get(key).await?.map(|object| object.descriptor()))
+        }
+
         async fn get_prefix(
             &self,
             _key: &ProofArtifactKey,
@@ -2051,7 +2038,9 @@ mod tests {
             )
             .await
             .expect("write proof artifact");
-        let artifact = publication.object();
+        let artifact = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: metadata.network_pair.clone(),
@@ -2360,7 +2349,9 @@ mod tests {
             )
             .await
             .expect("publish proof artifact");
-        let object = publication.object();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: metadata.network_pair.clone(),
@@ -2420,6 +2411,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalidation_keeps_artifact_for_late_nonterminal_consumer() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-late-nonterminal-root"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::clone(&runtime),
+        );
+        let metadata = task_log_metadata_with_requests(&[58], false);
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = root_invalidation_artifact_refs(&metadata, pipeline, route)
+            .into_iter()
+            .next()
+            .expect("root artifact ref")
+            .proof_ref;
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                &metadata.network_pair,
+                pipeline,
+                route,
+                &proof_ref,
+                &serde_json::to_vec(&Proof {
+                    proof: Some("0xlate".to_string()),
+                    ..Proof::default()
+                })
+                .expect("serialize proof"),
+            )
+            .await
+            .expect("publish proof artifact");
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: metadata.network_pair.clone(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await
+            .expect("register proof artifact");
+        let artifact = runtime
+            .get_proof_artifact(&metadata.network_pair, pipeline, route, &proof_ref)
+            .await
+            .expect("get proof artifact")
+            .expect("proof artifact record");
+
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_late_nonterminal_root".to_string(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "hoodi_proposal".to_string(),
+                proposal_id: Some(58),
+                proof_ids: vec![proof_ref.clone()],
+                metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+                request_fingerprint: None,
+            })
+            .await
+            .expect("register runtime task");
+
+        let mut data = wire::InvalidateArtifactsData::default();
+        data.artifacts.matched = 1;
+        remove_invalidated_artifacts(&state, vec![artifact], &mut data).await;
+
+        assert_eq!(data.tasks.skipped_non_terminal, 1);
+        assert_eq!(data.artifacts.removed, 0);
+        assert!(
+            runtime
+                .get_proof_artifact(&metadata.network_pair, pipeline, route, &proof_ref)
+                .await
+                .expect("get retained proof artifact")
+                .is_some(),
+            "artifact invalidation ignored a late non-terminal consumer"
+        );
+    }
+
+    #[tokio::test]
     async fn invalidation_keeps_sp1_routes_distinct() {
         let runtime = Arc::new(
             RuntimeManager::new(test_runtime_root("invalidate-sp1-routes"))
@@ -2448,7 +2523,9 @@ mod tests {
                 .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, &bytes)
                 .await
                 .expect("publish proof artifact");
-            let object = publication.object();
+            let object = publication
+                .try_object()
+                .expect("proof publication should materialize content");
             runtime
                 .upsert_proof_artifact(ProofArtifactRegistration {
                     network_pair: network_pair.to_string(),
@@ -2610,7 +2687,9 @@ mod tests {
             )
             .await
             .expect("publish corrupt artifact");
-        let object = publication.object();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),
@@ -3016,7 +3095,9 @@ mod tests {
             .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, &bytes)
             .await
             .expect("publish proof artifact");
-        let artifact = publication.object();
+        let artifact = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),

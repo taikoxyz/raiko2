@@ -185,7 +185,9 @@ async fn write_e2e_proof_artifact(
         )
         .await
         .expect("write proof artifact");
-    let artifact = publication.object();
+    let artifact = publication
+        .try_object()
+        .expect("proof publication should materialize content");
     state
         .runtime
         .upsert_proof_artifact(ProofArtifactRegistration {
@@ -230,7 +232,13 @@ async fn replace_e2e_proof_artifact(
         .expect("delete proof artifact manifest");
     state
         .runtime
-        .remove_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+        .remove_proof_artifact_if_descriptor(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            &old.descriptor(),
+        )
         .await
         .expect("remove proof artifact record");
     write_e2e_proof_artifact(state, network_pair, proof_ref, pipeline_key, route, proof).await;
@@ -1100,8 +1108,8 @@ async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
     assert_eq!(invalidated["data"]["dry_run"], false);
     assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
     assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
-    assert_eq!(invalidated["data"]["artifacts"]["manifests_removed"], 0);
-    assert_eq!(invalidated["data"]["artifacts"]["manifests_missing"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["manifests_removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["manifests_missing"], 0);
     assert_eq!(invalidated["data"]["tasks"]["matched"], 1);
     assert_eq!(invalidated["data"]["tasks"]["removed"], 1);
 

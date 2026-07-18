@@ -9,10 +9,10 @@ mod artifact_store;
 mod publication;
 
 pub use artifact_store::{
-    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactDeleteResult,
-    ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-    ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject, RuntimeStateWriteResult,
-    validate_scope_component,
+    GcsProofArtifactStore, MemoryProofArtifactStore, ProofArtifactConflict,
+    ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
+    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject,
+    RuntimeStateWriteResult, validate_scope_component,
 };
 pub use publication::ProofArtifactPublicationInvalidated;
 
@@ -190,6 +190,20 @@ pub struct ProofArtifactRegistration {
     pub generation: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofArtifactInvalidationResult {
+    Invalidated(ProofArtifactDeleteResult),
+    BlockedByLiveTask,
+    MissingOrChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProofArtifactInvalidationAdmission {
+    Marked,
+    BlockedByLiveTask,
+    MissingOrChanged,
+}
+
 impl ProofArtifactRegistration {
     #[must_use]
     pub fn descriptor(&self) -> ProofArtifactDescriptor {
@@ -258,6 +272,7 @@ impl RuntimeManager {
     where
         F: Fn(&mut Vec<RuntimeTaskRecord>) -> Result<T>,
     {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
         let task_ref = task_ref.to_string();
         self.mutate(move |state| {
             let mut records = state
@@ -289,6 +304,7 @@ impl RuntimeManager {
     where
         F: Fn(&mut Vec<RuntimeTaskRecord>) -> Result<T>,
     {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
         let task_ref = task_ref.to_string();
         self.mutate_checkpoint(permit, move |state| {
             let mut records = state
@@ -775,6 +791,25 @@ impl RuntimeManager {
         proof_ref: &str,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
+        self.publish_proof_artifact_bytes_locked(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            bytes,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_proof_artifact_bytes_locked(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        bytes: &[u8],
+    ) -> Result<ProofArtifactPutResult> {
         let lifecycle = self.fence_external_mutation()?;
         let key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
         let publication = self.store.put_if_absent(&key, bytes).await?;
@@ -782,6 +817,40 @@ impl RuntimeManager {
         let _lifecycle = self
             .fence_external_mutation()
             .context("global runtime fence changed during artifact publication")?;
+        Ok(publication)
+    }
+
+    pub async fn publish_active_proof_artifact_bytes(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        bytes: &[u8],
+    ) -> Result<ProofArtifactPutResult> {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let publication = self
+            .publish_proof_artifact_bytes_locked(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                bytes,
+            )
+            .await?;
+        let artifact = publication
+            .try_object()
+            .context("active proof artifact conflict references missing content")?;
+        self.upsert_proof_artifact_locked(ProofArtifactRegistration {
+            network_pair: network_pair.to_string(),
+            proof_ref: proof_ref.to_string(),
+            pipeline_key,
+            route,
+            proof_uri: artifact.proof_uri.clone(),
+            content_hash: artifact.content_hash.clone(),
+            generation: artifact.generation,
+        })
+        .await?;
         Ok(publication)
     }
 
@@ -1051,6 +1120,7 @@ impl RuntimeManager {
         task_id: &str,
         expected_status: RunnerStatus,
     ) -> Result<bool> {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
         let task_id = task_id.to_string();
         self.mutate(move |state| {
             let Some(task) = state.tasks.get_mut(&task_id) else {
@@ -1111,6 +1181,14 @@ impl RuntimeManager {
     }
 
     pub async fn upsert_proof_artifact(
+        &self,
+        registration: ProofArtifactRegistration,
+    ) -> Result<()> {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
+        self.upsert_proof_artifact_locked(registration).await
+    }
+
+    async fn upsert_proof_artifact_locked(
         &self,
         registration: ProofArtifactRegistration,
     ) -> Result<()> {
@@ -1477,18 +1555,6 @@ impl RuntimeManager {
         Ok(artifacts)
     }
 
-    pub async fn remove_proof_artifact(
-        &self,
-        network_pair: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        proof_ref: &str,
-    ) -> Result<Option<ProofArtifactRecord>> {
-        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        self.mutate(move |state| Ok(state.artifacts.remove(&key)))
-            .await
-    }
-
     pub async fn remove_proof_artifact_if_descriptor(
         &self,
         network_pair: &str,
@@ -1578,6 +1644,86 @@ impl RuntimeManager {
         )
         .await
         .map(Some)
+    }
+
+    pub async fn invalidate_proof_artifact_descriptor_if_unowned(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        descriptor: &ProofArtifactDescriptor,
+    ) -> Result<ProofArtifactInvalidationResult> {
+        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        let expected_descriptor = descriptor.clone();
+        let network_pair_owned = network_pair.to_string();
+        let proof_ref_owned = proof_ref.to_string();
+        let marked = self
+            .mutate(move |state| {
+                if !state
+                    .artifacts
+                    .get(&key)
+                    .is_some_and(|record| record.descriptor() == expected_descriptor)
+                {
+                    return Ok(ProofArtifactInvalidationAdmission::MissingOrChanged);
+                }
+                let has_live_task = artifact_task_records(
+                    state,
+                    &network_pair_owned,
+                    pipeline_key,
+                    route,
+                    &proof_ref_owned,
+                )?
+                .iter()
+                .any(|task| {
+                    !matches!(
+                        task.runner_status,
+                        RunnerStatus::Failed | RunnerStatus::Cancelled
+                    )
+                });
+                if has_live_task {
+                    return Ok(ProofArtifactInvalidationAdmission::BlockedByLiveTask);
+                }
+                let record = state
+                    .artifacts
+                    .get_mut(&key)
+                    .context("proof artifact disappeared during invalidation")?;
+                record.lifecycle = ProofArtifactLifecycle::Invalidated;
+                record.invalidated_at.get_or_insert_with(now_ts);
+                record.updated_at = now_ts();
+                Ok(ProofArtifactInvalidationAdmission::Marked)
+            })
+            .await?;
+        match marked {
+            ProofArtifactInvalidationAdmission::BlockedByLiveTask => {
+                return Ok(ProofArtifactInvalidationResult::BlockedByLiveTask);
+            }
+            ProofArtifactInvalidationAdmission::MissingOrChanged => {
+                return Ok(ProofArtifactInvalidationResult::MissingOrChanged);
+            }
+            ProofArtifactInvalidationAdmission::Marked => {}
+        }
+
+        let delete_result = self
+            .finalize_proof_artifact_invalidation(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                descriptor.generation,
+                &descriptor.content_hash,
+            )
+            .await?;
+        self.remove_proof_artifact_if_descriptor(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            descriptor,
+        )
+        .await?;
+        Ok(ProofArtifactInvalidationResult::Invalidated(delete_result))
     }
 
     pub async fn finalize_proof_artifact_invalidation(
@@ -2361,6 +2507,18 @@ fn task_references(record: &RuntimeTaskRecord, task_ref: &str) -> bool {
             .get("aggregate_task_id")
             .and_then(serde_json::Value::as_str)
             == Some(task_ref)
+        || record
+            .metadata
+            .get("aggregate_input_artifacts")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|artifacts| {
+                artifacts.iter().any(|artifact| {
+                    artifact
+                        .get("proof_ref")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(task_ref)
+                })
+            })
 }
 
 fn task_network_pair(record: &RuntimeTaskRecord) -> Option<&str> {
@@ -2462,6 +2620,9 @@ mod tests {
         block_next_artifact_put: AtomicBool,
         artifact_put_entered: tokio::sync::Notify,
         allow_artifact_put: tokio::sync::Notify,
+        block_next_artifact_delete: AtomicBool,
+        artifact_delete_completed: tokio::sync::Notify,
+        allow_artifact_delete_return: tokio::sync::Notify,
     }
 
     impl RuntimeStateProbeStore {
@@ -2479,6 +2640,9 @@ mod tests {
                 block_next_artifact_put: AtomicBool::new(false),
                 artifact_put_entered: tokio::sync::Notify::new(),
                 allow_artifact_put: tokio::sync::Notify::new(),
+                block_next_artifact_delete: AtomicBool::new(false),
+                artifact_delete_completed: tokio::sync::Notify::new(),
+                allow_artifact_delete_return: tokio::sync::Notify::new(),
             })
         }
     }
@@ -2511,6 +2675,13 @@ mod tests {
 
         async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
             self.inner.get(key).await
+        }
+
+        async fn get_descriptor(
+            &self,
+            key: &ProofArtifactKey,
+        ) -> Result<Option<ProofArtifactDescriptor>> {
+            self.inner.get_descriptor(key).await
         }
 
         async fn get_prefix(
@@ -2549,9 +2720,18 @@ mod tests {
             generation: Option<i64>,
             expected_content_hash: &str,
         ) -> Result<ProofArtifactDeleteResult> {
-            self.inner
+            let result = self
+                .inner
                 .delete(key, generation, expected_content_hash)
-                .await
+                .await?;
+            if self
+                .block_next_artifact_delete
+                .swap(false, Ordering::SeqCst)
+            {
+                self.artifact_delete_completed.notify_one();
+                self.allow_artifact_delete_return.notified().await;
+            }
+            Ok(result)
         }
 
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
@@ -3317,7 +3497,9 @@ mod tests {
                 b"proof",
             )
             .await?;
-        let object = publication.object();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         let registration = ProofArtifactRegistration {
             network_pair: "l1-l2".into(),
             proof_ref: "proposal-1".into(),
@@ -3487,7 +3669,8 @@ mod tests {
         let object = runtime
             .publish_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, b"proof")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
@@ -3507,12 +3690,43 @@ mod tests {
                 route,
                 task_kind: "proposal".into(),
                 proposal_id: Some(1),
-                proof_ids: vec![proof_ref.into()],
-                metadata: serde_json::json!({ "network_pair": "l1-l2" }),
+                proof_ids: vec!["aggregate-task".into()],
+                metadata: serde_json::json!({
+                    "network_pair": "l1-l2",
+                    "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
+                }),
                 request_fingerprint: None,
             })
             .await?;
 
+        let mut stale_descriptor = object.descriptor();
+        stale_descriptor.generation = stale_descriptor
+            .generation
+            .map_or(Some(1), |value| Some(value.saturating_add(1)));
+        assert_eq!(
+            runtime
+                .invalidate_proof_artifact_descriptor_if_unowned(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &stale_descriptor,
+                )
+                .await?,
+            ProofArtifactInvalidationResult::MissingOrChanged
+        );
+        assert_eq!(
+            runtime
+                .invalidate_proof_artifact_descriptor_if_unowned(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &object.descriptor(),
+                )
+                .await?,
+            ProofArtifactInvalidationResult::BlockedByLiveTask
+        );
         assert!(
             !runtime
                 .invalidate_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
@@ -3545,6 +3759,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn descriptor_invalidation_serializes_new_task_admission_until_delete_finishes()
+    -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("artifact-admission-fence")?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone())?);
+        let network_pair = "l1-l2";
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-2";
+        let first = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"proof-a")
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: first.proof_uri.clone(),
+                content_hash: first.content_hash.clone(),
+                generation: first.generation,
+            })
+            .await?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "recoverable-root".into(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "proposal".into(),
+                proposal_id: Some(2),
+                proof_ids: vec![proof_ref.into()],
+                metadata: serde_json::json!({ "network_pair": network_pair }),
+                request_fingerprint: None,
+            })
+            .await?;
+        runtime
+            .sync_status("recoverable-root", RunnerStatus::Cancelled, None, None)
+            .await?;
+
+        store
+            .block_next_artifact_delete
+            .store(true, Ordering::SeqCst);
+        let invalidation = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let descriptor = first.descriptor();
+            async move {
+                runtime
+                    .invalidate_proof_artifact_descriptor_if_unowned(
+                        network_pair,
+                        pipeline,
+                        route,
+                        proof_ref,
+                        &descriptor,
+                    )
+                    .await
+            }
+        });
+        store.artifact_delete_completed.notified().await;
+
+        let mut admission = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .register_task(TaskRegistration {
+                        task_id: "replacement-root".into(),
+                        pipeline_key: Some(pipeline),
+                        route,
+                        task_kind: "proposal".into(),
+                        proposal_id: Some(2),
+                        proof_ids: vec![proof_ref.into()],
+                        metadata: serde_json::json!({ "network_pair": network_pair }),
+                        request_fingerprint: None,
+                    })
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut admission)
+                .await
+                .is_err(),
+            "new task admission bypassed the artifact invalidation fence"
+        );
+        let mut recovery = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .reopen_task_for_recovery("recoverable-root", RunnerStatus::Cancelled)
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut recovery)
+                .await
+                .is_err(),
+            "task recovery bypassed the artifact invalidation fence"
+        );
+
+        store.allow_artifact_delete_return.notify_one();
+        assert_eq!(
+            invalidation.await??,
+            ProofArtifactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+        );
+        admission.await??;
+        assert!(recovery.await??);
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref,)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invalidation_owner_scope_uses_full_artifact_identity() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "artifact-owner-scope".into())?;
         let pipeline = PipelineKey::ShastaSp1;
@@ -3553,7 +3883,8 @@ mod tests {
         let object = runtime
             .publish_proof_artifact_bytes("pair-a", pipeline, route, proof_ref, b"proof-a")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {

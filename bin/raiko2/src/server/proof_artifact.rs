@@ -143,6 +143,13 @@ mod tests {
             self.inner.get(key).await
         }
 
+        async fn get_descriptor(
+            &self,
+            key: &ProofArtifactKey,
+        ) -> Result<Option<raiko2_runtime::ProofArtifactDescriptor>> {
+            self.inner.get_descriptor(key).await
+        }
+
         async fn get_prefix(
             &self,
             key: &ProofArtifactKey,
@@ -229,7 +236,8 @@ mod tests {
         let old = runtime
             .publish_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref, &old_bytes)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
@@ -276,7 +284,13 @@ mod tests {
             )
             .await?;
         runtime
-            .remove_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+            .remove_proof_artifact_if_descriptor(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                &old.descriptor(),
+            )
             .await?;
 
         let new_bytes = serde_json::to_vec(&Proof {
@@ -286,7 +300,8 @@ mod tests {
         let replacement = runtime
             .publish_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref, &new_bytes)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {

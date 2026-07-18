@@ -633,7 +633,9 @@ impl RuntimeObserver {
             )
             .await
             .context("failed to commit proof artifact publication")?;
-        let artifact = publication.object();
+        let artifact = publication
+            .try_object()
+            .context("committed proof conflict references missing content")?;
         if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
             tracing::warn!(
                 task = ?id,
@@ -2124,6 +2126,13 @@ mod tests {
             self.inner.get(key).await
         }
 
+        async fn get_descriptor(
+            &self,
+            key: &ProofArtifactKey,
+        ) -> Result<Option<ProofArtifactDescriptor>> {
+            self.inner.get_descriptor(key).await
+        }
+
         async fn get_prefix(
             &self,
             key: &ProofArtifactKey,
@@ -2204,6 +2213,13 @@ mod tests {
 
         async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
             self.inner.get(key).await
+        }
+
+        async fn get_descriptor(
+            &self,
+            key: &ProofArtifactKey,
+        ) -> Result<Option<ProofArtifactDescriptor>> {
+            self.inner.get_descriptor(key).await
         }
 
         async fn get_prefix(
@@ -2290,6 +2306,13 @@ mod tests {
         }
 
         async fn get(&self, _key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            Ok(None)
+        }
+
+        async fn get_descriptor(
+            &self,
+            _key: &ProofArtifactKey,
+        ) -> Result<Option<ProofArtifactDescriptor>> {
             Ok(None)
         }
 
@@ -3227,7 +3250,10 @@ mod tests {
         let publication = runtime
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
-        let object = publication.object().clone();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),
@@ -3295,7 +3321,10 @@ mod tests {
         let publication = runtime
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
-        let object = publication.object().clone();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),
@@ -3341,7 +3370,13 @@ mod tests {
             )
             .await?;
         runtime
-            .remove_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .remove_proof_artifact_if_descriptor(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &object.descriptor(),
+            )
             .await?;
         store.allow_recheck.notify_one();
 
@@ -3366,7 +3401,9 @@ mod tests {
         let publication = runtime
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
-        let object = publication.object();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),
@@ -3451,7 +3488,9 @@ mod tests {
         let publication = first
             .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
             .await?;
-        let object = publication.object();
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         first
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),

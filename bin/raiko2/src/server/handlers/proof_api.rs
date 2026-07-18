@@ -619,7 +619,7 @@ async fn persist_external_aggregate_input_artifacts(
     for (index, proof) in proofs.iter().enumerate() {
         let proof_ref = aggregate_input_proof_ref(request_fingerprint, index);
         let publication = runtime
-            .publish_proof_artifact_bytes(
+            .publish_active_proof_artifact_bytes(
                 network_pair,
                 route.pipeline_key(),
                 route.route,
@@ -632,22 +632,9 @@ async fn persist_external_aggregate_input_artifacts(
             .map_err(|err| {
                 ApiError::internal(format!("failed to write aggregate input proof: {err}"))
             })?;
-        let artifact = publication.object();
-        let proof_uri = artifact.proof_uri.clone();
-        runtime
-            .upsert_proof_artifact(raiko2_runtime::ProofArtifactRegistration {
-                network_pair: network_pair.to_string(),
-                proof_ref: proof_ref.clone(),
-                pipeline_key: route.pipeline_key(),
-                route: route.route,
-                proof_uri: proof_uri.clone(),
-                content_hash: artifact.content_hash.clone(),
-                generation: artifact.generation,
-            })
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to register aggregate input proof: {err}"))
-            })?;
+        publication.try_object().ok_or_else(|| {
+            ApiError::internal("aggregate input proof conflict references missing content")
+        })?;
         inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
             network_pair: network_pair.to_string(),
             pipeline_key: route.pipeline_key(),
@@ -3853,7 +3840,9 @@ mod tests {
                 &serde_json::to_vec(proof)?,
             )
             .await?;
-        let artifact = publication.object();
+        let artifact = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),
@@ -5535,7 +5524,9 @@ mod tests {
             )
             .await
             .expect("write corrupt artifact");
-        let artifact = publication.object();
+        let artifact = publication
+            .try_object()
+            .expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: submission.pair.key.clone(),

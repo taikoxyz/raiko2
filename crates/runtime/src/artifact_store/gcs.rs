@@ -1,7 +1,8 @@
 use super::{
-    ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
-    ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore, RuntimeStateObject,
-    RuntimeStateWriteResult, content_hash, encode_component, validate_scope_component,
+    ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
+    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactStore,
+    RuntimeStateObject, RuntimeStateWriteResult, content_hash, encode_component,
+    validate_scope_component,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -367,15 +368,41 @@ impl ProofArtifactStore for GcsProofArtifactStore {
                 }))
             }
             GcsCreateResult::AlreadyExists => {
-                let existing = self
-                    .read_manifest_object(key)
+                let (existing_manifest, generation) = self
+                    .read_manifest(key)
                     .await?
                     .context("GCS manifest precondition failed but manifest is missing")?;
-                Ok(if existing.content_hash == hash {
-                    ProofArtifactPutResult::AlreadyExists(existing)
+                let descriptor = ProofArtifactDescriptor {
+                    proof_uri: self.content_uri(key, &existing_manifest.content_hash),
+                    content_hash: existing_manifest.content_hash,
+                    generation: Some(generation),
+                };
+                if descriptor.content_hash == hash {
+                    let existing = self
+                        .read_manifest_object(key)
+                        .await?
+                        .context("GCS manifest precondition failed but manifest is missing")?;
+                    Ok(ProofArtifactPutResult::AlreadyExists(existing))
                 } else {
-                    ProofArtifactPutResult::Conflict(existing)
-                })
+                    let content_name = self.content_name(key, &descriptor.content_hash);
+                    let object = self
+                        .read_named(&content_name, descriptor.proof_uri.clone())
+                        .await?
+                        .map(|mut object| {
+                            object.generation = descriptor.generation;
+                            object
+                        });
+                    if let Some(object) = object.as_ref() {
+                        anyhow::ensure!(
+                            object.content_hash == descriptor.content_hash,
+                            "proof manifest content hash mismatch"
+                        );
+                    }
+                    Ok(ProofArtifactPutResult::Conflict(ProofArtifactConflict {
+                        descriptor,
+                        object,
+                    }))
+                }
             }
         }
     }
@@ -391,11 +418,6 @@ impl ProofArtifactStore for GcsProofArtifactStore {
         let Some((manifest, generation)) = self.read_manifest(key).await? else {
             return Ok(None);
         };
-        let content_name = self.content_name(key, &manifest.content_hash);
-        self.transport
-            .read(&content_name, Some(1))
-            .await?
-            .context("proof manifest references missing content")?;
         Ok(Some(ProofArtifactDescriptor {
             proof_uri: self.content_uri(key, &manifest.content_hash),
             content_hash: manifest.content_hash,
@@ -647,7 +669,12 @@ mod tests {
         let store = store(Arc::clone(&transport))?;
         let key = key();
         let proof = br#"{"proof":"0x01"}"#;
-        let first = store.put_if_absent(&key, proof).await?.object().clone();
+        let first = store
+            .put_if_absent(&key, proof)
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
 
         transport.remove(&store.content_name(&key, &first.content_hash))?;
         let repaired = store.put_if_absent(&key, proof).await?;
@@ -658,12 +685,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn different_hash_conflicts_with_dangling_manifest_through_gcs_seam() -> Result<()> {
+        let transport = Arc::new(FakeGcsTransport::default());
+        let store = store(Arc::clone(&transport))?;
+        let key = key();
+        let first = store
+            .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        transport.remove(&store.content_name(&key, &first.content_hash))?;
+
+        let conflict = store.put_if_absent(&key, br#"{"proof":"0x02"}"#).await?;
+
+        let ProofArtifactPutResult::Conflict(conflict) = conflict else {
+            anyhow::bail!("different proof did not conflict with dangling manifest");
+        };
+        assert_eq!(conflict.descriptor, first.descriptor());
+        assert_eq!(conflict.object, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn descriptor_survives_missing_content_through_gcs_seam() -> Result<()> {
+        let transport = Arc::new(FakeGcsTransport::default());
+        let store = store(Arc::clone(&transport))?;
+        let key = key();
+        let first = store
+            .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        transport.remove(&store.content_name(&key, &first.content_hash))?;
+
+        assert_eq!(store.get_descriptor(&key).await?, Some(first.descriptor()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn prefix_read_rejects_manifest_with_missing_content() -> Result<()> {
         let transport = Arc::new(FakeGcsTransport::default());
         let store = store(Arc::clone(&transport))?;
         let key = key();
         let proof = br#"{"proof":"0x01"}"#;
-        let first = store.put_if_absent(&key, proof).await?.object().clone();
+        let first = store
+            .put_if_absent(&key, proof)
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
 
         transport.remove(&store.content_name(&key, &first.content_hash))?;
 
@@ -681,7 +753,12 @@ mod tests {
         let store = store(transport)?;
         let key = key();
         let proof = br#"{"proof":"0x01"}"#;
-        let first = store.put_if_absent(&key, proof).await?.object().clone();
+        let first = store
+            .put_if_absent(&key, proof)
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
 
         store
             .mark_invalidated(&key, first.generation, &first.content_hash)
@@ -689,7 +766,12 @@ mod tests {
         store
             .delete(&key, first.generation, &first.content_hash)
             .await?;
-        let second = store.put_if_absent(&key, proof).await?.object().clone();
+        let second = store
+            .put_if_absent(&key, proof)
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
 
         assert_ne!(first.generation, second.generation);
         assert!(
@@ -728,7 +810,8 @@ mod tests {
         let object = store
             .put_if_absent(&key, br#"{"proof":"0x01"}"#)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
 
         assert_eq!(

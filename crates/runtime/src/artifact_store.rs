@@ -55,7 +55,13 @@ pub struct ProofArtifactPrefix {
 pub enum ProofArtifactPutResult {
     Created(ProofArtifactObject),
     AlreadyExists(ProofArtifactObject),
-    Conflict(ProofArtifactObject),
+    Conflict(ProofArtifactConflict),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofArtifactConflict {
+    pub descriptor: ProofArtifactDescriptor,
+    pub object: Option<ProofArtifactObject>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,9 +72,10 @@ pub enum ProofArtifactDeleteResult {
 
 impl ProofArtifactPutResult {
     #[must_use]
-    pub const fn object(&self) -> &ProofArtifactObject {
+    pub const fn try_object(&self) -> Option<&ProofArtifactObject> {
         match self {
-            Self::Created(object) | Self::AlreadyExists(object) | Self::Conflict(object) => object,
+            Self::Created(object) | Self::AlreadyExists(object) => Some(object),
+            Self::Conflict(conflict) => conflict.object.as_ref(),
         }
     }
 }
@@ -100,9 +107,7 @@ pub trait ProofArtifactStore: std::fmt::Debug + Send + Sync {
     async fn get_descriptor(
         &self,
         key: &ProofArtifactKey,
-    ) -> Result<Option<ProofArtifactDescriptor>> {
-        Ok(self.get(key).await?.map(|object| object.descriptor()))
-    }
+    ) -> Result<Option<ProofArtifactDescriptor>>;
     async fn get_prefix(
         &self,
         key: &ProofArtifactKey,
@@ -228,13 +233,20 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
                 let existing_bytes = inner
                     .contents
                     .get(&(key.clone(), existing.content_hash.clone()))
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("proof manifest references missing content"))?;
-                ProofArtifactPutResult::Conflict(ProofArtifactObject {
+                    .cloned();
+                let descriptor = ProofArtifactDescriptor {
                     proof_uri: self.content_uri(key, &existing.content_hash),
-                    content_hash: existing.content_hash,
+                    content_hash: existing.content_hash.clone(),
                     generation: Some(existing.generation),
-                    bytes: existing_bytes,
+                };
+                ProofArtifactPutResult::Conflict(ProofArtifactConflict {
+                    object: existing_bytes.map(|bytes| ProofArtifactObject {
+                        proof_uri: descriptor.proof_uri.clone(),
+                        content_hash: descriptor.content_hash.clone(),
+                        generation: descriptor.generation,
+                        bytes,
+                    }),
+                    descriptor,
                 })
             });
         }
@@ -290,12 +302,6 @@ impl ProofArtifactStore for MemoryProofArtifactStore {
         let Some(manifest) = inner.manifests.get(key) else {
             return Ok(None);
         };
-        anyhow::ensure!(
-            inner
-                .contents
-                .contains_key(&(key.clone(), manifest.content_hash.clone())),
-            "proof manifest references missing content"
-        );
         Ok(Some(ProofArtifactDescriptor {
             proof_uri: self.content_uri(key, &manifest.content_hash),
             content_hash: manifest.content_hash.clone(),
@@ -480,7 +486,8 @@ mod tests {
         let first = store
             .put_if_absent(&key, b"proof-a")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         store
             .delete(&key, first.generation, &first.content_hash)
@@ -489,7 +496,8 @@ mod tests {
         let second = store
             .put_if_absent(&key, b"proof-b")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         assert_ne!(first.proof_uri, second.proof_uri);
         assert!(
@@ -509,7 +517,8 @@ mod tests {
         let object = store
             .put_if_absent(&key, b"proof-a")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
 
         assert_eq!(
@@ -534,7 +543,8 @@ mod tests {
         let first = store
             .put_if_absent(&key, b"proof-a")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         let conflict = store.put_if_absent(&key, b"proof-b").await?;
         assert!(matches!(conflict, ProofArtifactPutResult::Conflict(_)));
@@ -549,7 +559,8 @@ mod tests {
         let first = store
             .put_if_absent(&key, b"deterministic-proof")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         store
             .mark_invalidated(&key, first.generation, &first.content_hash)
@@ -561,7 +572,8 @@ mod tests {
         let second = store
             .put_if_absent(&key, b"deterministic-proof")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         assert_ne!(first.generation, second.generation);
         assert!(
@@ -584,7 +596,8 @@ mod tests {
         let first = store
             .put_if_absent(&key, b"proof-a")
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         store
             .inner
@@ -597,6 +610,54 @@ mod tests {
         let repaired = store.put_if_absent(&key, b"proof-a").await?;
         assert!(matches!(repaired, ProofArtifactPutResult::AlreadyExists(_)));
         assert_eq!(store.get(&key).await?, Some(first));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn different_put_conflicts_when_manifest_content_is_missing() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-a".into())?;
+        let key = key();
+        let first = store
+            .put_if_absent(&key, b"proof-a")
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        store
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?
+            .contents
+            .remove(&(key.clone(), first.content_hash.clone()));
+
+        let conflict = store.put_if_absent(&key, b"proof-b").await?;
+
+        let ProofArtifactPutResult::Conflict(conflict) = conflict else {
+            anyhow::bail!("different proof did not conflict with dangling manifest");
+        };
+        assert_eq!(conflict.descriptor, first.descriptor());
+        assert_eq!(conflict.object, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn descriptor_remains_readable_when_manifest_content_is_missing() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-a".into())?;
+        let key = key();
+        let first = store
+            .put_if_absent(&key, b"proof-a")
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        store
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?
+            .contents
+            .remove(&(key.clone(), first.content_hash.clone()));
+
+        assert_eq!(store.get_descriptor(&key).await?, Some(first.descriptor()));
         Ok(())
     }
 }

@@ -189,7 +189,7 @@
                 &proof_bytes,
             )
             .await?;
-        let artifact = publication.object();
+        let artifact = publication.try_object().expect("proof publication should materialize content");
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),

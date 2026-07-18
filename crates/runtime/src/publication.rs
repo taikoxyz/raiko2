@@ -43,10 +43,18 @@ impl RuntimeManager {
     ) -> Result<ProofArtifactPutResult> {
         validate_canonical_proof(proof_bytes)?;
         let publication = self
-            .publish_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref, proof_bytes)
+            .publish_proof_artifact_bytes_locked(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                proof_bytes,
+            )
             .await
             .context("failed to publish proof artifact")?;
-        let artifact = publication.object();
+        let artifact = publication
+            .try_object()
+            .context("canonical proof conflict references missing content")?;
         let descriptor = artifact.descriptor();
         validate_canonical_proof(&artifact.bytes)?;
 
@@ -345,7 +353,8 @@ mod tests {
         let created = first
             .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, proof)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         assert!(
             first
@@ -359,7 +368,8 @@ mod tests {
         let recovered = restarted
             .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
 
         assert_eq!(recovered.generation, created.generation);
@@ -406,7 +416,8 @@ mod tests {
         let first = runtime
             .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         runtime
             .sync_status(
@@ -446,7 +457,8 @@ mod tests {
         let second = runtime
             .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
 
         assert_ne!(first.generation, second.generation);

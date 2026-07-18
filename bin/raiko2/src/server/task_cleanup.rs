@@ -965,7 +965,8 @@ mod tests {
                 br#"{"proof":"0xcomplete"}"#,
             )
             .await?
-            .object()
+            .try_object()
+            .expect("proof publication should materialize content")
             .clone();
         runtime
             .upsert_proof_artifact(ProofArtifactRegistration {

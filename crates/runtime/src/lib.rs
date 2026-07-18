@@ -2551,6 +2551,7 @@ pub struct TaskRegistration {
 pub struct RuntimeTaskRecord {
     pub task_id: String,
     /// Immutable identity for this concrete task lifetime; never reused after replacement.
+    #[serde(default = "new_runtime_task_incarnation_id")]
     pub incarnation_id: uuid::Uuid,
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
@@ -2565,6 +2566,10 @@ pub struct RuntimeTaskRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_fingerprint: Option<String>,
     pub updated_at: i64,
+}
+
+fn new_runtime_task_incarnation_id() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2619,7 +2624,7 @@ fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecor
     );
     Ok(RuntimeTaskRecord {
         task_id: registration.task_id.clone(),
-        incarnation_id: uuid::Uuid::new_v4(),
+        incarnation_id: new_runtime_task_incarnation_id(),
         pipeline_key,
         route: registration.route,
         task_kind: registration.task_kind.clone(),
@@ -2804,6 +2809,61 @@ fn now_ts() -> i64 {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn legacy_runtime_state_assigns_and_persists_task_incarnation_ids() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "legacy-incarnation".into(),
+        )?);
+        let record = build_task_record(&TaskRegistration {
+            task_id: "legacy-root".into(),
+            pipeline_key: Some(PipelineKey::ShastaRisc0Network),
+            route: PipelineKey::ShastaRisc0Network.route(),
+            task_kind: "aggregate".into(),
+            proposal_id: Some(1),
+            proof_ids: vec!["legacy-proof".into()],
+            metadata: serde_json::json!({ "network_pair": "taiko_dev/taiko_dev_l1" }),
+            request_fingerprint: Some("legacy-request".into()),
+        })?;
+        let mut legacy_record = serde_json::to_value(record)?;
+        legacy_record
+            .as_object_mut()
+            .context("serialize legacy runtime task record as an object")?
+            .remove("incarnation_id");
+        let legacy_state = serde_json::json!({
+            "tasks": { "legacy-root": legacy_record },
+            "artifacts": {},
+            "pending_publications": {},
+        });
+        let bytes = serde_json::to_vec(&legacy_state)?;
+        assert!(matches!(
+            store.store_runtime_state(&bytes, None).await?,
+            RuntimeStateWriteResult::Stored { .. }
+        ));
+
+        let runtime = RuntimeManager::with_store(store.clone())?;
+        runtime.initialize().await?;
+        let restored = runtime
+            .get_task("legacy-root")
+            .await?
+            .context("legacy runtime task should load")?;
+        assert_ne!(restored.incarnation_id, uuid::Uuid::nil());
+
+        runtime
+            .sync_status("legacy-root", RunnerStatus::Running, None, None)
+            .await?;
+        let persisted = store
+            .load_runtime_state()
+            .await?
+            .context("migrated runtime state should persist")?;
+        let persisted_state: serde_json::Value = serde_json::from_slice(&persisted.bytes)?;
+        assert_eq!(
+            persisted_state["tasks"]["legacy-root"]["incarnation_id"],
+            serde_json::Value::String(restored.incarnation_id.to_string())
+        );
+        Ok(())
+    }
 
     #[derive(Debug)]
     struct RuntimeStateProbeStore {

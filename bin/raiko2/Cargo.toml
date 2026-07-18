@@ -70,5 +70,6 @@ local-provers = [
 fixture-server = ["local-provers", "raiko2-runtime/test-utils"]
 
 [dev-dependencies]
+raiko2-runtime = { workspace = true, features = ["test-utils"] }
 tower.workspace = true
 http-body-util = "0.1"

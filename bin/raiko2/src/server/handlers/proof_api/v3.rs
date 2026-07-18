@@ -17,9 +17,10 @@ use super::{
     clear_prover_tasks, clear_task_publication_outboxes, collect_prover_status,
     handle_created_batch_task, handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
-    load_task_data, load_task_lookup, planned_external_aggregate_task, prover_type_label,
-    public_task_id_from_fingerprint, register_batch_task, register_external_aggregate_task,
-    remove_task_children, resolve_engine, zk_any_not_drawn_response,
+    load_task_data, load_task_lookup, persist_registered_external_aggregate_inputs,
+    planned_external_aggregate_task, prover_type_label, public_task_id_from_fingerprint,
+    register_batch_task, register_external_aggregate_task, remove_task_children, resolve_engine,
+    zk_any_not_drawn_response,
 };
 
 pub(crate) async fn request_batch_shasta_proof(
@@ -150,7 +151,10 @@ async fn request_aggregation_proof_inner(
         "received hoodi aggregate request"
     );
 
-    match register_external_aggregate_task(&state, &submission, &aggregate).await? {
+    let mut registration =
+        register_external_aggregate_task(&state, &submission, &aggregate).await?;
+    persist_registered_external_aggregate_inputs(&state, &submission, &mut registration).await?;
+    match registration {
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_external_aggregate_task(&state, &engine, &submission, existing).await
         }

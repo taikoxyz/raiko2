@@ -121,7 +121,14 @@ struct ExternalAggregateSubmission {
     request: AggregationTaskRequest,
     inputs: Vec<AggregateProofInput>,
     input_artifacts: Vec<AggregateInputProofArtifact>,
+    input_bytes: Vec<Vec<u8>>,
     request_fingerprint: String,
+}
+
+struct PreparedExternalAggregateInputs {
+    inputs: Vec<AggregateProofInput>,
+    artifacts: Vec<AggregateInputProofArtifact>,
+    bytes: Vec<Vec<u8>>,
 }
 
 struct TaskLookup {
@@ -585,14 +592,8 @@ async fn build_external_aggregate_submission(
         pipeline: route.pipeline_key(),
         request: request.clone(),
     });
-    let (inputs, input_artifacts) = persist_external_aggregate_input_artifacts(
-        state.runtime.as_ref(),
-        &pair.key,
-        route,
-        &request_fingerprint,
-        &req.proofs,
-    )
-    .await?;
+    let prepared =
+        prepare_external_aggregate_inputs(&pair.key, route, &request_fingerprint, &req.proofs)?;
     let _ = (&req.graffiti, &req.prover, &req.blob_proof_type);
 
     Ok(ExternalAggregateSubmission {
@@ -602,40 +603,27 @@ async fn build_external_aggregate_submission(
         public_task_id,
         task_id,
         request,
-        inputs,
-        input_artifacts,
+        inputs: prepared.inputs,
+        input_artifacts: prepared.artifacts,
+        input_bytes: prepared.bytes,
         request_fingerprint,
     })
 }
 
-async fn persist_external_aggregate_input_artifacts(
-    runtime: &RuntimeManager,
+fn prepare_external_aggregate_inputs(
     network_pair: &str,
     route: CanonicalProofRoute,
     request_fingerprint: &str,
     proofs: &[Proof],
-) -> Result<(Vec<AggregateProofInput>, Vec<AggregateInputProofArtifact>), ApiError> {
+) -> Result<PreparedExternalAggregateInputs, ApiError> {
     let mut inputs = Vec::with_capacity(proofs.len());
     let mut input_artifacts = Vec::with_capacity(proofs.len());
+    let mut input_bytes = Vec::with_capacity(proofs.len());
     for (index, proof) in proofs.iter().enumerate() {
         let proof_ref = aggregate_input_proof_ref(request_fingerprint, index);
-        let publication = runtime
-            .publish_active_proof_artifact_bytes(
-                network_pair,
-                route.pipeline_key(),
-                route.route,
-                &proof_ref,
-                &serde_json::to_vec(proof).map_err(|err| {
-                    ApiError::internal(format!("failed to serialize aggregate input proof: {err}"))
-                })?,
-            )
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to write aggregate input proof: {err}"))
-            })?;
-        publication.try_object().ok_or_else(|| {
-            ApiError::internal("aggregate input proof conflict references missing content")
-        })?;
+        input_bytes.push(serde_json::to_vec(proof).map_err(|err| {
+            ApiError::internal(format!("failed to serialize aggregate input proof: {err}"))
+        })?);
         inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
             network_pair: network_pair.to_string(),
             pipeline_key: route.pipeline_key(),
@@ -644,7 +632,41 @@ async fn persist_external_aggregate_input_artifacts(
         }));
         input_artifacts.push(AggregateInputProofArtifact { proof_ref });
     }
-    Ok((inputs, input_artifacts))
+    Ok(PreparedExternalAggregateInputs {
+        inputs,
+        artifacts: input_artifacts,
+        bytes: input_bytes,
+    })
+}
+
+async fn persist_external_aggregate_input_artifacts(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    input_artifacts: &[AggregateInputProofArtifact],
+    input_bytes: &[Vec<u8>],
+    owner_incarnation: uuid::Uuid,
+) -> Result<(), ApiError> {
+    for (artifact, bytes) in input_artifacts.iter().zip(input_bytes) {
+        let publication = runtime
+            .publish_active_proof_artifact_bytes(
+                network_pair,
+                pipeline_key,
+                route,
+                &artifact.proof_ref,
+                owner_incarnation,
+                bytes,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to write aggregate input proof: {err}"))
+            })?;
+        publication.try_object().ok_or_else(|| {
+            ApiError::internal("aggregate input proof conflict references missing content")
+        })?;
+    }
+    Ok(())
 }
 
 async fn planned_external_aggregate_task(
@@ -917,6 +939,92 @@ async fn register_external_aggregate_task(
         })
         .await
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+}
+
+const fn external_aggregate_inputs_need_persistence(outcome: &TaskRegistrationOutcome) -> bool {
+    match outcome {
+        TaskRegistrationOutcome::Created(_) => true,
+        TaskRegistrationOutcome::Existing(record) => {
+            existing_external_aggregate_inputs_need_persistence(record.runner_status)
+        }
+    }
+}
+
+const fn existing_external_aggregate_inputs_need_persistence(status: RuntimeRunnerStatus) -> bool {
+    matches!(
+        status,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Failed
+    )
+}
+
+async fn persist_registered_external_aggregate_inputs(
+    state: &AppState,
+    submission: &ExternalAggregateSubmission,
+    registration: &mut TaskRegistrationOutcome,
+) -> Result<(), ApiError> {
+    let mut reopened_failed = None;
+    if let TaskRegistrationOutcome::Existing(record) = registration
+        && record.runner_status == RuntimeRunnerStatus::Failed
+    {
+        reopened_failed = Some(record.clone());
+        reset_runtime_task_to_allocated(state, &record.task_id, record.runner_status).await?;
+        record.runner_status = RuntimeRunnerStatus::Allocated;
+        record.error = None;
+    }
+    let owner_incarnation = match &*registration {
+        TaskRegistrationOutcome::Created(record) | TaskRegistrationOutcome::Existing(record) => {
+            record.incarnation_id
+        }
+    };
+    let persist_inputs = external_aggregate_inputs_need_persistence(registration);
+    let persistence = if persist_inputs {
+        persist_external_aggregate_input_artifacts(
+            &state.runtime,
+            &submission.pair.key,
+            submission.route.pipeline_key(),
+            submission.route.route,
+            &submission.input_artifacts,
+            &submission.input_bytes,
+            owner_incarnation,
+        )
+        .await
+    } else {
+        Ok(())
+    };
+    if let Some(original) = &reopened_failed {
+        state
+            .runtime
+            .sync_status(
+                &original.task_id,
+                original.runner_status,
+                original.error.clone(),
+                original.proof_uri.clone(),
+            )
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "failed to restore aggregate root after input repair: {error}"
+                ))
+            })?;
+        if let TaskRegistrationOutcome::Existing(record) = registration {
+            *record = original.clone();
+        }
+    }
+    if let Err(error) = persistence {
+        if let TaskRegistrationOutcome::Created(record) = registration {
+            let _ = state
+                .runtime
+                .sync_status(
+                    &record.task_id,
+                    RuntimeRunnerStatus::Failed,
+                    Some(error.message.clone()),
+                    None,
+                )
+                .await;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn build_task_metadata(
@@ -1763,11 +1871,14 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
             continue;
         }
 
-        let result = if metadata.proposals.is_empty() && metadata.aggregate_request.is_some() {
-            match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
-                Ok(engine) => {
-                    reenqueue_existing_external_aggregate_task(&engine, None, &record, &metadata)
-                        .await
+        let external_aggregate =
+            metadata.proposals.is_empty() && metadata.aggregate_request.is_some();
+        let mut reopened_before_enqueue = false;
+        let result = if external_aggregate {
+            match recover_external_aggregate_runtime_task(state, &record, &metadata).await {
+                Ok(reopened) => {
+                    reopened_before_enqueue = reopened;
+                    Ok(())
                 }
                 Err(error) => Err(error),
             }
@@ -1776,7 +1887,7 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
         };
         match result {
             Ok(()) => {
-                if record.runner_status == RuntimeRunnerStatus::Failed {
+                if record.runner_status == RuntimeRunnerStatus::Failed && !reopened_before_enqueue {
                     state
                         .runtime
                         .reopen_task_for_recovery(&record.task_id, record.runner_status)
@@ -1805,6 +1916,38 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
     Ok(recovered)
 }
 
+async fn recover_external_aggregate_runtime_task(
+    state: &AppState,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> Result<bool, ApiError> {
+    let mut recovery_record = record.clone();
+    let reopened = if record.runner_status == RuntimeRunnerStatus::Failed {
+        let reopened = state
+            .runtime
+            .reopen_task_for_recovery(&record.task_id, record.runner_status)
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("failed to reopen aggregate root: {error}"))
+            })?;
+        if !reopened {
+            return Err(ApiError::internal(
+                "aggregate root is no longer eligible for recovery",
+            ));
+        }
+        recovery_record.runner_status = RuntimeRunnerStatus::Allocated;
+        recovery_record.error = None;
+        true
+    } else {
+        false
+    };
+    recover_external_aggregate_input_artifacts(state.runtime.as_ref(), &recovery_record, metadata)
+        .await?;
+    let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
+    reenqueue_existing_external_aggregate_task(&engine, None, &recovery_record, metadata).await?;
+    Ok(reopened)
+}
+
 fn aggregate_inputs_from_artifacts(
     network_pair: &str,
     pipeline_key: PipelineKey,
@@ -1822,6 +1965,85 @@ fn aggregate_inputs_from_artifacts(
             })
         })
         .collect()
+}
+
+async fn recover_external_aggregate_input_artifacts(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> Result<(), ApiError> {
+    let mut bytes = Vec::with_capacity(metadata.aggregate_input_artifacts.len());
+    for artifact in &metadata.aggregate_input_artifacts {
+        let pending = runtime
+            .get_recoverable_pending_proof_publication(
+                &metadata.network_pair,
+                record.pipeline_key,
+                record.route,
+                &artifact.proof_ref,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to read pending aggregate input: {err}"))
+            })?;
+        let payload = if let Some(pending) = pending {
+            pending.bytes
+        } else {
+            let registration = runtime
+                .get_proof_artifact(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &artifact.proof_ref,
+                )
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!(
+                        "failed to read aggregate input registration: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ApiError::internal(format!(
+                        "aggregate input {} has no owned pending or active registration",
+                        artifact.proof_ref
+                    ))
+                })?;
+            let object = runtime
+                .read_proof_artifact_bytes(
+                    &metadata.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &artifact.proof_ref,
+                )
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("failed to read aggregate input: {err}"))
+                })?
+                .ok_or_else(|| {
+                    ApiError::internal(format!(
+                        "active aggregate input {} is missing content",
+                        artifact.proof_ref
+                    ))
+                })?;
+            if object.descriptor() != registration.descriptor() {
+                return Err(ApiError::internal(format!(
+                    "active aggregate input {} descriptor changed",
+                    artifact.proof_ref
+                )));
+            }
+            object.bytes
+        };
+        bytes.push(payload);
+    }
+    persist_external_aggregate_input_artifacts(
+        runtime,
+        &metadata.network_pair,
+        record.pipeline_key,
+        record.route,
+        &metadata.aggregate_input_artifacts,
+        &bytes,
+        record.incarnation_id,
+    )
+    .await
 }
 
 async fn handle_created_external_aggregate_task(
@@ -1852,15 +2074,32 @@ async fn handle_created_external_aggregate_task(
     let actual_task_id = match actual_task_id {
         Ok(task_id) => task_id,
         Err(err) => {
-            cleanup_external_aggregate_submission(state, engine, submission, &metadata).await;
+            cleanup_external_aggregate_submission(engine, submission, &metadata).await;
+            let _ = state
+                .runtime
+                .sync_status(
+                    &submission.public_task_id,
+                    RuntimeRunnerStatus::Failed,
+                    Some(err.message.clone()),
+                    None,
+                )
+                .await;
             return Err(err);
         }
     };
     if actual_task_id != aggregate.task_id {
-        cleanup_external_aggregate_submission(state, engine, submission, &metadata).await;
-        return Err(ApiError::internal(
-            "engine returned unexpected aggregation task id",
-        ));
+        cleanup_external_aggregate_submission(engine, submission, &metadata).await;
+        let err = ApiError::internal("engine returned unexpected aggregation task id");
+        let _ = state
+            .runtime
+            .sync_status(
+                &submission.public_task_id,
+                RuntimeRunnerStatus::Failed,
+                Some(err.message.clone()),
+                None,
+            )
+            .await;
+        return Err(err);
     }
 
     telemetry::record_request_registered(
@@ -1881,17 +2120,10 @@ async fn handle_created_external_aggregate_task(
 }
 
 async fn cleanup_external_aggregate_submission(
-    state: &AppState,
     engine: &Arc<dyn EngineHandle>,
     submission: &ExternalAggregateSubmission,
     metadata: &TaskMetadata,
 ) {
-    if let Ok(Some(record)) = state.runtime.get_task(&submission.public_task_id).await {
-        let _ = state
-            .runtime
-            .remove_task_if_incarnation(&record.task_id, record.incarnation_id)
-            .await;
-    }
     let _ = remove_task_children(
         engine,
         submission.route.pipeline_key(),
@@ -5660,16 +5892,100 @@ mod tests {
         let runtime = RuntimeManager::new(unique_test_runtime_root("external-agg-inputs"))
             .expect("runtime manager");
         let proof = valid_native_proof();
-        let (inputs, artifacts) = persist_external_aggregate_input_artifacts(
-            &runtime,
+        let pair = resolved_pair();
+        let prepared = prepare_external_aggregate_inputs(
             "taiko_dev/ethereum",
             route,
             "0xfingerprint",
             std::slice::from_ref(&proof),
         )
-        .await
-        .expect("persist aggregate input artifacts");
-
+        .expect("prepare aggregate input artifacts");
+        let inputs = prepared.inputs;
+        let artifacts = prepared.artifacts;
+        let bytes = prepared.bytes;
+        let mut metadata = build_task_metadata(
+            &pair,
+            BuildTaskMetadataParams {
+                network: &pair.network,
+                l1_network: &pair.l1_network,
+                proof_type: route.proof_type(),
+                requested_proof_type: Some("native"),
+                prover_type: None,
+                execution_mode: None,
+                aggregate_requested: true,
+            },
+            &[],
+            None,
+        );
+        metadata.aggregate_input_artifacts = artifacts.clone();
+        assert!(runtime.list_proof_artifacts().await?.is_empty());
+        let owner = match runtime
+            .register_task_if_absent(TaskRegistration {
+                task_id: "external-aggregate-root".into(),
+                pipeline_key: Some(route.pipeline_key()),
+                route: route.route,
+                task_kind: "hoodi_aggregate".into(),
+                proposal_id: None,
+                proof_ids: vec!["aggregate-root".into()],
+                metadata: serde_json::to_value(&metadata)?,
+                request_fingerprint: Some("0xfingerprint".into()),
+            })
+            .await?
+        {
+            TaskRegistrationOutcome::Created(record) => record.incarnation_id,
+            TaskRegistrationOutcome::Existing(_) => anyhow::bail!("unexpected existing task"),
+        };
+        let record = runtime
+            .get_task("external-aggregate-root")
+            .await?
+            .expect("durable aggregate root");
+        runtime
+            .upsert_pending_proof_publication(
+                "taiko_dev/ethereum",
+                route.pipeline_key(),
+                route.route,
+                &artifacts[0].proof_ref,
+                &bytes[0],
+            )
+            .await?;
+        let error = recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
+            .await
+            .expect_err("raw pending bytes without durable ownership must be rejected");
+        assert!(error.message.contains("no owned pending"));
+        assert!(
+            runtime
+                .remove_pending_proof_publication_if_unowned(
+                    "taiko_dev/ethereum",
+                    route.pipeline_key(),
+                    route.route,
+                    &artifacts[0].proof_ref,
+                )
+                .await?
+        );
+        runtime
+            .checkpoint_pending_proof_publication(
+                "taiko_dev/ethereum",
+                route.pipeline_key(),
+                route.route,
+                &artifacts[0].proof_ref,
+                &[owner],
+                &bytes[0],
+            )
+            .await?;
+        recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
+            .await
+            .expect("recover aggregate input from raw pending outbox");
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    "taiko_dev/ethereum",
+                    route.pipeline_key(),
+                    route.route,
+                    &artifacts[0].proof_ref,
+                )
+                .await?
+                .is_none()
+        );
         assert_eq!(artifacts.len(), 1);
         assert_eq!(
             artifacts[0].proof_ref,
@@ -5695,7 +6011,62 @@ mod tests {
         .await?
         .expect("stored aggregate input proof");
         assert_eq!(stored.proof, proof);
+        recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
+            .await
+            .expect("recover exact active aggregate input registration");
+
+        let active = runtime
+            .get_proof_artifact(
+                "taiko_dev/ethereum",
+                route.pipeline_key(),
+                route.route,
+                &artifacts[0].proof_ref,
+            )
+            .await?
+            .expect("active input registration");
+        runtime
+            .delete_proof_artifact(
+                "taiko_dev/ethereum",
+                route.pipeline_key(),
+                route.route,
+                &artifacts[0].proof_ref,
+                active.generation,
+                &active.content_hash,
+            )
+            .await?;
+        runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                route.pipeline_key(),
+                route.route,
+                &artifacts[0].proof_ref,
+                b"different-canonical-input",
+            )
+            .await?;
+        let error = recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
+            .await
+            .expect_err("stale active registration must not adopt replacement bytes");
+        assert!(error.message.contains("descriptor changed"));
         Ok(())
+    }
+
+    #[test]
+    fn terminal_external_aggregate_duplicates_do_not_republish_inputs() {
+        assert!(existing_external_aggregate_inputs_need_persistence(
+            RuntimeRunnerStatus::Allocated
+        ));
+        assert!(!existing_external_aggregate_inputs_need_persistence(
+            RuntimeRunnerStatus::Running
+        ));
+        assert!(existing_external_aggregate_inputs_need_persistence(
+            RuntimeRunnerStatus::Failed
+        ));
+        assert!(!existing_external_aggregate_inputs_need_persistence(
+            RuntimeRunnerStatus::Completed
+        ));
+        assert!(!existing_external_aggregate_inputs_need_persistence(
+            RuntimeRunnerStatus::Cancelled
+        ));
     }
 
     #[tokio::test]

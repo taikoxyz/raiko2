@@ -856,22 +856,68 @@ impl RuntimeManager {
         pipeline_key: PipelineKey,
         route: PipelineRoute,
         proof_ref: &str,
+        owner_incarnation: uuid::Uuid,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
-        let publication = self
-            .publish_proof_artifact_bytes_locked(
+        let proof_ref_owned = proof_ref.to_string();
+        let network_pair_owned = network_pair.to_string();
+        let has_durable_owner = self.state.read().await.tasks.values().any(|task| {
+            task.incarnation_id == owner_incarnation
+                && task.pipeline_key == pipeline_key
+                && task.route == route
+                && task_network_pair(task) == Some(network_pair_owned.as_str())
+                && task_references(task, &proof_ref_owned)
+                && task.runner_status != RunnerStatus::Cancelled
+        });
+        anyhow::ensure!(
+            has_durable_owner,
+            "active proof artifact requires a durable task owner"
+        );
+        anyhow::ensure!(
+            self.checkpoint_pending_proof_publication(
                 network_pair,
                 pipeline_key,
                 route,
                 proof_ref,
+                &[owner_incarnation],
                 bytes,
             )
+            .await?,
+            "active proof artifact owner changed before checkpoint"
+        );
+        let publication = self
+            .publish_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref, bytes)
             .await?;
+        if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
+            self.release_pending_proof_publication_owner(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                owner_incarnation,
+            )
+            .await?;
+            anyhow::bail!("different active proof artifact already exists");
+        }
         let artifact = publication
             .try_object()
             .context("active proof artifact conflict references missing content")?;
-        self.upsert_proof_artifact_locked(ProofArtifactRegistration {
+        if self
+            .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .is_some_and(|record| record.descriptor() == artifact.descriptor())
+        {
+            self.release_pending_proof_publication_owner(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                owner_incarnation,
+            )
+            .await?;
+            return Ok(publication);
+        }
+        let registration = ProofArtifactRegistration {
             network_pair: network_pair.to_string(),
             proof_ref: proof_ref.to_string(),
             pipeline_key,
@@ -879,8 +925,26 @@ impl RuntimeManager {
             proof_uri: artifact.proof_uri.clone(),
             content_hash: artifact.content_hash.clone(),
             generation: artifact.generation,
-        })
-        .await?;
+        };
+        anyhow::ensure!(
+            self.register_pending_proof_artifact(registration.clone())
+                .await?
+                == ProofArtifactLifecycle::Pending,
+            "active proof artifact was invalidated before activation"
+        );
+        anyhow::ensure!(
+            self.activate_proof_artifact_with_tasks(
+                proof_ref,
+                registration,
+                &[owner_incarnation],
+                |_| Ok(Some(())),
+            )
+            .await?
+            .is_some(),
+            "active proof artifact owner changed before activation"
+        );
+        self.remove_local_pending(network_pair, pipeline_key, route, proof_ref)
+            .await?;
         Ok(publication)
     }
 
@@ -3814,6 +3878,169 @@ mod tests {
             .context("replacement outbox")?;
         assert_eq!(pending.owner_incarnations, vec![second.incarnation_id]);
         assert_eq!(pending.bytes, b"proof");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_artifact_publication_requires_a_durable_task_owner() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "active-owner".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "external-input-0";
+
+        let error = runtime
+            .publish_active_proof_artifact_bytes(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                uuid::Uuid::new_v4(),
+                b"proof",
+            )
+            .await
+            .expect_err("anonymous active artifacts must be rejected");
+
+        assert!(error.to_string().contains("durable task owner"));
+        assert!(runtime.list_proof_artifacts().await?.is_empty());
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_artifact_publication_rejects_different_bytes() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "active-conflict".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "external-input-0";
+        let owner = match runtime
+            .register_task_if_absent(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "aggregate".into(),
+                proposal_id: None,
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({
+                    "network_pair": "l1-l2",
+                    "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
+                }),
+                request_fingerprint: Some("request".into()),
+            })
+            .await?
+        {
+            TaskRegistrationOutcome::Created(record) => record.incarnation_id,
+            TaskRegistrationOutcome::Existing(_) => anyhow::bail!("unexpected existing task"),
+        };
+
+        runtime
+            .publish_active_proof_artifact_bytes(
+                "l1-l2", pipeline, route, proof_ref, owner, b"first",
+            )
+            .await?;
+        runtime
+            .publish_active_proof_artifact_bytes(
+                "l1-l2", pipeline, route, proof_ref, owner, b"first",
+            )
+            .await?;
+        assert_eq!(
+            runtime
+                .get_proof_artifact("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .expect("idempotent active artifact")
+                .lifecycle,
+            ProofArtifactLifecycle::Active
+        );
+        let error = runtime
+            .publish_active_proof_artifact_bytes(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                owner,
+                b"different",
+            )
+            .await
+            .expect_err("different bytes must remain a conflict");
+
+        assert!(
+            error
+                .to_string()
+                .contains("different active proof artifact")
+        );
+        assert!(
+            runtime
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .expect("original artifact")
+                .bytes,
+            b"first"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recoverable_pending_publication_rejects_hash_mismatch() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "pending-hash-mismatch".into(),
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "external-input-0";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: Some(pipeline),
+                route,
+                task_kind: "aggregate".into(),
+                proposal_id: None,
+                proof_ids: Vec::new(),
+                metadata: serde_json::json!({
+                    "network_pair": "l1-l2",
+                    "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
+                }),
+                request_fingerprint: Some("request".into()),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"expected",
+                )
+                .await?
+        );
+
+        let key = RuntimeManager::pending_artifact_key("l1-l2", pipeline, route, proof_ref);
+        let original = store.get(&key).await?.context("pending object")?;
+        store
+            .delete(&key, original.generation, &original.content_hash)
+            .await?;
+        store.put_if_absent(&key, b"corrupted").await?;
+
+        let error = runtime
+            .get_recoverable_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+            .await
+            .expect_err("pending bytes must match the authoritative hash");
+        assert!(error.to_string().contains("content hash mismatch"));
+        assert!(runtime.list_proof_artifacts().await?.is_empty());
         Ok(())
     }
 

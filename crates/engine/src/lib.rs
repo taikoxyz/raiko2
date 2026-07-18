@@ -227,8 +227,29 @@ pub struct ProofCompletionPermit {
     guard: Box<dyn std::any::Any + Send + Sync>,
 }
 
+pub struct TaskCancellationPermit {
+    guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
 pub struct TaskExecutionPermit {
     guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl TaskCancellationPermit {
+    pub fn tracked(guard: impl std::any::Any + Send + Sync + 'static) -> Self {
+        Self {
+            guard: Box::new(guard),
+        }
+    }
+
+    #[must_use]
+    pub fn guard<T: std::any::Any>(&self) -> Option<&T> {
+        self.guard.downcast_ref()
+    }
+
+    fn untracked() -> Self {
+        Self::tracked(())
+    }
 }
 
 impl TaskExecutionPermit {
@@ -267,6 +288,13 @@ impl ProofCompletionPermit {
 
 #[async_trait]
 pub trait EngineObserver: Send + Sync {
+    async fn acquire_task_cancellation_permit(
+        &self,
+        _id: &EngineTaskId,
+    ) -> Result<TaskCancellationPermit, EngineObserverError> {
+        Ok(TaskCancellationPermit::untracked())
+    }
+
     async fn acquire_task_execution_permit(
         &self,
         _id: &EngineTaskId,
@@ -331,7 +359,7 @@ pub trait EngineObserver: Send + Sync {
     ) {
     }
 
-    async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
+    async fn on_task_cancelled(&self, _id: &EngineTaskId, _permit: &TaskCancellationPermit) {}
 
     async fn load_pending_proof_checkpoint(
         &self,
@@ -761,9 +789,16 @@ where
     ///
     /// Returns an error if the task store cannot cancel the task.
     pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
+        let cancellation_permit = match &self.inner.observer {
+            Some(observer) => observer
+                .acquire_task_cancellation_permit(&id)
+                .await
+                .map_err(TaskStoreError::backend)?,
+            None => TaskCancellationPermit::untracked(),
+        };
         self.inner.scheduler.cancel(id.clone()).await?;
         if let Some(observer) = &self.inner.observer {
-            observer.on_task_cancelled(&id).await;
+            observer.on_task_cancelled(&id, &cancellation_permit).await;
         }
         Ok(())
     }
@@ -1870,6 +1905,35 @@ mod tests {
         }
     }
 
+    struct CancellationPermitMarker;
+
+    struct CancellationPermitObserver {
+        permits: AtomicUsize,
+        callbacks: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for CancellationPermitObserver {
+        async fn acquire_task_cancellation_permit(
+            &self,
+            _id: &EngineTaskId,
+        ) -> Result<crate::TaskCancellationPermit, EngineObserverError> {
+            self.permits.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::TaskCancellationPermit::tracked(
+                CancellationPermitMarker,
+            ))
+        }
+
+        async fn on_task_cancelled(
+            &self,
+            _id: &EngineTaskId,
+            permit: &crate::TaskCancellationPermit,
+        ) {
+            assert!(permit.guard::<CancellationPermitMarker>().is_some());
+            self.callbacks.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     struct RecoveringObserver {
         proof_successes: AtomicUsize,
     }
@@ -2759,6 +2823,34 @@ mod tests {
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
         assert!(matches!(view.state, TaskState::Cancelled));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_carries_observer_permit_into_callback() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let observer = Arc::new(CancellationPermitObserver {
+            permits: AtomicUsize::new(0),
+            callbacks: AtomicUsize::new(0),
+        });
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+            Some(observer.clone()),
+        );
+        let task_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        engine.cancel(task_id.clone()).await?;
+
+        let task = engine
+            .get(task_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected cancelled task"))?;
+        assert!(matches!(task.state, TaskState::Cancelled));
+        assert_eq!(observer.permits.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.callbacks.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

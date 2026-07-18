@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
     EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
-    ProofCompletionPermit, ProposalStage, TaskExecutionPermit,
+    ProofCompletionPermit, ProposalStage, TaskCancellationPermit, TaskExecutionPermit,
     tasks::{EngineTask, ProofArtifactRef},
 };
 use raiko2_pipeline::PipelineRoute;
@@ -148,9 +148,111 @@ impl RuntimeObserver {
         })
     }
 
+    fn cancellation_owners(
+        permit: &TaskCancellationPermit,
+    ) -> std::result::Result<&RuntimeExecutionOwners, EngineObserverError> {
+        permit.guard::<RuntimeExecutionOwners>().ok_or_else(|| {
+            EngineObserverError::RuntimeInactive(
+                "task cancellation permit does not belong to the runtime".to_string(),
+            )
+        })
+    }
+
     async fn find_root_records(&self, id: &EngineTaskId) -> Result<Vec<RuntimeTaskRecord>> {
         let canonical_ref = Self::root_task_ref(id);
         self.runtime.find_tasks_by_task_ref(&canonical_ref).await
+    }
+
+    async fn current_execution_owners(
+        &self,
+        id: &EngineTaskId,
+    ) -> std::result::Result<RuntimeExecutionOwners, EngineObserverError> {
+        let mut owner_records = Vec::new();
+        for record in self
+            .runtime
+            .get_tasks_by_ref(&Self::root_task_ref(id))
+            .await
+        {
+            if record.runner_status != RunnerStatus::Cancelled
+                && self.record_matches_observer(id, &record).map_err(|error| {
+                    EngineObserverError::RuntimeSync(format!(
+                        "failed to validate runtime owner {}: {error}",
+                        record.task_id
+                    ))
+                })?
+            {
+                owner_records.push((record.task_id, record.incarnation_id));
+            }
+        }
+        let mut incarnations = owner_records
+            .iter()
+            .map(|(_, incarnation)| *incarnation)
+            .collect::<Vec<_>>();
+        incarnations.sort_unstable();
+        incarnations.dedup();
+        Ok(RuntimeExecutionOwners {
+            by_task_id: owner_records.into_iter().collect(),
+            incarnations,
+        })
+    }
+
+    async fn cancel_runtime_roots(
+        &self,
+        id: &EngineTaskId,
+        stage: &str,
+        task_id: &str,
+        owners: &RuntimeExecutionOwners,
+    ) -> Result<(usize, Option<ProofArtifactDescriptor>)> {
+        let root_ref = Self::root_task_ref(id);
+        self.runtime
+            .update_tasks_and_invalidate_artifact(
+                &root_ref,
+                &self.network_pair,
+                id.0.pipeline_key(),
+                self.route,
+                |records| {
+                    let mut completed_root_exists = false;
+                    let mut matching_root_exists = false;
+                    let mut cancelled_roots = 0usize;
+                    let updated_at = now_ts();
+                    let observed_at_ms = now_ms();
+                    for record in records {
+                        if owners.by_task_id.get(&record.task_id) != Some(&record.incarnation_id)
+                            || !self.record_matches_observer(id, record)?
+                        {
+                            continue;
+                        }
+                        matching_root_exists = true;
+                        if record.runner_status == RunnerStatus::Completed {
+                            completed_root_exists = true;
+                            continue;
+                        }
+                        if is_terminal_status(record.runner_status) {
+                            continue;
+                        }
+                        record.runner_status = RunnerStatus::Cancelled;
+                        record.error = None;
+                        update_task_metadata(record, |metadata| {
+                            metadata.mark_stage_terminal(
+                                task_id,
+                                stage,
+                                observed_at_ms,
+                                "cancelled",
+                            );
+                            metadata.runtime.active_stage = Some(stage.to_string());
+                            metadata.runtime.last_event = Some("cancelled".to_string());
+                        })?;
+                        record.updated_at = updated_at;
+                        cancelled_roots += 1;
+                    }
+                    Ok((
+                        cancelled_roots,
+                        matching_root_exists && !completed_root_exists,
+                    ))
+                },
+            )
+            .await
+            .map(|(cancelled_roots, _, descriptor)| (cancelled_roots, descriptor))
     }
 
     fn stage_name(task: &EngineTask) -> &'static str {
@@ -1163,30 +1265,23 @@ impl RuntimeObserver {
 
 #[async_trait]
 impl EngineObserver for RuntimeObserver {
+    async fn acquire_task_cancellation_permit(
+        &self,
+        id: &EngineTaskId,
+    ) -> std::result::Result<TaskCancellationPermit, EngineObserverError> {
+        Ok(TaskCancellationPermit::tracked(
+            self.current_execution_owners(id).await?,
+        ))
+    }
+
     async fn acquire_task_execution_permit(
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> std::result::Result<TaskExecutionPermit, EngineObserverError> {
         let proof_ref = Self::root_task_ref(id);
-        let owner_records = self
-            .runtime
-            .get_tasks_by_ref(&proof_ref)
-            .await
-            .into_iter()
-            .filter_map(|record| {
-                (record.runner_status != RunnerStatus::Cancelled
-                    && self.record_matches_observer(id, &record).unwrap_or(false))
-                .then_some((record.task_id, record.incarnation_id))
-            })
-            .collect::<Vec<_>>();
-        let mut owner_incarnations = owner_records
-            .iter()
-            .map(|(_, incarnation)| *incarnation)
-            .collect::<Vec<_>>();
-        owner_incarnations.sort_unstable();
-        owner_incarnations.dedup();
-        if owner_incarnations.is_empty() {
+        let owners = self.current_execution_owners(id).await?;
+        if owners.incarnations.is_empty() {
             if matches!(
                 task.publication_source(),
                 EngineTask::ProveProposal { .. }
@@ -1213,10 +1308,7 @@ impl EngineObserver for RuntimeObserver {
                 "task {proof_ref} has no active runtime owner"
             )));
         }
-        Ok(TaskExecutionPermit::tracked(RuntimeExecutionOwners {
-            by_task_id: owner_records.into_iter().collect(),
-            incarnations: owner_incarnations,
-        }))
+        Ok(TaskExecutionPermit::tracked(owners))
     }
 
     async fn acquire_submission_checkpoint_permit(
@@ -1659,57 +1751,23 @@ impl EngineObserver for RuntimeObserver {
         }
     }
 
-    async fn on_task_cancelled(&self, id: &EngineTaskId) {
+    async fn on_task_cancelled(&self, id: &EngineTaskId, permit: &TaskCancellationPermit) {
+        let cancellation_owners = match Self::cancellation_owners(permit) {
+            Ok(owners) => owners,
+            Err(error) => {
+                tracing::warn!(task = ?id, %error, "refusing unpermitted runtime cancellation");
+                return;
+            }
+        };
         let stage = Self::stage_name_from_task_id(id);
         let finished_at_ms = now_ms();
         let task_id = Self::timing_key_for_stage_name(id, stage);
-        self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms, None)
-            .await;
         let root_ref = Self::root_task_ref(id);
-        let cancelled = self
-            .runtime
-            .update_tasks_and_invalidate_artifact(
-                &root_ref,
-                &self.network_pair,
-                id.0.pipeline_key(),
-                self.route,
-                |records| {
-                    let mut completed_root_exists = false;
-                    let mut matching_root_exists = false;
-                    let updated_at = now_ts();
-                    let observed_at_ms = now_ms();
-                    for record in records {
-                        if !self.record_matches_observer(id, record)? {
-                            continue;
-                        }
-                        matching_root_exists = true;
-                        if record.runner_status == RunnerStatus::Completed {
-                            completed_root_exists = true;
-                            continue;
-                        }
-                        if is_terminal_status(record.runner_status) {
-                            continue;
-                        }
-                        record.runner_status = RunnerStatus::Cancelled;
-                        record.error = None;
-                        update_task_metadata(record, |metadata| {
-                            metadata.mark_stage_terminal(
-                                &task_id,
-                                stage,
-                                observed_at_ms,
-                                "cancelled",
-                            );
-                            metadata.runtime.active_stage = Some(stage.to_string());
-                            metadata.runtime.last_event = Some("cancelled".to_string());
-                        })?;
-                        record.updated_at = updated_at;
-                    }
-                    Ok(((), matching_root_exists && !completed_root_exists))
-                },
-            )
-            .await;
-        let descriptor = match cancelled {
-            Ok(((), _, descriptor)) => descriptor,
+        let (cancelled_roots, descriptor) = match self
+            .cancel_runtime_roots(id, stage, &task_id, cancellation_owners)
+            .await
+        {
+            Ok(result) => result,
             Err(error) => {
                 tracing::warn!(
                     task = ?id,
@@ -1719,6 +1777,11 @@ impl EngineObserver for RuntimeObserver {
                 return;
             }
         };
+        if cancelled_roots == 0 {
+            return;
+        }
+        self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms, None)
+            .await;
         if let Some(descriptor) = descriptor
             && let Err(err) = self
                 .runtime
@@ -3043,7 +3106,13 @@ mod tests {
         });
 
         store.put_entered.notified().await;
-        observer.on_task_cancelled(&task_id).await;
+        let cancellation_permit = observer
+            .acquire_task_cancellation_permit(&task_id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        observer
+            .on_task_cancelled(&task_id, &cancellation_permit)
+            .await;
         store.allow_put.notify_one();
 
         let error = publication

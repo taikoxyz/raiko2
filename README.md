@@ -79,9 +79,10 @@ The runtime is governed by these invariants:
 9. A replacement starts only after the old process has stopped admissions, drained work, stopped
    workers, and exited. Deployment configuration must enforce this non-overlapping sequence.
 10. Each runtime task lifetime has an immutable `incarnation_id`. It rejects a delayed worker
-    checkpoint after a replacement reuses the same deterministic task ID. Pending proof outboxes
-    persist the exact eligible incarnations, and the completion permit carries that set through the
-    artifact/root CAS; it is not a namespace owner epoch, lease, or distributed lock.
+    checkpoint or cancellation callback after a replacement reuses the same deterministic task ID.
+    Pending proof outboxes persist the exact eligible incarnations, and the completion permit carries
+    that set through the artifact/root CAS; it is not a namespace owner epoch, lease, or distributed
+    lock.
 11. Each scheduler lease also carries a non-reused local token. This prevents remove/recreate ABA
     from accepting an old completion even when task ID, worker label, and attempt number repeat.
     The runtime additionally issues an execution permit mapping task IDs to the incarnations present

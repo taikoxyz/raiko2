@@ -2016,6 +2016,33 @@ impl BoundlessProver {
         }
     }
 
+    /// Stage metadata recorded on the finished proof for telemetry/debugging.
+    fn boundless_stage_metadata(
+        &self,
+        submission: &Submission,
+        context: &FulfillmentContext<'_>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "zkvm": "risc0",
+            "runner": "network",
+            "proof_type": context.proof_type,
+            "quoted_mcycles_count": context.quoted_mcycles_count,
+            "evaluated_mcycles_count": context.evaluated_mcycles_count,
+            "boundless": {
+                "provider_request_id": submission.provider_request_id,
+                "remote_tx_hash": submission.remote_tx_hash,
+                "expires_at": submission.expires_at,
+                "lock_expires_at": submission.lock_expires_at,
+                "submitted_at": submission.submitted_at,
+                "max_price_multiplier": submission.max_price_multiplier,
+                "max_price_wei": submission.max_price_wei.to_string(),
+                "image_id": alloy_primitives::hex::encode_prefixed(context.image_id.as_bytes()),
+                "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
+                "offchain": self.config.offchain,
+            }
+        })
+    }
+
     async fn fetch_boundless_fulfillment(
         &self,
         client: &Client,
@@ -2067,25 +2094,7 @@ impl BoundlessProver {
                 "Boundless fulfillment journal does not match local dry-run journal".to_string(),
             )));
         }
-        let stage_metadata = serde_json::json!({
-            "zkvm": "risc0",
-            "runner": "network",
-            "proof_type": context.proof_type,
-            "quoted_mcycles_count": context.quoted_mcycles_count,
-            "evaluated_mcycles_count": context.evaluated_mcycles_count,
-            "boundless": {
-                "provider_request_id": submission.provider_request_id,
-                "remote_tx_hash": submission.remote_tx_hash,
-                "expires_at": submission.expires_at,
-                "lock_expires_at": submission.lock_expires_at,
-                "submitted_at": submission.submitted_at,
-                "max_price_multiplier": submission.max_price_multiplier,
-                "max_price_wei": submission.max_price_wei.to_string(),
-                "image_id": alloy_primitives::hex::encode_prefixed(context.image_id.as_bytes()),
-                "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
-                "offchain": self.config.offchain,
-            }
-        });
+        let stage_metadata = self.boundless_stage_metadata(submission, context);
         let extra_data = match (context.proof_type, context.proposal_carry_data) {
             ("proposal", Some(carry)) => {
                 with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?

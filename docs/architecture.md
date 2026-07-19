@@ -604,6 +604,29 @@ Important recovery cases are:
 
 Boundless and SP1 submission progress is written through the fallible `ProverProgressObserver`.
 The checkpoint contains the backend, attempt, submission time, deadline, and backend-specific payload.
+For Boundless, request construction produces a non-zero market request ID before dispatch. Persisting
+that ID is the dispatch admission point: if cancellation wins first, checkpoint persistence is
+rejected and no provider call starts; if the checkpoint wins, every uncertain response and restart
+continues with that exact ID for the current attempt. The offchain dispatch itself is attempted once
+per attempt, so an accepted response that is lost in transit cannot trigger a second payable
+request. A later attempt may rotate the ID only after provider state proves that the previous ID is
+terminal and no longer payable.
+The checkpoint also binds the request to its exact guest image, Boundless market deployment, and
+submission transport. A replacement configured for a different image, market, or transport fails
+closed instead of polling or resubmitting the identifier in another payable domain. Before such a
+cutover, settle or explicitly abandon every outstanding remote request, then start the new
+configuration in a new namespace.
+
+Remote checkpoints are task-scoped even though runtime metadata is projected into each root. Under
+the process-local lifecycle gate, a progress write refreshes and updates every current active owner
+while excluding replacement incarnations. Recovery searches every retained owner and selects the
+highest recorded attempt, so a root attached after the progress event reuses the already-paid
+request even when the original owner is later cancelled. Progress merging is monotonic: an older
+attempt cannot overwrite a newer checkpoint, and every retained projection of the same attempt must
+agree on the provider identity, original submission time, and submission context. SP1 restart
+re-notification projects the original submission timestamp and deadline into late owners instead of
+starting a new timeout window. Boundless may only enrich that identity by adding the transaction
+hash; removing or changing an observed hash is rejected permanently.
 
 ```mermaid
 sequenceDiagram
@@ -613,18 +636,32 @@ sequenceDiagram
   participant Observer as ProverProgressObserver
   participant Runtime as Runtime store
 
-  Worker->>Provider: Submit request
-  Provider-->>Worker: Provider request ID
-  loop Until checkpoint is durable or stage is stopped
-    Worker->>Observer: Persist submission checkpoint
-    Observer->>Runtime: Permit-authorized repository commit
-    Runtime-->>Observer: Success or error
+  alt Boundless: request ID finalized locally
+    loop Until checkpoint is durable or stage is stopped
+      Worker->>Observer: Persist finalized request ID
+      Observer->>Runtime: Permit-authorized repository commit
+      Runtime-->>Observer: Success or error
+    end
+    Observer-->>Worker: Checkpoint durable
+    Worker->>Provider: Submit the checkpointed request ID once
+    Provider-->>Worker: Accepted or uncertain response
+  else SP1: provider assigns request ID
+    Worker->>Provider: Submit request
+    Provider-->>Worker: Provider request ID
+    loop Until checkpoint is durable or stage is stopped
+      Worker->>Observer: Persist returned request ID
+      Observer->>Runtime: Permit-authorized repository commit
+      Runtime-->>Observer: Success or error
+    end
+    Observer-->>Worker: Checkpoint durable
   end
-  Observer-->>Worker: Checkpoint durable
   Worker->>Provider: Poll the same request ID
 ```
 
-A newly returned provider request ID is never treated as resumable before checkpoint persistence.
+SP1 assigns its request ID during submission. A newly
+returned SP1 request ID is never treated as resumable before checkpoint persistence, and transient
+checkpoint failures are retried by the same worker without resubmission. Boundless checkpoints its
+already-finalized ID before the provider call instead.
 Checkpoint fields are strict: zero deadlines, zero attempts, missing Boundless lock deadlines, and
 missing exact bid data fail closed instead of entering a compatibility fallback. SP1 also persists
 and verifies the network mode, fulfillment strategy, timeout, simulation policy, cycle limit, and
@@ -704,6 +741,8 @@ operator can identify the failed boundary without inferring it from the aggregat
 
 - Active manifests must not be removed by age-based lifecycle rules.
 - Immutable content must remain available until every manifest that references it is gone.
+- Terminal root records are retained for seven days. Artifact manifests, including external
+  aggregation inputs, are not deleted merely because their root record reaches that age.
 - Generation-scoped invalidation markers and unreferenced content must outlive the longest retry,
   recovery, and cleanup window; the current operational minimum is 30 days.
 - Runtime state is control-plane data and must not share artifact garbage-collection rules.

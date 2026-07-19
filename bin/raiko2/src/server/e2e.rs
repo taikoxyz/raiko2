@@ -3030,7 +3030,13 @@ async fn e2e_duplicate_aggregate_post_reuses_same_root_task() {
 
 #[tokio::test]
 async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_progress() {
-    let config = base_config();
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.sp1.prover = Sp1ProverMode::Network;
+    config.prover.sp1.verify = true;
+    config.rpc.pairs[0].sp1_verifier_rpc_url = Some("https://verifier.example.com".to_string());
+    config.rpc.pairs[0].sp1_verifier_address =
+        Some("0x0000000000000000000000000000000000000001".to_string());
     let engine = sp1_fixture_engine(json!({}));
     let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -3064,6 +3070,14 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
     metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
         updated_at: 1,
         provider_request_id: Some("0xsp1-aggregate".to_string()),
+        expires_at: Some(7_201),
+        submitted_at: Some(1),
+        rebid_attempt: Some(1),
+        sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
+        sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
+        sp1_skip_simulation: Some(false),
+        sp1_cycle_limit: Some(1_000_000),
+        sp1_timeout_secs: Some(7_200),
         ..TaskRuntimeMetadata::default()
     });
     record.metadata = serde_json::to_value(metadata).expect("serialize metadata");
@@ -3868,7 +3882,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::ShastaRisc0Network,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -3884,7 +3898,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         graffiti: None,
         prover_config: Default::default(),
     };
-    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request);
+    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0Network, &proposal_request);
     let mut metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -3916,33 +3930,37 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_secs() as i64;
-    metadata.upsert_proposal_runtime(
-        &proposal_ref,
-        &BoundlessSubmissionProgress {
-            provider_request_id: "0x1234".to_string(),
-            remote_tx_hash: Some("0xabcd".to_string()),
-            expires_at: 123_456,
-            lock_expires_at: 123_300,
-            submitted_at: 123_000,
-            image_ref: "0ximage".to_string(),
-            deployment: "base".to_string(),
-            offchain: false,
-            quoted_mcycles_count: Some(6_000),
-            evaluated_mcycles_count: Some(12_345),
-            max_price_multiplier: 4,
-            max_price_wei: Some("9000000000000".to_string()),
-            rebid_attempt: 2,
-        },
-        updated_at,
-    );
-    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+    metadata
+        .upsert_proposal_runtime(
+            &proposal_ref,
+            &BoundlessSubmissionProgress {
+                provider_request_id: "0x1234".to_string(),
+                remote_tx_hash: Some("0xabcd".to_string()),
+                expires_at: 123_456,
+                lock_expires_at: 123_300,
+                submitted_at: 123_000,
+                image_ref: "0ximage".to_string(),
+                deployment: "base".to_string(),
+                offchain: false,
+                quoted_mcycles_count: Some(6_000),
+                evaluated_mcycles_count: Some(12_345),
+                max_price_multiplier: 4,
+                max_price_wei: Some("9000000000000".to_string()),
+                rebid_attempt: 2,
+            },
+            updated_at,
+        )
+        .expect("persist canonical Boundless progress");
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0Network);
 
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0,
-            route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
+            pipeline_key: PipelineKey::ShastaRisc0Network,
+            route: "risc0/network"
+                .parse::<PipelineRoute>()
+                .expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             network_pair: "taiko_dev/ethereum".into(),
             artifact_refs,
@@ -3967,7 +3985,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
 
     let (status, res) = get_json(&app, "/v3/tasks/task_runtime_fallback").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "risc0/local");
+    assert_eq!(res["data"]["route"], "risc0/network");
     assert_eq!(res["data"]["status"], "proving");
     assert_eq!(res["data"]["runtime"]["runner_status"], "allocated");
     assert_eq!(res["data"]["runtime"]["active_stage"], "prove");

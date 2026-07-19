@@ -1025,7 +1025,7 @@ struct Submission {
     remote_tx_hash: Option<String>,
     expires_at: u64,
     // Offer lock deadline (`rampUpStart + lockTimeout`). The market pays nothing for fulfillments
-    // past this time, so it bounds the payable window; `0` when resumed from a legacy record.
+    // past this time, so it bounds the payable window.
     lock_expires_at: u64,
     submitted_at: u64,
     // Floored effective price multiplier at this attempt, for progress/metadata display only.
@@ -1033,8 +1033,7 @@ struct Submission {
     max_price_multiplier: u32,
     // Exact escalated max price this submission bid, in wei. The floored `max_price_multiplier`
     // renders the common attempt-2 (×1.5) rung as `1` — indistinguishable from an un-escalated bid —
-    // so this carries the precise value for telemetry. `0` when resumed from a record that predates
-    // the field.
+    // so this carries the precise value for telemetry.
     max_price_wei: U256,
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
     // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
@@ -1109,11 +1108,59 @@ async fn publish_boundless_progress(
     crate::persist_prover_progress(observer, &progress, "boundless_submission", permit).await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_offchain_after_checkpoint<F, Fut>(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    permit: crate::SubmissionCheckpointPermit,
+    submission: Submission,
+    image_ref: &str,
+    deployment: &str,
+    mcycles_count: (u32, u32),
+    dispatch: F,
+) -> RaikoResult<Submission>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = RaikoResult<U256>>,
+{
+    publish_boundless_progress(
+        observer,
+        &permit,
+        &submission,
+        image_ref,
+        deployment,
+        true,
+        mcycles_count,
+    )
+    .await?;
+    drop(permit);
+
+    match dispatch().await {
+        Ok(returned_id) if returned_id == submission.market_request_id => Ok(submission),
+        Ok(returned_id) => Err(RaikoError::Guest(format!(
+            "Boundless order stream returned request id 0x{returned_id:x}, expected checkpointed request id 0x{:x}",
+            submission.market_request_id
+        ))),
+        Err(error) => {
+            tracing::warn!(
+                provider_request_id = %submission.provider_request_id,
+                error = %error,
+                "Boundless offchain submission returned an uncertain error; polling checkpointed request id"
+            );
+            Ok(submission)
+        }
+    }
+}
+
 impl TryFrom<BoundlessSubmissionResume> for Submission {
     type Error = RaikoError;
 
     fn try_from(value: BoundlessSubmissionResume) -> Result<Self, Self::Error> {
-        let raw_id = value.provider_request_id.trim_start_matches("0x");
+        let raw_id = value.provider_request_id.strip_prefix("0x").ok_or_else(|| {
+            RaikoError::Guest(format!(
+                "Invalid stored Boundless provider_request_id {}: expected canonical 0x-prefixed hexadecimal",
+                value.provider_request_id
+            ))
+        })?;
         let market_request_id = U256::from_str_radix(raw_id, 16).map_err(|e| {
             RaikoError::Guest(format!(
                 "Invalid stored Boundless provider_request_id {}: {e}",
@@ -1124,6 +1171,12 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             return Err(RaikoError::Guest(
                 "Invalid stored Boundless provider_request_id: zero".to_string(),
             ));
+        }
+        if value.provider_request_id != format!("0x{market_request_id:x}") {
+            return Err(RaikoError::Guest(format!(
+                "Invalid stored Boundless provider_request_id {}: non-canonical encoding",
+                value.provider_request_id
+            )));
         }
         if value.expires_at == 0 {
             return Err(RaikoError::Guest(
@@ -1140,9 +1193,20 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
                 "Invalid stored Boundless submission: missing lock_expires_at".to_string(),
             ));
         }
+        if value.submitted_at >= value.lock_expires_at || value.lock_expires_at > value.expires_at {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: invalid deadline ordering".to_string(),
+            ));
+        }
         if value.rebid_attempt == 0 {
             return Err(RaikoError::Guest(
                 "Invalid stored Boundless submission: rebid_attempt must start at one".to_string(),
+            ));
+        }
+        if value.max_price_multiplier == 0 {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: max_price_multiplier must be non-zero"
+                    .to_string(),
             ));
         }
         let max_price_wei = value
@@ -1157,6 +1221,11 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             .map_err(|error| {
                 RaikoError::Guest(format!("Invalid stored Boundless max_price_wei: {error}"))
             })?;
+        if max_price_wei == U256::ZERO {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: max_price_wei must be non-zero".to_string(),
+            ));
+        }
         Ok(Self {
             market_request_id,
             provider_request_id: value.provider_request_id,
@@ -1164,11 +1233,38 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             expires_at: value.expires_at,
             lock_expires_at: value.lock_expires_at,
             submitted_at: value.submitted_at,
-            max_price_multiplier: value.max_price_multiplier.max(1),
+            max_price_multiplier: value.max_price_multiplier,
             max_price_wei,
             attempt: u64::from(value.rebid_attempt),
         })
     }
+}
+
+fn validate_resume_context(
+    resume: &BoundlessSubmissionResume,
+    image_ref: &str,
+    deployment: &str,
+    offchain: bool,
+) -> RaikoResult<()> {
+    if resume.image_ref != image_ref {
+        return Err(RaikoError::Guest(format!(
+            "Boundless checkpoint image {} does not match current image {image_ref}",
+            resume.image_ref
+        )));
+    }
+    if resume.deployment != deployment {
+        return Err(RaikoError::Guest(format!(
+            "Boundless checkpoint deployment {} does not match current deployment {deployment}",
+            resume.deployment
+        )));
+    }
+    if resume.offchain != offchain {
+        return Err(RaikoError::Guest(format!(
+            "Boundless checkpoint transport {} does not match current transport {offchain}",
+            resume.offchain
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1643,22 +1739,23 @@ impl BoundlessProver {
         Ok(request)
     }
 
-    /// Build a [`Submission`] record for a just-submitted request. Derives the provider id,
+    /// Builds the durable submission identity before dispatching a finalized request.
+    ///
+    /// Derives the provider id,
     /// deadlines, and exact escalated max price from `request`, and the floored display multiplier
-    /// from `attempt` + config. `market_request_id` is passed separately because the offchain submit
-    /// returns the market's assigned id, which need not equal `request.id`; the onchain path passes
-    /// `request.id`. `remote_tx_hash` is set later on the onchain path once the tx is sent.
-    fn make_submission(
-        &self,
-        market_request_id: U256,
-        remote_tx_hash: Option<String>,
-        request: &ProofRequest,
-        attempt: u64,
-    ) -> Submission {
-        Submission {
+    /// from `attempt` + config. Both dispatch paths checkpoint this exact non-zero request id before
+    /// sending; `remote_tx_hash` is populated later when the on-chain transport returns it.
+    fn make_submission(&self, request: &ProofRequest, attempt: u64) -> RaikoResult<Submission> {
+        let market_request_id = request.id;
+        if market_request_id == U256::ZERO {
+            return Err(RaikoError::InvalidRequestConfig(
+                "Finalized Boundless request id must be nonzero before submission".to_string(),
+            ));
+        }
+        Ok(Submission {
             market_request_id,
             provider_request_id: format!("0x{market_request_id:x}"),
-            remote_tx_hash,
+            remote_tx_hash: None,
             expires_at: request.expires_at(),
             lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
@@ -1669,24 +1766,42 @@ impl BoundlessProver {
             ),
             max_price_wei: U256::from(request.offer.maxPrice),
             attempt,
-        }
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit_request_offchain(
         &self,
         client: &Client,
         request: &ProofRequest,
+        observer: Option<&Arc<dyn ProverProgressObserver>>,
+        permit: crate::SubmissionCheckpointPermit,
+        image_ref: &str,
+        deployment: &str,
+        mcycles_count: (u32, u32),
         attempt: u64,
     ) -> RaikoResult<Submission> {
-        let market_request_id = retry_external("submit boundless offchain request", || async {
-            client
-                .submit_request_offchain(request)
-                .await
-                .map(|(id, _)| id)
-                .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))
-        })
-        .await?;
-        Ok(self.make_submission(market_request_id, None, request, attempt))
+        let submission = self.make_submission(request, attempt)?;
+        dispatch_offchain_after_checkpoint(
+            observer,
+            permit,
+            submission,
+            image_ref,
+            deployment,
+            mcycles_count,
+            || async {
+                client
+                    .submit_request_offchain(request)
+                    .await
+                    .map(|(id, _)| id)
+                    .map_err(|error| {
+                        RaikoError::Guest(format!(
+                            "Boundless offchain request dispatch failed: {error}"
+                        ))
+                    })
+            },
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1701,7 +1816,6 @@ impl BoundlessProver {
         evaluated_mcycles_count: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
-        let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
         let signer = client.signer.as_ref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
         })?;
@@ -1758,7 +1872,8 @@ impl BoundlessProver {
             .from(client.boundless_market.caller())
             .value(value);
 
-        let mut submission = self.make_submission(request.id, None, request, attempt);
+        let mut submission = self.make_submission(request, attempt)?;
+        let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
         publish_boundless_progress(
             observer,
             &checkpoint_permit,
@@ -1769,20 +1884,37 @@ impl BoundlessProver {
             (quoted_mcycles_count, evaluated_mcycles_count),
         )
         .await?;
+        drop(checkpoint_permit);
 
         match call.send().await {
             Ok(pending_tx) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
-                publish_boundless_progress(
-                    observer,
-                    &checkpoint_permit,
-                    &submission,
-                    image_ref,
-                    deployment,
-                    false,
-                    (quoted_mcycles_count, evaluated_mcycles_count),
-                )
-                .await?;
+                match crate::acquire_submission_checkpoint_permit(observer).await {
+                    Ok(tx_hash_permit) => {
+                        if let Err(error) = publish_boundless_progress(
+                            observer,
+                            &tx_hash_permit,
+                            &submission,
+                            image_ref,
+                            deployment,
+                            false,
+                            (quoted_mcycles_count, evaluated_mcycles_count),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                provider_request_id = %submission.provider_request_id,
+                                error = %error,
+                                "Boundless request id is durable but its optional transaction hash was not checkpointed"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        provider_request_id = %submission.provider_request_id,
+                        error = %error,
+                        "Boundless request id is durable but transaction-hash checkpoint admission is closed"
+                    ),
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -1819,23 +1951,21 @@ impl BoundlessProver {
         if self.config.offchain {
             let checkpoint_permit =
                 crate::acquire_submission_checkpoint_permit(context.observer).await?;
-            let submission = self
-                .submit_request_offchain(context.client, &request, context.attempt)
-                .await?;
-            publish_boundless_progress(
-                context.observer,
-                &checkpoint_permit,
-                &submission,
-                context.image_ref,
-                context.deployment,
-                true,
-                (
-                    context.quoted_mcycles_count,
-                    context.evaluated_mcycles_count,
-                ),
-            )
-            .await?;
-            return Ok(submission);
+            return self
+                .submit_request_offchain(
+                    context.client,
+                    &request,
+                    context.observer,
+                    checkpoint_permit,
+                    context.image_ref,
+                    context.deployment,
+                    (
+                        context.quoted_mcycles_count,
+                        context.evaluated_mcycles_count,
+                    ),
+                    context.attempt,
+                )
+                .await;
         }
 
         self.submit_request_onchain(
@@ -2224,7 +2354,15 @@ impl BoundlessProver {
                 })
                 .transpose()
                 .map_err(|error| RaikoError::Guest(error.to_string()))?
-                .map(Submission::try_from)
+                .map(|resume| {
+                    validate_resume_context(
+                        &resume,
+                        &image_ref,
+                        &deployment,
+                        self.config.offchain,
+                    )?;
+                    Submission::try_from(resume)
+                })
                 .transpose()?
         } else {
             None
@@ -2789,11 +2927,12 @@ mod tests {
         BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
         ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
         Submission, TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
-        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
-        exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
-        parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
-        quote_batch_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        user_cycles_to_mcycles, validate_offer_params,
+        defer_poll_timeout_while_payable, dispatch_offchain_after_checkpoint,
+        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
+        publish_boundless_progress, quote_batch_mcycles, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
+        validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2801,15 +2940,14 @@ mod tests {
         price_oracle::{Amount, Asset},
         storage::StorageUploaderType,
     };
-    use raiko2_primitives::Proof;
-    use raiko2_primitives::ProofType;
+    use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmission, RemoteSubmissionId};
     use std::{
         collections::HashMap,
         env,
         sync::{
             Arc, Mutex, MutexGuard,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::{Duration, Instant, SystemTime},
     };
@@ -2827,6 +2965,18 @@ mod tests {
 
     struct PermanentProgressObserver {
         calls: AtomicUsize,
+    }
+
+    struct RecordingProgressObserver {
+        persisted: Arc<AtomicBool>,
+    }
+
+    struct PermitDropSignal(Arc<AtomicBool>);
+
+    impl Drop for PermitDropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     #[async_trait::async_trait]
@@ -2863,6 +3013,32 @@ mod tests {
             Err(crate::ProgressPersistenceError::Permanent(
                 "runtime is draining".to_string(),
             ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for RecordingProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.persisted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_submission() -> Submission {
+        Submission {
+            market_request_id: U256::from(1),
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            expires_at: 100,
+            lock_expires_at: 90,
+            submitted_at: 1,
+            max_price_multiplier: 1,
+            max_price_wei: U256::from(1),
+            attempt: 1,
         }
     }
 
@@ -2934,6 +3110,120 @@ mod tests {
 
         assert!(error.to_string().contains("runtime is draining"));
         assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn offchain_dispatch_starts_only_after_checkpoint_is_durable() {
+        let persisted = Arc::new(AtomicBool::new(false));
+        let observer: Arc<dyn crate::ProverProgressObserver> =
+            Arc::new(RecordingProgressObserver {
+                persisted: Arc::clone(&persisted),
+            });
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_for_call = Arc::clone(&dispatched);
+        let persisted_for_call = Arc::clone(&persisted);
+        let permit_released = Arc::new(AtomicBool::new(false));
+        let permit = crate::SubmissionCheckpointPermit::tracked(PermitDropSignal(Arc::clone(
+            &permit_released,
+        )));
+        let permit_released_for_call = Arc::clone(&permit_released);
+
+        let submission = dispatch_offchain_after_checkpoint(
+            Some(&observer),
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            move || async move {
+                assert!(persisted_for_call.load(Ordering::SeqCst));
+                assert!(permit_released_for_call.load(Ordering::SeqCst));
+                dispatched_for_call.fetch_add(1, Ordering::SeqCst);
+                Ok(U256::from(1))
+            },
+        )
+        .await
+        .expect("checkpointed offchain request should dispatch");
+
+        assert_eq!(submission.market_request_id, U256::from(1));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_checkpoint_failure_prevents_offchain_dispatch() {
+        let observer: Arc<dyn crate::ProverProgressObserver> =
+            Arc::new(PermanentProgressObserver {
+                calls: AtomicUsize::new(0),
+            });
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_for_call = Arc::clone(&dispatched);
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let error = dispatch_offchain_after_checkpoint(
+            Some(&observer),
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            move || async move {
+                dispatched_for_call.fetch_add(1, Ordering::SeqCst);
+                Ok(U256::from(1))
+            },
+        )
+        .await
+        .expect_err("a fenced checkpoint must prevent provider dispatch");
+
+        assert!(error.to_string().contains("runtime is draining"));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn uncertain_offchain_dispatch_polls_the_checkpointed_request_once() {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_for_call = Arc::clone(&dispatched);
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let submission = dispatch_offchain_after_checkpoint(
+            None,
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            move || async move {
+                dispatched_for_call.fetch_add(1, Ordering::SeqCst);
+                Err(RaikoError::Guest("uncertain transport failure".to_string()))
+            },
+        )
+        .await
+        .expect("an uncertain response must retain the pre-dispatch request id");
+
+        assert_eq!(submission.market_request_id, U256::from(1));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn offchain_dispatch_rejects_a_provider_id_mismatch() {
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let error = dispatch_offchain_after_checkpoint(
+            None,
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            || async { Ok(U256::from(2)) },
+        )
+        .await
+        .expect_err("provider must confirm the checkpointed request id");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected checkpointed request id")
+        );
     }
 
     const STORAGE_ENV_VARS: &[&str] = &[
@@ -3504,6 +3794,9 @@ mod tests {
         let resume = crate::BoundlessSubmissionResume {
             provider_request_id: "0x1".to_string(),
             remote_tx_hash: None,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
             expires_at: 2_000,
             lock_expires_at: 1_500,
             submitted_at: 1_000,
@@ -3511,18 +3804,94 @@ mod tests {
             max_price_wei: Some("1".to_string()),
             rebid_attempt: 1,
         };
-        let submission = super::Submission::try_from(resume).expect("valid resume record");
+        let submission = super::Submission::try_from(resume.clone()).expect("valid resume record");
         assert_eq!(submission.lock_expires_at, 1_500);
+
+        let mut invalid_deadlines = resume.clone();
+        invalid_deadlines.submitted_at = invalid_deadlines.lock_expires_at;
+        let deadline_error = super::Submission::try_from(invalid_deadlines)
+            .expect_err("invalid deadline ordering must fail closed");
+        assert!(deadline_error.to_string().contains("deadline ordering"));
+
+        let mut zero_price = resume.clone();
+        zero_price.max_price_wei = Some("0".to_string());
+        let price_error =
+            super::Submission::try_from(zero_price).expect_err("zero max price must fail closed");
+        assert!(
+            price_error
+                .to_string()
+                .contains("max_price_wei must be non-zero")
+        );
+
+        let mut noncanonical_id = resume.clone();
+        noncanonical_id.provider_request_id = "0x01".to_string();
+        let id_error = super::Submission::try_from(noncanonical_id)
+            .expect_err("non-canonical request identity must fail closed");
+        assert!(id_error.to_string().contains("non-canonical encoding"));
+
+        let mut zero_multiplier = resume;
+        zero_multiplier.max_price_multiplier = 0;
+        let multiplier_error = super::Submission::try_from(zero_multiplier)
+            .expect_err("zero max price multiplier must fail closed");
+        assert!(
+            multiplier_error
+                .to_string()
+                .contains("max_price_multiplier must be non-zero")
+        );
 
         let error = serde_json::from_value::<crate::BoundlessSubmissionResume>(serde_json::json!({
             "provider_request_id": "0x1",
             "remote_tx_hash": null,
+            "image_ref": "0ximage",
+            "deployment": "base",
+            "offchain": false,
             "expires_at": 2_000,
             "submitted_at": 1_000,
             "max_price_multiplier": 1,
         }))
         .expect_err("checkpoint without required fields must be rejected");
         assert!(error.to_string().contains("lock_expires_at"));
+    }
+
+    #[test]
+    fn resumed_submission_rejects_a_different_provider_context() {
+        let resume = crate::BoundlessSubmissionResume {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            expires_at: 2_000,
+            lock_expires_at: 1_500,
+            submitted_at: 1_000,
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+
+        let image_error = validate_resume_context(&resume, "0xother", "base", false)
+            .expect_err("a different guest image must not resume a paid request");
+        assert!(
+            image_error
+                .to_string()
+                .contains("does not match current image")
+        );
+
+        let deployment_error = validate_resume_context(&resume, "0ximage", "sepolia", false)
+            .expect_err("a different market must not reuse the checkpointed request id");
+        assert!(
+            deployment_error
+                .to_string()
+                .contains("does not match current deployment")
+        );
+
+        let transport_error = validate_resume_context(&resume, "0ximage", "base", true)
+            .expect_err("a different transport must not reuse the checkpointed request id");
+        assert!(
+            transport_error
+                .to_string()
+                .contains("does not match current transport")
+        );
     }
 
     #[test]

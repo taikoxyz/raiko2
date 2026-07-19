@@ -2230,8 +2230,7 @@ fn count_runtime_network_inflight(
 ) {
     if runtime.has_sp1_network_submission_progress() {
         network.sp1.inflight_orders = network.sp1.inflight_orders.saturating_add(1);
-    }
-    if runtime.provider_request_id.is_some()
+    } else if runtime.has_boundless_submission_resume()
         && matches!(runtime.expires_at, Some(expires_at) if expires_at > now_secs)
     {
         network.risc0.inflight_orders = network.risc0.inflight_orders.saturating_add(1);
@@ -3816,6 +3815,84 @@ mod tests {
         metadata.runtime.proposals.insert(task_id, runtime);
     }
 
+    fn test_boundless_runtime(
+        provider_request_id: &str,
+        submitted_at: u64,
+        lock_expires_at: u64,
+        expires_at: u64,
+    ) -> TaskRuntimeMetadata {
+        TaskRuntimeMetadata {
+            provider_request_id: Some(provider_request_id.to_string()),
+            image_ref: Some("0ximage".to_string()),
+            deployment: Some("base".to_string()),
+            offchain: Some(false),
+            expires_at: Some(expires_at),
+            lock_expires_at: Some(lock_expires_at),
+            submitted_at: Some(submitted_at),
+            quoted_mcycles_count: Some(1),
+            evaluated_mcycles_count: Some(1),
+            max_price_multiplier: Some(1),
+            max_price_wei: Some("1000".to_string()),
+            rebid_attempt: Some(1),
+            ..TaskRuntimeMetadata::default()
+        }
+    }
+
+    fn test_sp1_runtime(
+        provider_request_id: &str,
+        submitted_at: u64,
+        timeout_secs: u64,
+    ) -> TaskRuntimeMetadata {
+        TaskRuntimeMetadata {
+            provider_request_id: Some(provider_request_id.to_string()),
+            expires_at: Some(submitted_at.saturating_add(timeout_secs)),
+            submitted_at: Some(submitted_at),
+            rebid_attempt: Some(1),
+            sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
+            sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
+            sp1_skip_simulation: Some(false),
+            sp1_cycle_limit: Some(1_000_000),
+            sp1_timeout_secs: Some(timeout_secs),
+            ..TaskRuntimeMetadata::default()
+        }
+    }
+
+    fn configure_test_aggregate(metadata: &mut TaskMetadata) {
+        let request = AggregationTaskRequest {
+            request_id: "aggregate-request".to_string(),
+            proposal_ids: metadata
+                .proposals
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect(),
+            prover_config: ProverTaskConfig::default(),
+        };
+        metadata.aggregate_requested = true;
+        metadata.aggregate_task_id = Some(aggregate_task_ref(
+            PipelineKey::ShastaRisc0Network,
+            &request,
+        ));
+        metadata.aggregate_request = Some(request);
+    }
+
+    #[test]
+    fn network_inflight_counts_each_remote_checkpoint_for_exactly_one_backend() {
+        let mut network = ProverNetworkStatus::default();
+        count_runtime_network_inflight(&test_sp1_runtime("sp1-request", 1, 100), &mut network, 10);
+
+        assert_eq!(network.sp1.inflight_orders, 1);
+        assert_eq!(network.risc0.inflight_orders, 0);
+
+        count_runtime_network_inflight(
+            &test_boundless_runtime("0x1", 1, 50, 100),
+            &mut network,
+            10,
+        );
+
+        assert_eq!(network.sp1.inflight_orders, 1);
+        assert_eq!(network.risc0.inflight_orders, 1);
+    }
+
     async fn upsert_test_record(
         runtime: &RuntimeManager,
         task_id: &str,
@@ -3905,13 +3982,15 @@ mod tests {
             "prover-status-expired-boundless",
         ))?);
         let mut metadata = zk_any_metadata(Some("prove"));
+        let expires_at = unix_now_secs().saturating_sub(1);
         set_test_proposal_runtime(
             &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xexpired".to_string()),
-                expires_at: Some(unix_now_secs().saturating_sub(1)),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_boundless_runtime(
+                "0xexpired",
+                expires_at.saturating_sub(2),
+                expires_at.saturating_sub(1),
+                expires_at,
+            ),
         );
         upsert_test_record(
             &runtime,
@@ -4104,12 +4183,15 @@ mod tests {
         )
         .await?;
         let mut remote_metadata = metadata.clone();
+        let now = unix_now_secs();
         set_test_proposal_runtime(
             &mut remote_metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xremote".to_string()),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_boundless_runtime(
+                "0xremote",
+                now,
+                now.saturating_add(300),
+                now.saturating_add(600),
+            ),
         );
         upsert_test_record(
             &runtime,
@@ -4269,32 +4351,14 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                lock_expires_at: Some(123_400),
-                submitted_at: Some(123_000),
-                max_price_multiplier: Some(1),
-                max_price_wei: Some("1000".to_string()),
-                rebid_attempt: Some(1),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_boundless_runtime("0x1234", 123_000, 123_400, 123_456),
         );
+        let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        let metadata = TaskMetadata::decode_for_record(&record).expect("canonical Boundless root");
 
-        for pipeline_key in [
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaRisc0,
-            PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Network,
-        ] {
-            let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-            record.pipeline_key = pipeline_key;
-
-            assert!(
-                should_reenqueue_existing_submission_without_engine(&record, &metadata),
-                "{pipeline_key}"
-            );
-        }
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -4328,34 +4392,19 @@ mod tests {
     fn failed_submission_with_sp1_resume_metadata_is_reenqueueable_for_failed_prove_stage() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.proof_type = ProofType::Sp1;
-        set_test_proposal_runtime(
+        set_test_proposal_runtime(&mut metadata, test_sp1_runtime("0xsp1", 1, 7_200));
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        align_runtime_record_identity(
+            &mut record,
             &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xsp1".to_string()),
-                expires_at: Some(7_200),
-                submitted_at: Some(1),
-                rebid_attempt: Some(1),
-                sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
-                sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
-                sp1_timeout_secs: Some(7_200),
-                ..TaskRuntimeMetadata::default()
-            },
-        );
-
-        for pipeline_key in [
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaRisc0,
             PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Network,
-        ] {
-            let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-            record.pipeline_key = pipeline_key;
+            "sp1/network".parse().expect("SP1 network route"),
+        );
+        let metadata = TaskMetadata::decode_for_record(&record).expect("canonical SP1 root");
 
-            assert!(
-                should_reenqueue_existing_submission_without_engine(&record, &metadata),
-                "{pipeline_key}"
-            );
-        }
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -4461,11 +4510,7 @@ mod tests {
         metadata.requested_proof_type = Some("zk_any".to_string());
         set_test_proposal_runtime(
             &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_boundless_runtime("0x1234", 123_000, 123_400, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
         runtime.upsert_task(&record).await?;
@@ -4726,10 +4771,7 @@ mod tests {
         );
         metadata.runtime.proposals.insert(
             plan.proposals[0].task_ref.clone(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("sp1-request".to_string()),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_sp1_runtime("sp1-request", 1, 7_200),
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
@@ -5348,23 +5390,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_aggregate_ignores_proposal_resume_metadata() {
+    fn failed_aggregate_reenqueues_when_only_the_proposal_has_remote_progress() {
         let mut metadata = task_metadata_with_stage(Some("aggregate"));
+        configure_test_aggregate(&mut metadata);
         set_test_proposal_runtime(
             &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xproposal".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_boundless_runtime("0xproposal", 123_000, 123_400, 123_456),
         );
-        metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
-            provider_request_id: Some("0xaggregate".to_string()),
-            ..TaskRuntimeMetadata::default()
-        });
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        let metadata = TaskMetadata::decode_for_record(&record).expect("canonical aggregate root");
 
-        assert!(!should_reenqueue_existing_submission_without_engine(
+        assert!(should_reenqueue_existing_submission_without_engine(
             &record, &metadata
         ));
     }
@@ -5372,25 +5408,19 @@ mod tests {
     #[test]
     fn failed_aggregate_with_aggregate_resume_metadata_is_reenqueueable() {
         let mut metadata = task_metadata_with_stage(Some("aggregate"));
+        configure_test_aggregate(&mut metadata);
         set_test_proposal_runtime(
             &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xproposal".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            test_boundless_runtime("0xproposal", 123_000, 123_400, 123_456),
         );
-        metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
-            provider_request_id: Some("0xaggregate".to_string()),
-            expires_at: Some(456_789),
-            lock_expires_at: Some(456_700),
-            submitted_at: Some(456_000),
-            max_price_multiplier: Some(1),
-            max_price_wei: Some("1000".to_string()),
-            rebid_attempt: Some(1),
-            ..TaskRuntimeMetadata::default()
-        });
+        metadata.runtime.aggregate = Some(test_boundless_runtime(
+            "0xaggregate",
+            456_000,
+            456_700,
+            456_789,
+        ));
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        let metadata = TaskMetadata::decode_for_record(&record).expect("canonical aggregate root");
 
         assert!(should_reenqueue_existing_submission_without_engine(
             &record, &metadata

@@ -528,6 +528,10 @@ impl std::fmt::Display for Sp1FulfillmentStrategy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sp1NetworkSubmissionProgress {
     pub provider_request_id: String,
+    /// Time at which this exact provider request was accepted, in seconds since the UNIX epoch.
+    /// Retries and restart recovery must preserve this value so every runtime owner projects the
+    /// same durable request deadline.
+    pub submitted_at: u64,
     pub network_mode: Sp1NetworkMode,
     pub fulfillment_strategy: Sp1FulfillmentStrategy,
     pub skip_simulation: bool,

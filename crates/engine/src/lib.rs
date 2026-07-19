@@ -81,6 +81,7 @@ pub enum EngineTaskSuccess {
 pub enum EngineObserverError {
     RuntimeSync(String),
     RuntimeInactive(String),
+    ProgressRejected(String),
     ProofPublication(String),
     ProofInvalidated(String),
 }
@@ -90,6 +91,7 @@ impl std::fmt::Display for EngineObserverError {
         match self {
             Self::RuntimeSync(error)
             | Self::RuntimeInactive(error)
+            | Self::ProgressRejected(error)
             | Self::ProofPublication(error)
             | Self::ProofInvalidated(error) => formatter.write_str(error),
         }
@@ -156,6 +158,7 @@ impl From<EngineObserverError> for TaskExecutionError {
         match error {
             EngineObserverError::RuntimeSync(error)
             | EngineObserverError::RuntimeInactive(error)
+            | EngineObserverError::ProgressRejected(error)
             | EngineObserverError::ProofPublication(error) => Self::Coordination(error),
             EngineObserverError::ProofInvalidated(error) => Self::ProofInvalidated(error),
         }
@@ -519,9 +522,10 @@ impl ProverProgressObserver for EngineProgressObserver {
             .await
         {
             Ok(()) => Ok(()),
-            Err(EngineObserverError::RuntimeInactive(error)) => {
-                Err(raiko2_prover::ProgressPersistenceError::Permanent(error))
-            }
+            Err(
+                EngineObserverError::RuntimeInactive(error)
+                | EngineObserverError::ProgressRejected(error),
+            ) => Err(raiko2_prover::ProgressPersistenceError::Permanent(error)),
             Err(error) => Err(raiko2_prover::ProgressPersistenceError::Retryable(
                 error.to_string(),
             )),
@@ -944,7 +948,8 @@ where
                     EngineTaskSuccess::Proof { proof, .. },
                     EngineObserverError::ProofPublication(error)
                     | EngineObserverError::RuntimeSync(error)
-                    | EngineObserverError::RuntimeInactive(error),
+                    | EngineObserverError::RuntimeInactive(error)
+                    | EngineObserverError::ProgressRejected(error),
                 ) => TaskExecutionError::ProofPublication {
                     error,
                     proof: Box::new(proof),

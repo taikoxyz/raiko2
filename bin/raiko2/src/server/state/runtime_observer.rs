@@ -17,14 +17,15 @@ use raiko2_runtime::{
     ProofArtifactDescriptor, ProofArtifactPublicationInvalidated, ProofArtifactPutResult,
     ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crate::server::task_metadata::publication_proof_artifact_refs;
 use crate::server::task_metadata::{
-    TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
+    RemoteSubmissionConflict, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
+    stage_task_ref_for_stage,
 };
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
@@ -122,6 +123,9 @@ impl RuntimeObserver {
     ) -> EngineObserverError {
         tracing::warn!(task = ?id, %error, "failed to sync runtime task progress");
         let message = format!("failed to sync runtime task progress: {error}");
+        if error.downcast_ref::<RemoteSubmissionConflict>().is_some() {
+            return EngineObserverError::ProgressRejected(message);
+        }
         if !self.runtime.checkpoint_failure_is_retryable(permit) {
             return EngineObserverError::RuntimeInactive(message);
         }
@@ -247,25 +251,18 @@ impl RuntimeObserver {
         owner_incarnations: &[uuid::Uuid],
         permit: &raiko2_runtime::RuntimeSubmissionCheckpointPermit,
         mutator: F,
-    ) -> Result<()>
+    ) -> Result<usize>
     where
-        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<bool>,
     {
         self.update_root_records_with_policy_filter_count_mode(
             id,
-            TerminalRootPolicy::IncludeAll,
-            |record, updated_at, observed_at_ms| {
-                mutator(record, updated_at, observed_at_ms)?;
-                Ok(true)
-            },
+            TerminalRootPolicy::Exclude,
+            mutator,
             Some(owner_incarnations),
             Some(permit),
         )
         .await
-        .and_then(|updated| {
-            anyhow::ensure!(updated != 0, "provider checkpoint matched no runtime root");
-            Ok(())
-        })
     }
 
     async fn update_root_records_with_policy_filter_count<F>(
@@ -388,55 +385,6 @@ impl RuntimeObserver {
             .collect()
     }
 
-    async fn load_root_record_for_resume(
-        &self,
-        id: &EngineTaskId,
-        task: &EngineTask,
-    ) -> Result<Option<RuntimeTaskRecord>> {
-        let records = self.find_root_records(id).await;
-        let mut resumable_failed = None;
-
-        for record in records {
-            if !self.record_matches_observer(id, &record)? {
-                continue;
-            }
-            if !is_terminal_status(record.runner_status) {
-                return Ok(Some(record));
-            }
-            if record.runner_status == RunnerStatus::Failed
-                && Self::record_has_resumable_remote_submission_for_task(&record, id, task)?
-            {
-                resumable_failed.get_or_insert(record);
-            }
-        }
-
-        Ok(resumable_failed)
-    }
-
-    fn record_has_resumable_remote_submission_for_task(
-        record: &RuntimeTaskRecord,
-        id: &EngineTaskId,
-        task: &EngineTask,
-    ) -> Result<bool> {
-        let metadata = TaskMetadata::decode_for_record(record)?;
-        let task_ref = Self::root_task_ref(id);
-        Ok(match task.publication_source() {
-            EngineTask::ProveProposal { .. } => metadata
-                .proposal_runtime(&task_ref)
-                .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
-            EngineTask::Aggregate { .. } => metadata
-                .aggregate_runtime()
-                .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
-            EngineTask::Preflight { .. }
-            | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => false,
-            EngineTask::PublishProof { .. } => {
-                unreachable!()
-            }
-        })
-    }
-
     fn record_matches_observer(
         &self,
         id: &EngineTaskId,
@@ -470,6 +418,30 @@ impl RuntimeObserver {
         match progress {
             ProverProgress::BoundlessSubmission(_) => "boundless",
             ProverProgress::Sp1NetworkSubmission(_) => "sp1_network",
+        }
+    }
+
+    async fn record_external_submission_metrics(
+        &self,
+        id: &EngineTaskId,
+        stage: &'static str,
+        progress: &ProverProgress,
+    ) {
+        match self.load_root_record(id).await {
+            Ok(Some(record)) => match Self::metric_context(&record) {
+                Ok(context) => telemetry::record_external_submission(
+                    &context,
+                    stage,
+                    Self::submission_provider(progress),
+                ),
+                Err(error) => {
+                    tracing::warn!(task = ?id, %error, "failed to build telemetry context");
+                }
+            },
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(task = ?id, %error, "failed to load runtime task for telemetry");
+            }
         }
     }
 
@@ -781,6 +753,7 @@ impl RuntimeObserver {
                         metadata.runtime.active_stage = Some(stage.to_string());
                         metadata.runtime.last_event = Some("failed".to_string());
                         metadata.runtime.proof_artifact = None;
+                        Ok(())
                     })?;
                     record.updated_at = updated_at;
                     Ok(true)
@@ -849,6 +822,7 @@ impl RuntimeObserver {
                             metadata.runtime.active_stage = None;
                             metadata.runtime.last_event = Some("cancelled".to_string());
                             metadata.runtime.proof_artifact = None;
+                            Ok(())
                         })?;
                         record.updated_at = updated_at;
                     }
@@ -1117,18 +1091,19 @@ impl RuntimeObserver {
         }
     }
 
-    async fn current_completion_owner_incarnations(
+    async fn current_owner_incarnations(
         &self,
         id: &EngineTaskId,
-        completion_owners: &RuntimeExecutionOwners,
+        execution_owners: &RuntimeExecutionOwners,
+        include_completed: bool,
     ) -> Result<Vec<uuid::Uuid>> {
         let mut owner_incarnations = self
-            .current_execution_owners(id, true)
+            .current_execution_owners(id, include_completed)
             .await?
             .by_task_id
             .into_iter()
             .filter(|(task_id, incarnation_id)| {
-                completion_owners
+                execution_owners
                     .by_task_id
                     .get(task_id)
                     .is_none_or(|expected| expected == incarnation_id)
@@ -1151,7 +1126,7 @@ impl RuntimeObserver {
         let gate = self.runtime.execution_lifecycle_gate();
         let _lifecycle_guard = gate.lock().await;
         let owner_incarnations = self
-            .current_completion_owner_incarnations(id, completion_owners)
+            .current_owner_incarnations(id, completion_owners, true)
             .await?;
         if owner_incarnations.is_empty() {
             return Ok((0, HashSet::new()));
@@ -1516,6 +1491,7 @@ impl EngineObserver for RuntimeObserver {
                         metadata.mark_stage_started(&task_id, stage, observed_at_ms);
                         metadata.runtime.active_stage = Some(stage.to_string());
                         metadata.runtime.last_event = Some(format!("started:{worker}"));
+                        Ok(())
                     })?;
                     record.updated_at = updated_at;
                     Ok(())
@@ -1560,28 +1536,10 @@ impl EngineObserver for RuntimeObserver {
         permit: &SubmissionCheckpointPermit,
         execution_permit: &TaskExecutionPermit,
     ) -> std::result::Result<(), EngineObserverError> {
-        let owner_incarnations = &Self::execution_owners(execution_permit)?.incarnations;
+        let execution_owners = Self::execution_owners(execution_permit)?.clone();
         let stage = Self::stage_name(task);
-        match self.load_root_record(id).await {
-            Ok(Some(record)) => match Self::metric_context(&record) {
-                Ok(context) => telemetry::record_external_submission(
-                    &context,
-                    stage,
-                    Self::submission_provider(progress),
-                ),
-                Err(err) => {
-                    tracing::warn!(task = ?id, error = %err, "failed to build telemetry context");
-                }
-            },
-            Ok(None) => {}
-            Err(err) => {
-                tracing::warn!(
-                    task = ?id,
-                    error = %err,
-                    "failed to load runtime task for telemetry"
-                );
-            }
-        }
+        self.record_external_submission_metrics(id, stage, progress)
+            .await;
         let runtime_permit = permit
             .guard::<raiko2_runtime::RuntimeSubmissionCheckpointPermit>()
             .ok_or_else(|| {
@@ -1589,66 +1547,87 @@ impl EngineObserver for RuntimeObserver {
                     "submission checkpoint permit does not belong to the runtime".to_string(),
                 )
             })?;
+        let gate = self.runtime.execution_lifecycle_gate();
+        let _lifecycle_guard = gate.lock().await;
+        let owner_incarnations = self
+            .current_owner_incarnations(id, &execution_owners, false)
+            .await
+            .map_err(|error| {
+                EngineObserverError::RuntimeSync(format!(
+                    "failed to refresh provider checkpoint owners: {error}"
+                ))
+            })?;
+        if owner_incarnations.is_empty() {
+            return Err(EngineObserverError::RuntimeInactive(format!(
+                "provider checkpoint matched no active runtime root for {}",
+                Self::root_task_ref(id)
+            )));
+        }
         let result = self
             .checkpoint_retry_root_records(
                 id,
-                owner_incarnations,
+                &owner_incarnations,
                 runtime_permit,
                 |record, updated_at, _observed_at_ms| {
-                    if !is_terminal_status(record.runner_status) {
-                        record.runner_status = RunnerStatus::Allocated;
-                        record.error = None;
-                    }
                     let task_id = Self::root_task_ref(id);
                     update_task_metadata(record, |metadata| {
-                        metadata.runtime.active_stage = Some(stage.to_string());
-                        metadata.runtime.last_event = Some("submission_registered".to_string());
                         match progress {
                             ProverProgress::BoundlessSubmission(submission) => {
                                 match task.publication_source() {
-                                    EngineTask::ProveProposal { .. } => {
-                                        metadata.upsert_proposal_runtime(
+                                    EngineTask::ProveProposal { .. } => metadata
+                                        .upsert_proposal_runtime(
                                             &task_id, submission, updated_at,
-                                        );
-                                    }
+                                        )?,
                                     EngineTask::Aggregate { .. } => {
-                                        metadata.upsert_aggregate_runtime(submission, updated_at);
+                                        metadata
+                                            .upsert_aggregate_runtime(submission, updated_at)?;
                                     }
                                     EngineTask::Preflight { .. }
                                     | EngineTask::Validate { .. }
                                     | EngineTask::Encode { .. }
-                                    | EngineTask::Proposal { .. } => {}
-                                    EngineTask::PublishProof { .. } => unreachable!(),
+                                    | EngineTask::Proposal { .. }
+                                    | EngineTask::PublishProof { .. } => unreachable!(),
                                 }
                             }
                             ProverProgress::Sp1NetworkSubmission(submission) => {
                                 match task.publication_source() {
-                                    EngineTask::ProveProposal { .. } => {
-                                        metadata.upsert_proposal_sp1_network_runtime(
+                                    EngineTask::ProveProposal { .. } => metadata
+                                        .upsert_proposal_sp1_network_runtime(
                                             &task_id, submission, updated_at,
-                                        );
-                                    }
-                                    EngineTask::Aggregate { .. } => {
-                                        metadata.upsert_aggregate_sp1_network_runtime(
+                                        )?,
+                                    EngineTask::Aggregate { .. } => metadata
+                                        .upsert_aggregate_sp1_network_runtime(
                                             submission, updated_at,
-                                        );
-                                    }
+                                        )?,
                                     EngineTask::Preflight { .. }
                                     | EngineTask::Validate { .. }
                                     | EngineTask::Encode { .. }
-                                    | EngineTask::Proposal { .. } => {}
-                                    EngineTask::PublishProof { .. } => unreachable!(),
+                                    | EngineTask::Proposal { .. }
+                                    | EngineTask::PublishProof { .. } => unreachable!(),
                                 }
                             }
                         }
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some("submission_registered".to_string());
+                        Ok(())
+                    })
+                    .map_err(|error| {
+                        RemoteSubmissionConflict::new(format!(
+                            "provider progress is not a canonical runtime checkpoint: {error}"
+                        ))
                     })?;
-                    record.updated_at = updated_at;
-                    Ok(())
+                    record.runner_status = RunnerStatus::Allocated;
+                    record.error = None;
+                    Ok(true)
                 },
             )
             .await;
         match result {
-            Ok(()) => Ok(()),
+            Ok(updated) if updated > 0 => Ok(()),
+            Ok(_) => Err(EngineObserverError::RuntimeInactive(format!(
+                "provider checkpoint matched no active runtime root for {}",
+                Self::root_task_ref(id)
+            ))),
             Err(error) => Err(self.progress_sync_error(id, runtime_permit, &error)),
         }
     }
@@ -1735,6 +1714,7 @@ impl EngineObserver for RuntimeObserver {
                             metadata.runtime.active_stage =
                                 Some(stage_name_from_pipeline_stage(*stage).to_string());
                             metadata.runtime.last_event = Some("stage_completed".to_string());
+                            Ok(())
                         })?;
                         record.updated_at = updated_at;
                         Ok(())
@@ -1785,6 +1765,7 @@ impl EngineObserver for RuntimeObserver {
                         metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
                         metadata.runtime.active_stage = Some(stage.to_string());
                         metadata.runtime.last_event = Some("failed".to_string());
+                        Ok(())
                     })?;
                     record.updated_at = updated_at;
                     Ok(())
@@ -1818,13 +1799,8 @@ impl EngineObserver for RuntimeObserver {
     ) -> std::result::Result<Option<PendingProofCheckpoint>, ProgressPersistenceError> {
         let permanent = |message: String| ProgressPersistenceError::Permanent(message);
         let source = task.publication_source();
-        let record = match source {
-            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, source)
-                .await
-                .map_err(|error| {
-                    permanent(format!("failed to load runtime checkpoint: {error}"))
-                })?,
+        match source {
+            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => {}
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
@@ -1833,38 +1809,132 @@ impl EngineObserver for RuntimeObserver {
                 unreachable!()
             }
         }
-        .ok_or_else(|| {
-            permanent("runtime task record is missing while loading checkpoint".into())
-        })?;
 
-        let metadata = TaskMetadata::decode_for_record(&record).map_err(|error| {
-            permanent(format!("runtime checkpoint metadata is invalid: {error}"))
-        })?;
         let task_id = Self::root_task_ref(id);
-        let runtime = match source {
-            EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
-            EngineTask::Aggregate { .. } => metadata.aggregate_runtime(),
-            EngineTask::Preflight { .. }
-            | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => None,
-            EngineTask::PublishProof { .. } => {
-                unreachable!()
+        let mut has_active_owner = false;
+        let mut matched_owner = false;
+        let mut checkpoints = BTreeMap::<u32, (i64, PendingProofCheckpoint)>::new();
+        for record in self.find_root_records(id).await {
+            if !self.record_matches_observer(id, &record).map_err(|error| {
+                permanent(format!(
+                    "failed to validate runtime checkpoint owner: {error}"
+                ))
+            })? {
+                continue;
             }
-        };
-        let Some(runtime) = runtime else {
-            return Ok(None);
-        };
-        if !runtime.has_remote_submission_progress() {
-            return Ok(None);
+            matched_owner = true;
+            has_active_owner |= !is_terminal_status(record.runner_status);
+            let metadata = TaskMetadata::decode_for_record(&record).map_err(|error| {
+                permanent(format!("runtime checkpoint metadata is invalid: {error}"))
+            })?;
+            let runtime = match source {
+                EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
+                EngineTask::Aggregate { .. } => metadata.aggregate_runtime(),
+                EngineTask::Preflight { .. }
+                | EngineTask::Validate { .. }
+                | EngineTask::Encode { .. }
+                | EngineTask::Proposal { .. }
+                | EngineTask::PublishProof { .. } => unreachable!(),
+            };
+            let Some(runtime) = runtime.filter(|runtime| runtime.has_remote_submission_progress())
+            else {
+                continue;
+            };
+            let checkpoint = build_pending_proof_checkpoint(runtime, backend)?;
+            let attempt = checkpoint.attempt.get();
+            match checkpoints.entry(attempt) {
+                std::collections::btree_map::Entry::Occupied(mut selected) => {
+                    let (selected_updated_at, current) = selected.get();
+                    if prefer_checkpoint_candidate(
+                        current,
+                        *selected_updated_at,
+                        &checkpoint,
+                        runtime.updated_at,
+                    )
+                    .map_err(|reason| {
+                        permanent(format!(
+                            "conflicting provider checkpoints share attempt {} for task {task_id}: {reason}",
+                            checkpoint.attempt
+                        ))
+                    })? {
+                        selected.insert((runtime.updated_at, checkpoint));
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(selected) => {
+                    selected.insert((runtime.updated_at, checkpoint));
+                }
+            }
         }
-
-        build_pending_proof_checkpoint(runtime, backend).map(Some)
+        if !matched_owner {
+            return Err(permanent(
+                "runtime task record is missing while loading checkpoint".into(),
+            ));
+        }
+        if !has_active_owner {
+            return Err(permanent(format!(
+                "runtime task {task_id} has no active owner while loading checkpoint"
+            )));
+        }
+        Ok(checkpoints
+            .into_iter()
+            .next_back()
+            .map(|(_, (_, checkpoint))| checkpoint))
     }
 }
 
 fn checkpoint_error(message: impl Into<String>) -> ProgressPersistenceError {
     ProgressPersistenceError::Permanent(message.into())
+}
+
+fn prefer_checkpoint_candidate(
+    selected: &PendingProofCheckpoint,
+    selected_updated_at: i64,
+    candidate: &PendingProofCheckpoint,
+    candidate_updated_at: i64,
+) -> std::result::Result<bool, String> {
+    if selected.backend != candidate.backend
+        || selected.attempt != candidate.attempt
+        || selected.submitted_at_secs != candidate.submitted_at_secs
+        || selected.deadline_secs != candidate.deadline_secs
+    {
+        return Err("checkpoint identity differs".to_string());
+    }
+
+    match selected.backend {
+        NetworkProverBackend::Sp1 => {
+            let selected_resume = selected
+                .decode_payload_for::<Sp1NetworkSubmissionProgress>(NetworkProverBackend::Sp1)
+                .map_err(|error| error.to_string())?;
+            let candidate_resume = candidate
+                .decode_payload_for::<Sp1NetworkSubmissionProgress>(NetworkProverBackend::Sp1)
+                .map_err(|error| error.to_string())?;
+            if selected_resume != candidate_resume {
+                return Err("SP1 submission identity differs".to_string());
+            }
+            Ok(candidate_updated_at > selected_updated_at)
+        }
+        NetworkProverBackend::Boundless => {
+            let mut selected_resume = selected
+                .decode_payload_for::<BoundlessSubmissionResume>(NetworkProverBackend::Boundless)
+                .map_err(|error| error.to_string())?;
+            let mut candidate_resume = candidate
+                .decode_payload_for::<BoundlessSubmissionResume>(NetworkProverBackend::Boundless)
+                .map_err(|error| error.to_string())?;
+            let selected_tx_hash = selected_resume.remote_tx_hash.take();
+            let candidate_tx_hash = candidate_resume.remote_tx_hash.take();
+            if selected_resume != candidate_resume {
+                return Err("Boundless submission identity differs".to_string());
+            }
+            match (selected_tx_hash, candidate_tx_hash) {
+                (Some(selected), Some(candidate)) if selected != candidate => {
+                    Err("Boundless transaction hash differs".to_string())
+                }
+                (None, Some(_)) => Ok(true),
+                (Some(_), None) => Ok(false),
+                _ => Ok(candidate_updated_at > selected_updated_at),
+            }
+        }
+    }
 }
 
 fn build_pending_proof_checkpoint(
@@ -1886,6 +1956,7 @@ fn build_pending_proof_checkpoint(
                 provider_request_id: runtime.provider_request_id.clone().ok_or_else(|| {
                     checkpoint_error("SP1 checkpoint is missing provider_request_id")
                 })?,
+                submitted_at: required(runtime.submitted_at, "submitted_at")?,
                 network_mode: runtime
                     .sp1_network_mode
                     .ok_or_else(|| checkpoint_error("SP1 checkpoint is missing network_mode"))?,
@@ -1908,7 +1979,7 @@ fn build_pending_proof_checkpoint(
             PendingProofCheckpoint::from_payload(
                 backend,
                 attempt,
-                required(runtime.submitted_at, "submitted_at")?,
+                resume.submitted_at,
                 required(runtime.expires_at, "expires_at")?,
                 &resume,
             )
@@ -1920,6 +1991,16 @@ fn build_pending_proof_checkpoint(
                     checkpoint_error("Boundless checkpoint is missing provider_request_id")
                 })?,
                 remote_tx_hash: runtime.remote_tx_hash.clone(),
+                image_ref: runtime
+                    .image_ref
+                    .clone()
+                    .ok_or_else(|| checkpoint_error("Boundless checkpoint is missing image_ref"))?,
+                deployment: runtime.deployment.clone().ok_or_else(|| {
+                    checkpoint_error("Boundless checkpoint is missing deployment")
+                })?,
+                offchain: runtime
+                    .offchain
+                    .ok_or_else(|| checkpoint_error("Boundless checkpoint is missing offchain"))?,
                 expires_at: required(runtime.expires_at, "expires_at")?,
                 lock_expires_at: required(runtime.lock_expires_at, "lock_expires_at")?,
                 submitted_at: required(runtime.submitted_at, "submitted_at")?,
@@ -1948,15 +2029,16 @@ fn build_pending_proof_checkpoint(
     }
 }
 
-fn update_task_metadata<F>(record: &mut RuntimeTaskRecord, mutator: F) -> Result<()>
+fn update_task_metadata<T, F>(record: &mut RuntimeTaskRecord, mutator: F) -> Result<T>
 where
-    F: FnOnce(&mut TaskMetadata),
+    F: FnOnce(&mut TaskMetadata) -> Result<T>,
 {
     let mut metadata = TaskMetadata::decode_for_record(record)?;
-    mutator(&mut metadata);
+    let output = mutator(&mut metadata)?;
+    metadata.validate_runtime_progress(record.route)?;
     record.metadata =
         serde_json::to_value(metadata).context("failed to serialize task metadata")?;
-    Ok(())
+    Ok(output)
 }
 
 const fn is_terminal_status(status: RunnerStatus) -> bool {
@@ -2131,6 +2213,100 @@ mod tests {
             .await?
             .map(|checkpoint| checkpoint.decode_payload_for(backend).map_err(Into::into))
             .transpose()
+    }
+
+    #[test]
+    fn newer_sp1_checkpoint_cannot_replace_a_different_same_attempt_submission() {
+        let mut progress = Sp1NetworkSubmissionProgress {
+            provider_request_id: "request-a".to_string(),
+            submitted_at: 100,
+            network_mode: Sp1NetworkMode::Reserved,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+            skip_simulation: true,
+            cycle_limit: 1_000_000,
+            timeout_secs: 3_600,
+            attempt: 1,
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
+        };
+        let selected = PendingProofCheckpoint::from_payload(
+            NetworkProverBackend::Sp1,
+            std::num::NonZeroU32::MIN,
+            100,
+            3_700,
+            &progress,
+        )
+        .expect("valid selected checkpoint");
+        progress.provider_request_id = "request-b".to_string();
+        let candidate = PendingProofCheckpoint::from_payload(
+            NetworkProverBackend::Sp1,
+            std::num::NonZeroU32::MIN,
+            100,
+            3_700,
+            &progress,
+        )
+        .expect("valid candidate checkpoint");
+
+        let error = prefer_checkpoint_candidate(&selected, 10, &candidate, 20)
+            .expect_err("a newer timestamp must not hide a conflicting provider request");
+
+        assert_eq!(error, "SP1 submission identity differs");
+    }
+
+    #[test]
+    fn boundless_transaction_hash_is_a_monotonic_same_attempt_refinement() {
+        let mut resume = BoundlessSubmissionResume {
+            provider_request_id: "request-a".to_string(),
+            remote_tx_hash: None,
+            image_ref: "image-a".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            expires_at: 200,
+            lock_expires_at: 180,
+            submitted_at: 100,
+            max_price_multiplier: 1,
+            max_price_wei: Some("1000".to_string()),
+            rebid_attempt: 1,
+        };
+        let pending = PendingProofCheckpoint::from_payload(
+            NetworkProverBackend::Boundless,
+            std::num::NonZeroU32::MIN,
+            100,
+            200,
+            &resume,
+        )
+        .expect("valid pending checkpoint");
+        resume.remote_tx_hash = Some("0xtx".to_string());
+        let dispatched = PendingProofCheckpoint::from_payload(
+            NetworkProverBackend::Boundless,
+            std::num::NonZeroU32::MIN,
+            100,
+            200,
+            &resume,
+        )
+        .expect("valid dispatched checkpoint");
+
+        assert!(
+            prefer_checkpoint_candidate(&pending, 20, &dispatched, 10)
+                .expect("adding the transaction hash is compatible")
+        );
+        assert!(
+            !prefer_checkpoint_candidate(&dispatched, 10, &pending, 20)
+                .expect("removing the transaction hash is compatible but stale")
+        );
+
+        resume.remote_tx_hash = Some("0xother".to_string());
+        let conflicting = PendingProofCheckpoint::from_payload(
+            NetworkProverBackend::Boundless,
+            std::num::NonZeroU32::MIN,
+            100,
+            200,
+            &resume,
+        )
+        .expect("valid conflicting checkpoint");
+        let error = prefer_checkpoint_candidate(&dispatched, 10, &conflicting, 20)
+            .expect_err("two transaction hashes cannot identify the same submission attempt");
+        assert_eq!(error, "Boundless transaction hash differs");
     }
 
     include!("runtime_observer_state_tests.rs");
@@ -2507,6 +2683,13 @@ mod tests {
         runner_status: RunnerStatus,
     ) -> Result<()> {
         let task_ref = proposal_task_ref(pipeline, request);
+        let route = if pipeline == PipelineKey::ShastaSp1 {
+            "sp1/network"
+                .parse::<PipelineRoute>()
+                .expect("parse SP1 network route")
+        } else {
+            pipeline.route()
+        };
         let (network, l1_network) = network_pair
             .split_once('/')
             .unwrap_or((network_pair, "ethereum"));
@@ -2514,7 +2697,7 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
                 pipeline_key: pipeline,
-                route: pipeline.route(),
+                route,
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: network_pair.to_string(),
                 artifact_refs: vec![task_ref.clone()],
@@ -2608,7 +2791,7 @@ mod tests {
                 remote_tx_hash: Some("0xabcd".to_string()),
                 expires_at: future_expires_at,
                 lock_expires_at: future_expires_at - 600,
-                submitted_at: future_expires_at - 300,
+                submitted_at: future_expires_at - 900,
                 image_ref: "0ximage".to_string(),
                 deployment: "base".to_string(),
                 offchain: false,
@@ -2638,7 +2821,7 @@ mod tests {
         assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
         assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(runtime_entry.expires_at, Some(future_expires_at));
-        assert_eq!(runtime_entry.submitted_at, Some(future_expires_at - 300));
+        assert_eq!(runtime_entry.submitted_at, Some(future_expires_at - 900));
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
@@ -2653,7 +2836,7 @@ mod tests {
             .get_task("task_public")
             .await?
             .expect("runtime task");
-        record.runner_status = RunnerStatus::Failed;
+        record.runner_status = RunnerStatus::Allocated;
         runtime.upsert_task(&record).await?;
         let resumed = load_checkpoint_payload::<BoundlessSubmissionResume>(
             &observer,
@@ -2669,9 +2852,12 @@ mod tests {
         .expect("boundless submission can resume");
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(resumed.image_ref, "0ximage");
+        assert_eq!(resumed.deployment, "base");
+        assert!(!resumed.offchain);
         assert_eq!(resumed.expires_at, future_expires_at);
         assert_eq!(resumed.lock_expires_at, future_expires_at - 600);
-        assert_eq!(resumed.submitted_at, future_expires_at - 300);
+        assert_eq!(resumed.submitted_at, future_expires_at - 900);
         assert_eq!(resumed.max_price_multiplier, 4);
         assert_eq!(resumed.max_price_wei.as_deref(), Some("9000000000000"));
         assert_eq!(resumed.rebid_attempt, 3);
@@ -2687,6 +2873,8 @@ mod tests {
             .get_mut(&task_ref)
             .expect("proposal runtime exists");
         runtime_entry.submitted_at = None;
+        runtime_entry.image_ref = None;
+        runtime_entry.deployment = None;
         runtime_entry.max_price_multiplier = None;
         runtime_entry.rebid_attempt = None;
         runtime_entry.lock_expires_at = None;
@@ -2720,9 +2908,11 @@ mod tests {
                 .proposals
                 .get_mut(&task_ref)
                 .expect("proposal runtime exists");
+            runtime_entry.image_ref = Some("0ximage".to_string());
+            runtime_entry.deployment = Some("base".to_string());
             runtime_entry.expires_at = Some(expired_at);
-            runtime_entry.lock_expires_at = Some(future_expires_at - 600);
-            runtime_entry.submitted_at = Some(future_expires_at - 300);
+            runtime_entry.lock_expires_at = Some(expired_at.saturating_sub(300));
+            runtime_entry.submitted_at = Some(expired_at.saturating_sub(600));
             runtime_entry.max_price_multiplier = Some(4);
             runtime_entry.rebid_attempt = Some(5);
         }
@@ -3922,7 +4112,7 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1".to_string(),
                 pipeline_key: PipelineKey::ShastaSp1,
-                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: vec![task_ref.clone()],
@@ -3956,7 +4146,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaSp1.route(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
         );
         drive_engine_progress(
             &observer,
@@ -3968,6 +4158,7 @@ mod tests {
             &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                 attempt: 1,
                 provider_request_id: "0xsp1".to_string(),
+                submitted_at: now_secs(),
                 network_mode: Sp1NetworkMode::Reserved,
                 fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                 skip_simulation: true,
@@ -4007,7 +4198,7 @@ mod tests {
             .get_task("task_public_sp1")
             .await?
             .expect("runtime task exists");
-        record.runner_status = RunnerStatus::Failed;
+        record.runner_status = RunnerStatus::Allocated;
         runtime.upsert_task(&record).await?;
         let resumed = load_checkpoint_payload::<Sp1NetworkSubmissionProgress>(
             &observer,
@@ -4070,7 +4261,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            pipeline.route(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
         );
         let error = drive_engine_progress(
             &observer,
@@ -4082,6 +4273,7 @@ mod tests {
             &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                 attempt: 1,
                 provider_request_id: "0xaccepted".to_string(),
+                submitted_at: now_secs(),
                 network_mode: Sp1NetworkMode::Reserved,
                 fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                 skip_simulation: true,
@@ -4099,6 +4291,360 @@ mod tests {
         assert!(!runtime.accepts_mutations());
         assert!(matches!(error, EngineObserverError::RuntimeInactive(_)));
         assert!(runtime.check_readiness().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_checkpoint_includes_a_root_joined_after_execution_admission() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-late-provider-owner",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: proposal_task_id.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "root-a",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
+        );
+        let execution_permit = engine_execution_permit(&observer, &proposal_task_id, &task).await?;
+
+        register_observer_task(
+            runtime.as_ref(),
+            "root-b",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let progress = Sp1NetworkSubmissionProgress {
+            attempt: 1,
+            provider_request_id: "0xshared".to_string(),
+            submitted_at: now_secs(),
+            network_mode: Sp1NetworkMode::Reserved,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+            skip_simulation: true,
+            cycle_limit: 1_000_000,
+            timeout_secs: 3_600,
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
+        };
+        EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(progress),
+            &checkpoint_permit(&runtime),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        for task_id in ["root-a", "root-b"] {
+            let record = runtime.get_task(task_id).await?.expect("shared root");
+            let metadata = TaskMetadata::decode_for_record(&record)?;
+            assert_eq!(
+                metadata
+                    .proposal_runtime(&RuntimeObserver::root_task_ref(&proposal_task_id))
+                    .and_then(|runtime| runtime.provider_request_id.as_deref()),
+                Some("0xshared"),
+                "{task_id}"
+            );
+        }
+
+        let root_a = runtime.get_task("root-a").await?.expect("root a");
+        assert_eq!(
+            runtime
+                .cancel_task_if_current(&root_a.lifetime(), None)
+                .await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        );
+        let resumed = load_checkpoint_payload::<Sp1NetworkSubmissionProgress>(
+            &observer,
+            &proposal_task_id,
+            &task,
+            NetworkProverBackend::Sp1,
+        )
+        .await?
+        .expect("remaining owner must retain the shared provider checkpoint");
+        assert_eq!(resumed.provider_request_id, "0xshared");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_attempt_provider_identity_drift_is_permanently_rejected() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-provider-identity-drift",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: proposal_task_id.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "root-a",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
+        );
+        let execution_permit = engine_execution_permit(&observer, &proposal_task_id, &task).await?;
+        let mut progress = Sp1NetworkSubmissionProgress {
+            attempt: 1,
+            provider_request_id: "0xoriginal".to_string(),
+            submitted_at: now_secs(),
+            network_mode: Sp1NetworkMode::Reserved,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+            skip_simulation: true,
+            cycle_limit: 1_000_000,
+            timeout_secs: 3_600,
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
+        };
+        EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(progress.clone()),
+            &checkpoint_permit(&runtime),
+            &execution_permit,
+        )
+        .await
+        .expect("persist original provider identity");
+
+        progress.provider_request_id = "0xconflict".to_string();
+        let error = EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(progress),
+            &checkpoint_permit(&runtime),
+            &execution_permit,
+        )
+        .await
+        .expect_err("one attempt cannot replace its provider identity");
+        assert!(matches!(error, EngineObserverError::ProgressRejected(_)));
+
+        let resumed = load_checkpoint_payload::<Sp1NetworkSubmissionProgress>(
+            &observer,
+            &proposal_task_id,
+            &task,
+            NetworkProverBackend::Sp1,
+        )
+        .await?
+        .expect("original checkpoint remains durable");
+        assert_eq!(resumed.provider_request_id, "0xoriginal");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn late_owner_recovers_checkpoint_from_a_cancelled_shared_owner() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-post-checkpoint-owner",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: proposal_task_id.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "root-a",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
+        );
+        let execution_permit = engine_execution_permit(&observer, &proposal_task_id, &task).await?;
+        EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                attempt: 1,
+                provider_request_id: "0xoriginal".to_string(),
+                submitted_at: now_secs(),
+                network_mode: Sp1NetworkMode::Reserved,
+                fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                skip_simulation: true,
+                cycle_limit: 1_000_000,
+                timeout_secs: 3_600,
+                max_price_per_pgu: None,
+                auction_timeout_secs: None,
+            }),
+            &checkpoint_permit(&runtime),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        register_observer_task(
+            runtime.as_ref(),
+            "root-b",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let root_a = runtime.get_task("root-a").await?.expect("root a");
+        runtime
+            .cancel_task_if_current(&root_a.lifetime(), None)
+            .await?;
+
+        let resumed = load_checkpoint_payload::<Sp1NetworkSubmissionProgress>(
+            &observer,
+            &proposal_task_id,
+            &task,
+            NetworkProverBackend::Sp1,
+        )
+        .await?
+        .expect("late owner must reuse the shared request after restart");
+        assert_eq!(resumed.provider_request_id, "0xoriginal");
+        EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(resumed.clone()),
+            &checkpoint_permit(&runtime),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let root_b = runtime.get_task("root-b").await?.expect("root b");
+        let root_b_metadata = TaskMetadata::decode_for_record(&root_b)?;
+        let root_b_checkpoint = root_b_metadata
+            .proposal_runtime(&RuntimeObserver::root_task_ref(&proposal_task_id))
+            .expect("resumed owner receives the durable checkpoint");
+        assert_eq!(root_b_checkpoint.submitted_at, Some(resumed.submitted_at));
+        let reloaded = load_checkpoint_payload::<Sp1NetworkSubmissionProgress>(
+            &observer,
+            &proposal_task_id,
+            &task,
+            NetworkProverBackend::Sp1,
+        )
+        .await?
+        .expect("reprojected checkpoint remains canonical across owners");
+        assert_eq!(reloaded, resumed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_root_rejects_a_late_provider_checkpoint() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-cancelled-progress",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_progress_cancelled",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
+        );
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: proposal_task_id.clone(),
+        };
+        let execution_permit = engine_execution_permit(&observer, &proposal_task_id, &task).await?;
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        let record = runtime
+            .get_task("task_progress_cancelled")
+            .await?
+            .expect("runtime task");
+        assert_eq!(
+            runtime
+                .cancel_task_if_current(&record.lifetime(), None)
+                .await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        );
+
+        let error = EngineObserver::on_task_progress(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                attempt: 1,
+                provider_request_id: "0xlate".to_string(),
+                submitted_at: now_secs(),
+                network_mode: Sp1NetworkMode::Reserved,
+                fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                skip_simulation: true,
+                cycle_limit: 1_000_000,
+                timeout_secs: 3_600,
+                max_price_per_pgu: None,
+                auction_timeout_secs: None,
+            }),
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect_err("cancelled root must close provider checkpoint admission");
+
+        assert!(matches!(error, EngineObserverError::RuntimeInactive(_)));
+        let cancelled = runtime
+            .get_task("task_progress_cancelled")
+            .await?
+            .expect("runtime task");
+        assert_eq!(cancelled.runner_status, RunnerStatus::Cancelled);
+        let metadata = TaskMetadata::decode_for_record(&cancelled)?;
+        assert!(
+            metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&proposal_task_id))
+                .is_none_or(|runtime| runtime.provider_request_id.is_none())
+        );
         Ok(())
     }
 
@@ -4125,7 +4671,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            pipeline.route(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
         );
         let task = EngineTask::ProveProposal {
             request,
@@ -4142,6 +4688,7 @@ mod tests {
             &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                 attempt: 1,
                 provider_request_id: "0xaccepted".to_string(),
+                submitted_at: now_secs(),
                 network_mode: Sp1NetworkMode::Reserved,
                 fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                 skip_simulation: true,
@@ -4183,7 +4730,7 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_load".to_string(),
                 pipeline_key: PipelineKey::ShastaSp1,
-                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: vec![task_ref.clone(), other_task_ref.clone()],
@@ -4228,7 +4775,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaSp1.route(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
         );
         drive_engine_progress(
             &observer,
@@ -4240,6 +4787,7 @@ mod tests {
             &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                 attempt: 1,
                 provider_request_id: "0xsp1-proposal".to_string(),
+                submitted_at: now_secs(),
                 network_mode: Sp1NetworkMode::Reserved,
                 fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                 skip_simulation: true,
@@ -4305,7 +4853,7 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_aggregate".to_string(),
                 pipeline_key: PipelineKey::ShastaSp1,
-                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: vec![
@@ -4342,7 +4890,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaSp1.route(),
+            "sp1/network".parse::<PipelineRoute>().expect("parse route"),
         );
         assert!(
             load_checkpoint_payload::<Sp1NetworkSubmissionProgress>(
@@ -4368,6 +4916,7 @@ mod tests {
             &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                 attempt: 1,
                 provider_request_id: "0xsp1-aggregate".to_string(),
+                submitted_at: now_secs(),
                 network_mode: Sp1NetworkMode::Reserved,
                 fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                 skip_simulation: true,

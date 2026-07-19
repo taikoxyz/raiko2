@@ -1561,11 +1561,13 @@ const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
 
 const fn sp1_network_submission_progress(
     provider_request_id: String,
+    submitted_at: u64,
     config: &Sp1Config,
     attempt: u32,
 ) -> Sp1NetworkSubmissionProgress {
     Sp1NetworkSubmissionProgress {
         provider_request_id,
+        submitted_at,
         network_mode: config.network_mode,
         fulfillment_strategy: config.fulfillment_strategy,
         skip_simulation: config.skip_simulation,
@@ -1580,22 +1582,16 @@ const fn sp1_network_submission_progress(
 async fn notify_sp1_network_submission(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     permit: &crate::SubmissionCheckpointPermit,
-    provider_request_id: String,
-    config: &Sp1Config,
-    attempt: u32,
+    progress: &Sp1NetworkSubmissionProgress,
 ) -> RaikoResult<()> {
-    let progress = ProverProgress::Sp1NetworkSubmission(sp1_network_submission_progress(
-        provider_request_id,
-        config,
-        attempt,
-    ));
+    let progress = ProverProgress::Sp1NetworkSubmission(progress.clone());
     crate::persist_prover_progress(observer, &progress, "sp1_network_submission", permit).await
 }
 
 fn load_sp1_resume(
     checkpoint: Option<crate::PendingProofCheckpoint>,
     config: &Sp1Config,
-) -> RaikoResult<(u64, Option<u64>, Option<String>)> {
+) -> RaikoResult<(u64, Option<u64>, Option<Sp1NetworkSubmissionProgress>)> {
     let Some(checkpoint) = checkpoint else {
         return Ok((1, None, None));
     };
@@ -1610,6 +1606,13 @@ fn load_sp1_resume(
     if resume.provider_request_id.is_empty() {
         return Err(RaikoError::Guest(
             "SP1 checkpoint has empty provider request id".to_string(),
+        ));
+    }
+    if resume.submitted_at != checkpoint.submitted_at_secs
+        || resume.submitted_at.checked_add(resume.timeout_secs) != Some(checkpoint.deadline_secs)
+    {
+        return Err(RaikoError::Guest(
+            "SP1 checkpoint timestamps do not match its provider payload".to_string(),
         ));
     }
     let target_matches = resume.network_mode == config.network_mode
@@ -1632,7 +1635,7 @@ fn load_sp1_resume(
     Ok((
         u64::from(checkpoint.attempt.get()),
         Some(checkpoint.deadline_secs),
-        Some(resume.provider_request_id),
+        Some(resume),
     ))
 }
 
@@ -1646,18 +1649,12 @@ async fn submit_or_resume_sp1_request(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     stage: &str,
     request_attempt: u64,
-    stored_request_id: Option<String>,
+    stored_submission: Option<Sp1NetworkSubmissionProgress>,
 ) -> RaikoResult<(String, bool)> {
-    if let Some(request_id) = stored_request_id {
+    if let Some(submission) = stored_submission {
         let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
-        notify_sp1_network_submission(
-            observer,
-            &checkpoint_permit,
-            request_id.clone(),
-            config,
-            u32::try_from(request_attempt).unwrap_or(u32::MAX),
-        )
-        .await?;
+        notify_sp1_network_submission(observer, &checkpoint_permit, &submission).await?;
+        let request_id = submission.provider_request_id;
         tracing::info!(
             stage,
             request_id = %request_id,
@@ -1697,14 +1694,13 @@ async fn submit_or_resume_sp1_request(
         RaikoError::Guest(format!("SP1 {stage} proof request failed: {error}"))
     })?;
     let request_id = request_id.to_string();
-    notify_sp1_network_submission(
-        observer,
-        &checkpoint_permit,
+    let submission = sp1_network_submission_progress(
         request_id.clone(),
+        sp1_now_secs(),
         config,
         u32::try_from(request_attempt).unwrap_or(u32::MAX),
-    )
-    .await?;
+    );
+    notify_sp1_network_submission(observer, &checkpoint_permit, &submission).await?;
     tracing::info!(
         stage,
         request_id = %request_id,
@@ -1739,7 +1735,7 @@ async fn request_network_proof(
     } else {
         None
     };
-    let (mut request_attempt, resumed_deadline_secs, mut stored_request_id) =
+    let (mut request_attempt, resumed_deadline_secs, mut stored_submission) =
         load_sp1_resume(checkpoint, config)?;
 
     loop {
@@ -1752,7 +1748,7 @@ async fn request_network_proof(
             observer.as_ref(),
             stage,
             request_attempt,
-            stored_request_id.take(),
+            stored_submission.take(),
         )
         .await?;
 
@@ -1999,8 +1995,8 @@ mod tests {
         decode_execution_status, decode_fulfillment_status, default_sp1_network_rpc_url,
         encode_sp1_onchain_payload, load_sp1_resume, load_sp1_subproof_for_aggregation,
         notify_sp1_network_submission, remote_verifier_program_vkey, remote_verifier_proof_bytes,
-        resolve_sp1_network_rpc_url, sp1_resume_wait_plan, sp1_sdk_network_mode,
-        sp1_transient_poll_status, sp1_vk_uuid,
+        resolve_sp1_network_rpc_url, sp1_network_submission_progress, sp1_resume_wait_plan,
+        sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
     };
     use crate::{
         Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress, sp1_config::Sp1Config,
@@ -2111,6 +2107,7 @@ mod tests {
         let config = Sp1Config::default();
         let resume = Sp1NetworkSubmissionProgress {
             provider_request_id: "0x1234".into(),
+            submitted_at: 100,
             network_mode: Sp1NetworkMode::Mainnet,
             fulfillment_strategy: Sp1FulfillmentStrategy::Auction,
             skip_simulation: config.skip_simulation,
@@ -2124,7 +2121,7 @@ mod tests {
             crate::NetworkProverBackend::Sp1,
             NonZeroU32::new(1).expect("non-zero attempt"),
             100,
-            200,
+            100 + config.timeout_secs,
             &resume,
         )
         .expect("checkpoint");
@@ -2160,16 +2157,16 @@ mod tests {
         });
         let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
         let permit = crate::SubmissionCheckpointPermit::untracked();
-
-        notify_sp1_network_submission(
-            Some(&progress_observer),
-            &permit,
+        let progress = sp1_network_submission_progress(
             "0x1234".to_string(),
+            100,
             &super::Sp1Config::default(),
             1,
-        )
-        .await
-        .expect("checkpoint eventually persists");
+        );
+
+        notify_sp1_network_submission(Some(&progress_observer), &permit, &progress)
+            .await
+            .expect("checkpoint eventually persists");
 
         assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
     }
@@ -2181,16 +2178,16 @@ mod tests {
         });
         let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
         let permit = crate::SubmissionCheckpointPermit::untracked();
-
-        let error = notify_sp1_network_submission(
-            Some(&progress_observer),
-            &permit,
+        let progress = sp1_network_submission_progress(
             "0x1234".to_string(),
+            100,
             &super::Sp1Config::default(),
             1,
-        )
-        .await
-        .expect_err("permanent runtime fence must stop checkpoint persistence");
+        );
+
+        let error = notify_sp1_network_submission(Some(&progress_observer), &permit, &progress)
+            .await
+            .expect_err("permanent runtime fence must stop checkpoint persistence");
 
         assert!(error.to_string().contains("runtime is draining"));
         assert_eq!(observer.calls.load(Ordering::SeqCst), 1);

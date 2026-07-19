@@ -111,6 +111,12 @@ pub struct BoundlessSubmissionProgress {
 pub struct BoundlessSubmissionResume {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
+    /// Exact guest image used by the submitted request.
+    pub image_ref: String,
+    /// Boundless market deployment that owns the request identifier.
+    pub deployment: String,
+    /// Transport used to submit the request to the Boundless market.
+    pub offchain: bool,
     pub expires_at: u64,
     /// Offer lock deadline in seconds since the UNIX epoch.
     pub lock_expires_at: u64,

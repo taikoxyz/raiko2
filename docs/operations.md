@@ -851,6 +851,17 @@ Operator notes:
   their artifact identity until deletion succeeds and are swept during startup reconciliation. A
   successor at the same artifact key does not inherit the predecessor incarnation's publication
   intent.
+- Boundless finalizes a non-zero market request ID and checkpoints it before either offchain or
+  onchain dispatch. Treat that durable checkpoint as the dispatch admission boundary: cancellation
+  that commits first prevents the provider call, while a later cancellation never causes a fresh
+  request ID. An uncertain offchain response is polled under the checkpointed ID and is not sent a
+  second time. The checkpoint is also bound to the exact guest image, Boundless market deployment,
+  and submission transport. Before changing any of them, settle or explicitly abandon every
+  outstanding remote request, then start the new configuration in a new namespace. An existing
+  checkpoint fails closed rather than crossing that provider boundary.
+- SP1 checkpoints the provider-assigned request ID together with its original submission time. A
+  restart or late-joining root reprojects that exact timestamp and deadline; it never extends the
+  paid request's timeout by treating recovery as a new submission.
 - Proposal execution nodes are position-independent: batch order never creates dependencies between
   proposals, and only aggregation depends on the proposal artifact tasks it consumes. Proof
   activation refreshes current owners under the short local lifecycle gate; newly registered distinct

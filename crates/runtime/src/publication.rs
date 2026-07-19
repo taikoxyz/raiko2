@@ -42,6 +42,10 @@ impl RuntimeManager {
         proof_ref: &str,
         proof_bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
         validate_canonical_proof(proof_bytes)?;
         let publication = self
             .publish_proof_artifact_bytes_locked(
@@ -218,8 +222,8 @@ fn validate_canonical_proof(bytes: &[u8]) -> Result<()> {
     let proof = serde_json::from_slice::<Proof>(bytes)
         .context("canonical proof artifact is not a valid normalized proof")?;
     anyhow::ensure!(
-        proof.proof.is_some(),
-        "canonical proof artifact has no proof payload"
+        proof.proof.is_some() || proof.quote.is_some(),
+        "canonical proof artifact has no proof or quote payload"
     );
     Ok(())
 }
@@ -329,13 +333,13 @@ mod tests {
         first
             .register_task(crate::TaskRegistration {
                 task_id: "root-recover-manifest".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: vec![proof_ref.into()],
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
                 metadata: serde_json::json!({ "network_pair": network_pair }),
-                request_fingerprint: None,
+                request_fingerprint: "root-recover-manifest".into(),
             })
             .await?;
         let owner = first
@@ -405,19 +409,33 @@ mod tests {
         runtime
             .register_task(crate::TaskRegistration {
                 task_id: "root-cancelled-after-commit".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: vec![proof_ref.into()],
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
                 metadata: serde_json::json!({ "network_pair": network_pair }),
-                request_fingerprint: None,
+                request_fingerprint: "root-cancelled-after-commit".into(),
             })
             .await?;
 
-        runtime
-            .upsert_pending_proof_publication(network_pair, pipeline, route, proof_ref, proof)
-            .await?;
+        let owner = runtime
+            .get_task("root-cancelled-after-commit")
+            .await?
+            .expect("registered root")
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    proof,
+                )
+                .await?
+        );
         let first = runtime
             .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
             .await?
@@ -431,9 +449,17 @@ mod tests {
         runtime
             .cancel_task_if_current(&root.lifetime(), None)
             .await?;
-        runtime
-            .invalidate_pending_proof_publication(network_pair, pipeline, route, proof_ref)
-            .await?;
+        assert!(
+            runtime
+                .release_pending_proof_publication_owner(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    root.incarnation_id,
+                )
+                .await?
+        );
         assert!(
             runtime
                 .read_proof_artifact_bytes(network_pair, pipeline, route, proof_ref)
@@ -445,19 +471,32 @@ mod tests {
         runtime
             .register_task(crate::TaskRegistration {
                 task_id: "replacement-root".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: vec![proof_ref.into()],
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
                 metadata: serde_json::json!({ "network_pair": network_pair }),
-                request_fingerprint: None,
+                request_fingerprint: "replacement-root".into(),
             })
             .await?;
 
-        runtime
-            .upsert_pending_proof_publication(network_pair, pipeline, route, proof_ref, proof)
-            .await?;
+        let replacement = runtime
+            .get_task("replacement-root")
+            .await?
+            .expect("replacement root");
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[replacement.incarnation_id],
+                    proof,
+                )
+                .await?
+        );
         let second = runtime
             .commit_proof_artifact_publication(network_pair, pipeline, route, proof_ref, proof)
             .await?

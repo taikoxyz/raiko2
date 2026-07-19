@@ -31,13 +31,6 @@ impl TaskStoreError {
         Self::Backend(Box::new(err))
     }
 
-    pub fn corrupt_data<E>(err: E) -> Self
-    where
-        E: Error + Send + Sync + 'static,
-    {
-        Self::CorruptData(Box::new(err))
-    }
-
     pub fn corrupt_msg(msg: impl Into<String>) -> Self {
         Self::CorruptData(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -110,7 +103,7 @@ where
     async fn set_state_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         state: TaskState<O, Id>,
         payload: Option<P>,
@@ -118,14 +111,14 @@ where
     async fn complete_success_and_release_dependents_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         output: O,
     ) -> StoreResult<bool>;
     async fn complete_failure_and_fail_dependents_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         error: String,
         dependent_error: String,
@@ -138,13 +131,13 @@ where
     async fn retry_now_if_running(
         &self,
         id: TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         priority: Priority,
         payload: P,
     ) -> StoreResult<bool> {
         let updated = self
-            .set_state_if_running(&id, worker, attempt, TaskState::Ready, Some(payload))
+            .set_state_if_running(&id, lease_token, attempt, TaskState::Ready, Some(payload))
             .await?;
         if updated {
             self.push_ready(priority, id).await?;
@@ -154,7 +147,7 @@ where
     async fn retry_later_if_running(
         &self,
         id: TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         error: String,
         payload: P,
@@ -163,7 +156,7 @@ where
         let updated = self
             .set_state_if_running(
                 &id,
-                worker,
+                lease_token,
                 attempt,
                 TaskState::Retrying {
                     error,
@@ -191,21 +184,26 @@ where
     async fn take_ready(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
     ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>>;
-    async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool>;
+    async fn renew_lease(
+        &self,
+        id: &TaskId<Id>,
+        lease_token: &str,
+        attempt: u32,
+    ) -> StoreResult<bool>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
-        worker: &str,
+        lease_token: &str,
     ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy)>> {
         loop {
             let Some(id) = self.pop_ready(prio).await? else {
                 return Ok(None);
             };
             if let Some((payload, priority, attempt, execution_policy)) =
-                self.take_ready(&id, worker).await?
+                self.take_ready(&id, lease_token).await?
             {
                 return Ok(Some((id, payload, priority, attempt, execution_policy)));
             }
@@ -218,7 +216,7 @@ where
     async fn checkpoint_payload_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         payload: P,
         execution_policy: TaskExecutionPolicy,
@@ -254,6 +252,7 @@ struct OwnerGraph<Id> {
 
 struct TaskRecord<P, O, Id> {
     definition_payload: P,
+    definition_execution_policy: TaskExecutionPolicy,
     payload: Option<P>,
     state: TaskState<O, Id>,
     priority: Priority,
@@ -419,7 +418,7 @@ where
 {
     record.definition_payload == node.task.payload
         && record.priority == node.task.priority
-        && record.execution_policy == node.execution_policy
+        && record.definition_execution_policy == node.execution_policy
         && graph_task_sets_match(&record.dependencies, &node.dependencies)
 }
 
@@ -537,7 +536,7 @@ fn take_ready_locked<P, O, Id>(
     inner: &mut Inner<P, O, Id>,
     lease: Duration,
     id: &TaskId<Id>,
-    worker: &str,
+    lease_token: &str,
 ) -> StoreResult<Option<TakenReadyTask<P>>>
 where
     P: Clone,
@@ -566,7 +565,7 @@ where
     record.attempt = record.attempt.saturating_add(1);
     let attempt = record.attempt;
     record.state = TaskState::Running {
-        worker: worker.to_string(),
+        lease_token: lease_token.to_string(),
         attempt,
     };
     record.lease_sequence = lease_sequence;
@@ -666,7 +665,9 @@ where
                 .expect("attached graph task was checked before recovery reset");
             record.payload = Some(node.task.payload.clone());
             record.state = state;
+            record.attempt = 0;
             record.lease_until_ms = None;
+            record.execution_policy = node.execution_policy.clone();
             record.dependencies.clone_from(&node.dependencies);
             record.priority
         };
@@ -681,7 +682,7 @@ where
 fn running_lease_matches<P, O, Id>(
     inner: &Inner<P, O, Id>,
     id: &TaskId<Id>,
-    worker: &str,
+    lease_token: &str,
     attempt: u32,
 ) -> bool
 where
@@ -690,9 +691,9 @@ where
     matches!(
         inner.tasks.get(id).map(|record| &record.state),
         Some(TaskState::Running {
-            worker: current_worker,
+            lease_token: current_lease_token,
             attempt: current_attempt,
-        }) if current_worker == worker && *current_attempt == attempt
+        }) if current_lease_token == lease_token && *current_attempt == attempt
     )
 }
 
@@ -766,7 +767,11 @@ where
     }
 }
 
-fn cancel_task_locked<P, O, Id>(inner: &mut Inner<P, O, Id>, id: &TaskId<Id>) -> StoreResult<bool>
+fn cancel_task_locked<P, O, Id>(
+    inner: &mut Inner<P, O, Id>,
+    id: &TaskId<Id>,
+    dependent_error: &str,
+) -> StoreResult<bool>
 where
     Id: ReadyQueueSort,
 {
@@ -786,7 +791,7 @@ where
         .ok_or_else(|| TaskStoreError::corrupt_msg("task disappeared during cancellation"))?;
     record.state = TaskState::Cancelled;
     record.lease_until_ms = None;
-    fail_dependents_locked(inner, id, "dependency cancelled");
+    fail_dependents_locked(inner, id, dependent_error);
     Ok(true)
 }
 
@@ -917,6 +922,7 @@ where
                     node.id.clone(),
                     TaskRecord {
                         definition_payload: node.task.payload.clone(),
+                        definition_execution_policy: node.execution_policy.clone(),
                         payload: Some(node.task.payload.clone()),
                         state: state.clone(),
                         priority: node.task.priority,
@@ -997,7 +1003,7 @@ where
         match mode {
             DetachMode::Cancel => {
                 for task_id in &retired {
-                    let _ = cancel_task_locked(&mut inner, task_id)?;
+                    let _ = cancel_task_locked(&mut inner, task_id, "dependency cancelled")?;
                 }
             }
             DetachMode::Remove => {
@@ -1106,6 +1112,7 @@ where
             remove_queue_memberships(&mut g, &id);
             if let Some(existing) = g.tasks.get_mut(&id) {
                 existing.definition_payload = payload.clone();
+                existing.definition_execution_policy = execution_policy.clone();
                 existing.payload = Some(payload);
                 existing.priority = prio;
                 existing.attempt = 0;
@@ -1144,6 +1151,7 @@ where
             id,
             TaskRecord {
                 definition_payload: payload.clone(),
+                definition_execution_policy: execution_policy.clone(),
                 payload: Some(payload),
                 state: next_state,
                 priority: prio,
@@ -1166,7 +1174,7 @@ where
     async fn set_state_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         state: TaskState<O, Id>,
         payload: Option<P>,
@@ -1176,13 +1184,13 @@ where
             return Ok(false);
         };
         let TaskState::Running {
-            worker: current_worker,
+            lease_token: current_lease_token,
             attempt: current_attempt,
         } = &record.state
         else {
             return Ok(false);
         };
-        if current_worker != worker || *current_attempt != attempt {
+        if current_lease_token != lease_token || *current_attempt != attempt {
             return Ok(false);
         }
 
@@ -1199,12 +1207,12 @@ where
     async fn complete_success_and_release_dependents_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         output: O,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
-        if !running_lease_matches(&g, id, worker, attempt) {
+        if !running_lease_matches(&g, id, lease_token, attempt) {
             return Ok(false);
         }
         remove_queue_memberships(&mut g, id);
@@ -1221,13 +1229,13 @@ where
     async fn complete_failure_and_fail_dependents_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         error: String,
         dependent_error: String,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
-        if !running_lease_matches(&g, id, worker, attempt) {
+        if !running_lease_matches(&g, id, lease_token, attempt) {
             return Ok(false);
         }
         remove_queue_memberships(&mut g, id);
@@ -1258,14 +1266,13 @@ where
                 "an owned task must be cancelled by detaching its root owner",
             ));
         }
-        let _ = dependent_error;
-        cancel_task_locked(&mut g, id)
+        cancel_task_locked(&mut g, id, &dependent_error)
     }
 
     async fn retry_now_if_running(
         &self,
         id: TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         priority: Priority,
         payload: P,
@@ -1275,13 +1282,13 @@ where
             return Ok(false);
         };
         let TaskState::Running {
-            worker: current_worker,
+            lease_token: current_lease_token,
             attempt: current_attempt,
         } = &record.state
         else {
             return Ok(false);
         };
-        if current_worker != worker || *current_attempt != attempt {
+        if current_lease_token != lease_token || *current_attempt != attempt {
             return Ok(false);
         }
 
@@ -1296,7 +1303,7 @@ where
     async fn retry_later_if_running(
         &self,
         id: TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         error: String,
         payload: P,
@@ -1307,13 +1314,13 @@ where
             return Ok(false);
         };
         let TaskState::Running {
-            worker: current_worker,
+            lease_token: current_lease_token,
             attempt: current_attempt,
         } = &record.state
         else {
             return Ok(false);
         };
-        if current_worker != worker || *current_attempt != attempt {
+        if current_lease_token != lease_token || *current_attempt != attempt {
             return Ok(false);
         }
 
@@ -1403,10 +1410,10 @@ where
     async fn take_ready(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
     ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
         let mut g = self.inner.lock().await;
-        take_ready_locked(&mut g, self.lease, id, worker)
+        take_ready_locked(&mut g, self.lease, id, lease_token)
     }
 
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()> {
@@ -1426,7 +1433,7 @@ where
     async fn checkpoint_payload_if_running(
         &self,
         id: &TaskId<Id>,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
         payload: P,
         execution_policy: TaskExecutionPolicy,
@@ -1438,9 +1445,9 @@ where
         if !matches!(
             &record.state,
             TaskState::Running {
-                worker: current_worker,
+                lease_token: current_lease_token,
                 attempt: current_attempt,
-            } if current_worker == worker && *current_attempt == attempt
+            } if current_lease_token == lease_token && *current_attempt == attempt
         ) {
             return Ok(false);
         }
@@ -1449,21 +1456,26 @@ where
         Ok(true)
     }
 
-    async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool> {
+    async fn renew_lease(
+        &self,
+        id: &TaskId<Id>,
+        lease_token: &str,
+        attempt: u32,
+    ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
         let Some(record) = g.tasks.get_mut(id) else {
             return Ok(false);
         };
 
         let TaskState::Running {
-            worker: current_worker,
+            lease_token: current_lease_token,
             attempt: current_attempt,
         } = &record.state
         else {
             return Ok(false);
         };
 
-        if current_worker != worker || *current_attempt != attempt {
+        if current_lease_token != lease_token || *current_attempt != attempt {
             return Ok(false);
         }
 

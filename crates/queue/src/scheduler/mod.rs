@@ -79,10 +79,6 @@ where
         Self::from_arc_with_config(Arc::new(store), config)
     }
 
-    pub fn from_arc(store: Arc<dyn TaskStore<P, O, Id>>) -> Self {
-        Self::from_arc_with_config(store, SchedulerConfig::default())
-    }
-
     pub fn from_arc_with_config(
         store: Arc<dyn TaskStore<P, O, Id>>,
         config: SchedulerConfig,
@@ -269,19 +265,6 @@ where
             }),
             Err(error) => self.complete_failure(lease, error).await,
         }
-    }
-
-    /// Completes a running lease as failed without consulting its retry policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns `TaskStoreError` if the underlying store fails.
-    pub async fn complete_permanent_failure(
-        &self,
-        lease: TaskLease<P, Id>,
-        error: String,
-    ) -> Result<bool, TaskStoreError> {
-        self.fail_completed_lease(lease, error).await
     }
 
     async fn complete_success(
@@ -664,32 +647,37 @@ mod tests {
         async fn set_state_if_running(
             &self,
             id: &TestTaskId,
-            worker: &str,
+            lease_token: &str,
             attempt: u32,
             state: TaskState<O, TestId>,
             payload: Option<P>,
         ) -> crate::StoreResult<bool> {
             self.inner
-                .set_state_if_running(id, worker, attempt, state, payload)
+                .set_state_if_running(id, lease_token, attempt, state, payload)
                 .await
         }
 
         async fn complete_success_and_release_dependents_if_running(
             &self,
             id: &TestTaskId,
-            worker: &str,
+            lease_token: &str,
             attempt: u32,
             output: O,
         ) -> crate::StoreResult<bool> {
             self.inner
-                .complete_success_and_release_dependents_if_running(id, worker, attempt, output)
+                .complete_success_and_release_dependents_if_running(
+                    id,
+                    lease_token,
+                    attempt,
+                    output,
+                )
                 .await
         }
 
         async fn complete_failure_and_fail_dependents_if_running(
             &self,
             id: &TestTaskId,
-            worker: &str,
+            lease_token: &str,
             attempt: u32,
             error: String,
             dependent_error: String,
@@ -697,7 +685,7 @@ mod tests {
             self.inner
                 .complete_failure_and_fail_dependents_if_running(
                     id,
-                    worker,
+                    lease_token,
                     attempt,
                     error,
                     dependent_error,
@@ -754,7 +742,7 @@ mod tests {
         async fn take_ready(
             &self,
             _id: &TestTaskId,
-            _worker: &str,
+            _lease_token: &str,
         ) -> crate::StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
             Ok(None)
         }
@@ -762,10 +750,10 @@ mod tests {
         async fn pop_ready_and_take(
             &self,
             prio: Priority,
-            worker: &str,
+            lease_token: &str,
         ) -> crate::StoreResult<Option<(TestTaskId, P, Priority, u32, TaskExecutionPolicy)>>
         {
-            self.inner.pop_ready_and_take(prio, worker).await
+            self.inner.pop_ready_and_take(prio, lease_token).await
         }
 
         async fn put_payload(&self, id: &TestTaskId, payload: P) -> crate::StoreResult<()> {
@@ -775,23 +763,23 @@ mod tests {
         async fn checkpoint_payload_if_running(
             &self,
             id: &TestTaskId,
-            worker: &str,
+            lease_token: &str,
             attempt: u32,
             payload: P,
             execution_policy: TaskExecutionPolicy,
         ) -> crate::StoreResult<bool> {
             self.inner
-                .checkpoint_payload_if_running(id, worker, attempt, payload, execution_policy)
+                .checkpoint_payload_if_running(id, lease_token, attempt, payload, execution_policy)
                 .await
         }
 
         async fn renew_lease(
             &self,
             id: &TestTaskId,
-            worker: &str,
+            lease_token: &str,
             attempt: u32,
         ) -> crate::StoreResult<bool> {
-            self.inner.renew_lease(id, worker, attempt).await
+            self.inner.renew_lease(id, lease_token, attempt).await
         }
 
         async fn schedule(&self, id: TestTaskId, not_before_ms: u64) -> crate::StoreResult<()> {

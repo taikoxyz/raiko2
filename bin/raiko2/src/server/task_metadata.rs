@@ -1,14 +1,15 @@
 use alloy_primitives::{hex, keccak256};
+use anyhow::{Context, Result};
 use raiko2_engine::{
     AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
 };
 use raiko2_pipeline::PipelineKey;
-use raiko2_primitives::{ProofType, ShastaCheckpoint, proof_type::lowercase};
+use raiko2_primitives::{L2BlockRange, ProofType, ShastaCheckpoint, proof_type::lowercase};
 use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
 };
-use raiko2_runtime::ProofArtifactDescriptor;
+use raiko2_runtime::{ProofArtifactDescriptor, RuntimeTaskRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -31,6 +32,7 @@ impl ProverType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TaskMetadata {
     pub(crate) network_pair: String,
     pub(crate) network: String,
@@ -56,6 +58,7 @@ pub(crate) struct TaskMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AggregateInputProofArtifact {
     pub(crate) proof_ref: String,
 }
@@ -72,6 +75,7 @@ pub(crate) struct BuildTaskMetadataParams<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProposalTask {
     pub(crate) proposal_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,11 +84,11 @@ pub(crate) struct ProposalTask {
     pub(crate) l2_block_numbers: Vec<u64>,
     pub(crate) last_anchor_block_number: u64,
     pub(crate) task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) request: Option<ProposalTaskRequest>,
+    pub(crate) request: ProposalTaskRequest,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) active_stage: Option<String>,
@@ -107,6 +111,7 @@ impl RuntimeMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StageTimingMetadata {
     pub(crate) stage: String,
     pub(crate) started_at_ms: i64,
@@ -117,6 +122,7 @@ pub(crate) struct StageTimingMetadata {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TaskRuntimeMetadata {
     pub(crate) updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,6 +170,107 @@ pub(crate) struct TaskRuntimeMetadata {
 }
 
 impl TaskMetadata {
+    pub(crate) fn decode_for_record(record: &RuntimeTaskRecord) -> Result<Self> {
+        let metadata: Self = serde_json::from_value(record.metadata.clone())
+            .context("failed to parse runtime task metadata")?;
+        anyhow::ensure!(
+            record.pipeline_key.supports_route(record.route),
+            "runtime task route does not match the canonical pipeline"
+        );
+        anyhow::ensure!(
+            metadata.network_pair == format!("{}/{}", metadata.network, metadata.l1_network),
+            "runtime task metadata network fields are inconsistent"
+        );
+        anyhow::ensure!(
+            metadata.network_pair == record.network_pair,
+            "runtime task metadata network_pair does not match the canonical record"
+        );
+        anyhow::ensure!(
+            metadata.proof_type == record.pipeline_key.proof_type(),
+            "runtime task metadata proof_type does not match the canonical pipeline"
+        );
+        metadata.validate_execution_identity(record)?;
+        anyhow::ensure!(
+            publication_proof_artifact_refs(&metadata, record.pipeline_key) == record.artifact_refs,
+            "runtime task metadata artifact references do not match the canonical record"
+        );
+        Ok(metadata)
+    }
+
+    fn validate_execution_identity(&self, record: &RuntimeTaskRecord) -> Result<()> {
+        anyhow::ensure!(
+            !self.proposals.is_empty() || self.aggregate_request.is_some(),
+            "runtime task metadata has no execution request"
+        );
+        anyhow::ensure!(
+            self.aggregate_requested == self.aggregate_request.is_some(),
+            "runtime task aggregate flag does not match its request"
+        );
+
+        for proposal in &self.proposals {
+            let request = &proposal.request;
+            anyhow::ensure!(
+                proposal.proposal_id == request.proposal_id
+                    && proposal.l1_inclusion_block_number == request.l1_inclusion_block_number
+                    && proposal.last_anchor_block_number == request.last_anchor_block_number
+                    && proposal.checkpoint == request.checkpoint,
+                "runtime proposal projection does not match its canonical request"
+            );
+            anyhow::ensure!(
+                request.l2_block_range
+                    == Some(canonical_l2_block_range(&proposal.l2_block_numbers)?),
+                "runtime proposal block projection does not match its canonical request"
+            );
+            anyhow::ensure!(
+                proposal.task_id == proposal_task_ref(record.pipeline_key, request),
+                "runtime proposal task_id does not match its canonical request"
+            );
+        }
+
+        match (&self.aggregate_request, &self.aggregate_task_id) {
+            (Some(request), Some(task_id)) => {
+                anyhow::ensure!(
+                    *task_id == aggregate_task_ref(record.pipeline_key, request),
+                    "runtime aggregate task_id does not match its canonical request"
+                );
+                if self.proposals.is_empty() {
+                    anyhow::ensure!(
+                        !self.aggregate_input_artifacts.is_empty(),
+                        "external aggregate metadata contains no input artifacts"
+                    );
+                    anyhow::ensure!(
+                        request.proposal_ids.is_empty()
+                            || request.proposal_ids.len() == self.aggregate_input_artifacts.len(),
+                        "external aggregate proposal ids do not match input artifacts"
+                    );
+                } else {
+                    let persisted_ids = self
+                        .proposals
+                        .iter()
+                        .map(|proposal| proposal.proposal_id)
+                        .collect::<Vec<_>>();
+                    anyhow::ensure!(
+                        request.proposal_ids == persisted_ids,
+                        "runtime aggregate proposal ids do not match its proposal requests"
+                    );
+                    anyhow::ensure!(
+                        self.aggregate_input_artifacts.is_empty(),
+                        "batch aggregate metadata contains external input artifacts"
+                    );
+                }
+            }
+            (None, None) => {
+                anyhow::ensure!(
+                    self.aggregate_input_artifacts.is_empty(),
+                    "proposal metadata contains external aggregate input artifacts"
+                );
+            }
+            _ => anyhow::bail!("runtime aggregate task identity is incomplete"),
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn prover_type_str(&self) -> Option<String> {
         self.prover_type.map(|kind| kind.as_str().to_string())
     }
@@ -210,6 +317,19 @@ impl TaskMetadata {
                 request,
             })
         })
+    }
+
+    pub(crate) fn owns_engine_task(&self, task_id: &EngineTaskId) -> bool {
+        match &task_id.0 {
+            EngineTaskKey::Proposal { pipeline, .. } => self
+                .proposals
+                .iter()
+                .any(|proposal| proposal.engine_task_id(*pipeline) == *task_id),
+            EngineTaskKey::Aggregate { pipeline, .. } => self
+                .aggregate_engine_task_id(*pipeline)
+                .as_ref()
+                .is_some_and(|aggregate| aggregate == task_id),
+        }
     }
 
     pub(crate) fn upsert_proposal_runtime(
@@ -304,13 +424,27 @@ impl TaskMetadata {
     }
 }
 
+fn canonical_l2_block_range(block_numbers: &[u64]) -> Result<L2BlockRange> {
+    let start = *block_numbers
+        .first()
+        .context("runtime proposal block projection is empty")?;
+    let end = *block_numbers
+        .last()
+        .expect("checked non-empty block projection");
+    anyhow::ensure!(
+        block_numbers
+            .windows(2)
+            .all(|window| window[0].checked_add(1) == Some(window[1])),
+        "runtime proposal block projection is not contiguous"
+    );
+    Ok(L2BlockRange { start, end })
+}
+
 impl ProposalTask {
-    pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> Option<EngineTaskId> {
-        self.request.clone().map(|request| {
-            EngineTaskId::new(EngineTaskKey::Proposal {
-                pipeline: pipeline_key,
-                request,
-            })
+    pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> EngineTaskId {
+        EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: pipeline_key,
+            request: self.request.clone(),
         })
     }
 }
@@ -353,11 +487,7 @@ pub(crate) fn proposal_proof_artifact_refs(
     pipeline_key: PipelineKey,
     proposal: &ProposalTask,
 ) -> Vec<String> {
-    proposal
-        .request
-        .as_ref()
-        .map(|request| vec![proposal_task_ref(pipeline_key, request)])
-        .unwrap_or_default()
+    vec![proposal_task_ref(pipeline_key, &proposal.request)]
 }
 
 pub(crate) fn root_proof_artifact_refs(
@@ -566,6 +696,51 @@ impl StageTimingMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raiko2_runtime::RunnerStatus;
+
+    fn runtime_record(metadata: &TaskMetadata, artifact_refs: Vec<String>) -> RuntimeTaskRecord {
+        RuntimeTaskRecord {
+            task_id: "root".to_string(),
+            incarnation_id: uuid::Uuid::new_v4(),
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: PipelineKey::ShastaSp1.route(),
+            task_kind: "proposal".to_string(),
+            network_pair: metadata.network_pair.clone(),
+            artifact_refs,
+            runner_status: RunnerStatus::Allocated,
+            image_ref: None,
+            proof_uri: None,
+            error: None,
+            metadata: serde_json::to_value(metadata).expect("serialize metadata"),
+            request_fingerprint: "root-request".into(),
+            updated_at: 0,
+        }
+    }
+
+    fn external_aggregate_metadata() -> TaskMetadata {
+        let request = AggregationTaskRequest {
+            request_id: "aggregate-request".to_string(),
+            proposal_ids: vec![1],
+            prover_config: raiko2_engine::ProverTaskConfig::default(),
+        };
+        TaskMetadata {
+            network_pair: "taiko_hoodi/hoodi".to_string(),
+            network: "taiko_hoodi".to_string(),
+            l1_network: "hoodi".to_string(),
+            proof_type: ProofType::Sp1,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(aggregate_task_ref(PipelineKey::ShastaSp1, &request)),
+            aggregate_request: Some(request),
+            aggregate_input_artifacts: vec![AggregateInputProofArtifact {
+                proof_ref: "external-input".to_string(),
+            }],
+            runtime: RuntimeMetadata::default(),
+        }
+    }
 
     #[test]
     fn task_metadata_roundtrips_canonical_proof_type() {
@@ -592,28 +767,73 @@ mod tests {
 
     #[test]
     fn publication_refs_include_external_aggregate_inputs() {
-        let metadata = TaskMetadata {
-            network_pair: "taiko_hoodi/hoodi".to_string(),
-            network: "taiko_hoodi".to_string(),
-            l1_network: "hoodi".to_string(),
-            proof_type: ProofType::Sp1,
-            requested_proof_type: None,
-            prover_type: None,
-            execution_mode: None,
-            aggregate_requested: true,
-            proposals: Vec::new(),
-            aggregate_task_id: None,
-            aggregate_request: None,
-            aggregate_input_artifacts: vec![AggregateInputProofArtifact {
-                proof_ref: "external-input".to_string(),
-            }],
-            runtime: RuntimeMetadata::default(),
-        };
+        let metadata = external_aggregate_metadata();
 
         assert_eq!(
             publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1),
-            vec!["external-input"]
+            vec![
+                metadata.aggregate_task_id.clone().expect("aggregate ref"),
+                "external-input".to_string(),
+            ]
         );
+    }
+
+    #[test]
+    fn decode_for_record_rejects_identity_drift() {
+        let metadata = external_aggregate_metadata();
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let valid = runtime_record(&metadata, artifact_refs);
+        assert!(TaskMetadata::decode_for_record(&valid).is_ok());
+
+        let mut wrong_network = valid.clone();
+        wrong_network.network_pair = "taiko_dev/ethereum".to_string();
+        assert!(TaskMetadata::decode_for_record(&wrong_network).is_err());
+
+        let mut wrong_pipeline = valid.clone();
+        wrong_pipeline.pipeline_key = PipelineKey::ShastaRisc0;
+        wrong_pipeline.route = wrong_pipeline.pipeline_key.route();
+        assert!(TaskMetadata::decode_for_record(&wrong_pipeline).is_err());
+
+        let mut wrong_artifacts = valid;
+        wrong_artifacts.artifact_refs = vec!["different-input".to_string()];
+        assert!(TaskMetadata::decode_for_record(&wrong_artifacts).is_err());
+    }
+
+    #[test]
+    fn decode_for_record_rejects_noncanonical_metadata_shape() {
+        let metadata = external_aggregate_metadata();
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let valid = runtime_record(&metadata, artifact_refs);
+
+        let mut missing_request = valid.clone();
+        missing_request.metadata["aggregate_request"] = serde_json::Value::Null;
+        assert!(TaskMetadata::decode_for_record(&missing_request).is_err());
+
+        let mut wrong_task_id = valid.clone();
+        wrong_task_id.metadata["aggregate_task_id"] = serde_json::json!("wrong");
+        assert!(TaskMetadata::decode_for_record(&wrong_task_id).is_err());
+
+        let mut mismatched_inputs = metadata;
+        let request = mismatched_inputs
+            .aggregate_request
+            .as_mut()
+            .expect("aggregate request");
+        request.proposal_ids.push(2);
+        mismatched_inputs.aggregate_task_id = Some(aggregate_task_ref(
+            PipelineKey::ShastaSp1,
+            mismatched_inputs
+                .aggregate_request
+                .as_ref()
+                .expect("aggregate request"),
+        ));
+        let mismatch_refs =
+            publication_proof_artifact_refs(&mismatched_inputs, PipelineKey::ShastaSp1);
+        let mismatched_inputs = runtime_record(&mismatched_inputs, mismatch_refs);
+        assert!(TaskMetadata::decode_for_record(&mismatched_inputs).is_err());
+
+        let mut unknown_legacy_index = valid;
+        unknown_legacy_index.metadata["proof_ids"] = serde_json::json!(["legacy"]);
+        assert!(TaskMetadata::decode_for_record(&unknown_legacy_index).is_err());
     }
 
     #[test]

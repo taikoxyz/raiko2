@@ -52,7 +52,7 @@ pub use sp1_config::{
 use alloy::sol_types::SolValue;
 use alloy_primitives::Bytes;
 use alloy_primitives::{Address, B256};
-use raiko2_pipeline::{PipelineRoute, ProverBackend};
+use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data,
@@ -524,13 +524,9 @@ pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], Str
 /// Returns an error when the supplied proofs do not satisfy the route-specific external
 /// aggregation admission contract.
 pub fn validate_external_aggregate_proofs(
-    route: PipelineRoute,
+    pipeline_key: raiko2_pipeline::PipelineKey,
     proofs: &[Proof],
 ) -> Result<(), RaikoError> {
-    let pipeline_key = route
-        .pipeline_key()
-        .map_err(RaikoError::InvalidRequestConfig)?;
-
     for (index, proof) in proofs.iter().enumerate() {
         match pipeline_key {
             raiko2_pipeline::PipelineKey::ShastaNative => {
@@ -672,7 +668,7 @@ mod tests {
     use alloy_primitives::B256;
     #[cfg(any(feature = "risc0", feature = "boundless"))]
     use alloy_sol_types::SolValue;
-    use raiko2_pipeline::PipelineRoute;
+    use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::Proof;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use std::sync::{
@@ -779,26 +775,33 @@ mod tests {
 
     #[test]
     fn aggregate_validator_accepts_native_local_proof() {
-        let route = "native/local"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
-        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+        assert!(
+            validate_external_aggregate_proofs(
+                PipelineKey::ShastaNative,
+                &[aggregate_proof_fixture()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn aggregate_validator_accepts_sgx_remote_proof() {
-        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
-        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+        assert!(
+            validate_external_aggregate_proofs(
+                PipelineKey::ShastaSgx,
+                &[aggregate_proof_fixture()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn aggregate_validator_rejects_missing_sgx_remote_proof_bytes() {
-        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.proof = None;
 
-        let err =
-            validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof bytes");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSgx, &[proof])
+            .expect_err("missing proof bytes");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SGX aggregation metadata")
@@ -807,11 +810,11 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_sp1_fields() {
-        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.uuid = None;
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing uuid");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+            .expect_err("missing uuid");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SP1 aggregation metadata")
@@ -820,13 +823,12 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_sp1_proof_without_quote_or_legacy_payload() {
-        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.proof = None;
         proof.quote = None;
 
-        let err =
-            validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof data");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+            .expect_err("missing proof data");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SP1 aggregation metadata")
@@ -835,11 +837,11 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_risc0_local_fields() {
-        let route = "risc0/local".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0, &[proof])
+            .expect_err("missing receipt");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing RISC0 aggregation metadata")
@@ -848,13 +850,11 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_boundless_receipt() {
-        let route = "risc0/network"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+            .expect_err("missing receipt");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing Boundless aggregation metadata")
@@ -863,9 +863,6 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_boundless_proof_without_carry_data() {
-        let route = "risc0/network"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
         let proof = Proof {
             proof: None,
             input: None,
@@ -875,7 +872,8 @@ mod tests {
             extra_data: None,
         };
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing carry");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+            .expect_err("missing carry");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing Boundless aggregation metadata")
@@ -884,9 +882,6 @@ mod tests {
 
     #[test]
     fn aggregate_validator_accepts_boundless_proof_with_receipt_and_carry_data() {
-        let route = "risc0/network"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
         let proof = Proof {
             proof: None,
             input: None,
@@ -898,7 +893,9 @@ mod tests {
             ),
         };
 
-        assert!(validate_external_aggregate_proofs(route, &[proof]).is_ok());
+        assert!(
+            validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof]).is_ok()
+        );
     }
 
     #[test]

@@ -8,7 +8,6 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use google_cloud_storage::client::{Storage, StorageControl};
-use google_cloud_storage::model_ext::ReadRange;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -37,7 +36,7 @@ enum GcsWriteResult {
 
 #[async_trait]
 trait GcsTransport: std::fmt::Debug + Send + Sync {
-    async fn read(&self, name: &str, prefix_bytes: Option<u64>) -> Result<Option<GcsObject>>;
+    async fn read(&self, name: &str) -> Result<Option<GcsObject>>;
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult>;
     async fn write_if_generation(
         &self,
@@ -70,12 +69,13 @@ pub struct GcsProofArtifactStore {
 
 #[async_trait]
 impl GcsTransport for GoogleGcsTransport {
-    async fn read(&self, name: &str, prefix_bytes: Option<u64>) -> Result<Option<GcsObject>> {
-        let mut request = self.storage.read_object(&self.bucket_resource, name);
-        if let Some(length) = prefix_bytes {
-            request = request.set_read_range(ReadRange::segment(0, length));
-        }
-        let mut response = match request.send().await {
+    async fn read(&self, name: &str) -> Result<Option<GcsObject>> {
+        let mut response = match self
+            .storage
+            .read_object(&self.bucket_resource, name)
+            .send()
+            .await
+        {
             Ok(response) => response,
             Err(error) if error.http_status_code() == Some(404) => return Ok(None),
             Err(error) => return Err(error).context("failed to read GCS object"),
@@ -266,7 +266,7 @@ impl GcsProofArtifactStore {
     }
 
     async fn read_named(&self, name: &str, uri: String) -> Result<Option<ProofArtifactObject>> {
-        let Some(object) = self.transport.read(name, None).await? else {
+        let Some(object) = self.transport.read(name).await? else {
             return Ok(None);
         };
         Ok(Some(ProofArtifactObject {
@@ -321,6 +321,31 @@ impl GcsProofArtifactStore {
         object.generation = Some(manifest_generation);
         Ok(Some(object))
     }
+
+    async fn conflict_result(
+        &self,
+        key: &ProofArtifactKey,
+        descriptor: ProofArtifactDescriptor,
+    ) -> Result<ProofArtifactPutResult> {
+        let content_name = self.content_name(key, &descriptor.content_hash);
+        let object = self
+            .read_named(&content_name, descriptor.proof_uri.clone())
+            .await?
+            .map(|mut object| {
+                object.generation = descriptor.generation;
+                object
+            });
+        if let Some(object) = object.as_ref() {
+            anyhow::ensure!(
+                object.content_hash == descriptor.content_hash,
+                "proof manifest content hash mismatch"
+            );
+        }
+        Ok(ProofArtifactPutResult::Conflict(ProofArtifactConflict {
+            descriptor,
+            object,
+        }))
+    }
 }
 
 impl RuntimeStoreScope for GcsProofArtifactStore {
@@ -352,24 +377,7 @@ impl ProofObjectStore for GcsProofArtifactStore {
                 generation: Some(generation),
             };
             if descriptor.content_hash != hash {
-                let content_name = self.content_name(key, &descriptor.content_hash);
-                let object = self
-                    .read_named(&content_name, descriptor.proof_uri.clone())
-                    .await?
-                    .map(|mut object| {
-                        object.generation = descriptor.generation;
-                        object
-                    });
-                if let Some(object) = object.as_ref() {
-                    anyhow::ensure!(
-                        object.content_hash == descriptor.content_hash,
-                        "proof manifest content hash mismatch"
-                    );
-                }
-                return Ok(ProofArtifactPutResult::Conflict(ProofArtifactConflict {
-                    descriptor,
-                    object,
-                }));
+                return self.conflict_result(key, descriptor).await;
             }
 
             let content_name = self.content_name(key, &hash);
@@ -385,10 +393,21 @@ impl ProofObjectStore for GcsProofArtifactStore {
         }
 
         let content_name = self.content_name(key, &hash);
-        self.transport
+        let content_creation = self
+            .transport
             .create(&content_name, bytes)
             .await
             .context("failed to publish immutable GCS proof content")?;
+        if content_creation == GcsCreateResult::AlreadyExists {
+            let existing = self
+                .read_named(&content_name, self.content_uri(key, &hash))
+                .await?
+                .context("immutable GCS proof content disappeared after create conflict")?;
+            anyhow::ensure!(
+                existing.content_hash == hash,
+                "immutable GCS proof content hash mismatch"
+            );
+        }
 
         let manifest = serde_json::to_vec(&ProofManifest {
             content_hash: hash.clone(),
@@ -426,24 +445,7 @@ impl ProofObjectStore for GcsProofArtifactStore {
                         .context("GCS manifest precondition failed but manifest is missing")?;
                     Ok(ProofArtifactPutResult::AlreadyExists(existing))
                 } else {
-                    let content_name = self.content_name(key, &descriptor.content_hash);
-                    let object = self
-                        .read_named(&content_name, descriptor.proof_uri.clone())
-                        .await?
-                        .map(|mut object| {
-                            object.generation = descriptor.generation;
-                            object
-                        });
-                    if let Some(object) = object.as_ref() {
-                        anyhow::ensure!(
-                            object.content_hash == descriptor.content_hash,
-                            "proof manifest content hash mismatch"
-                        );
-                    }
-                    Ok(ProofArtifactPutResult::Conflict(ProofArtifactConflict {
-                        descriptor,
-                        object,
-                    }))
+                    self.conflict_result(key, descriptor).await
                 }
             }
         }
@@ -476,20 +478,13 @@ impl ProofObjectStore for GcsProofArtifactStore {
             max_bytes > 0,
             "proof artifact prefix limit must be positive"
         );
-        let Some((manifest, manifest_generation)) = self.read_manifest(key).await? else {
+        let Some(object) = self.read_manifest_object(key).await? else {
             return Ok(None);
         };
-        let length = u64::try_from(max_bytes).context("proof prefix limit is too large")?;
-        let content_name = self.content_name(key, &manifest.content_hash);
-        let object = self
-            .transport
-            .read(&content_name, Some(length))
-            .await?
-            .context("proof manifest references missing content")?;
         Ok(Some(ProofArtifactPrefix {
-            proof_uri: self.content_uri(key, &manifest.content_hash),
-            generation: Some(manifest_generation),
-            bytes: object.bytes,
+            proof_uri: object.proof_uri,
+            generation: object.generation,
+            bytes: object.bytes.into_iter().take(max_bytes).collect(),
         }))
     }
 
@@ -552,7 +547,7 @@ impl ProofObjectStore for GcsProofArtifactStore {
         descriptor: &ProofArtifactDescriptor,
     ) -> Result<bool> {
         let name = self.invalidation_name(key, descriptor.generation, &descriptor.content_hash);
-        Ok(self.transport.read(&name, None).await?.is_some())
+        Ok(self.transport.read(&name).await?.is_some())
     }
 
     async fn delete_exact(

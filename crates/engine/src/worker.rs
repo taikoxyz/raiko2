@@ -55,14 +55,18 @@ impl WorkerGroup {
     /// Stop every worker and wait for its supervisor to exit.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
-        let handles = self
-            .handles
-            .lock()
-            .ok()
-            .and_then(|mut handles| handles.take());
+        let handles = match self.handles.lock() {
+            Ok(mut handles) => handles.take(),
+            Err(poisoned) => {
+                tracing::error!("worker handle lock poisoned during shutdown");
+                poisoned.into_inner().take()
+            }
+        };
         if let Some(handles) = handles {
             for handle in handles {
-                let _ = handle.await;
+                if let Err(error) = handle.await {
+                    tracing::warn!(%error, "worker supervisor did not stop cleanly");
+                }
             }
         }
     }
@@ -71,9 +75,14 @@ impl WorkerGroup {
 impl Drop for WorkerGroup {
     fn drop(&mut self) {
         let _ = self.shutdown_tx.send(true);
-        if let Ok(mut handles) = self.handles.lock()
-            && let Some(handles) = handles.take()
-        {
+        let handles = match self.handles.lock() {
+            Ok(mut handles) => handles.take(),
+            Err(poisoned) => {
+                tracing::error!("worker handle lock poisoned during drop");
+                poisoned.into_inner().take()
+            }
+        };
+        if let Some(handles) = handles {
             for handle in handles {
                 handle.abort();
             }
@@ -147,7 +156,11 @@ fn spawn_worker_supervised<R: Runnable>(
             };
             let Some(outcome) = outcome else {
                 handle.abort();
-                let _ = handle.await;
+                if let Err(error) = handle.await
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(worker = %worker_id, %error, "worker task failed during shutdown");
+                }
                 break;
             };
             match outcome {
@@ -197,7 +210,11 @@ fn spawn_maintenance_supervised<R: Runnable>(
             };
             let Some(outcome) = outcome else {
                 handle.abort();
-                let _ = handle.await;
+                if let Err(error) = handle.await
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, "maintenance task failed during shutdown");
+                }
                 break;
             };
             match outcome {

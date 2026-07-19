@@ -12,10 +12,9 @@ use tracing::{debug, info};
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchShastaRequest,
     ClearProverStatus, ProofStatus, ProverStatus, ProverTaskScope, PruneStatus, ServerAclFeature,
-    TaskData, TaskLookup, TaskMetadata, authorize_acl_feature_with_rate_limit,
-    batch_request_fingerprint, build_canonical_batch_submission,
-    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
-    clear_task_publication_outboxes, collect_prover_status, handle_created_batch_task,
+    TaskData, TaskLookup, authorize_acl_feature_with_rate_limit, batch_request_fingerprint,
+    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
+    clear_prover_tasks, collect_prover_status, handle_created_batch_task,
     handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
     load_task_data, load_task_lookup, persist_registered_external_aggregate_inputs,
@@ -75,8 +74,7 @@ async fn request_batch_shasta_proof_inner(
         &submission.pair.key,
         submission.route.pipeline_key(),
     )?;
-    let plan =
-        build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
+    let plan = build_submission_plan(&submission, &request_fingerprint)?;
 
     info!(
         task_id = submission.public_task_id.as_str(),
@@ -98,8 +96,8 @@ async fn request_batch_shasta_proof_inner(
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_batch_task(&state, &submission, existing, None).await
         }
-        TaskRegistrationOutcome::Created(_) => {
-            handle_created_batch_task(&state, &submission, &plan).await
+        TaskRegistrationOutcome::Created(record) => {
+            handle_created_batch_task(&state, &submission, &plan, &record).await
         }
     }
 }
@@ -149,7 +147,7 @@ async fn request_aggregation_proof_inner(
             handle_existing_external_aggregate_task(&state, &engine, &submission, existing).await
         }
         TaskRegistrationOutcome::Created(_) => {
-            handle_created_external_aggregate_task(&state, &engine, &submission, &aggregate).await
+            handle_created_external_aggregate_task(&state, &engine, &submission).await
         }
     }
 }
@@ -176,7 +174,7 @@ pub(crate) async fn cancel_task(
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
     let TaskLookup {
         record,
-        metadata,
+        metadata: _,
         engine: _,
     } = load_task_lookup(&state, &id).await?;
 
@@ -191,7 +189,7 @@ pub(crate) async fn cancel_task(
 
     let outcome = state
         .lifecycle
-        .cancel(&record, &metadata, None)
+        .cancel(&record, None)
         .await
         .map_err(|err| ApiError::internal(format!("failed to cancel task: {err}")))?;
     if !matches!(
@@ -257,25 +255,22 @@ pub(crate) async fn prune_proofs(
         .await
         .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
     for record in records {
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-            .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-        state
+        let (removal, _) = state
             .lifecycle
-            .retire(&record, &metadata, raiko2_queue::DetachMode::Remove)
+            .remove(&record, raiko2_queue::DetachMode::Remove)
             .await
             .map_err(|err| {
-                ApiError::internal(format!("failed to retire task {}: {err}", record.task_id))
+                ApiError::internal(format!("failed to remove task {}: {err}", record.task_id))
             })?;
-
-        clear_task_publication_outboxes(&state.runtime, &record, &metadata).await?;
-
-        state
-            .runtime
-            .remove_task_if_current(&record.lifetime())
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to prune task {}: {err}", record.task_id))
-            })?;
+        if !matches!(
+            removal,
+            RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::Missing
+        ) {
+            return Err(ApiError::internal(format!(
+                "task {} changed while it was being pruned",
+                record.task_id
+            )));
+        }
     }
 
     Ok(Json(PruneStatus { status: "ok" }))

@@ -39,9 +39,15 @@ The architecture is organized around these invariants:
    `ProofLifecycle`. Runtime commands use exact `TaskLifetime` and `ArtifactExpectation`
    preconditions, queue effects are owner-aware projections, and reconciliation resumes any effect
    interrupted after the authoritative state transition.
-10. Runtime-state revisions and GCS object generations belong to storage. Runtime-state revisions are
-    repository-internal; an artifact manifest generation is exposed only inside an exact artifact
-    descriptor for conditional invalidation or deletion. Neither grants runtime authority.
+10. Runtime-state revisions and GCS object generations belong to storage. A runtime-state generation
+    is the CAS identity for one snapshot; serialized JSON byte order is not identity. Runtime-state
+    generations are repository-internal, while an artifact manifest generation is exposed only
+    inside an exact artifact descriptor for conditional invalidation or deletion. Neither grants
+    runtime authority.
+11. Durable execution metadata is a hard-cut schema. Canonical proposal and aggregate requests are
+    required; proposal fields, task references, aggregate flags, and artifact indexes are validated
+    projections. Unknown or inconsistent fields fail startup instead of being inferred, repaired, or
+    accepted through a legacy path.
 
 ## System Architecture
 
@@ -109,7 +115,14 @@ different boundaries:
   scope tasks and artifacts.
 
 Runtime task records store the network pair and artifact references as first-class fields. Runtime
-commands do not parse opaque metadata JSON to reconstruct identity or ownership.
+commands do not parse opaque metadata JSON to reconstruct identity or ownership. Every root also
+stores one non-empty, namespace-scoped request fingerprint. The fingerprint is mandatory and unique
+inside the authoritative state; there is no anonymous task-registration path.
+
+At startup, every runtime record is decoded and checked before reconciliation or worker creation.
+The canonical engine request is the source for execution identity; duplicated display and query
+fields must match it exactly. A runtime namespace written by an older or incompatible schema must be
+cut over explicitly rather than migrated in place.
 
 Proofs are never reused across environments, concrete proof types, or execution routes. A
 `risc0/local` proof therefore cannot satisfy a `risc0/network` request, even if the public proof
@@ -149,23 +162,78 @@ sequenceDiagram
 queue mutex. Reusing a stage adds an owner without duplicating execution. Detaching one root removes
 only that owner; shared stages remain until the last live owner leaves. Queue lease tokens still
 identify execution attempts, while `TaskLifetime { task_id, incarnation_id }` identifies the exact
-authoritative record that a callback may affect.
+authoritative record that a callback may affect. If an existing shared publication completes a newly
+registered root before its projection attach runs, the lifecycle attach observes `Completed` under
+the same local gate and becomes a successful no-op instead of reopening work or failing the request.
 
-Proposal execution is decomposed into preflight, validation, encoding, and proving stages.
-Aggregation depends on proposal proof artifact references rather than in-memory proof values. A
-successful prover result that cannot yet be published is converted into a durable publication-retry
-payload, so publication retries reuse the computed proof and do not pay to prove again.
+Every proposal node has a root-independent definition and no proposal-to-proposal dependency. Batch
+position is request presentation, not execution identity; the same proposal can therefore be shared
+by a standalone root and by any batch position without graph conflict. Proposal execution is
+decomposed internally into preflight, validation, encoding, and proving stages. Aggregation alone
+carries dependencies on the pending proposal proof artifact references it consumes. A successful
+prover result that cannot yet be published is converted into a durable publication-retry payload, so
+publication retries reuse the computed proof and do not pay to prove again.
+Cached proposal artifacts short-circuit proposal execution through the observer; they never remove a
+proposal node or change an aggregate input from dependent to independent. Initial admission and every
+recovery therefore reconstruct the same task set, payloads, and dependency edges.
+
+Execution ownership is derived from canonical proposal or aggregate task membership in
+`TaskMetadata`, not from the broad artifact-reference index. That index also includes external
+aggregate inputs so storage cleanup can protect live consumers; consuming a proposal artifact does
+not authorize proposal-stage callbacks to mutate the aggregate root.
 
 Terminal engine state is not authoritative by itself. If terminal synchronization fails, API and
-startup recovery compare the runtime root with active engine state. Only active engine states
-(`Pending`, `Ready`, `Retrying`, or `Running`) block re-enqueue; a terminal engine record cannot
-permanently strand a non-terminal runtime root.
+startup recovery inspect the exact `RootOwner(task_id, incarnation_id)` projection. Only an active
+task (`Pending`, `Ready`, `Retrying`, or `Running`) in that projection blocks re-enqueue; a shared
+task owned by another root or a terminal engine record cannot strand a non-terminal runtime root.
 
-Terminal failure uses the same state-first lifecycle transition as cancellation. The observer first
-marks each non-terminal exact runtime root `Failed` while holding the process-local lifecycle
-transition gate, then returns the affected `RootOwner` set to the engine. The engine removes those owners with
-`DetachMode::Remove` before releasing the gate. This prevents a recovered root from attaching to a
-failed shared stage through an owner relationship that was already made terminal.
+Recovery, invalidation, cleanup, and replacement use snapshot-conditional runtime commands. A
+recovery attempt can reopen only the exact record whose metadata it used to build the recovery plan;
+an invalidation or cleanup attempt can retire only the exact non-cancelled record it selected. Root
+replacement atomically verifies the predecessor snapshot, removes its pending-publication
+ownership, and installs one successor. Only the winning replacement swaps the old and new
+`RootOwner` projections under the lifecycle transition gate. This closes same-incarnation races in
+which status or remote-checkpoint metadata changed after a caller read the root. Removing the
+predecessor owner leaves an unowned pending-publication record with its typed artifact identity until
+the proof object is deleted; a successor that references the same artifact key does not inherit the
+predecessor's publication authority. Startup reconciliation completes that cleanup after a crash.
+Orphan cleanup uses the same gate to inspect the exact `(task_id, incarnation_id)` projection and
+commit cancellation. A globally shared queue task owned by another root is never evidence that the
+selected root is attached, and an attachment cannot slip between that inspection and cancellation.
+
+Terminal failure uses the same state-first lifecycle transition as cancellation. The observer locks
+the process-local lifecycle transition gate and re-resolves every active owner, including roots that
+joined the shared stage after its execution permit was issued. The engine then revalidates the queue
+lease, the observer marks those exact roots `Failed`, and the engine commits the terminal queue state
+and removes the affected `RootOwner` set before releasing the gate. A runtime-state persistence error
+keeps the queue task in `Retrying`; the queue never becomes terminal first. This prevents a recovered
+root from attaching to a failed shared stage through an owner relationship that was already made
+terminal.
+
+```mermaid
+sequenceDiagram
+  participant Engine
+  participant Observer
+  participant Gate as Lifecycle transition gate
+  participant State as RuntimeStateRepository
+  participant Queue as ExecutionProjection
+
+  Engine->>Observer: acquire_terminal_failure_permit(execution permit)
+  Observer->>Gate: Lock
+  Observer->>State: Re-resolve active exact owners
+  Engine->>Queue: Renew and validate lease token
+  Engine->>Observer: persist failure(terminal permit)
+  alt Runtime CAS fails
+    Observer-->>Engine: RuntimeSync error
+    Engine->>Queue: Complete as Retrying
+    Observer->>Gate: Unlock
+  else Runtime failure is durable
+    Observer->>State: Mark active exact roots Failed
+    Observer-->>Engine: RootOwner projection
+    Engine->>Queue: Complete terminal and detach owners
+    Observer->>Gate: Unlock
+  end
+```
 
 Completed-proof reads use a three-step validation rather than trusting a stale snapshot:
 
@@ -196,16 +264,23 @@ owner record, lease renewal, owner epoch, or task-scoped lifecycle fence. Immuta
 scheduler lease tokens, and GCS generations reject different classes of stale operation; none grants
 namespace authority or bypasses the fence.
 
-The fence is an admission boundary for short commits, not a lock held across an API request, provider
-call, external storage operation, or publication saga. `ProofLifecycle` also has a process-local
-transition gate that serializes only the active-root decision with one in-memory queue attach or
-detach, so shutdown cannot start between those two steps. While `Active`, repositories may begin
-ordinary mutations and external writes. Entering `Draining` makes readiness fail immediately and rejects every
+The fence is an admission boundary for short commits. One read permit spans each admitted runtime
+repository write or proof-object operation so draining can wait for it to settle, but no permit spans
+an API request, provider call, complete task, or publication saga. `ProofLifecycle` also has a
+process-local transition gate that serializes one active-root decision across its single
+runtime-state CAS and in-memory queue attach or detach, so neither shutdown nor a competing lifecycle
+transition can split those effects. While `Active`, repositories may begin ordinary mutations and
+external writes.
+Entering `Draining` makes readiness fail immediately and rejects every
 new ordinary mutation, publication step, invalidation step, reconciliation write, cleanup write, and
 provider submission. Shutdown waits only for repository commits already admitted and request-ID
 checkpoints covered by provider permits acquired while `Active`. After their bounded deadline,
 workers and maintenance tasks are stopped and joined; unfinished sagas resume from durable state on
 the next start.
+
+While coherent, readiness also compares the authoritative runtime object generation with the local
+repository snapshot. An out-of-band generation change permanently fails that process closed; it is
+never adopted as a second writer's state.
 
 The authoritative state repository is the linearization point for lifecycle races. Commands carry
 typed preconditions:
@@ -233,15 +308,19 @@ sequenceDiagram
   B->>Queue: detach(owner A), attach(owner B, DAG)
   A->>State: update_if_current(TaskLifetime A)
   State-->>A: Stale
-  Note over A,Queue: No cross-component lock is required
+  Note over A,Queue: Stale callbacks need no task-scoped or distributed lock
 ```
 
 After leasing a queue task, the engine captures the exact task lifetimes eligible for that execution
 and revalidates the unique lease token before emitting observer events. Start, progress, failure,
-proof checkpoint, and terminal mutations all compare those identities. A distinct root that joins a
-shared stage before publication may become an eligible owner; a replacement incarnation for an
-already captured task ID may not. A remove/recreate race therefore fails either the queue-token check
-or the runtime-lifetime check, while a legitimate shared root can receive an already-computed proof.
+proof checkpoint, and terminal mutations all compare those identities. A proof checkpoint freezes
+the observed task-ID-to-incarnation map as its replacement fence. Immediately before the single
+activation CAS, the observer briefly holds the lifecycle transition gate and refreshes current
+owners. A distinct active task ID registered for the shared stage after checkpointing is admitted; a different
+incarnation for a task ID already in the checkpoint cohort is rejected. Terminal failure performs the
+same gated owner refresh before the engine revalidates its lease. A remove/recreate race therefore
+fails either the queue-token check or the runtime-lifetime check, while a legitimate shared root can
+receive an already-computed proof.
 
 An admitted provider checkpoint may write while the runtime is `Draining`, but completion is checked
 against the permit and namespace state at commit. If the bounded drain deadline wins, the process
@@ -305,6 +384,12 @@ generation/hash-conditional invalidation. Their crate-private `RuntimeStateStore
 `ProofObjectStore` seams have GCS and memory adapters; callers never assemble raw store operations or
 interpret a runtime-state revision as lifecycle authority.
 
+`RuntimeTaskRecord` is the durable identity boundary. Its network pair, pipeline key, route, and
+`artifact_refs` are canonical; `artifact_refs` is the only proof-reference index. Serialized task
+metadata carries request and progress details, but every read validates its derived network, proof
+type, and artifact references against the record before using it. Divergence is corruption and fails
+closed rather than selecting a second path or reconstructing missing identity.
+
 For a logical `ProofArtifactKey`, the GCS backend uses this layout:
 
 ```text
@@ -329,22 +414,31 @@ Publication has three storage outcomes:
 
 Normal reads materialize the manifest and referenced content and reject a missing or hash-mismatched
 content object as corruption. Metadata-only manifest reads are used for repair and conditional delete,
-so a dangling manifest remains inspectable even when normal proof reads fail.
+so a dangling manifest remains inspectable even when normal proof reads fail. Prefix selection also
+validates the complete immutable content before returning a bounded prefix; it does not trust an
+unchecked GCS range read.
 
 ## Publication Transaction
 
 Proof publication is a resumable saga. The queue first checkpoints the completed payload under its
-lease token. `ProofPublication` writes immutable pending bytes, then records a publication intent in
-runtime state that binds the content hash, exact `ArtifactExpectation`, and eligible
-`TaskLifetime` owners. The canonical object is published only after that intent is authoritative.
-Activation then commits the exact descriptor and completes every still-current eligible root in one
-runtime-state mutation. Pending cleanup and queue completion are idempotent tail effects.
+lease token. `ProofPublication` records a publication intent in runtime state that binds the typed
+artifact identity, content hash, and eligible `TaskLifetime` owners, then materializes the immutable
+pending bytes. The canonical object is published only after that intent is authoritative. Activation
+then refreshes current owners under the short lifecycle transition gate and commits the exact
+descriptor plus every eligible root in one runtime-state mutation. The checkpoint cohort fences
+replacement incarnations; distinct active roots registered after the checkpoint may join the activation.
+Pending cleanup and queue completion are idempotent tail effects.
 
-No lock spans these steps. Each repository command is short and conditional; the intent and queue
-retry payload are the recovery record between commands. If pending bytes exist without an intent,
-reconciliation removes them as an orphan. If the intent exists without a canonical manifest,
-publication retries. If a canonical manifest exists without activation, reconciliation activates it
-for current owners or invalidates it when no eligible owner remains.
+No namespace authority or distributed lock spans the saga. A bounded process-local lock is scoped to
+one typed artifact key, so it orders same-artifact object operations without blocking task-state
+transitions or unrelated artifacts. The runtime-state publication intent is the unique ownership and
+content-hash truth; every durable repository command remains conditional. The intent and queue retry
+payload are the recovery record between commands. If intent persistence fails, no pending object is
+written. If pending-object materialization fails, the durable intent remains and a publication retry
+recreates the object. If a canonical manifest exists without activation, reconciliation activates it
+for still-current exact intent owners or invalidates it when no eligible intent owner remains. A
+replacement task at the same logical key is not an owner unless its exact `incarnation_id` has
+checkpointed that publication.
 
 ```mermaid
 sequenceDiagram
@@ -359,19 +453,23 @@ sequenceDiagram
   Engine->>Engine: Checkpoint proof payload under lease token
   Engine->>Observer: Proof ready with lease and TaskLifetime owners
   Observer->>Publish: commit(command)
-  Publish->>Objects: Put immutable pending blob
-  Objects-->>Publish: Created or AlreadyApplied
   Publish->>State: Record owner/hash publication intent
   State-->>Publish: Applied, AlreadyApplied, Stale, or Conflict
+  Publish->>Objects: Put immutable pending blob
+  Objects-->>Publish: Created or AlreadyApplied
   Publish->>Objects: publish_if_absent(exact key, hash)
   Objects-->>Publish: Created, AlreadyApplied, or Conflict
+  Observer->>Observer: Lock lifecycle gate and refresh current owners
   Publish->>State: Activate exact descriptor and complete current owners
   State-->>Publish: Applied, AlreadyApplied, or no active owner
+  Observer->>Observer: Release lifecycle gate
   alt At least one owner completed
     Publish->>Objects: Delete exact pending blob
+    Publish->>State: Remove unowned publication intent
     Publish->>Queue: Finish lease
   else No eligible owner remains
     Publish->>Objects: Invalidate exact canonical descriptor and pending blob
+    Publish->>State: Remove unowned publication intent
     Publish->>Queue: Finish as invalidated
   end
   alt A transient step fails
@@ -451,8 +549,9 @@ sequenceDiagram
 If generation A is invalidated, a later lifecycle may create generation B with identical or different
 content. Reads of A remain invalidated because its exact `(logical key, manifest generation,
 content hash)` descriptor differs from B. Conditional deletion prevents delayed cancellation or
-cleanup from deleting a replacement manifest. Cancellation after pending cleanup still reconciles
-the canonical manifest by its exact descriptor before invalidating it.
+cleanup from deleting a replacement manifest. If the pending blob is already missing while its
+durable intent remains, cancellation still reconciles the canonical manifest by its exact descriptor
+before invalidating it.
 
 ## Restart And Failure Recovery
 
@@ -490,9 +589,9 @@ Important recovery cases are:
 | --- | --- |
 | Root registered, projection missing | Atomically attach its owner and complete DAG |
 | Root cancelled or failed, projection still attached | Detach its owner; remove only nodes with no remaining owner |
-| Pending blob exists, publication intent missing | Treat as orphan and delete the exact pending descriptor |
+| Publication intent exists, pending blob missing | Re-materialize it from the retained queue payload, or re-run the proof after restart |
 | Publication intent exists, canonical manifest missing | Retry create-only publication from the retained payload |
-| Canonical manifest exists, activation missing | Activate for exact current owners, or invalidate when none remain |
+| Canonical manifest exists, activation missing | Activate for still-current exact intent owners, or invalidate when none remain |
 | Activation exists, queue completion missing | Finish or remove the queue projection idempotently |
 | Canonical artifact exists, registration missing | Validate and restore registration before considering reproof |
 | Proof is computed, publication incomplete | Retry `PublishProof` with the retained normalized proof |

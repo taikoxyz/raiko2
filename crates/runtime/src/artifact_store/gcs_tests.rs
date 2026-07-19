@@ -40,11 +40,23 @@ impl FakeGcsTransport {
             .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?
             .contains_key(name))
     }
+
+    fn replace_bytes(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let mut objects = self
+            .objects
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?;
+        let object = objects
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("fake object does not exist"))?;
+        object.bytes = bytes.to_vec();
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl GcsTransport for FakeGcsTransport {
-    async fn read(&self, name: &str, prefix_bytes: Option<u64>) -> Result<Option<GcsObject>> {
+    async fn read(&self, name: &str) -> Result<Option<GcsObject>> {
         let objects = self
             .objects
             .lock()
@@ -52,12 +64,8 @@ impl GcsTransport for FakeGcsTransport {
         let Some(object) = objects.get(name) else {
             return Ok(None);
         };
-        let mut bytes = object.bytes.clone();
-        if let Some(limit) = prefix_bytes {
-            bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-        }
         Ok(Some(GcsObject {
-            bytes,
+            bytes: object.bytes.clone(),
             generation: object.generation,
         }))
     }
@@ -175,6 +183,31 @@ async fn same_hash_publication_repairs_missing_content_through_gcs_seam() -> Res
 }
 
 #[tokio::test]
+async fn missing_manifest_rejects_corrupt_preexisting_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let proof = br#"{"proof":"0x01"}"#;
+    let hash = content_hash(proof);
+    let content_name = store.content_name(&key, &hash);
+    assert!(matches!(
+        transport
+            .create(&content_name, br#"{"proof":"corrupted"}"#)
+            .await?,
+        GcsCreateResult::Created(_)
+    ));
+
+    let error = store
+        .put_if_absent(&key, proof)
+        .await
+        .expect_err("corrupt immutable content must not gain a manifest");
+
+    assert!(error.to_string().contains("content hash mismatch"));
+    assert!(!transport.contains(&store.manifest_name(&key))?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn different_hash_conflicts_with_dangling_manifest_through_gcs_seam() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
@@ -239,6 +272,32 @@ async fn prefix_read_rejects_manifest_with_missing_content() -> Result<()> {
         .await
         .expect_err("dangling manifest must be reported as corruption");
     assert!(error.to_string().contains("missing content"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn prefix_read_rejects_corrupted_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let proof = br#"{"proof":"0x01"}"#;
+    let first = store
+        .put_if_absent(&key, proof)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+
+    transport.replace_bytes(
+        &store.content_name(&key, &first.content_hash),
+        br#"{"proof":"corrupted"}"#,
+    )?;
+
+    let error = store
+        .get_prefix(&key, 4)
+        .await
+        .expect_err("prefix reads must validate the complete immutable content");
+    assert!(error.to_string().contains("content hash mismatch"));
     Ok(())
 }
 

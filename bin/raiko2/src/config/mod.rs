@@ -188,14 +188,6 @@ mod tests {
             .expect("time went backwards")
             .as_nanos();
         path.push(format!("raiko2-config-{nanos}.toml"));
-        let contents = if contents.contains("[runtime]") {
-            contents.to_string()
-        } else {
-            format!(
-                "{contents}\n[runtime]\nenvironment = 'test'\nnamespace = 'raiko2-test'\n\
-                 [runtime.store]\nbackend = 'memory'\n"
-            )
-        };
         std::fs::write(&path, contents).expect("write temp config");
         path
     }
@@ -581,15 +573,11 @@ mod tests {
             "native/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
-        assert_eq!(
-            "risc0/boundless".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
-        );
-        assert_eq!(
+        assert!("risc0/boundless".parse::<PipelineRoute>().is_err());
+        assert!(
             "shasta-risc0-boundless"
                 .parse::<raiko2_pipeline::PipelineKey>()
-                .unwrap(),
-            raiko2_pipeline::PipelineKey::ShastaRisc0Network
+                .is_err()
         );
         assert_eq!(
             "sgx/remote".parse::<PipelineRoute>().unwrap(),
@@ -701,6 +689,13 @@ timeout_ms = 300000
 [queue]
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let _base_url_guard =
@@ -755,6 +750,13 @@ execution_po2 = 24
 [queue]
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -785,6 +787,13 @@ runner = "local"
 [queue]
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -859,6 +868,13 @@ runner = "local"
 [queue]
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -895,6 +911,13 @@ pairs = [
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from([
@@ -932,6 +955,13 @@ pairs = [
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -966,6 +996,13 @@ runner = "local"
 
 [queue.retry]
 strategy = "fixed"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -999,6 +1036,13 @@ runner = "local"
 [queue]
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -1033,6 +1077,13 @@ runner = "local"
 [queue]
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -1066,6 +1117,13 @@ taiko_hoodi = "https://verify.hoodi.example"
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -1102,6 +1160,13 @@ taiko_dev = "https://verify.dev.example"
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);

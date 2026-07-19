@@ -116,6 +116,13 @@ mod tests {
             Box::pin(async { panic!("unexpected task state lookup") })
         }
 
+        fn has_active_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected execution projection lookup") })
+        }
+
         fn attach_execution_plan(
             &self,
             _owner: raiko2_queue::RootOwner,

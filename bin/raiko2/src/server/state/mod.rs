@@ -197,11 +197,22 @@ impl AppState {
     }
 
     async fn finish_initialization(self) -> Result<Self> {
+        crate::server::handlers::validate_persisted_runtime_task_metadata(&self).await?;
         let reconciled = self.runtime.reconcile_invalidated_proof_artifacts().await?;
         if reconciled > 0 {
             tracing::info!(
                 reconciled,
                 "reconciled invalidated proof artifacts after runtime restart"
+            );
+        }
+        let removed_pending = self
+            .runtime
+            .reconcile_unowned_pending_proof_publications()
+            .await?;
+        if removed_pending > 0 {
+            tracing::info!(
+                removed_pending,
+                "removed unowned pending proof publications after runtime restart"
             );
         }
         let recovered = crate::server::handlers::recover_pending_runtime_tasks(&self).await?;
@@ -247,6 +258,7 @@ impl AppState {
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.begin_shutdown().await;
         let checkpoint_deadline = Instant::now() + SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT;
         if !self
             .runtime
@@ -259,14 +271,20 @@ impl AppState {
             );
         }
         self.pipelines.shutdown().await;
-        let handles = self
-            .background_tasks
-            .lock()
-            .map(|mut handles| handles.drain(..).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let handles = match self.background_tasks.lock() {
+            Ok(mut handles) => handles.drain(..).collect::<Vec<_>>(),
+            Err(poisoned) => {
+                warn!("background task lock poisoned during shutdown");
+                poisoned.into_inner().drain(..).collect()
+            }
+        };
         for handle in handles {
             handle.abort();
-            let _ = handle.await;
+            if let Err(error) = handle.await
+                && !error.is_cancelled()
+            {
+                warn!(%error, "background task failed before shutdown completed");
+            }
         }
     }
 

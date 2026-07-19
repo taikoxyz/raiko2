@@ -74,7 +74,7 @@ pub enum TaskState<O, Id> {
     },
     Ready,
     Running {
-        worker: String,
+        lease_token: String,
         attempt: u32,
     },
     Retrying {

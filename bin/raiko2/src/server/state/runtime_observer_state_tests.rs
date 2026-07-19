@@ -113,10 +113,7 @@
             pipeline.route(),
         );
         let publication = PublishedProofCommit {
-            proof_uris: std::collections::HashMap::from([
-                ("task_exact".into(), "memory://canonical-proof".into()),
-                ("task_other".into(), "memory://canonical-proof".into()),
-            ]),
+            proof_uri: "memory://canonical-proof".into(),
             synchronized_roots: std::collections::HashSet::from(["task_exact".into()]),
             root_ref: "proposal".into(),
             descriptor: ProofArtifactDescriptor {
@@ -261,7 +258,7 @@
             "taiko_dev/ethereum",
             pipeline,
             &request,
-            RunnerStatus::Completed,
+            RunnerStatus::Allocated,
         )
         .await?;
         let observer = RuntimeObserver::new(
@@ -269,30 +266,46 @@
             "taiko_dev/ethereum".to_string(),
             route,
         );
-        checkpoint_proof_fixture(
+        let proof_task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: task_id.clone(),
+        };
+        let execution_permit = EngineObserver::acquire_task_execution_permit(
             &observer,
             &task_id,
-            &EngineTask::ProveProposal {
-                request: request.clone(),
-                input_task: task_id.clone(),
-            },
+            &proof_task,
         )
-        .await?;
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let completion_permit = EngineObserver::checkpoint_completed_proof(
+            &observer,
+            &task_id,
+            &proof_task,
+            &proof_fixture(),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let mut completed = runtime
+            .get_task("task_reconciled_root")
+            .await?
+            .context("active task")?;
+        completed.runner_status = RunnerStatus::Completed;
+        runtime.upsert_task(&completed).await?;
 
-        observer
-            .on_task_succeeded(
-                &task_id,
-                &EngineTask::ProveProposal {
-                    request: request.clone(),
-                    input_task: task_id.clone(),
-                },
-                &EngineTaskSuccess::Proof {
-                    stage: raiko2_pipeline::PipelineStage::Prove,
-                    proof: proof_fixture(),
-                },
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
+        EngineObserver::on_task_succeeded(
+            &observer,
+            &task_id,
+            &proof_task,
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof_fixture(),
+            },
+            Some(&completion_permit),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         assert_eq!(
             runtime
@@ -425,7 +438,7 @@
             ("task_running", RunnerStatus::Running),
             ("task_cancelled", RunnerStatus::Cancelled),
             ("task_failed", RunnerStatus::Failed),
-            ("task_completed", RunnerStatus::Completed),
+            ("task_completed", RunnerStatus::Allocated),
         ];
         for (task_id, status) in roots {
             register_observer_task(
@@ -444,29 +457,42 @@
             "taiko_dev/ethereum".to_string(),
             PipelineKey::ShastaNative.route(),
         );
-        checkpoint_proof_fixture(
-            &observer,
-            &proposal_task_id,
-            &EngineTask::ProveProposal {
-                request: request.clone(),
-                input_task: proposal_task_id.clone(),
-            },
-        )
-        .await?;
-        observer
-            .on_task_succeeded(
-                &proposal_task_id,
-                &EngineTask::ProveProposal {
-                    request,
-                    input_task: proposal_task_id.clone(),
-                },
-                &EngineTaskSuccess::Proof {
-                    stage: raiko2_pipeline::PipelineStage::Prove,
-                    proof: proof_fixture(),
-                },
-            )
+        let proof_task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: proposal_task_id.clone(),
+        };
+        let execution_permit = engine_execution_permit(&observer, &proposal_task_id, &proof_task)
             .await
             .map_err(anyhow::Error::msg)?;
+        let completion_permit = EngineObserver::checkpoint_completed_proof(
+            &observer,
+            &proposal_task_id,
+            &proof_task,
+            &proof_fixture(),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let mut concurrently_completed = runtime
+            .get_task("task_completed")
+            .await?
+            .context("root to reconcile")?;
+        concurrently_completed.runner_status = RunnerStatus::Completed;
+        runtime.upsert_task(&concurrently_completed).await?;
+
+        EngineObserver::on_task_succeeded(
+            &observer,
+            &proposal_task_id,
+            &proof_task,
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof_fixture(),
+            },
+            Some(&completion_permit),
+            &execution_permit,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         for task_id in ["task_allocated", "task_running"] {
             let active = runtime.get_task(task_id).await?.expect("active task");

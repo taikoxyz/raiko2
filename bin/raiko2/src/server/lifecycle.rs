@@ -2,12 +2,14 @@
 
 use anyhow::{Result, bail};
 use raiko2_engine::EngineExecutionPlan;
-use raiko2_queue::{AttachOutcome, DetachMode, DetachOutcome, RootOwner};
-use raiko2_runtime::{RuntimeManager, RuntimeMutationOutcome, RuntimeTaskRecord};
+use raiko2_queue::{DetachMode, DetachOutcome, RootOwner};
+use raiko2_runtime::{
+    ProofArtifactPrecondition, RunnerStatus, RuntimeManager, RuntimeMutationOutcome,
+    RuntimeTaskRecord, TaskRegistration,
+};
 use std::sync::Arc;
 
 use crate::server::state::{EngineHandle, PipelineFactory};
-use crate::server::task_metadata::TaskMetadata;
 
 /// Coordinates durable root transitions with idempotent in-memory queue effects.
 #[derive(Clone)]
@@ -34,37 +36,151 @@ impl ProofLifecycle {
         record: &RuntimeTaskRecord,
         engine: &Arc<dyn EngineHandle>,
         plan: EngineExecutionPlan,
-    ) -> Result<AttachOutcome> {
+    ) -> Result<()> {
         let gate = self.runtime.execution_lifecycle_gate();
         let _gate = gate.lock().await;
-        if !self.runtime.is_lifecycle_active()
-            || !self
-                .runtime
-                .is_task_active_if_current(&record.lifetime())
-                .await?
-        {
+        if !self.runtime.is_lifecycle_active() {
             bail!("runtime root is no longer active for execution attachment");
         }
-        Ok(engine
+        let Some(current) = self.runtime.get_task(&record.task_id).await? else {
+            bail!("runtime root is no longer active for execution attachment");
+        };
+        if current.incarnation_id != record.incarnation_id {
+            bail!("runtime root is no longer active for execution attachment");
+        }
+        if current.runner_status == RunnerStatus::Completed {
+            return Ok(());
+        }
+        if !matches!(
+            current.runner_status,
+            RunnerStatus::Allocated | RunnerStatus::Running
+        ) {
+            bail!("runtime root is no longer active for execution attachment");
+        }
+        engine
             .attach_execution_plan(
                 RootOwner::new(record.task_id.clone(), record.incarnation_id),
                 plan,
             )
-            .await?)
+            .await?;
+        Ok(())
+    }
+
+    /// Replaces one unchanged runtime root and swaps its queue projection while holding the
+    /// process-local lifecycle transition gate.
+    pub(crate) async fn replace(
+        &self,
+        expected: &RuntimeTaskRecord,
+        registration: TaskRegistration,
+        artifact_preconditions: &[ProofArtifactPrecondition],
+        replacement_engine: &Arc<dyn EngineHandle>,
+        replacement_plan: EngineExecutionPlan,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        let previous_engine = self
+            .pipelines
+            .get(&expected.network_pair, expected.pipeline_key);
+        let gate = self.runtime.execution_lifecycle_gate();
+        let gate_guard = gate.lock().await;
+        let Some(replacement) = self
+            .runtime
+            .replace_task_if_unchanged_with_artifact_preconditions(
+                expected,
+                registration,
+                artifact_preconditions,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let projection = async {
+            if let Some(engine) = previous_engine {
+                engine
+                    .detach_execution(
+                        RootOwner::new(expected.task_id.clone(), expected.incarnation_id),
+                        DetachMode::Remove,
+                    )
+                    .await?;
+            }
+            replacement_engine
+                .attach_execution_plan(
+                    RootOwner::new(replacement.task_id.clone(), replacement.incarnation_id),
+                    replacement_plan,
+                )
+                .await
+        }
+        .await
+        .map_err(anyhow::Error::from);
+        drop(gate_guard);
+        let publication_cleanup = self
+            .runtime
+            .release_task_pending_publications(expected)
+            .await;
+        finish_lifecycle_effect(projection, publication_cleanup)?;
+        Ok(Some(replacement))
     }
 
     /// Cancels the durable root first, then detaches its exact queue projection.
     pub(crate) async fn cancel(
         &self,
         record: &RuntimeTaskRecord,
-        metadata: &TaskMetadata,
+        error: Option<String>,
+    ) -> Result<RuntimeMutationOutcome> {
+        self.cancel_transition(record, error).await
+    }
+
+    /// Cancels an unchanged root only when its exact execution projection is still inactive.
+    pub(crate) async fn cancel_orphaned_if_unchanged(
+        &self,
+        record: &RuntimeTaskRecord,
+        error: String,
+    ) -> Result<RuntimeMutationOutcome> {
+        let engine = self
+            .pipelines
+            .get(&record.network_pair, record.pipeline_key);
+        let gate = self.runtime.execution_lifecycle_gate();
+        let gate = gate.lock().await;
+        let owner = RootOwner::new(record.task_id.clone(), record.incarnation_id);
+        if let Some(engine) = &engine
+            && engine.has_active_execution(owner.clone()).await?
+        {
+            return Ok(RuntimeMutationOutcome::Blocked);
+        }
+
+        let outcome = self
+            .runtime
+            .cancel_task_if_unchanged(record, Some(error))
+            .await?;
+        if !matches!(
+            outcome,
+            RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied
+        ) {
+            return Ok(outcome);
+        }
+        let projection = if let Some(engine) = engine {
+            engine
+                .detach_execution(owner, DetachMode::Cancel)
+                .await
+                .map_err(anyhow::Error::from)
+        } else {
+            Ok(DetachOutcome::not_attached(DetachMode::Cancel))
+        };
+        drop(gate);
+        let publication_cleanup = self.runtime.release_task_pending_publications(record).await;
+        finish_lifecycle_effect(projection, publication_cleanup)?;
+        Ok(outcome)
+    }
+
+    async fn cancel_transition(
+        &self,
+        record: &RuntimeTaskRecord,
         error: Option<String>,
     ) -> Result<RuntimeMutationOutcome> {
         let engine = self
             .pipelines
-            .get(&metadata.network_pair, record.pipeline_key);
+            .get(&record.network_pair, record.pipeline_key);
         let gate = self.runtime.execution_lifecycle_gate();
-        let _gate = gate.lock().await;
+        let gate = gate.lock().await;
         let outcome = self
             .runtime
             .cancel_task_if_current(&record.lifetime(), error)
@@ -75,22 +191,27 @@ impl ProofLifecycle {
         ) {
             return Ok(outcome);
         }
-        if let Some(engine) = engine {
+        let projection = if let Some(engine) = engine {
             engine
                 .detach_execution(
                     RootOwner::new(record.task_id.clone(), record.incarnation_id),
                     DetachMode::Cancel,
                 )
-                .await?;
-        }
+                .await
+                .map_err(anyhow::Error::from)
+        } else {
+            Ok(DetachOutcome::not_attached(DetachMode::Cancel))
+        };
+        drop(gate);
+        let publication_cleanup = self.runtime.release_task_pending_publications(record).await;
+        finish_lifecycle_effect(projection, publication_cleanup)?;
         Ok(outcome)
     }
 
-    /// Retires a root before destructive cleanup and removes its exact queue projection.
-    pub(crate) async fn retire(
+    /// Removes one unchanged root and its exact queue projection as one lifecycle transition.
+    pub(crate) async fn remove(
         &self,
         record: &RuntimeTaskRecord,
-        metadata: &TaskMetadata,
         mode: DetachMode,
     ) -> Result<(
         RuntimeMutationOutcome,
@@ -98,29 +219,187 @@ impl ProofLifecycle {
     )> {
         let engine = self
             .pipelines
-            .get(&metadata.network_pair, record.pipeline_key);
+            .get(&record.network_pair, record.pipeline_key);
         let gate = self.runtime.execution_lifecycle_gate();
-        let _gate = gate.lock().await;
-        let outcome = self
-            .runtime
-            .retire_task_if_current(&record.lifetime(), None)
-            .await?;
+        let gate = gate.lock().await;
+        let outcome = self.runtime.retire_task_if_unchanged(record, None).await?;
         if !matches!(
             outcome,
             RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied
         ) {
             return Ok((outcome, DetachOutcome::not_attached(mode)));
         }
-        let detached = if let Some(engine) = engine {
+        let detached: Result<_> = if let Some(engine) = engine {
             engine
                 .detach_execution(
                     RootOwner::new(record.task_id.clone(), record.incarnation_id),
                     mode,
                 )
-                .await?
+                .await
+                .map_err(anyhow::Error::from)
         } else {
-            DetachOutcome::not_attached(mode)
+            Ok(DetachOutcome::not_attached(mode))
         };
-        Ok((outcome, detached))
+        let removal = match detached {
+            Ok(detached) => self
+                .runtime
+                .remove_task_if_current(&record.lifetime())
+                .await
+                .map(|removed| (removed, detached)),
+            Err(error) => Err(error),
+        };
+        drop(gate);
+        let publication_cleanup = self.runtime.release_task_pending_publications(record).await;
+        finish_lifecycle_effect(removal, publication_cleanup)
+    }
+}
+
+fn finish_lifecycle_effect<T>(effect: Result<T>, publication_cleanup: Result<()>) -> Result<T> {
+    match (effect, publication_cleanup) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(effect_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+            "lifecycle projection effect failed: {effect_error:#}; pending publication cleanup also failed: {cleanup_error:#}"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
+    use raiko2_engine::{EngineTaskId, EngineTaskKey};
+    use raiko2_pipeline::PipelineKey;
+    use raiko2_queue::{AttachOutcome, TaskStoreError};
+    use raiko2_runtime::TaskRegistration;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    #[derive(Default)]
+    struct BlockingProjectionEngine {
+        inspection_started: Notify,
+        allow_inspection: Notify,
+        attached: AtomicBool,
+    }
+
+    impl EngineHandle for BlockingProjectionEngine {
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn has_active_execution(
+            &self,
+            _owner: RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async move {
+                self.inspection_started.notify_one();
+                self.allow_inspection.notified().await;
+                Ok(self.attached.load(Ordering::SeqCst))
+            })
+        }
+
+        fn attach_execution_plan(
+            &self,
+            _owner: RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>> {
+            Box::pin(async move {
+                self.attached.store(true, Ordering::SeqCst);
+                Ok(AttachOutcome::Attached)
+            })
+        }
+
+        fn detach_execution(
+            &self,
+            _owner: RootOwner,
+            mode: DetachMode,
+        ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>> {
+            Box::pin(async move {
+                self.attached.store(false, Ordering::SeqCst);
+                Ok(DetachOutcome::not_attached(mode))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn orphan_cancellation_serializes_projection_inspection_with_attach() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            format!("orphan-attach-race-{}", uuid::Uuid::new_v4()),
+        )?);
+        let record = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "taiko_dev/ethereum".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        let engine = Arc::new(BlockingProjectionEngine::default());
+        let mut pipelines = StaticPipelineFactory::default();
+        pipelines.insert(
+            &record.network_pair,
+            record.pipeline_key,
+            engine.clone() as Arc<dyn EngineHandle>,
+        );
+        let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::new(pipelines));
+
+        let inspection_started = engine.inspection_started.notified();
+        let cancel_lifecycle = lifecycle.clone();
+        let cancel_record = record.clone();
+        let cancellation = tokio::spawn(async move {
+            cancel_lifecycle
+                .cancel_orphaned_if_unchanged(&cancel_record, "orphaned".into())
+                .await
+        });
+        inspection_started.await;
+
+        let attach_lifecycle = lifecycle.clone();
+        let attach_record = record.clone();
+        let attach_engine = engine.clone() as Arc<dyn EngineHandle>;
+        let attachment = tokio::spawn(async move {
+            attach_lifecycle
+                .attach(
+                    &attach_record,
+                    &attach_engine,
+                    EngineExecutionPlan {
+                        proposals: Vec::new(),
+                        aggregate: None,
+                    },
+                )
+                .await
+        });
+        engine.allow_inspection.notify_one();
+
+        assert_eq!(cancellation.await??, RuntimeMutationOutcome::Applied);
+        assert!(attachment.await?.is_err());
+        assert!(!engine.attached.load(Ordering::SeqCst));
+        assert_eq!(
+            runtime
+                .get_task(&record.task_id)
+                .await?
+                .expect("cancelled root")
+                .runner_status,
+            RunnerStatus::Cancelled
+        );
+        Ok(())
     }
 }

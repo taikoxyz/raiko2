@@ -39,7 +39,8 @@ use raiko2_provider::Provider;
 use raiko2_queue::{
     AttachOutcome, DetachMode, DetachOutcome, ExecutionGraph, ExecutionNode, MemoryStore, NewTask,
     Priority, ProjectionView, RetryPolicy, RootOwner, Scheduler, SchedulerConfig,
-    TaskExecutionPolicy, TaskLease, TaskState, TaskStoreError, TaskView, TaskViewState,
+    TaskCompletionDisposition, TaskExecutionPolicy, TaskLease, TaskState, TaskStoreError, TaskView,
+    TaskViewState,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -100,6 +101,7 @@ impl std::error::Error for EngineObserverError {}
 #[derive(Debug)]
 enum TaskExecutionError {
     Retryable(String),
+    Coordination(String),
     Stage {
         error: String,
         observer_task: Box<EngineTask>,
@@ -115,6 +117,7 @@ impl TaskExecutionError {
     fn message(&self) -> &str {
         match self {
             Self::Retryable(error)
+            | Self::Coordination(error)
             | Self::Stage { error, .. }
             | Self::ProofPublication { error, .. }
             | Self::ProofInvalidated(error) => error,
@@ -153,13 +156,13 @@ impl From<EngineObserverError> for TaskExecutionError {
         match error {
             EngineObserverError::RuntimeSync(error)
             | EngineObserverError::RuntimeInactive(error)
-            | EngineObserverError::ProofPublication(error) => Self::Retryable(error),
+            | EngineObserverError::ProofPublication(error) => Self::Coordination(error),
             EngineObserverError::ProofInvalidated(error) => Self::ProofInvalidated(error),
         }
     }
 }
 
-const fn publication_retry_policy() -> RetryPolicy {
+const fn durability_retry_policy() -> RetryPolicy {
     RetryPolicy::Exponential {
         max_attempts: u32::MAX,
         base_delay: Duration::from_secs(1),
@@ -167,19 +170,23 @@ const fn publication_retry_policy() -> RetryPolicy {
     }
 }
 
-fn apply_proof_completion_policy(
+fn apply_execution_failure_policy(
     lease: &mut TaskLease<EngineTask, EngineTaskKey>,
     payload: &EngineTask,
     execution_result: &Result<EngineOutput<impl Sized>, TaskExecutionError>,
 ) {
-    if let Err(TaskExecutionError::ProofPublication { proof, .. }) = execution_result {
-        lease.payload = payload.clone().with_pending_publication((**proof).clone());
-        lease.execution_policy.retry = publication_retry_policy();
-    } else if matches!(
-        execution_result,
-        Err(TaskExecutionError::ProofInvalidated(_))
-    ) {
-        lease.execution_policy.retry = RetryPolicy::None;
+    match execution_result {
+        Err(TaskExecutionError::ProofPublication { proof, .. }) => {
+            lease.payload = payload.clone().with_pending_publication((**proof).clone());
+            lease.execution_policy.retry = durability_retry_policy();
+        }
+        Err(TaskExecutionError::Coordination(_)) => {
+            lease.execution_policy.retry = durability_retry_policy();
+        }
+        Err(TaskExecutionError::ProofInvalidated(_)) => {
+            lease.execution_policy.retry = RetryPolicy::None;
+        }
+        _ => {}
     }
 }
 
@@ -232,6 +239,12 @@ pub struct TaskExecutionPermit {
     guard: Box<dyn std::any::Any + Send + Sync>,
 }
 
+/// Keeps an observer-owned terminal transition gate held while the engine validates the lease,
+/// persists terminal runtime state, and removes the corresponding queue projection.
+pub struct TerminalFailurePermit {
+    guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
 /// Keeps the root-owner transition gate held until the engine removes failed projections.
 ///
 /// A terminal queue failure first becomes durable runtime state, then the engine removes every
@@ -243,25 +256,35 @@ pub struct TerminalFailureProjection {
 }
 
 impl TerminalFailureProjection {
-    /// Creates a terminal-failure projection guarded by the caller's lifecycle transition lock.
-    pub fn tracked(
-        root_owners: Vec<RootOwner>,
-        lifecycle_guard: impl std::any::Any + Send + 'static,
-    ) -> Self {
-        Self {
-            root_owners,
-            _lifecycle_guard: Box::new(lifecycle_guard),
-        }
-    }
-
     /// Returns the exact runtime-root owners that must leave the execution projection.
     #[must_use]
     pub fn root_owners(&self) -> &[RootOwner] {
         &self.root_owners
     }
+}
+
+impl TerminalFailurePermit {
+    pub fn tracked(guard: impl std::any::Any + Send + Sync + 'static) -> Self {
+        Self {
+            guard: Box::new(guard),
+        }
+    }
+
+    #[must_use]
+    pub fn guard<T: std::any::Any>(&self) -> Option<&T> {
+        self.guard.downcast_ref()
+    }
+
+    #[must_use]
+    pub fn into_projection(self, root_owners: Vec<RootOwner>) -> TerminalFailureProjection {
+        TerminalFailureProjection {
+            root_owners,
+            _lifecycle_guard: self.guard,
+        }
+    }
 
     fn untracked() -> Self {
-        Self::tracked(Vec::new(), ())
+        Self::tracked(())
     }
 }
 
@@ -335,6 +358,8 @@ pub trait EngineObserver: Send + Sync {
         Ok(())
     }
 
+    async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
+
     async fn checkpoint_completed_proof(
         &self,
         _id: &EngineTaskId,
@@ -361,9 +386,18 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _error: &str,
-        _execution_permit: &TaskExecutionPermit,
+        permit: TerminalFailurePermit,
     ) -> Result<TerminalFailureProjection, EngineObserverError> {
-        Ok(TerminalFailureProjection::untracked())
+        Ok(permit.into_projection(Vec::new()))
+    }
+
+    async fn acquire_terminal_failure_permit(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _execution_permit: &TaskExecutionPermit,
+    ) -> Result<TerminalFailurePermit, EngineObserverError> {
+        Ok(TerminalFailurePermit::untracked())
     }
 
     async fn load_pending_proof_checkpoint(
@@ -443,7 +477,11 @@ impl AbortOnDropTask {
     async fn abort_and_wait(&mut self) {
         if let Some(handle) = self.0.take() {
             handle.abort();
-            let _ = handle.await;
+            if let Err(error) = handle.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "lease renewal task failed before abort completed");
+            }
         }
     }
 }
@@ -680,7 +718,6 @@ where
     ) -> Result<AttachOutcome, TaskStoreError> {
         let mut nodes =
             Vec::with_capacity(plan.proposals.len() + usize::from(plan.aggregate.is_some()));
-        let mut previous = None;
         let mut proposal_ids = std::collections::HashSet::new();
 
         for request in plan.proposals {
@@ -694,10 +731,9 @@ where
                     priority: PROPOSAL_TASK_PRIORITY,
                     payload: EngineTask::Proposal { request },
                 },
-                dependencies: previous.into_iter().collect(),
+                dependencies: Vec::new(),
                 execution_policy: self.externally_stateful_stage_execution_policy(),
             });
-            previous = Some(task_id);
         }
 
         if let Some(aggregate) = plan.aggregate {
@@ -782,12 +818,7 @@ where
         self.inner.scheduler.list().await
     }
 
-    /// Atomically projects one runtime-root incarnation onto its complete engine task graph.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the queue rejects the graph or cannot persist it.
-    pub async fn attach_execution(
+    async fn attach_execution(
         &self,
         owner: RootOwner,
         graph: ExecutionGraph<EngineTask, EngineTaskKey>,
@@ -805,7 +836,13 @@ where
         owner: &RootOwner,
         mode: DetachMode,
     ) -> Result<DetachOutcome<EngineTaskKey>, TaskStoreError> {
-        self.inner.scheduler.detach(owner, mode).await
+        let outcome = self.inner.scheduler.detach(owner, mode).await?;
+        if let Some(observer) = &self.inner.observer {
+            for task_id in &outcome.retired {
+                observer.on_task_cancelled(task_id).await;
+            }
+        }
+        Ok(outcome)
     }
 
     /// Returns the currently attached task graph for one exact runtime-root incarnation.
@@ -837,7 +874,7 @@ where
             .clone()
             .with_pending_publication(completed_proof.clone());
         let checkpoint_policy = TaskExecutionPolicy {
-            retry: publication_retry_policy(),
+            retry: durability_retry_policy(),
             ..lease.execution_policy.clone()
         };
         let checkpointed = self
@@ -961,29 +998,10 @@ where
         execution_permit: &TaskExecutionPermit,
     ) -> Result<(), TaskStoreError> {
         let error = task_lease_lost_error();
-        let failed = self
-            .inner
-            .scheduler
-            .complete_permanent_failure(lease.clone(), error.clone())
+        let mut lease = lease.clone();
+        lease.execution_policy.retry = RetryPolicy::None;
+        self.complete_terminal_failure(lease, observer_task, error, execution_permit)
             .await?;
-        if failed && let Some(observer) = &self.inner.observer {
-            match observer
-                .on_task_failed(&lease.id, observer_task, &error, execution_permit)
-                .await
-            {
-                Ok(projection) => {
-                    self.detach_terminal_failure_projection(&lease.id, projection)
-                        .await;
-                }
-                Err(observer_error) => {
-                    tracing::warn!(
-                        task = ?lease.id,
-                        error = %observer_error,
-                        "failed to persist terminal lease-loss state"
-                    );
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1003,6 +1021,7 @@ where
             return (Err(error.into()), false);
         }
         if let Some(observer) = &self.inner.observer
+            && !matches!(payload, EngineTask::PublishProof { .. })
             && !matches!(payload.publication_source(), EngineTask::Proposal { .. })
         {
             observer
@@ -1025,35 +1044,77 @@ where
         }
     }
 
-    async fn notify_applied_terminal_failure(
+    async fn retry_after_terminal_observer_error(
         &self,
-        completion: raiko2_queue::TaskCompletionDisposition,
-        id: &EngineTaskId,
+        mut lease: TaskLease<EngineTask, EngineTaskKey>,
+        execution_error: &str,
+        observer_error: &EngineObserverError,
+    ) -> Result<TaskCompletionDisposition, TaskStoreError> {
+        tracing::warn!(
+            task = ?lease.id,
+            error = %observer_error,
+            "terminal runtime state is not durable; retrying the queue task"
+        );
+        lease.execution_policy.retry = durability_retry_policy();
+        self.inner
+            .scheduler
+            .complete_with_disposition(
+                lease,
+                Err(format!(
+                    "{execution_error}; terminal runtime persistence failed: {observer_error}"
+                )),
+            )
+            .await
+    }
+
+    async fn complete_terminal_failure(
+        &self,
+        lease: TaskLease<EngineTask, EngineTaskKey>,
         task: &EngineTask,
-        error: Option<&str>,
+        error: String,
         execution_permit: &TaskExecutionPermit,
-    ) {
-        if completion == raiko2_queue::TaskCompletionDisposition::Failed
-            && let Some(observer) = &self.inner.observer
-            && let Some(error) = error
+    ) -> Result<TaskCompletionDisposition, TaskStoreError> {
+        let Some(observer) = &self.inner.observer else {
+            return self
+                .inner
+                .scheduler
+                .complete_with_disposition(lease, Err(error))
+                .await;
+        };
+        let terminal_permit = match observer
+            .acquire_terminal_failure_permit(&lease.id, task, execution_permit)
+            .await
         {
-            match observer
-                .on_task_failed(id, task, error, execution_permit)
-                .await
-            {
-                Ok(projection) => {
-                    self.detach_terminal_failure_projection(id, projection)
-                        .await;
-                }
-                Err(observer_error) => {
-                    tracing::warn!(
-                        task = ?id,
-                        error = %observer_error,
-                        "failed to persist terminal task failure"
-                    );
-                }
+            Ok(permit) => permit,
+            Err(observer_error) => {
+                return self
+                    .retry_after_terminal_observer_error(lease, &error, &observer_error)
+                    .await;
             }
+        };
+        if !self.inner.scheduler.renew_lease(&lease).await? {
+            return Ok(TaskCompletionDisposition::Stale);
         }
+        let projection = match observer
+            .on_task_failed(&lease.id, task, &error, terminal_permit)
+            .await
+        {
+            Ok(projection) => projection,
+            Err(observer_error) => {
+                return self
+                    .retry_after_terminal_observer_error(lease, &error, &observer_error)
+                    .await;
+            }
+        };
+        let id = lease.id.clone();
+        let completion = self
+            .inner
+            .scheduler
+            .complete_with_disposition(lease, Err(error))
+            .await;
+        self.detach_terminal_failure_projection(&id, projection)
+            .await;
+        completion
     }
 
     async fn detach_terminal_failure_projection(
@@ -1175,25 +1236,27 @@ where
             )
             .await;
         }
-        apply_proof_completion_policy(&mut lease, &payload, &execution_result);
+        apply_execution_failure_policy(&mut lease, &payload, &execution_result);
         let result = execution_result.map_err(|error| error.to_string());
-        let error = result.as_ref().err().cloned();
-        let completed_id = lease.id.clone();
-        let completion = self
-            .inner
-            .scheduler
-            .complete_with_disposition(lease, result)
-            .await;
+        let completion = match result {
+            Err(error) if lease.execution_policy.failure_is_terminal(lease.attempt) => {
+                self.complete_terminal_failure(
+                    lease,
+                    &terminal_observer_task,
+                    error,
+                    &execution_permit,
+                )
+                .await
+            }
+            result => {
+                self.inner
+                    .scheduler
+                    .complete_with_disposition(lease, result)
+                    .await
+            }
+        };
         renew_task.abort_and_wait().await;
-        let completion = completion?;
-        self.notify_applied_terminal_failure(
-            completion,
-            &completed_id,
-            &terminal_observer_task,
-            error.as_deref(),
-            &execution_permit,
-        )
-        .await;
+        completion?;
         Ok(true)
     }
 
@@ -1238,12 +1301,13 @@ where
     }
 
     pub async fn shutdown_workers(&self) {
-        let groups = self
-            .inner
-            .worker_groups
-            .lock()
-            .map(|mut groups| groups.drain(..).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let groups = match self.inner.worker_groups.lock() {
+            Ok(mut groups) => groups.drain(..).collect::<Vec<_>>(),
+            Err(poisoned) => {
+                tracing::error!("worker group lock poisoned during engine shutdown");
+                poisoned.into_inner().drain(..).collect::<Vec<_>>()
+            }
+        };
         for group in groups {
             group.shutdown().await;
         }
@@ -1347,7 +1411,7 @@ where
     async fn wait_lease_interruption(
         &self,
         id: &EngineTaskId,
-        worker: &str,
+        lease_token: &str,
         attempt: u32,
     ) -> Result<LeaseInterruption, TaskStoreError> {
         let notifier = self.inner.scheduler.notifier();
@@ -1361,9 +1425,9 @@ where
 
             match view.state {
                 TaskState::Running {
-                    worker: current_worker,
+                    lease_token: current_lease_token,
                     attempt: current_attempt,
-                } if current_worker == worker && current_attempt == attempt => {}
+                } if current_lease_token == lease_token && current_attempt == attempt => {}
                 TaskState::Cancelled => return Ok(LeaseInterruption::Cancelled),
                 _ => return Ok(LeaseInterruption::Lost),
             }
@@ -1886,6 +1950,7 @@ mod tests {
     }
 
     struct PublicationFailingObserver {
+        task_starts: AtomicUsize,
         proof_successes: AtomicUsize,
         task_failures: AtomicUsize,
         failures: usize,
@@ -1894,6 +1959,7 @@ mod tests {
     impl PublicationFailingObserver {
         fn new(failures: usize) -> Self {
             Self {
+                task_starts: AtomicUsize::new(0),
                 proof_successes: AtomicUsize::new(0),
                 task_failures: AtomicUsize::new(0),
                 failures,
@@ -1903,6 +1969,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EngineObserver for PublicationFailingObserver {
+        async fn on_task_started(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            _worker: &str,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) {
+            self.task_starts.fetch_add(1, Ordering::SeqCst);
+        }
+
         async fn on_task_succeeded(
             &self,
             _id: &EngineTaskId,
@@ -1927,10 +2003,48 @@ mod tests {
             _id: &EngineTaskId,
             _task: &EngineTask,
             _error: &str,
-            _execution_permit: &crate::TaskExecutionPermit,
+            permit: crate::TerminalFailurePermit,
         ) -> Result<TerminalFailureProjection, EngineObserverError> {
             self.task_failures.fetch_add(1, Ordering::SeqCst);
-            Ok(TerminalFailureProjection::untracked())
+            Ok(permit.into_projection(Vec::new()))
+        }
+    }
+
+    #[derive(Default)]
+    struct RuntimeSyncFailingObserver {
+        stage_successes: AtomicUsize,
+        task_failures: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for RuntimeSyncFailingObserver {
+        async fn on_task_succeeded(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            success: &EngineTaskSuccess,
+            _permit: Option<&crate::ProofCompletionPermit>,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) -> Result<(), EngineObserverError> {
+            if !matches!(success, EngineTaskSuccess::Proof { .. })
+                && self.stage_successes.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return Err(EngineObserverError::RuntimeSync(
+                    "injected intermediate runtime sync failure".to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn on_task_failed(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            _error: &str,
+            permit: crate::TerminalFailurePermit,
+        ) -> Result<TerminalFailureProjection, EngineObserverError> {
+            self.task_failures.fetch_add(1, Ordering::SeqCst);
+            Ok(permit.into_projection(Vec::new()))
         }
     }
 
@@ -1974,12 +2088,32 @@ mod tests {
             _id: &EngineTaskId,
             _task: &EngineTask,
             _error: &str,
-            _execution_permit: &crate::TaskExecutionPermit,
+            permit: crate::TerminalFailurePermit,
         ) -> Result<TerminalFailureProjection, EngineObserverError> {
-            Ok(TerminalFailureProjection::tracked(
-                vec![self.owner.clone()],
-                (),
-            ))
+            Ok(permit.into_projection(vec![self.owner.clone()]))
+        }
+    }
+
+    struct TerminalSyncFailingObserver {
+        owner: RootOwner,
+        failures: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for TerminalSyncFailingObserver {
+        async fn on_task_failed(
+            &self,
+            _id: &EngineTaskId,
+            _task: &EngineTask,
+            _error: &str,
+            permit: crate::TerminalFailurePermit,
+        ) -> Result<TerminalFailureProjection, EngineObserverError> {
+            if self.failures.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(EngineObserverError::RuntimeSync(
+                    "injected terminal sync failure".to_string(),
+                ));
+            }
+            Ok(permit.into_projection(vec![self.owner.clone()]))
         }
     }
 
@@ -2012,6 +2146,18 @@ mod tests {
                 self.proof_successes.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CancellationObserver {
+        retired_tasks: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for CancellationObserver {
+        async fn on_task_cancelled(&self, _id: &EngineTaskId) {
+            self.retired_tasks.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2630,8 +2776,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attached_execution_plan_delays_next_proposal() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn shared_proposal_has_one_definition_across_batch_positions()
+    -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
             test_context(),
@@ -2639,33 +2785,40 @@ mod tests {
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
-        let second_request = proposal_request(2);
-        let second_proposal = engine.proposal_task_id(second_request.clone());
-        let first_request = proposal_request(1);
-        let owner = RootOwner::new("proposal-chain", uuid::Uuid::new_v4());
+        let shared_request = proposal_request(2);
+        let shared_proposal = engine.proposal_task_id(shared_request.clone());
+        let batch_owner = RootOwner::new("proposal-batch", uuid::Uuid::new_v4());
         engine
             .attach_execution_plan(
-                owner,
+                batch_owner,
                 EngineExecutionPlan {
-                    proposals: vec![first_request, second_request],
+                    proposals: vec![proposal_request(1), shared_request.clone()],
                     aggregate: None,
                 },
             )
             .await?;
+        let standalone_owner = RootOwner::new("proposal-standalone", uuid::Uuid::new_v4());
+        let outcome = engine
+            .attach_execution_plan(
+                standalone_owner.clone(),
+                EngineExecutionPlan {
+                    proposals: vec![shared_request],
+                    aggregate: None,
+                },
+            )
+            .await?;
+        assert_eq!(outcome, AttachOutcome::Attached);
 
-        let ready = engine
-            .inner
-            .scheduler
-            .next_ready("w1")
+        let projection = engine
+            .inspect_execution(&standalone_owner)
             .await?
-            .ok_or_else(|| std::io::Error::other("expected ready task"))?;
-        assert_eq!(ready.id, engine.proposal_task_id(proposal_request(1)));
-
-        let second_view = engine
-            .get(second_proposal)
-            .await?
-            .ok_or_else(|| std::io::Error::other("expected second task view"))?;
-        assert!(matches!(second_view.state, TaskState::Pending { .. }));
+            .ok_or_else(|| std::io::Error::other("expected standalone projection"))?;
+        let shared = projection
+            .tasks
+            .iter()
+            .find(|task| task.id == shared_proposal)
+            .ok_or_else(|| std::io::Error::other("expected shared proposal"))?;
+        assert_eq!(shared.owner_count, 2);
         Ok(())
     }
 
@@ -2772,6 +2925,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn intermediate_runtime_sync_failure_retries_without_terminal_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(RuntimeSyncFailingObserver::default());
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+            Some(observer.clone()),
+        );
+        let (_owner, job_id) =
+            attach_proposal!(engine, "intermediate-sync-retry", proposal_request(1));
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Retrying { attempt: 1, .. }));
+        assert_eq!(observer.stage_successes.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn proof_publication_failure_retries_durable_output_without_reproving()
     -> Result<(), Box<dyn std::error::Error>> {
         let observer = Arc::new(PublicationFailingObserver::new(1));
@@ -2800,6 +2982,7 @@ mod tests {
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
         assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
+        let starts_after_proving = observer.task_starts.load(Ordering::SeqCst);
 
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         engine.inner.scheduler.maintenance_tick().await?;
@@ -2813,6 +2996,11 @@ mod tests {
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 2);
         assert_eq!(observer.task_failures.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            observer.task_starts.load(Ordering::SeqCst),
+            starts_after_proving,
+            "publication-only retries must not reopen task execution telemetry"
+        );
         Ok(())
     }
 
@@ -2987,6 +3175,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_failure_retries_until_runtime_state_is_durable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let owner = RootOwner::new("terminal-sync-retry", uuid::Uuid::new_v4());
+        let observer = Arc::new(TerminalSyncFailingObserver {
+            owner: owner.clone(),
+            failures: AtomicUsize::new(0),
+        });
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(FailingProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+            Some(observer.clone()),
+        );
+        let request = proposal_request(1);
+        let task_id = engine.proposal_task_id(request.clone());
+        engine
+            .attach_execution_plan(
+                owner.clone(),
+                EngineExecutionPlan {
+                    proposals: vec![request],
+                    aggregate: None,
+                },
+            )
+            .await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+        let view = engine
+            .get(task_id.clone())
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected retrying task"))?;
+        assert!(matches!(view.state, TaskState::Retrying { .. }));
+        assert!(engine.inspect_execution(&owner).await?.is_some());
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        engine.inner.scheduler.maintenance_tick().await?;
+        assert!(Box::pin(engine.run_one("w2")).await?);
+
+        assert!(engine.inspect_execution(&owner).await?.is_none());
+        assert!(engine.get(task_id).await?.is_none());
+        assert_eq!(observer.failures.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn recovered_proposal_output_is_finalized_through_observer()
     -> Result<(), Box<dyn std::error::Error>> {
         let observer = Arc::new(RecoveringObserver {
@@ -3046,6 +3282,39 @@ mod tests {
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
         assert!(matches!(view.state, TaskState::Cancelled));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_task_notifies_cancellation_only_after_its_last_owner_detaches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(CancellationObserver::default());
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+            Some(observer.clone()),
+        );
+        let request = proposal_request(1);
+        let plan = EngineExecutionPlan {
+            proposals: vec![request],
+            aggregate: None,
+        };
+        let first = RootOwner::new("first", uuid::Uuid::new_v4());
+        let second = RootOwner::new("second", uuid::Uuid::new_v4());
+        engine
+            .attach_execution_plan(first.clone(), plan.clone())
+            .await?;
+        engine.attach_execution_plan(second.clone(), plan).await?;
+
+        let first_outcome = engine.detach_execution(&first, DetachMode::Cancel).await?;
+        assert!(first_outcome.retired.is_empty());
+        assert_eq!(observer.retired_tasks.load(Ordering::SeqCst), 0);
+
+        let second_outcome = engine.detach_execution(&second, DetachMode::Cancel).await?;
+        assert_eq!(second_outcome.retired.len(), 1);
+        assert_eq!(observer.retired_tasks.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

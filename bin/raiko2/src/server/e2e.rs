@@ -15,13 +15,12 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
+use raiko2_engine::{Engine, ProposalTaskRequest, ProverTaskConfig};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
-use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,7 +39,7 @@ use super::fixture::{
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
     ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_proof_artifact_refs,
-    proposal_task_ref, root_proof_artifact_refs,
+    proposal_task_ref, publication_proof_artifact_refs, root_proof_artifact_refs,
 };
 use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::test_support::{MemoryProofArtifactStore, RuntimeStore};
@@ -1925,11 +1924,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         graffiti: None,
         prover_config: ProverTaskConfig::default(),
     };
-    let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-        pipeline: PipelineKey::ShastaRisc0,
-        request: proposal_request.clone(),
-    });
-    let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
+    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request);
     let metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -1945,8 +1940,8 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
             l1_inclusion_block_number: 1,
             l2_block_numbers: vec![3],
             last_anchor_block_number: 0,
-            task_id: encoded_task_id,
-            request: Some(proposal_request),
+            task_id: proposal_ref,
+            request: proposal_request,
         }],
         aggregate_task_id: None,
         aggregate_request: None,
@@ -1970,17 +1965,18 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         false,
         &canonical_proposals,
     );
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_orphan_registered".to_string(),
-            pipeline_key: None,
+            pipeline_key: PipelineKey::ShastaRisc0,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
-            proposal_id: Some(3),
-            proof_ids: vec![encode_task_id(&proposal_task_id).expect("encode orphan task id")],
+            network_pair: "taiko_dev/ethereum".into(),
+            artifact_refs,
             metadata: serde_json::to_value(metadata).expect("serialize orphan metadata"),
-            request_fingerprint: Some(request_fingerprint),
+            request_fingerprint,
         })
         .await
         .expect("register orphan task");
@@ -2066,22 +2062,19 @@ async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission
     assert!(first["data"].get("task_id").is_none(), "{first}");
     let task_id = single_report_task_id(&app).await;
 
-    let registered = state
+    let mut registered = state
         .runtime
         .get_task(&task_id)
         .await
         .expect("get registered task")
         .expect("registered task");
+    registered.runner_status = RunnerStatus::Failed;
+    registered.error = Some("fixture failed".to_string());
     state
         .runtime
-        .sync_nonterminal_status_if_current(
-            &registered.lifetime(),
-            RunnerStatus::Failed,
-            Some("fixture failed".to_string()),
-            None,
-        )
+        .upsert_task(&registered)
         .await
-        .expect("sync failed task status");
+        .expect("store failed task fixture");
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
@@ -2128,22 +2121,19 @@ async fn e2e_duplicate_aggregate_shasta_post_recovers_failed_root_before_remote_
     assert!(first["data"].get("task_id").is_none(), "{first}");
     let task_id = single_report_task_id(&app).await;
 
-    let registered = state
+    let mut registered = state
         .runtime
         .get_task(&task_id)
         .await
         .expect("get registered task")
         .expect("registered task");
+    registered.runner_status = RunnerStatus::Failed;
+    registered.error = Some("fixture aggregate failed".to_string());
     state
         .runtime
-        .sync_nonterminal_status_if_current(
-            &registered.lifetime(),
-            RunnerStatus::Failed,
-            Some("fixture aggregate failed".to_string()),
-            None,
-        )
+        .upsert_task(&registered)
         .await
-        .expect("sync failed task status");
+        .expect("store failed aggregate task fixture");
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
@@ -2746,7 +2736,7 @@ async fn e2e_batch_single_proof_aggregate_sp1_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -2814,10 +2804,16 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     assert_eq!(status, StatusCode::OK, "{res}");
     let id = single_report_task_id(&app).await;
 
+    assert!(
+        engine
+            .run_one("e2e")
+            .await
+            .expect("recover cached proposal")
+    );
     assert!(engine.run_one("e2e").await.expect("run aggregate"));
     assert!(
         !engine.run_one("e2e").await.expect("queue drained"),
-        "cached proposal proof should avoid preflight/proposal tasks"
+        "cached proposal recovery and aggregation should drain the canonical graph"
     );
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
@@ -3193,7 +3189,7 @@ async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -3877,21 +3873,18 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
 
-    let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-        pipeline: PipelineKey::ShastaRisc0,
-        request: ProposalTaskRequest {
-            proposal_id: 3,
-            l2_block_range: None,
-            l1_inclusion_block_number: 1,
-            last_anchor_block_number: 0,
-            checkpoint: None,
-            blob_proof_type: None,
-            prover: None,
-            graffiti: None,
-            prover_config: Default::default(),
-        },
-    });
-    let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
+    let proposal_request = ProposalTaskRequest {
+        proposal_id: 3,
+        l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 3, end: 3 }),
+        l1_inclusion_block_number: 1,
+        last_anchor_block_number: 0,
+        checkpoint: None,
+        blob_proof_type: None,
+        prover: None,
+        graffiti: None,
+        prover_config: Default::default(),
+    };
+    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request);
     let mut metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -3907,18 +3900,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             l1_inclusion_block_number: 1,
             l2_block_numbers: vec![3],
             last_anchor_block_number: 0,
-            task_id: encoded_task_id.clone(),
-            request: Some(ProposalTaskRequest {
-                proposal_id: 3,
-                l2_block_range: None,
-                l1_inclusion_block_number: 1,
-                last_anchor_block_number: 0,
-                checkpoint: None,
-                blob_proof_type: None,
-                prover: None,
-                graffiti: None,
-                prover_config: Default::default(),
-            }),
+            task_id: proposal_ref.clone(),
+            request: proposal_request,
         }],
         aggregate_task_id: None,
         aggregate_request: None,
@@ -3934,7 +3917,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .expect("time")
         .as_secs() as i64;
     metadata.upsert_proposal_runtime(
-        &encoded_task_id,
+        &proposal_ref,
         &BoundlessSubmissionProgress {
             provider_request_id: "0x1234".to_string(),
             remote_tx_hash: Some("0xabcd".to_string()),
@@ -3952,18 +3935,19 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         },
         updated_at,
     );
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
 
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
-            pipeline_key: None,
+            pipeline_key: PipelineKey::ShastaRisc0,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
-            proposal_id: Some(3),
-            proof_ids: vec![encoded_task_id.clone()],
+            network_pair: "taiko_dev/ethereum".into(),
+            artifact_refs,
             metadata: serde_json::to_value(metadata).expect("serialize metadata"),
-            request_fingerprint: None,
+            request_fingerprint: "task-runtime-fallback".into(),
         })
         .await
         .expect("register task");
@@ -4056,7 +4040,7 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
 
     let proposal_request = ProposalTaskRequest {
         proposal_id: 3,
-        l2_block_range: None,
+        l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 3, end: 3 }),
         l1_inclusion_block_number: 1,
         last_anchor_block_number: 0,
         checkpoint: None,
@@ -4065,12 +4049,7 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
         graffiti: None,
         prover_config: Default::default(),
     };
-    let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-        pipeline: PipelineKey::ShastaRisc0,
-        request: proposal_request.clone(),
-    });
     let proof_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request);
-    let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
     let metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -4086,8 +4065,8 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
             l1_inclusion_block_number: 1,
             l2_block_numbers: vec![3],
             last_anchor_block_number: 0,
-            task_id: encoded_task_id.clone(),
-            request: Some(proposal_request),
+            task_id: proof_ref.clone(),
+            request: proposal_request,
         }],
         aggregate_task_id: None,
         aggregate_request: None,
@@ -4097,18 +4076,19 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
             ..Default::default()
         },
     };
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
 
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_persisted_proof".to_string(),
-            pipeline_key: None,
+            pipeline_key: PipelineKey::ShastaRisc0,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
-            proposal_id: Some(3),
-            proof_ids: vec![encoded_task_id.clone()],
+            network_pair: "taiko_dev/ethereum".into(),
+            artifact_refs,
             metadata: serde_json::to_value(metadata).expect("serialize metadata"),
-            request_fingerprint: None,
+            request_fingerprint: "task-persisted-proof".into(),
         })
         .await
         .expect("register task");

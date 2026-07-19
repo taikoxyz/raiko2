@@ -34,14 +34,19 @@ at a time, old and replacement processes never overlap, and namespaces never sha
 deployment invariant; the application has no distributed owner lease or owner epoch. Both
 environment and namespace participate in task fingerprints and object names.
 
+### Request Fingerprint
+The mandatory, non-empty identity of one normalized proof request inside a runtime namespace. It is
+stored directly on every root and is unique within authoritative runtime state. Registration,
+deduplication, replacement, and public task IDs use it; there is no anonymous root lifecycle.
+
 ### Namespace Fence
 The process-wide mutation authority for one namespace. It admits short authoritative commits and
 external writes while active, rejects new work as soon as draining starts, and rejects every write
-when inactive. Drain waits only for repository commits already admitted and request-ID checkpoints
-covered by provider permits acquired while active. A separate process-local lifecycle transition gate
-serializes only the active-root decision with one in-memory queue attach or detach. Neither is held
-across a complete task, provider call, external storage operation, or saga; neither is a
-multi-instance coordination protocol.
+when inactive. One permit spans each admitted repository write or proof-object operation, and drain
+waits for those operations plus request-ID checkpoints covered by provider permits acquired while
+active. A separate process-local lifecycle transition gate serializes only the active-root decision
+with one in-memory queue attach or detach. Neither spans a complete task, provider call, or saga;
+neither is a multi-instance coordination protocol.
 
 ### Proof Lifecycle
 The concrete application service that handles submission, cancellation, cleanup, invalidation, and
@@ -66,12 +71,15 @@ and its complete DAG is atomic, as is detaching that owner. A shared stage remai
 root owns it; the last owner leaving cancels or removes the stage. Cancellation and terminal failure
 persist their exact root transition before detaching the owner; terminal failure holds the local
 lifecycle transition gate until its detach finishes. Restart reconciliation rebuilds the projection
-instead of treating it as durable authority.
+instead of treating it as durable authority. Proposal nodes have root-independent definitions and no
+proposal-to-proposal dependencies; only aggregation depends on the proposal artifacts it consumes.
 
 ### Root Owner
 The exact `TaskLifetime` whose root currently requires an execution graph. Root owners are local
 queue relationships, not namespace owners. They allow distinct roots to share a stage without one
-root's cancellation deleting work still required by another.
+root's cancellation deleting work still required by another. Ownership comes from canonical task
+membership in runtime metadata; a broad artifact reference may instead identify a storage consumer
+and does not grant execution ownership.
 
 ### GCS Generation
 The native storage version of one GCS object. Runtime-state generations are hidden inside the state
@@ -136,10 +144,13 @@ completion boundary of a proof task, not a separate public task status; the task
 non-terminal until publication succeeds.
 
 ### Publication Intent
-The authoritative runtime record between pending proof persistence and canonical publication. It
-binds a content hash and artifact expectation to the exact task lifetimes eligible for completion.
-Restart reconciliation uses it to resume publication, activate the canonical descriptor, or
-invalidate an ownerless result without rerunning the prover.
+The authoritative runtime record created before pending proof materialization and canonical
+publication. It binds the typed artifact identity and content hash to the exact task lifetimes
+observed at checkpoint. Restart reconciliation uses it to resume a retained pending payload, activate
+the canonical descriptor, or invalidate an ownerless result. Normal completion refreshes owners under
+the local lifecycle gate before activation: a distinct root registered after the checkpoint may join,
+but a replacement incarnation for an already observed task ID may not. If pending materialization
+never completed, the root may recompute the proof without leaving an untracked object.
 
 ### Proof URI
 The backend-neutral location of a published proof artifact exposed as `proof_uri`. GCS stores use

@@ -625,7 +625,9 @@ Validation:
 - `proposal_id_start` and `proposal_id_end` must be supplied together, and start must be less than or
   equal to end.
 - `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string no longer than 130
-  characters including `0x`.
+  characters including `0x`. Prefix matching validates the complete manifest-selected content hash
+  before examining the bounded prefix; corrupt or missing content fails the request instead of being
+  treated as a non-match.
 
 ## Legacy V3 Submit Shasta Batch Proof
 
@@ -846,6 +848,7 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
+- When provided, `aggregation_ids` must contain exactly one ID per entry in `proofs`.
 - `proof_type` must be a concrete proof type: `risc0`, `sp1`, `sgx`, or `sgxgeth`.
 - `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
@@ -917,8 +920,8 @@ x-api-key: <server.acl.keys[].key with allow=["admin"]>
 
 Requires an ACL key that allows `admin`.
 
-Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
-directories. Reusable proof artifacts in the configured artifact store are retained.
+Removes all registered root tasks and detaches their owner-aware in-process execution projections.
+Reusable proof artifacts in the configured artifact store are retained.
 
 ### Response
 
@@ -1160,10 +1163,11 @@ All API errors use the Hoodi-style envelope:
 - Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
   `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
 - Before the first canonical publication attempt, a completed proof payload is checkpointed under
-  the queue lease and written as an immutable pending blob. The authoritative runtime state then
-  records a publication intent containing the content hash, exact artifact expectation, and exact
-  `TaskLifetime` owners. State updates do not rewrite large proofs. Recovery uses the same intent and
-  pending blob after restart, and publication retries do not run the prover again.
+  the queue lease. Authoritative runtime state first records a publication intent containing the
+  typed artifact identity, content hash, and exact `TaskLifetime` owners; only then is the immutable
+  pending blob materialized. State updates do not rewrite large proofs. A failed intent write creates
+  no object, while a failed blob write leaves a durable retry intent. Recovery uses the same intent
+  and pending blob after restart, and in-process publication retries do not run the prover again.
 - Invalidation first reserves the exact artifact expectation in authoritative runtime state and
   verifies that no live matching owner remains. It then writes a tombstone for `(logical key,
   manifest generation, content hash)`, conditionally deletes only that manifest generation, and

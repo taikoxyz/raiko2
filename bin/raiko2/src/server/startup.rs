@@ -12,7 +12,6 @@ pub(crate) struct StartupSummary {
     environment: String,
     namespace: String,
     runtime_store: String,
-    queue_backend: String,
     queue_workers: usize,
     json_logs: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,7 +49,6 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
             crate::config::RuntimeStoreBackend::Gcs => "gcs",
         }
         .to_string(),
-        queue_backend: "memory".to_string(),
         queue_workers: config.queue.workers,
         json_logs,
         remote_sgx_base_url,
@@ -84,7 +82,6 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             environment = %summary.environment,
             namespace = %summary.namespace,
             runtime_store = %summary.runtime_store,
-            queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
             remote_sgx_base_url = %base_url,
@@ -99,7 +96,6 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             environment = %summary.environment,
             namespace = %summary.namespace,
             runtime_store = %summary.runtime_store,
-            queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
             remote_sgx_base_url = %base_url,
@@ -113,7 +109,6 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             environment = %summary.environment,
             namespace = %summary.namespace,
             runtime_store = %summary.runtime_store,
-            queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
             remote_sgx_sgxgeth_base_url = %sgxgeth_base_url,
@@ -127,7 +122,6 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             environment = %summary.environment,
             namespace = %summary.namespace,
             runtime_store = %summary.runtime_store,
-            queue_backend = %summary.queue_backend,
             queue_workers = summary.queue_workers,
             json_logs = summary.json_logs,
             "{}",
@@ -198,7 +192,6 @@ mod tests {
         assert_eq!(summary["environment"], "test");
         assert_eq!(summary["namespace"], "raiko2-test");
         assert_eq!(summary["runtime_store"], "memory");
-        assert_eq!(summary["queue_backend"], "memory");
         assert_eq!(summary["queue_workers"], 9);
         assert_eq!(summary["json_logs"], false);
         assert!(summary.get("remote_sgx_base_url").is_none());

@@ -67,10 +67,11 @@ The runtime is governed by these invariants:
 4. The namespace fence is the single process-wide mutation authority. Entering `Draining` closes
    admission and readiness immediately, rejects new ordinary mutations and external writes, and
    waits only for short repository commits plus request-ID checkpoints covered by provider permits
-   acquired while `Active`. A separate process-local lifecycle transition gate serializes only the
-   active-root decision with its one in-memory queue attach or detach; neither mechanism is held
-   across a complete task, provider call, external storage operation, or publication saga, and
-   shutdown does not wait for every proof task to finish.
+   acquired while `Active`. One namespace-fence permit spans each admitted repository write or
+   proof-object operation so draining can wait for that operation to settle. A separate process-local
+   lifecycle transition gate serializes one short active-root transition across its runtime-state CAS
+   and in-memory queue attach or detach. Neither mechanism spans a complete task, provider call, or
+   publication saga, and shutdown does not wait for every proof task to finish.
 5. Proof computation is not task completion. Completion requires a normalized proof to be durably
    published, registered, readable, and synchronized to the runtime root.
 6. Proof manifests are create-only and first-valid-wins. Content is immutable and addressed by
@@ -87,15 +88,33 @@ The runtime is governed by these invariants:
     preconditions reject delayed worker, cancellation, cleanup, and publication callbacks after a
     replacement reuses the same deterministic task ID. A task lifetime is stale-callback identity,
     not a namespace owner epoch, lease, or distributed lock.
+    `RuntimeTaskRecord.artifact_refs` is the only durable proof-reference index; metadata is decoded
+    only after its network, pipeline, route, proof type, and derived artifact references match that
+    canonical record. Every persisted proposal carries its canonical engine request directly;
+    derived proposal fields and task references are validated projections, never recovery inputs or
+    compatibility fallbacks. Every root has one mandatory, non-empty request fingerprint, unique
+    within the runtime namespace; anonymous task registration is not supported.
 11. Each scheduler lease also carries a non-reused local token. This prevents remove/recreate ABA
     from accepting an old completion even when task ID, worker label, and attempt number repeat. The
     token identifies one local execution attempt and never authorizes runtime writes.
 12. The in-process execution projection atomically attaches a complete task graph to a root owner
     and atomically detaches that owner. Shared stages remain executable while any live root owns
-    them; the last owner leaving cancels or removes the stage. Cancellation and terminal failure
+    them; the last owner leaving cancels or removes the stage. Proposal nodes have root-independent
+    definitions and no proposal-to-proposal dependency; aggregation alone depends on the proposal
+    artifacts it consumes. Cancellation and terminal failure
     first persist the exact root transition, then remove its owner before another root can reuse the
-    stage. Runtime state remains authoritative if projection removal fails, and reconciliation
-    rebuilds the projection instead of rolling state back.
+    stage. A terminal worker error remains queue-retryable until that runtime transition is durable.
+    Runtime state remains authoritative if projection removal fails, and reconciliation rebuilds the
+    projection instead of rolling state back. Recovery, destructive retirement, and root
+    replacement compare the complete observed runtime-task snapshot; a stale request performs no
+    queue effect, and replacement commits one successor before swapping its owner projection.
+    Publication checkpoints persist their typed owner/hash intent before materializing the pending
+    blob, so a failed state CAS cannot create an untracked object and a failed object write remains
+    retryable from durable state. Final activation briefly refreshes owners under the local lifecycle
+    gate: a newly registered distinct root may share the proof, while a replacement incarnation for a
+    checkpointed task ID may not.
+    Pending-publication records retain their typed artifact identity until unowned object cleanup
+    succeeds, so restart can finish a replacement interrupted after the runtime CAS.
 13. Cross-domain lifecycle work is coordinated by the concrete `ProofLifecycle` service as
     state-first, idempotent effects. Repository commands use exact task lifetimes and artifact
     descriptors and return typed outcomes such as `Applied`, `AlreadyApplied`, `Stale`,

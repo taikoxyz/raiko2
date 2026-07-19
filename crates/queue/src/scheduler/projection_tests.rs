@@ -172,6 +172,45 @@ async fn conflicting_graph_attach_is_atomic() -> StoreResult<()> {
 }
 
 #[tokio::test]
+async fn checkpoint_policy_does_not_change_the_shared_task_definition() -> StoreResult<()> {
+    let scheduler = scheduler();
+    let first_owner = owner("first");
+    let graph = ExecutionGraph::new(vec![node(1, "task", [])]);
+    scheduler.attach(first_owner, graph.clone()).await?;
+    let lease = scheduler
+        .next_ready("worker")
+        .await?
+        .ok_or_else(|| TaskStoreError::corrupt_msg("expected running lease"))?;
+    assert!(
+        scheduler
+            .checkpoint_payload(
+                &lease,
+                "checkpointed",
+                TaskExecutionPolicy {
+                    lease_duration: Duration::from_secs(60),
+                    retry: RetryPolicy::Fixed {
+                        max_attempts: 3,
+                        delay: Duration::from_secs(1),
+                    },
+                },
+            )
+            .await?
+    );
+
+    assert_eq!(
+        scheduler.attach(owner("second"), graph).await?,
+        AttachOutcome::Attached
+    );
+    assert_eq!(
+        scheduler
+            .complete_with_disposition(lease, Ok("completed"))
+            .await?,
+        TaskCompletionDisposition::Succeeded
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn cyclic_graph_attach_is_atomic() -> StoreResult<()> {
     let scheduler = scheduler();
     let cyclic_owner = owner("cycle");
@@ -249,7 +288,22 @@ async fn reattaching_a_failed_owner_graph_makes_its_terminal_tasks_runnable() ->
         .ok_or_else(|| TaskStoreError::corrupt_msg("expected first lease"))?;
     assert!(
         scheduler
-            .complete_permanent_failure(failed_lease, "transient store failure".to_string())
+            .checkpoint_payload(
+                &failed_lease,
+                "publication-checkpoint",
+                TaskExecutionPolicy {
+                    lease_duration: Duration::from_secs(120),
+                    retry: RetryPolicy::Fixed {
+                        max_attempts: 1,
+                        delay: Duration::from_secs(1),
+                    },
+                },
+            )
+            .await?
+    );
+    assert!(
+        scheduler
+            .complete(failed_lease, Err("transient store failure".to_string()))
             .await?
     );
 
@@ -261,6 +315,9 @@ async fn reattaching_a_failed_owner_graph_makes_its_terminal_tasks_runnable() ->
         .next_ready("worker")
         .await?
         .ok_or_else(|| TaskStoreError::corrupt_msg("expected recovered lease"))?;
+    assert_eq!(retry_lease.attempt, 1);
+    assert_eq!(retry_lease.payload, "proposal");
+    assert_eq!(retry_lease.execution_policy.retry, RetryPolicy::None);
     assert!(
         scheduler
             .complete_with_disposition(retry_lease, Ok("recovered"))

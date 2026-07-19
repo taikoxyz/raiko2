@@ -36,7 +36,10 @@ use artifact_store::{
 use artifact_store::{ProofObjectStore, RuntimeStateStore, RuntimeStoreScope};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -60,6 +63,7 @@ impl std::fmt::Display for PendingProofPublicationRemoved {
 impl std::error::Error for PendingProofPublicationRemoved {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeState {
     tasks: HashMap<String, RuntimeTaskRecord>,
     artifacts: HashMap<String, ProofArtifactRecord>,
@@ -67,7 +71,12 @@ struct RuntimeState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct PendingProofPublicationRecord {
+    network_pair: String,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: String,
     content_hash: String,
     owner_incarnations: Vec<uuid::Uuid>,
 }
@@ -175,7 +184,7 @@ pub struct RuntimeManager {
     generation: StdMutex<Option<i64>>,
     lifecycle_commit: StdMutex<()>,
     mutation: Mutex<()>,
-    pending_publication_mutation: Mutex<()>,
+    artifact_lifecycle_locks: [Mutex<()>; ARTIFACT_LIFECYCLE_LOCK_SHARDS],
     execution_lifecycle_gate: Arc<Mutex<()>>,
     namespace_commit_fence: RwLock<()>,
     submission_checkpoints: Arc<SubmissionCheckpointAdmission>,
@@ -183,6 +192,8 @@ pub struct RuntimeManager {
     draining: AtomicBool,
     state_coherence: AtomicU8,
 }
+
+const ARTIFACT_LIFECYCLE_LOCK_SHARDS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiredTaskCursor {
@@ -275,6 +286,7 @@ pub enum ProofArtifactLifecycle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProofArtifactRecord {
     pub environment: String,
     pub network_pair: String,
@@ -326,7 +338,7 @@ impl ProofArtifactRecord {
 }
 
 impl RuntimeManager {
-    pub async fn get_tasks_by_ref(&self, task_ref: &str) -> Vec<RuntimeTaskRecord> {
+    pub async fn tasks_referencing(&self, task_ref: &str) -> Vec<RuntimeTaskRecord> {
         let mut records = self
             .state
             .read()
@@ -336,7 +348,12 @@ impl RuntimeManager {
             .filter(|record| task_references(record, task_ref))
             .cloned()
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        records.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
         records
     }
 
@@ -348,7 +365,6 @@ impl RuntimeManager {
     where
         F: Fn(&mut Vec<RuntimeTaskRecord>) -> Result<T>,
     {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
         let task_ref = task_ref.to_string();
         self.mutate(move |state| {
             let mut records = state
@@ -380,7 +396,6 @@ impl RuntimeManager {
     where
         F: Fn(&mut Vec<RuntimeTaskRecord>) -> Result<T>,
     {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
         let task_ref = task_ref.to_string();
         self.mutate_checkpoint(permit, move |state| {
             let mut records = state
@@ -399,6 +414,7 @@ impl RuntimeManager {
         .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn new(test_root: impl AsRef<std::path::Path>) -> Result<Self> {
         let namespace = format!(
             "test-{}",
@@ -408,12 +424,12 @@ impl RuntimeManager {
             "local".to_string(),
             namespace,
         )?);
-        Ok(Self::with_store(store))
+        Ok(Self::from_store(store))
     }
 
     pub fn new_memory(environment: String, namespace: String) -> Result<Self> {
         let store = Arc::new(MemoryProofArtifactStore::new(environment, namespace)?);
-        Ok(Self::with_store(store))
+        Ok(Self::from_store(store))
     }
 
     #[cfg_attr(
@@ -422,31 +438,17 @@ impl RuntimeManager {
     )]
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_store(store: Arc<dyn RuntimeStore>) -> Self {
-        Self {
-            store,
-            state: RwLock::new(RuntimeState::default()),
-            generation: StdMutex::new(None),
-            lifecycle_commit: StdMutex::new(()),
-            mutation: Mutex::new(()),
-            pending_publication_mutation: Mutex::new(()),
-            execution_lifecycle_gate: Arc::new(Mutex::new(())),
-            namespace_commit_fence: RwLock::new(()),
-            submission_checkpoints: Arc::new(SubmissionCheckpointAdmission::default()),
-            active: AtomicBool::new(true),
-            draining: AtomicBool::new(false),
-            state_coherence: AtomicU8::new(StateCoherence::Coherent as u8),
-        }
+        Self::from_store(store)
     }
 
-    #[cfg(not(any(test, feature = "test-utils")))]
-    fn with_store(store: Arc<dyn RuntimeStore>) -> Self {
+    fn from_store(store: Arc<dyn RuntimeStore>) -> Self {
         Self {
             store,
             state: RwLock::new(RuntimeState::default()),
             generation: StdMutex::new(None),
             lifecycle_commit: StdMutex::new(()),
             mutation: Mutex::new(()),
-            pending_publication_mutation: Mutex::new(()),
+            artifact_lifecycle_locks: std::array::from_fn(|_| Mutex::new(())),
             execution_lifecycle_gate: Arc::new(Mutex::new(())),
             namespace_commit_fence: RwLock::new(()),
             submission_checkpoints: Arc::new(SubmissionCheckpointAdmission::default()),
@@ -464,7 +466,7 @@ impl RuntimeManager {
     ) -> Result<Self> {
         let store =
             Arc::new(GcsProofArtifactStore::new(environment, namespace, bucket_id, prefix).await?);
-        Ok(Self::with_store(store))
+        Ok(Self::from_store(store))
     }
 
     pub async fn begin_draining(&self) {
@@ -565,7 +567,16 @@ impl RuntimeManager {
             .await
             .context("authoritative runtime store is unavailable")?;
         match StateCoherence::load(&self.state_coherence) {
-            StateCoherence::Coherent => {}
+            StateCoherence::Coherent => {
+                let observed_generation = stored.as_ref().and_then(|state| state.generation);
+                if observed_generation != self.current_generation()? {
+                    self.state_coherence
+                        .store(StateCoherence::Violated as u8, Ordering::Release);
+                    anyhow::bail!(
+                        "runtime state generation changed outside the authoritative repository"
+                    );
+                }
+            }
             StateCoherence::Recoverable => self.install_runtime_state_object(stored).await?,
             StateCoherence::Violated => {
                 anyhow::bail!("runtime state generation invariant was violated")
@@ -695,11 +706,10 @@ impl RuntimeManager {
         for attempt in 1..=MAX_ATTEMPTS {
             self.ensure_authoritative_write_allowed(checkpoint_permit)?;
             let current = self.state.read().await.clone();
-            let current_bytes =
-                serde_json::to_vec(&current).context("encode runtime store state")?;
             let expected_generation = self.current_generation()?;
             let mut next = current.clone();
             let output = update(&mut next)?;
+            validate_runtime_state(&next, self.environment())?;
             let next_bytes = serde_json::to_vec(&next).context("encode runtime store state")?;
 
             let write_result = self
@@ -748,11 +758,12 @@ impl RuntimeManager {
                         .await?;
                         return Ok(output);
                     }
+                    // The object generation is the CAS identity. Runtime state contains hash maps,
+                    // so deserializing and serializing an unchanged snapshot is not guaranteed to
+                    // reproduce the original byte order. Comparing those bytes would turn a
+                    // transport error before commit into a false coherence violation.
                     let remote_matches_current = match observed.as_ref() {
-                        Some(observed) => {
-                            observed.bytes == current_bytes
-                                && observed.generation == expected_generation
-                        }
+                        Some(observed) => observed.generation == expected_generation,
                         None => expected_generation.is_none(),
                     };
                     if remote_matches_current {
@@ -851,10 +862,9 @@ impl RuntimeManager {
     async fn install_runtime_state_object(&self, stored: Option<RuntimeStateObject>) -> Result<()> {
         match stored {
             Some(stored) => {
-                let mut state = serde_json::from_slice(&stored.bytes)
+                let state = serde_json::from_slice(&stored.bytes)
                     .context("decode authoritative runtime store state")?;
-                migrate_legacy_task_indexes(&mut state)
-                    .context("migrate authoritative runtime task indexes")?;
+                validate_runtime_state(&state, self.environment())?;
                 self.install_runtime_state(state, stored.generation).await
             }
             None => {
@@ -893,6 +903,43 @@ impl RuntimeManager {
         }
     }
 
+    fn artifact_lifecycle_lock(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> &Mutex<()> {
+        // Only same-artifact object-store steps require ordering. Runtime task transitions remain
+        // independent and use the authoritative state CAS instead of taking this lock.
+        let mut hasher = DefaultHasher::new();
+        Self::artifact_key(network_pair, pipeline_key, route, proof_ref).hash(&mut hasher);
+        let shard = hasher.finish() % ARTIFACT_LIFECYCLE_LOCK_SHARDS as u64;
+        &self.artifact_lifecycle_locks
+            [usize::try_from(shard).expect("artifact lock shard always fits usize")]
+    }
+
+    async fn has_active_artifact_owner(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        owner_incarnation: uuid::Uuid,
+    ) -> bool {
+        self.state.read().await.tasks.values().any(|task| {
+            task.incarnation_id == owner_incarnation
+                && task.pipeline_key == pipeline_key
+                && task.route == route
+                && task.network_pair == network_pair
+                && task_references(task, proof_ref)
+                && matches!(
+                    task.runner_status,
+                    RunnerStatus::Allocated | RunnerStatus::Running
+                )
+        })
+    }
+
     pub async fn publish_proof_artifact_bytes(
         &self,
         network_pair: &str,
@@ -901,7 +948,10 @@ impl RuntimeManager {
         proof_ref: &str,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
         self.publish_proof_artifact_bytes_locked(
             network_pair,
             pipeline_key,
@@ -938,18 +988,15 @@ impl RuntimeManager {
         owner_incarnation: uuid::Uuid,
         bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
-        let proof_ref_owned = proof_ref.to_string();
-        let network_pair_owned = network_pair.to_string();
-        let has_durable_owner = self.state.read().await.tasks.values().any(|task| {
-            task.incarnation_id == owner_incarnation
-                && task.pipeline_key == pipeline_key
-                && task.route == route
-                && task_network_pair(task) == Some(network_pair_owned.as_str())
-                && task_references(task, &proof_ref_owned)
-                && task.runner_status != RunnerStatus::Cancelled
-        });
         anyhow::ensure!(
-            has_durable_owner,
+            self.has_active_artifact_owner(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                owner_incarnation,
+            )
+            .await,
             "active proof artifact requires a durable task owner"
         );
         anyhow::ensure!(
@@ -965,7 +1012,7 @@ impl RuntimeManager {
             "active proof artifact owner changed before checkpoint"
         );
         let publication = self
-            .publish_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref, bytes)
+            .commit_proof_artifact_publication(network_pair, pipeline_key, route, proof_ref, bytes)
             .await?;
         if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
             self.release_pending_proof_publication_owner(
@@ -1005,25 +1052,34 @@ impl RuntimeManager {
             content_hash: artifact.content_hash.clone(),
             generation: artifact.generation,
         };
-        anyhow::ensure!(
-            self.register_pending_proof_artifact(registration.clone())
-                .await?
-                == ProofArtifactLifecycle::Pending,
-            "active proof artifact was invalidated before activation"
-        );
-        anyhow::ensure!(
-            self.activate_proof_artifact_with_tasks(
+        let activated = self
+            .activate_proof_artifact_with_tasks(
                 proof_ref,
                 registration,
                 &[owner_incarnation],
                 |_| Ok(Some(())),
             )
-            .await?
-            .is_some(),
-            "active proof artifact owner changed before activation"
-        );
-        self.remove_local_pending(network_pair, pipeline_key, route, proof_ref)
             .await?;
+        if activated.is_none() {
+            anyhow::ensure!(
+                self.invalidate_pending_proof_publication(
+                    network_pair,
+                    pipeline_key,
+                    route,
+                    proof_ref,
+                )
+                .await?,
+                "active proof artifact owner changed while invalidation was blocked"
+            );
+            anyhow::bail!("active proof artifact owner changed before activation");
+        }
+        self.remove_pending_proof_publication_if_unowned(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+        )
+        .await?;
         Ok(publication)
     }
 
@@ -1060,6 +1116,7 @@ impl RuntimeManager {
             .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn delete_proof_artifact(
         &self,
         network_pair: &str,
@@ -1082,29 +1139,50 @@ impl RuntimeManager {
         self.store.delete_exact(&key, &descriptor).await
     }
 
-    pub const fn ensure_layout(&self) -> Result<()> {
-        Ok(())
-    }
-
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn register_task(&self, registration: TaskRegistration) -> Result<RuntimeTaskRecord> {
         let record = build_task_record(&registration)?;
         self.upsert_task(&record).await?;
         Ok(record)
     }
 
-    pub async fn register_task_with_artifact_preconditions(
+    /// Atomically replaces one unchanged runtime-task snapshot.
+    ///
+    /// Returning `None` means the caller's snapshot is no longer authoritative. In that case this
+    /// method leaves both the current task and pending-publication ownership untouched.
+    pub async fn replace_task_if_unchanged_with_artifact_preconditions(
         &self,
+        expected: &RuntimeTaskRecord,
         registration: TaskRegistration,
         artifact_preconditions: &[ProofArtifactPrecondition],
-    ) -> Result<RuntimeTaskRecord> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+    ) -> Result<Option<RuntimeTaskRecord>> {
         let record = build_task_record(&registration)?;
+        let expected = expected.clone();
         let artifact_preconditions = artifact_preconditions.to_vec();
         self.mutate(move |state| {
+            let Some(current) = state.tasks.get(&expected.task_id) else {
+                return Ok(None);
+            };
+            if current != &expected {
+                return Ok(None);
+            }
             ensure_artifact_preconditions(state, &artifact_preconditions)?;
+            anyhow::ensure!(
+                record.task_id == expected.task_id || !state.tasks.contains_key(&record.task_id),
+                "replacement task id already belongs to another task"
+            );
+            let removed = state
+                .tasks
+                .remove(&expected.task_id)
+                .context("runtime task disappeared during conditional replacement")?;
+            for pending in state.pending_publications.values_mut() {
+                pending
+                    .owner_incarnations
+                    .retain(|owner| *owner != removed.incarnation_id);
+            }
             ensure_task_fingerprint_available(state, &record)?;
             state.tasks.insert(record.task_id.clone(), record.clone());
-            Ok(record.clone())
+            Ok(Some(record.clone()))
         })
         .await
     }
@@ -1122,12 +1200,7 @@ impl RuntimeManager {
         registration: TaskRegistration,
         artifact_preconditions: &[ProofArtifactPrecondition],
     ) -> Result<TaskRegistrationOutcome> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
-        let fingerprint = registration
-            .request_fingerprint
-            .as_deref()
-            .context("request_fingerprint is required for idempotent registration")?
-            .to_string();
+        let fingerprint = registration.request_fingerprint.clone();
         let record = build_task_record(&registration)?;
         let artifact_preconditions = artifact_preconditions.to_vec();
         self.mutate(move |state| {
@@ -1135,7 +1208,7 @@ impl RuntimeManager {
                 state
                     .tasks
                     .values()
-                    .find(|task| task.request_fingerprint.as_deref() == Some(&fingerprint))
+                    .find(|task| task.request_fingerprint == fingerprint)
                     .cloned()
             }) {
                 return Ok(TaskRegistrationOutcome::Existing(existing));
@@ -1147,55 +1220,13 @@ impl RuntimeManager {
         .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn upsert_task(&self, record: &RuntimeTaskRecord) -> Result<()> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
         let record = record.clone();
         self.mutate(move |state| {
             ensure_task_fingerprint_available(state, &record)?;
             state.tasks.insert(record.task_id.clone(), record.clone());
             Ok(())
-        })
-        .await
-    }
-
-    pub async fn update_task_metadata(
-        &self,
-        task_id: &str,
-        metadata: &serde_json::Value,
-    ) -> Result<bool> {
-        let task_id = task_id.to_string();
-        let metadata = metadata.clone();
-        self.mutate(move |state| {
-            let Some(task) = state.tasks.get_mut(&task_id) else {
-                return Ok(false);
-            };
-            task.metadata = metadata.clone();
-            task.updated_at = now_ts();
-            Ok(true)
-        })
-        .await
-    }
-
-    pub async fn update_task_metadata_integer(
-        &self,
-        task_id: &str,
-        json_path: &str,
-        value: i64,
-    ) -> Result<bool> {
-        let task_id = task_id.to_string();
-        let field = json_path
-            .strip_prefix("$.")
-            .context("metadata path must start with '$.'")?
-            .split('.')
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        self.mutate(move |state| {
-            let Some(task) = state.tasks.get_mut(&task_id) else {
-                return Ok(false);
-            };
-            set_json_integer(&mut task.metadata, &field, value)?;
-            task.updated_at = now_ts();
-            Ok(true)
         })
         .await
     }
@@ -1214,50 +1245,8 @@ impl RuntimeManager {
             .await
             .tasks
             .values()
-            .filter(|task| task.request_fingerprint.as_deref() == Some(fingerprint))
-            .max_by_key(|task| (task.updated_at, std::cmp::Reverse(task.task_id.clone())))
+            .find(|task| task.request_fingerprint == fingerprint)
             .cloned())
-    }
-
-    pub async fn find_task_by_engine_task_id(
-        &self,
-        engine_task_id: &str,
-    ) -> Result<Option<RuntimeTaskRecord>> {
-        self.find_task_by_task_ref(engine_task_id).await
-    }
-
-    pub async fn find_task_by_task_ref(&self, task_ref: &str) -> Result<Option<RuntimeTaskRecord>> {
-        Ok(self
-            .find_tasks_by_task_ref(task_ref)
-            .await?
-            .into_iter()
-            .next())
-    }
-
-    pub async fn find_tasks_by_engine_task_id(
-        &self,
-        engine_task_id: &str,
-    ) -> Result<Vec<RuntimeTaskRecord>> {
-        self.find_tasks_by_task_ref(engine_task_id).await
-    }
-
-    pub async fn find_tasks_by_task_ref(&self, task_ref: &str) -> Result<Vec<RuntimeTaskRecord>> {
-        let mut tasks = self
-            .state
-            .read()
-            .await
-            .tasks
-            .values()
-            .filter(|task| task_references(task, task_ref))
-            .cloned()
-            .collect::<Vec<_>>();
-        tasks.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| left.task_id.cmp(&right.task_id))
-        });
-        Ok(tasks)
     }
 
     /// Completes one concrete task lifetime only while every proof artifact it consumed remains
@@ -1295,74 +1284,96 @@ impl RuntimeManager {
         .await
     }
 
-    /// Reopens exactly one task lifetime for recovery.
-    pub async fn reopen_task_for_recovery_if_current(
+    /// Prepares one unchanged non-terminal task snapshot for recovery.
+    pub async fn prepare_task_for_recovery_if_unchanged(
         &self,
-        lifetime: &TaskLifetime,
-        expected_status: RunnerStatus,
-    ) -> Result<RuntimeMutationOutcome> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
-        let task_id = lifetime.task_id.clone();
-        let incarnation_id = lifetime.incarnation_id;
+        expected: &RuntimeTaskRecord,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        let expected = expected.clone();
         self.mutate(move |state| {
-            let Some(task) = state.tasks.get_mut(&task_id) else {
-                return Ok(RuntimeMutationOutcome::Missing);
+            let Some(task) = state.tasks.get_mut(&expected.task_id) else {
+                return Ok(None);
             };
-            if task.incarnation_id != incarnation_id {
-                return Ok(RuntimeMutationOutcome::Stale);
+            if task.incarnation_id != expected.incarnation_id {
+                return Ok(None);
             }
-            if task.runner_status != expected_status {
-                return Ok(RuntimeMutationOutcome::Blocked);
+            if task != &expected
+                || matches!(
+                    task.runner_status,
+                    RunnerStatus::Completed | RunnerStatus::Cancelled
+                )
+            {
+                return Ok(None);
             }
             task.runner_status = RunnerStatus::Allocated;
             task.error = None;
             task.updated_at = now_ts();
-            Ok(RuntimeMutationOutcome::Applied)
+            Ok(Some(task.clone()))
         })
         .await
     }
 
-    /// Updates a non-terminal task only when its exact lifetime is still current.
-    pub async fn sync_nonterminal_status_if_current(
+    /// Restores an exact task snapshot only when no state changed after recovery prepared it.
+    pub async fn restore_task_after_recovery_if_unchanged(
         &self,
-        lifetime: &TaskLifetime,
-        runner_status: RunnerStatus,
-        error: Option<String>,
-        proof_uri: Option<String>,
+        prepared: &RuntimeTaskRecord,
+        original: &RuntimeTaskRecord,
     ) -> Result<RuntimeMutationOutcome> {
-        let task_id = lifetime.task_id.clone();
-        let incarnation_id = lifetime.incarnation_id;
+        anyhow::ensure!(
+            prepared.task_id == original.task_id
+                && prepared.incarnation_id == original.incarnation_id,
+            "recovery rollback snapshots belong to different task lifetimes"
+        );
+        let mut expected_original = prepared.clone();
+        expected_original.runner_status = original.runner_status;
+        expected_original.error.clone_from(&original.error);
+        expected_original.updated_at = original.updated_at;
+        anyhow::ensure!(
+            expected_original == *original,
+            "recovery rollback may only restore status, error, and update time"
+        );
+
+        let prepared = prepared.clone();
+        let original = original.clone();
         self.mutate(move |state| {
-            let Some(task) = state.tasks.get_mut(&task_id) else {
+            let Some(current) = state.tasks.get_mut(&prepared.task_id) else {
                 return Ok(RuntimeMutationOutcome::Missing);
             };
-            if task.incarnation_id != incarnation_id {
+            if current.incarnation_id != prepared.incarnation_id {
                 return Ok(RuntimeMutationOutcome::Stale);
             }
-            if task.runner_status.is_terminal() {
+            if current != &prepared {
                 return Ok(RuntimeMutationOutcome::Blocked);
             }
-            task.runner_status = runner_status;
-            task.error.clone_from(&error);
-            if proof_uri.is_some() {
-                task.proof_uri.clone_from(&proof_uri);
-            }
-            task.updated_at = now_ts();
+            current.clone_from(&original);
             Ok(RuntimeMutationOutcome::Applied)
         })
         .await
     }
 
-    /// Returns whether this exact task lifetime may still own an execution graph.
-    pub async fn is_task_active_if_current(&self, lifetime: &TaskLifetime) -> Result<bool> {
-        let state = self.state.read().await;
-        Ok(state.tasks.get(&lifetime.task_id).is_some_and(|task| {
-            task.incarnation_id == lifetime.incarnation_id
-                && matches!(
-                    task.runner_status,
-                    RunnerStatus::Allocated | RunnerStatus::Running
-                )
-        }))
+    /// Marks one exact non-terminal task snapshot failed without overwriting concurrent progress.
+    pub async fn fail_task_if_unchanged(
+        &self,
+        expected: &RuntimeTaskRecord,
+        error: String,
+    ) -> Result<RuntimeMutationOutcome> {
+        let expected = expected.clone();
+        self.mutate(move |state| {
+            let Some(current) = state.tasks.get_mut(&expected.task_id) else {
+                return Ok(RuntimeMutationOutcome::Missing);
+            };
+            if current.incarnation_id != expected.incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
+            }
+            if current != &expected || current.runner_status.is_terminal() {
+                return Ok(RuntimeMutationOutcome::Blocked);
+            }
+            current.runner_status = RunnerStatus::Failed;
+            current.error = Some(error.clone());
+            current.updated_at = now_ts();
+            Ok(RuntimeMutationOutcome::Applied)
+        })
+        .await
     }
 
     /// Cancels exactly one task lifetime without affecting a replacement task.
@@ -1396,24 +1407,52 @@ impl RuntimeManager {
         .await
     }
 
-    /// Retires exactly one task lifetime before destructive queue cleanup.
+    /// Cancels one non-terminal task only while its complete observed snapshot is unchanged.
+    pub async fn cancel_task_if_unchanged(
+        &self,
+        expected: &RuntimeTaskRecord,
+        error: Option<String>,
+    ) -> Result<RuntimeMutationOutcome> {
+        let expected = expected.clone();
+        self.mutate(move |state| {
+            let Some(task) = state.tasks.get_mut(&expected.task_id) else {
+                return Ok(RuntimeMutationOutcome::Missing);
+            };
+            if task.incarnation_id != expected.incarnation_id {
+                return Ok(RuntimeMutationOutcome::Stale);
+            }
+            if task != &expected || task.runner_status.is_terminal() {
+                return Ok(RuntimeMutationOutcome::Blocked);
+            }
+            task.runner_status = RunnerStatus::Cancelled;
+            task.error.clone_from(&error);
+            task.updated_at = now_ts();
+            Ok(RuntimeMutationOutcome::Applied)
+        })
+        .await
+    }
+
+    /// Retires one unchanged task snapshot before destructive queue cleanup.
     ///
     /// Unlike cancellation, retirement also applies to completed and failed roots because the
     /// caller is about to remove the root and must prevent a concurrent recovery from attaching
-    /// a new execution graph.
-    pub async fn retire_task_if_current(
+    /// a new execution graph. A changed non-cancelled snapshot is blocked so stale invalidation or
+    /// cleanup cannot retire a root that recovery has reopened in the same incarnation.
+    pub async fn retire_task_if_unchanged(
         &self,
-        lifetime: &TaskLifetime,
+        expected: &RuntimeTaskRecord,
         error: Option<String>,
     ) -> Result<RuntimeMutationOutcome> {
-        let task_id = lifetime.task_id.clone();
-        let incarnation_id = lifetime.incarnation_id;
+        let expected = expected.clone();
         self.mutate(move |state| {
-            let Some(task) = state.tasks.get_mut(&task_id) else {
+            let Some(task) = state.tasks.get_mut(&expected.task_id) else {
                 return Ok(RuntimeMutationOutcome::Missing);
             };
-            if task.incarnation_id != incarnation_id {
+            if task.incarnation_id != expected.incarnation_id {
                 return Ok(RuntimeMutationOutcome::Stale);
+            }
+            if task != &expected {
+                return Ok(RuntimeMutationOutcome::Blocked);
             }
             if task.runner_status == RunnerStatus::Cancelled {
                 return Ok(RuntimeMutationOutcome::AlreadyApplied);
@@ -1427,18 +1466,20 @@ impl RuntimeManager {
         .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn upsert_proof_artifact(
         &self,
         registration: ProofArtifactRegistration,
     ) -> Result<()> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
-        self.upsert_proof_artifact_locked(registration).await
-    }
-
-    async fn upsert_proof_artifact_locked(
-        &self,
-        registration: ProofArtifactRegistration,
-    ) -> Result<()> {
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(
+                &registration.network_pair,
+                registration.pipeline_key,
+                registration.route,
+                &registration.proof_ref,
+            )
+            .lock()
+            .await;
         self.upsert_proof_artifact_with_lifecycle(registration, ProofArtifactLifecycle::Active)
             .await
     }
@@ -1494,17 +1535,14 @@ impl RuntimeManager {
                     return Ok(ProofArtifactLifecycle::Invalidated);
                 }
             }
-            let has_owner =
-                artifact_task_records(state, &network_pair, pipeline_key, route, &proof_ref)?
-                    .iter()
-                    .any(|task| {
-                        matches!(
-                            task.runner_status,
-                            RunnerStatus::Allocated
-                                | RunnerStatus::Running
-                                | RunnerStatus::Completed
-                        )
-                    });
+            let has_owner = pending_publication_has_live_owner(
+                state,
+                &key,
+                &network_pair,
+                pipeline_key,
+                route,
+                &proof_ref,
+            );
             let mut next = record.clone();
             next.lifecycle = if has_owner {
                 ProofArtifactLifecycle::Pending
@@ -1541,6 +1579,7 @@ impl RuntimeManager {
         .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     async fn upsert_proof_artifact_with_lifecycle(
         &self,
         registration: ProofArtifactRegistration,
@@ -1561,42 +1600,6 @@ impl RuntimeManager {
             Ok(())
         })
         .await
-    }
-
-    pub async fn reconcile_proof_artifact_registration(
-        &self,
-        registration: ProofArtifactRegistration,
-    ) -> Result<bool> {
-        let descriptor = registration.descriptor();
-        if !self
-            .proof_artifact_descriptor_is_current(
-                &registration.network_pair,
-                registration.pipeline_key,
-                registration.route,
-                &registration.proof_ref,
-                &descriptor,
-            )
-            .await?
-        {
-            return Ok(false);
-        }
-
-        let key = artifact_record_key(
-            &registration.network_pair,
-            registration.pipeline_key,
-            registration.route,
-            &registration.proof_ref,
-        );
-        Ok(self
-            .state
-            .read()
-            .await
-            .artifacts
-            .get(&key)
-            .is_some_and(|existing| {
-                existing.descriptor() == descriptor
-                    && existing.lifecycle == ProofArtifactLifecycle::Active
-            }))
     }
 
     fn proof_artifact_record(
@@ -1652,7 +1655,15 @@ impl RuntimeManager {
     where
         F: Fn(&mut Vec<RuntimeTaskRecord>) -> Result<Option<T>>,
     {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(
+                &registration.network_pair,
+                registration.pipeline_key,
+                registration.route,
+                &registration.proof_ref,
+            )
+            .lock()
+            .await;
         let task_ref = task_ref.to_string();
         let network_pair = registration.network_pair.clone();
         let pipeline_key = registration.pipeline_key;
@@ -1670,11 +1681,6 @@ impl RuntimeManager {
                 .pending_publications
                 .get(&key)
                 .context("pending proof publication ownership is missing")?;
-            anyhow::ensure!(
-                pending.content_hash == descriptor.content_hash
-                    && pending.owner_incarnations == owner_incarnations,
-                "pending proof publication ownership changed before activation"
-            );
             let Some(artifact) = state.artifacts.get(&key) else {
                 anyhow::bail!("proof artifact lifecycle registration is missing");
             };
@@ -1686,10 +1692,37 @@ impl RuntimeManager {
                 artifact.lifecycle != ProofArtifactLifecycle::Invalidated,
                 "proof artifact lifecycle was invalidated before activation"
             );
+            anyhow::ensure!(
+                artifact.lifecycle == ProofArtifactLifecycle::Active
+                    || pending.content_hash == descriptor.content_hash,
+                "pending proof publication content changed before activation"
+            );
 
             let mut records =
-                artifact_task_records(state, &network_pair, pipeline_key, route, &task_ref)?;
+                artifact_task_records(state, &network_pair, pipeline_key, route, &task_ref);
             records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+            let active_incarnations = records
+                .iter()
+                .filter(|record| {
+                    !matches!(
+                        record.runner_status,
+                        RunnerStatus::Failed | RunnerStatus::Cancelled
+                    )
+                })
+                .map(|record| record.incarnation_id)
+                .collect::<HashSet<_>>();
+            if !owner_incarnations
+                .iter()
+                .any(|owner| active_incarnations.contains(owner))
+            {
+                return Ok(None);
+            }
+            anyhow::ensure!(
+                owner_incarnations
+                    .iter()
+                    .all(|owner| active_incarnations.contains(owner)),
+                "proof publication activation includes a stale runtime owner"
+            );
             let Some(output) = update(&mut records)? else {
                 return Ok(None);
             };
@@ -1703,7 +1736,12 @@ impl RuntimeManager {
             artifact.lifecycle = ProofArtifactLifecycle::Active;
             artifact.invalidated_at = None;
             artifact.updated_at = now_ts();
-            state.pending_publications.remove(&key);
+            state
+                .pending_publications
+                .get_mut(&key)
+                .context("pending proof publication ownership disappeared")?
+                .owner_incarnations
+                .clear();
             Ok(Some(output))
         })
         .await
@@ -1721,20 +1759,23 @@ impl RuntimeManager {
     where
         F: Fn(&mut Vec<RuntimeTaskRecord>) -> Result<(T, bool)>,
     {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, task_ref)
+            .lock()
+            .await;
         let task_ref = task_ref.to_string();
         let network_pair = network_pair.to_string();
         let key = artifact_record_key(&network_pair, pipeline_key, route, &task_ref);
         self.mutate(move |state| {
             let mut records =
-                artifact_task_records(state, &network_pair, pipeline_key, route, &task_ref)?;
+                artifact_task_records(state, &network_pair, pipeline_key, route, &task_ref);
             records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
             let (output, requested_invalidation) = update(&mut records)?;
             for record in records {
                 state.tasks.insert(record.task_id.clone(), record);
             }
             let live_incarnations =
-                artifact_task_records(state, &network_pair, pipeline_key, route, &task_ref)?
+                artifact_task_records(state, &network_pair, pipeline_key, route, &task_ref)
                     .into_iter()
                     .filter(|record| {
                         !matches!(
@@ -1748,13 +1789,9 @@ impl RuntimeManager {
                 pending
                     .owner_incarnations
                     .retain(|owner| live_incarnations.contains(owner));
-                if pending.owner_incarnations.is_empty() {
-                    state.pending_publications.remove(&key);
-                }
             }
             let invalidate = requested_invalidation && live_incarnations.is_empty();
             let descriptor = if invalidate {
-                state.pending_publications.remove(&key);
                 state.artifacts.get_mut(&key).map(|artifact| {
                     if artifact.lifecycle == ProofArtifactLifecycle::Invalidated {
                         return artifact.descriptor();
@@ -1827,33 +1864,6 @@ impl RuntimeManager {
         .await
     }
 
-    pub async fn mark_proof_artifact_invalidated(
-        &self,
-        network_pair: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        proof_ref: &str,
-        content_hash: &str,
-    ) -> Result<Option<ProofArtifactDeleteResult>> {
-        let Some(record) = self
-            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
-            .await?
-        else {
-            return Ok(None);
-        };
-        if record.content_hash != content_hash {
-            return Ok(None);
-        }
-        self.mark_proof_artifact_descriptor_invalidated(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            &record.descriptor(),
-        )
-        .await
-    }
-
     pub async fn mark_proof_artifact_descriptor_invalidated(
         &self,
         network_pair: &str,
@@ -1898,7 +1908,10 @@ impl RuntimeManager {
         proof_ref: &str,
         descriptor: &ProofArtifactDescriptor,
     ) -> Result<ProofArtifactInvalidationResult> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
         let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
         let expected_descriptor = descriptor.clone();
         let network_pair_owned = network_pair.to_string();
@@ -1918,7 +1931,7 @@ impl RuntimeManager {
                     pipeline_key,
                     route,
                     &proof_ref_owned,
-                )?
+                )
                 .iter()
                 .any(|task| {
                     !matches!(
@@ -1962,6 +1975,13 @@ impl RuntimeManager {
             route,
             proof_ref,
             descriptor,
+        )
+        .await?;
+        self.remove_pending_proof_publication_if_unowned_locked(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
         )
         .await?;
         Ok(ProofArtifactInvalidationResult::Invalidated(delete_result))
@@ -2027,30 +2047,6 @@ impl RuntimeManager {
         Ok(invalidated.len())
     }
 
-    pub async fn proof_artifact_is_invalidated(
-        &self,
-        network_pair: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        proof_ref: &str,
-        content_hash: &str,
-    ) -> Result<bool> {
-        let local_record = self
-            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
-            .await?;
-        let Some(record) = local_record.filter(|record| record.content_hash == content_hash) else {
-            return Ok(false);
-        };
-        self.proof_artifact_descriptor_is_invalidated(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            &record.descriptor(),
-        )
-        .await
-    }
-
     pub async fn proof_artifact_descriptor_is_invalidated(
         &self,
         network_pair: &str,
@@ -2092,6 +2088,7 @@ impl RuntimeManager {
             .is_some_and(|current| current == *descriptor))
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn upsert_pending_proof_publication(
         &self,
         network_pair: &str,
@@ -2100,7 +2097,10 @@ impl RuntimeManager {
         proof_ref: &str,
         proof_bytes: &[u8],
     ) -> Result<()> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
         match self
             .put_pending_proof_publication_bytes(
                 network_pair,
@@ -2131,6 +2131,120 @@ impl RuntimeManager {
         self.store.put_if_absent(&key, proof_bytes).await
     }
 
+    async fn record_pending_proof_publication_intent(
+        &self,
+        record: PendingProofPublicationRecord,
+    ) -> Result<bool> {
+        let key = artifact_record_key(
+            &record.network_pair,
+            record.pipeline_key,
+            record.route,
+            &record.proof_ref,
+        );
+        self.mutate(move |state| {
+            let live_incarnations = state
+                .tasks
+                .values()
+                .filter(|task| {
+                    task_matches_artifact_identity(
+                        task,
+                        &record.network_pair,
+                        record.pipeline_key,
+                        record.route,
+                        &record.proof_ref,
+                    ) && !matches!(
+                        task.runner_status,
+                        RunnerStatus::Failed | RunnerStatus::Cancelled
+                    )
+                })
+                .map(|task| task.incarnation_id)
+                .collect::<HashSet<_>>();
+            let mut owners = record
+                .owner_incarnations
+                .iter()
+                .filter(|owner| live_incarnations.contains(owner))
+                .copied()
+                .collect::<Vec<_>>();
+            if owners.is_empty() {
+                return Ok(false);
+            }
+            let different_live_intent =
+                state.pending_publications.get(&key).is_some_and(|pending| {
+                    pending.content_hash != record.content_hash
+                        && pending
+                            .owner_incarnations
+                            .iter()
+                            .any(|owner| live_incarnations.contains(owner))
+                });
+            anyhow::ensure!(
+                !different_live_intent,
+                "different pending proof is owned by another task incarnation"
+            );
+            if let Some(existing) = state
+                .pending_publications
+                .get(&key)
+                .filter(|pending| pending.content_hash == record.content_hash)
+            {
+                owners.extend(
+                    existing
+                        .owner_incarnations
+                        .iter()
+                        .filter(|owner| live_incarnations.contains(owner))
+                        .copied(),
+                );
+            }
+            owners.sort_unstable();
+            owners.dedup();
+            let mut next = record.clone();
+            next.owner_incarnations = owners;
+            state.pending_publications.insert(key.clone(), next);
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn materialize_pending_proof_publication(
+        &self,
+        key: &ProofArtifactKey,
+        proof_bytes: &[u8],
+    ) -> Result<()> {
+        let mut publication = self
+            .put_pending_proof_publication_bytes(
+                &key.network_pair,
+                key.pipeline_key,
+                key.route,
+                &key.proof_ref,
+                proof_bytes,
+            )
+            .await?;
+        if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
+            anyhow::ensure!(
+                self.remove_local_pending(
+                    &key.network_pair,
+                    key.pipeline_key,
+                    key.route,
+                    &key.proof_ref,
+                )
+                .await?,
+                "conflicting pending proof disappeared before exact replacement"
+            );
+            publication = self
+                .put_pending_proof_publication_bytes(
+                    &key.network_pair,
+                    key.pipeline_key,
+                    key.route,
+                    &key.proof_ref,
+                    proof_bytes,
+                )
+                .await?;
+        }
+        anyhow::ensure!(
+            !matches!(publication, ProofArtifactPutResult::Conflict(_)),
+            "different pending proof still exists after exact replacement"
+        );
+        Ok(())
+    }
+
     pub async fn checkpoint_pending_proof_publication(
         &self,
         network_pair: &str,
@@ -2144,69 +2258,44 @@ impl RuntimeManager {
             !owner_incarnations.is_empty(),
             "pending proof publication requires an owner incarnation"
         );
-        let _pending_publication = self.pending_publication_mutation.lock().await;
-        let mut publication = self
-            .put_pending_proof_publication_bytes(
-                network_pair,
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
+        let key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
+        let content_hash = artifact_store::content_hash(proof_bytes);
+        let checkpointed = self
+            .record_pending_proof_publication_intent(PendingProofPublicationRecord {
+                network_pair: network_pair.to_string(),
                 pipeline_key,
                 route,
-                proof_ref,
-                proof_bytes,
-            )
-            .await?;
-        if matches!(publication, ProofArtifactPutResult::Conflict(_)) {
-            anyhow::ensure!(
-                self.remove_pending_proof_publication_if_unowned_locked(
-                    network_pair,
-                    pipeline_key,
-                    route,
-                    proof_ref,
-                )
-                .await?,
-                "different pending proof is owned by another task incarnation"
-            );
-            publication = self
-                .put_pending_proof_publication_bytes(
-                    network_pair,
-                    pipeline_key,
-                    route,
-                    proof_ref,
-                    proof_bytes,
-                )
-                .await?;
-        }
-        anyhow::ensure!(
-            !matches!(publication, ProofArtifactPutResult::Conflict(_)),
-            "different pending proof still exists after orphan cleanup"
-        );
-        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        let proof_ref_owned = proof_ref.to_string();
-        let owner_incarnations = owner_incarnations.to_vec();
-        let hash = artifact_store::content_hash(proof_bytes);
-        let checkpointed = self
-            .mutate(move |state| {
-                let has_active_owner = state.tasks.values().any(|record| {
-                    task_references(record, &proof_ref_owned)
-                        && !matches!(
-                            record.runner_status,
-                            RunnerStatus::Failed | RunnerStatus::Cancelled
-                        )
-                        && owner_incarnations.contains(&record.incarnation_id)
-                });
-                if !has_active_owner {
-                    return Ok(false);
-                }
-                state.pending_publications.insert(
-                    key.clone(),
-                    PendingProofPublicationRecord {
-                        content_hash: hash.clone(),
-                        owner_incarnations: owner_incarnations.clone(),
-                    },
-                );
-                Ok(true)
+                proof_ref: proof_ref.to_string(),
+                content_hash: content_hash.clone(),
+                owner_incarnations: owner_incarnations.to_vec(),
             })
             .await?;
         if !checkpointed {
+            return Ok(false);
+        }
+        self.materialize_pending_proof_publication(&key, proof_bytes)
+            .await?;
+        let state_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        let still_owned = {
+            let state = self.state.read().await;
+            state
+                .pending_publications
+                .get(&state_key)
+                .is_some_and(|pending| pending.content_hash == content_hash)
+                && pending_publication_has_live_owner(
+                    &state,
+                    &state_key,
+                    network_pair,
+                    pipeline_key,
+                    route,
+                    proof_ref,
+                )
+        };
+        if !still_owned {
             self.remove_pending_proof_publication_if_unowned_locked(
                 network_pair,
                 pipeline_key,
@@ -2214,8 +2303,9 @@ impl RuntimeManager {
                 proof_ref,
             )
             .await?;
+            return Ok(false);
         }
-        Ok(checkpointed)
+        Ok(true)
     }
 
     pub async fn get_pending_proof_publication(
@@ -2244,12 +2334,16 @@ impl RuntimeManager {
             .get(&state_key)
             .filter(|pending| {
                 state.tasks.values().any(|task| {
-                    task_references(task, &proof_ref_owned)
-                        && !matches!(
-                            task.runner_status,
-                            RunnerStatus::Failed | RunnerStatus::Cancelled
-                        )
-                        && pending.owner_incarnations.contains(&task.incarnation_id)
+                    task_matches_artifact_identity(
+                        task,
+                        network_pair,
+                        pipeline_key,
+                        route,
+                        &proof_ref_owned,
+                    ) && !matches!(
+                        task.runner_status,
+                        RunnerStatus::Failed | RunnerStatus::Cancelled
+                    ) && pending.owner_incarnations.contains(&task.incarnation_id)
                 })
             })
             .cloned()
@@ -2272,22 +2366,80 @@ impl RuntimeManager {
         }))
     }
 
-    pub async fn remove_pending_proof_publication(
-        &self,
-        network_pair: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        proof_ref: &str,
-    ) -> Result<bool> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
-        let state_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        self.mutate(move |state| {
-            state.pending_publications.remove(&state_key);
-            Ok(())
-        })
-        .await?;
-        self.remove_local_pending(network_pair, pipeline_key, route, proof_ref)
-            .await
+    /// Reconciles publication intents that no current runtime task still owns.
+    ///
+    /// An activated artifact with a live consumer needs only pending-blob cleanup. Every other
+    /// unfinished publication is invalidated before its pending intent is removed, including the
+    /// crash window after canonical object creation but before lifecycle registration.
+    pub async fn reconcile_unowned_pending_proof_publications(&self) -> Result<usize> {
+        let pending = {
+            let state = self.state.read().await;
+            state
+                .pending_publications
+                .iter()
+                .filter_map(|(key, record)| {
+                    if pending_publication_has_live_owner(
+                        &state,
+                        key,
+                        &record.network_pair,
+                        record.pipeline_key,
+                        record.route,
+                        &record.proof_ref,
+                    ) {
+                        return None;
+                    }
+                    let has_live_task = artifact_task_records(
+                        &state,
+                        &record.network_pair,
+                        record.pipeline_key,
+                        record.route,
+                        &record.proof_ref,
+                    )
+                    .iter()
+                    .any(|task| {
+                        !matches!(
+                            task.runner_status,
+                            RunnerStatus::Failed | RunnerStatus::Cancelled
+                        )
+                    });
+                    let active_for_live_task = has_live_task
+                        && state.artifacts.get(key).is_some_and(|artifact| {
+                            artifact.lifecycle == ProofArtifactLifecycle::Active
+                        });
+                    Some((
+                        record.network_pair.clone(),
+                        record.pipeline_key,
+                        record.route,
+                        record.proof_ref.clone(),
+                        !active_for_live_task,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut removed = 0usize;
+        for (network_pair, pipeline_key, route, proof_ref, invalidate) in pending {
+            let reconciled = if invalidate {
+                self.invalidate_pending_proof_publication(
+                    &network_pair,
+                    pipeline_key,
+                    route,
+                    &proof_ref,
+                )
+                .await?
+            } else {
+                self.remove_pending_proof_publication_if_unowned(
+                    &network_pair,
+                    pipeline_key,
+                    route,
+                    &proof_ref,
+                )
+                .await?
+            };
+            if reconciled {
+                removed = removed.saturating_add(1);
+            }
+        }
+        Ok(removed)
     }
 
     pub async fn remove_pending_proof_publication_if_unowned(
@@ -2297,7 +2449,10 @@ impl RuntimeManager {
         route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<bool> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
         self.remove_pending_proof_publication_if_unowned_locked(
             network_pair,
             pipeline_key,
@@ -2315,37 +2470,44 @@ impl RuntimeManager {
         proof_ref: &str,
     ) -> Result<bool> {
         let state_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        let proof_ref_owned = proof_ref.to_string();
-        let unowned = self
-            .mutate(move |state| {
-                let live_owners =
-                    state
-                        .pending_publications
-                        .get(&state_key)
-                        .is_some_and(|pending| {
-                            pending.owner_incarnations.iter().any(|owner| {
-                                state.tasks.values().any(|task| {
-                                    task.incarnation_id == *owner
-                                        && task_references(task, &proof_ref_owned)
-                                        && !matches!(
-                                            task.runner_status,
-                                            RunnerStatus::Failed | RunnerStatus::Cancelled
-                                        )
-                                })
-                            })
-                        });
-                if live_owners {
-                    return Ok(false);
-                }
-                state.pending_publications.remove(&state_key);
-                Ok(true)
-            })
+        let pending_record_present = {
+            let state = self.state.read().await;
+            if pending_publication_has_live_owner(
+                &state,
+                &state_key,
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+            ) {
+                return Ok(false);
+            }
+            state.pending_publications.contains_key(&state_key)
+        };
+        let removed_object = self
+            .remove_local_pending(network_pair, pipeline_key, route, proof_ref)
             .await?;
-        if !unowned {
+        if !pending_record_present && !removed_object {
             return Ok(false);
         }
-        self.remove_local_pending(network_pair, pipeline_key, route, proof_ref)
-            .await
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let removed_record = self
+            .mutate(move |state| {
+                if pending_publication_has_live_owner(
+                    state,
+                    &state_key,
+                    &network_pair,
+                    pipeline_key,
+                    route,
+                    &proof_ref,
+                ) {
+                    return Ok(false);
+                }
+                Ok(state.pending_publications.remove(&state_key).is_some())
+            })
+            .await?;
+        Ok(removed_object || removed_record)
     }
 
     pub async fn release_pending_proof_publication_owner(
@@ -2356,20 +2518,43 @@ impl RuntimeManager {
         proof_ref: &str,
         owner_incarnation: uuid::Uuid,
     ) -> Result<bool> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
         let state_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        self.mutate(move |state| {
-            if let Some(pending) = state.pending_publications.get_mut(&state_key) {
+        let pending_record_exists = self
+            .mutate(move |state| {
+                let Some(pending) = state.pending_publications.get_mut(&state_key) else {
+                    return Ok(false);
+                };
                 pending
                     .owner_incarnations
                     .retain(|owner| *owner != owner_incarnation);
-                if pending.owner_incarnations.is_empty() {
-                    state.pending_publications.remove(&state_key);
-                }
-            }
-            Ok(())
-        })
-        .await?;
+                Ok(true)
+            })
+            .await?;
+        if !pending_record_exists {
+            return Ok(false);
+        }
+
+        if self
+            .pending_publication_has_live_owner(network_pair, pipeline_key, route, proof_ref)
+            .await
+        {
+            return Ok(false);
+        }
+        if self
+            .invalidate_pending_proof_publication_locked(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+            )
+            .await?
+        {
+            return Ok(true);
+        }
         self.remove_pending_proof_publication_if_unowned_locked(
             network_pair,
             pipeline_key,
@@ -2377,6 +2562,43 @@ impl RuntimeManager {
             proof_ref,
         )
         .await
+    }
+
+    /// Releases every pending publication owned by one exact runtime-task lifetime.
+    pub async fn release_task_pending_publications(
+        &self,
+        record: &RuntimeTaskRecord,
+    ) -> Result<()> {
+        for proof_ref in &record.artifact_refs {
+            self.release_pending_proof_publication_owner(
+                &record.network_pair,
+                record.pipeline_key,
+                record.route,
+                proof_ref,
+                record.incarnation_id,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn pending_publication_has_live_owner(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> bool {
+        let state_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        let state = self.state.read().await;
+        pending_publication_has_live_owner(
+            &state,
+            &state_key,
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+        )
     }
 
     async fn remove_local_pending(
@@ -2395,8 +2617,12 @@ impl RuntimeManager {
         Ok(true)
     }
 
-    /// Invalidates the publication only if the authoritative state still has no live owner.
-    /// Returns `false` when a live owner prevents invalidation.
+    /// Invalidates an unowned publication intent without treating a replacement task that merely
+    /// references the same artifact key as the old publication owner.
+    ///
+    /// An active artifact remains protected by every live consumer. A pending artifact is fenced
+    /// by the exact owner incarnations recorded in its durable publication intent, so replacing a
+    /// root cannot strand the old incarnation's outbox forever.
     pub async fn invalidate_pending_proof_publication(
         &self,
         network_pair: &str,
@@ -2404,12 +2630,28 @@ impl RuntimeManager {
         route: PipelineRoute,
         proof_ref: &str,
     ) -> Result<bool> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
+            .lock()
+            .await;
+        self.invalidate_pending_proof_publication_locked(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+        )
+        .await
+    }
+
+    async fn invalidate_pending_proof_publication_locked(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<bool> {
         let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
         let canonical = self.store.get(&object_key).await?;
-        let state_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
-        let network_pair_owned = network_pair.to_string();
-        let proof_ref_owned = proof_ref.to_string();
         let canonical_record = canonical.as_ref().map(|object| {
             self.proof_artifact_record(
                 ProofArtifactRegistration {
@@ -2425,49 +2667,21 @@ impl RuntimeManager {
             )
             .1
         });
+        let state_object_key = object_key.clone();
         let invalidated = self
             .mutate(move |state| {
-                let has_live_owner = artifact_task_records(
+                Ok(mark_unowned_pending_publication_invalidated(
                     state,
-                    &network_pair_owned,
-                    pipeline_key,
-                    route,
-                    &proof_ref_owned,
-                )?
-                .iter()
-                .any(|task| {
-                    !matches!(
-                        task.runner_status,
-                        RunnerStatus::Failed | RunnerStatus::Cancelled
-                    )
-                });
-                if has_live_owner {
-                    return Ok(false);
-                }
-                state.pending_publications.remove(&state_key);
-                if let Some(canonical_record) = canonical_record.as_ref() {
-                    match state.artifacts.get_mut(&state_key) {
-                        None => {
-                            state
-                                .artifacts
-                                .insert(state_key.clone(), canonical_record.clone());
-                        }
-                        Some(record) if record.descriptor() == canonical_record.descriptor() => {
-                            record.lifecycle = ProofArtifactLifecycle::Invalidated;
-                            record.invalidated_at.get_or_insert_with(now_ts);
-                            record.updated_at = now_ts();
-                        }
-                        Some(_) => {}
-                    }
-                }
-                Ok(true)
+                    &state_object_key,
+                    canonical_record.as_ref(),
+                ))
             })
             .await?;
-        if !invalidated {
+        let Some(invalidate_canonical) = invalidated else {
             return Ok(false);
-        }
+        };
 
-        if let Some(object) = canonical.as_ref() {
+        if invalidate_canonical && let Some(object) = canonical.as_ref() {
             self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
                 key: object_key,
                 descriptor: object.descriptor(),
@@ -2475,14 +2689,13 @@ impl RuntimeManager {
             })
             .await?;
         }
-        let pending_key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
-        let pending = self.store.get(&pending_key).await?;
-        if let Some(pending) = pending.as_ref() {
-            let _commit = self.begin_object_commit()?;
-            self.store
-                .delete_exact(&pending_key, &pending.descriptor())
-                .await?;
-        }
+        self.remove_pending_proof_publication_if_unowned_locked(
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+        )
+        .await?;
         Ok(true)
     }
 
@@ -2577,12 +2790,11 @@ impl RuntimeManager {
         Ok(tasks)
     }
 
-    /// Removes exactly one task lifetime and its pending-publication ownership.
+    /// Removes exactly one retired task lifetime and its pending-publication ownership.
     pub async fn remove_task_if_current(
         &self,
         lifetime: &TaskLifetime,
     ) -> Result<RuntimeMutationOutcome> {
-        let _pending_publication = self.pending_publication_mutation.lock().await;
         let task_id = lifetime.task_id.clone();
         let incarnation_id = lifetime.incarnation_id;
         self.mutate(move |state| {
@@ -2592,6 +2804,9 @@ impl RuntimeManager {
             if current.incarnation_id != incarnation_id {
                 return Ok(RuntimeMutationOutcome::Stale);
             }
+            if current.runner_status != RunnerStatus::Cancelled {
+                return Ok(RuntimeMutationOutcome::Blocked);
+            }
             let Some(removed) = state.tasks.remove(&task_id) else {
                 return Ok(RuntimeMutationOutcome::Conflict);
             };
@@ -2600,9 +2815,6 @@ impl RuntimeManager {
                     .owner_incarnations
                     .retain(|owner| *owner != removed.incarnation_id);
             }
-            state
-                .pending_publications
-                .retain(|_, pending| !pending.owner_incarnations.is_empty());
             Ok(RuntimeMutationOutcome::Applied)
         })
         .await
@@ -2612,20 +2824,18 @@ impl RuntimeManager {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRegistration {
     pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pipeline_key: Option<PipelineKey>,
+    pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
     pub task_kind: String,
-    pub proposal_id: Option<u64>,
-    #[serde(default)]
-    pub proof_ids: Vec<String>,
+    pub network_pair: String,
+    pub artifact_refs: Vec<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_fingerprint: Option<String>,
+    pub request_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeTaskRecord {
     pub task_id: String,
     /// Immutable identity for this concrete task lifetime; never reused after replacement.
@@ -2633,21 +2843,16 @@ pub struct RuntimeTaskRecord {
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
     pub task_kind: String,
-    pub proposal_id: Option<u64>,
     /// Canonical network-pair scope for every artifact and task ownership decision.
-    #[serde(default = "missing_task_network_pair")]
     pub network_pair: String,
     /// Canonical proof references consumed or produced by this root.
-    #[serde(default)]
     pub artifact_refs: Vec<String>,
-    pub proof_ids: Vec<String>,
     pub runner_status: RunnerStatus,
     pub image_ref: Option<String>,
     pub proof_uri: Option<String>,
     pub error: Option<String>,
     pub metadata: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_fingerprint: Option<String>,
+    pub request_fingerprint: String,
     pub updated_at: i64,
 }
 
@@ -2696,36 +2901,48 @@ impl std::fmt::Display for RunnerStatus {
 }
 
 fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecord> {
-    let pipeline_key = registration.pipeline_key.map_or_else(
-        || {
-            registration
-                .route
-                .pipeline_key()
-                .map_err(anyhow::Error::msg)
-        },
-        Ok,
-    )?;
     anyhow::ensure!(
-        pipeline_key_matches_route(pipeline_key, registration.route),
+        !registration.task_id.is_empty(),
+        "task registration id is empty"
+    );
+    anyhow::ensure!(
+        !registration.task_kind.is_empty(),
+        "task registration kind is empty"
+    );
+    anyhow::ensure!(
+        registration.pipeline_key.supports_route(registration.route),
         "pipeline_key '{}' does not match route '{}'",
-        pipeline_key.as_str(),
+        registration.pipeline_key.as_str(),
         registration.route
+    );
+    anyhow::ensure!(
+        !registration.network_pair.is_empty(),
+        "task registration requires network_pair"
+    );
+    anyhow::ensure!(
+        registration
+            .artifact_refs
+            .iter()
+            .all(|proof_ref| !proof_ref.is_empty()),
+        "task registration contains an empty artifact reference"
+    );
+    let unique_artifact_refs = registration.artifact_refs.iter().collect::<HashSet<_>>();
+    anyhow::ensure!(
+        unique_artifact_refs.len() == registration.artifact_refs.len(),
+        "task registration contains duplicate artifact references"
+    );
+    anyhow::ensure!(
+        !registration.request_fingerprint.is_empty(),
+        "task registration request fingerprint is empty"
     );
     Ok(RuntimeTaskRecord {
         task_id: registration.task_id.clone(),
         incarnation_id: uuid::Uuid::new_v4(),
-        pipeline_key,
+        pipeline_key: registration.pipeline_key,
         route: registration.route,
         task_kind: registration.task_kind.clone(),
-        proposal_id: registration.proposal_id,
-        network_pair: registration
-            .metadata
-            .get("network_pair")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        artifact_refs: task_artifact_refs(&registration.metadata, &registration.proof_ids),
-        proof_ids: registration.proof_ids.clone(),
+        network_pair: registration.network_pair.clone(),
+        artifact_refs: registration.artifact_refs.clone(),
         runner_status: RunnerStatus::Allocated,
         image_ref: None,
         proof_uri: None,
@@ -2736,51 +2953,182 @@ fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecor
     })
 }
 
-fn migrate_legacy_task_indexes(state: &mut RuntimeState) -> Result<()> {
-    for record in state.tasks.values_mut() {
-        if record.network_pair == missing_task_network_pair() {
-            record.network_pair = record
-                .metadata
-                .get("network_pair")
-                .and_then(serde_json::Value::as_str)
-                .filter(|network_pair| !network_pair.is_empty())
-                .context("legacy runtime task is missing network_pair metadata")?
-                .to_string();
-        }
-        if record.artifact_refs.is_empty() {
-            record.artifact_refs = task_artifact_refs(&record.metadata, &record.proof_ids);
-        }
-    }
-    Ok(())
-}
-
-fn missing_task_network_pair() -> String {
-    "\0missing-network-pair".to_string()
-}
-
-fn pipeline_key_matches_route(pipeline_key: PipelineKey, route: PipelineRoute) -> bool {
-    matches!(
-        (pipeline_key, route),
-        (
-            PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth,
-            PipelineRoute {
-                guest_system: raiko2_pipeline::GuestSystem::Sgx,
-                runner: raiko2_pipeline::RunnerKind::Remote,
-            }
-        )
-    ) || route.pipeline_key() == Ok(pipeline_key)
-}
-
 fn artifact_record_key(
     network_pair: &str,
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_ref: &str,
 ) -> String {
-    format!(
-        "{network_pair}|{}|{route}|{proof_ref}",
-        pipeline_key.as_str()
-    )
+    let route = route.to_string();
+    let mut key = String::from("artifact:v1:");
+    for component in [
+        network_pair,
+        pipeline_key.as_str(),
+        route.as_str(),
+        proof_ref,
+    ] {
+        write!(&mut key, "{}:{component}", component.len())
+            .expect("writing an artifact identity to a String cannot fail");
+    }
+    key
+}
+
+fn validate_runtime_state(state: &RuntimeState, environment: &str) -> Result<()> {
+    let mut incarnations = HashSet::new();
+    let mut request_fingerprints = HashSet::new();
+    for (task_id, record) in &state.tasks {
+        validate_runtime_task_record(
+            task_id,
+            record,
+            &mut incarnations,
+            &mut request_fingerprints,
+        )?;
+    }
+    for (key, record) in &state.artifacts {
+        validate_proof_artifact_record(key, record, environment)?;
+    }
+    for (key, record) in &state.pending_publications {
+        validate_pending_publication_record(key, record, &state.tasks)?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_task_record<'a>(
+    task_id: &str,
+    record: &'a RuntimeTaskRecord,
+    incarnations: &mut HashSet<uuid::Uuid>,
+    request_fingerprints: &mut HashSet<&'a str>,
+) -> Result<()> {
+    anyhow::ensure!(
+        task_id == record.task_id,
+        "runtime task key does not match record"
+    );
+    anyhow::ensure!(!record.task_id.is_empty(), "runtime task id is empty");
+    anyhow::ensure!(
+        record.incarnation_id != uuid::Uuid::nil(),
+        "runtime task incarnation is nil"
+    );
+    anyhow::ensure!(
+        incarnations.insert(record.incarnation_id),
+        "runtime task incarnation is duplicated"
+    );
+    anyhow::ensure!(
+        record.pipeline_key.supports_route(record.route),
+        "runtime task pipeline does not support its route"
+    );
+    anyhow::ensure!(!record.task_kind.is_empty(), "runtime task kind is empty");
+    anyhow::ensure!(
+        !record.network_pair.is_empty(),
+        "runtime task network pair is empty"
+    );
+    anyhow::ensure!(
+        record
+            .artifact_refs
+            .iter()
+            .all(|proof_ref| !proof_ref.is_empty()),
+        "runtime task contains an empty artifact reference"
+    );
+    anyhow::ensure!(
+        record.artifact_refs.iter().collect::<HashSet<_>>().len() == record.artifact_refs.len(),
+        "runtime task contains duplicate artifact references"
+    );
+    anyhow::ensure!(
+        !record.request_fingerprint.is_empty(),
+        "runtime task request fingerprint is empty"
+    );
+    anyhow::ensure!(
+        request_fingerprints.insert(&record.request_fingerprint),
+        "runtime task request fingerprint is duplicated"
+    );
+    Ok(())
+}
+
+fn validate_proof_artifact_record(
+    key: &str,
+    record: &ProofArtifactRecord,
+    environment: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        key == artifact_record_key(
+            &record.network_pair,
+            record.pipeline_key,
+            record.route,
+            &record.proof_ref,
+        ),
+        "runtime artifact key does not match record"
+    );
+    anyhow::ensure!(
+        record.environment == environment,
+        "runtime artifact environment does not match the store"
+    );
+    anyhow::ensure!(
+        record.pipeline_key.supports_route(record.route),
+        "runtime artifact pipeline does not support its route"
+    );
+    anyhow::ensure!(
+        !record.network_pair.is_empty()
+            && !record.proof_ref.is_empty()
+            && !record.proof_uri.is_empty()
+            && !record.content_hash.is_empty(),
+        "runtime artifact identity or descriptor is empty"
+    );
+    anyhow::ensure!(
+        (record.lifecycle == ProofArtifactLifecycle::Invalidated)
+            == record.invalidated_at.is_some(),
+        "runtime artifact invalidation timestamp does not match its lifecycle"
+    );
+    Ok(())
+}
+
+fn validate_pending_publication_record(
+    key: &str,
+    record: &PendingProofPublicationRecord,
+    tasks: &HashMap<String, RuntimeTaskRecord>,
+) -> Result<()> {
+    anyhow::ensure!(
+        key == artifact_record_key(
+            &record.network_pair,
+            record.pipeline_key,
+            record.route,
+            &record.proof_ref,
+        ),
+        "pending publication key does not match record"
+    );
+    anyhow::ensure!(
+        record.pipeline_key.supports_route(record.route),
+        "pending publication pipeline does not support its route"
+    );
+    anyhow::ensure!(
+        !record.network_pair.is_empty()
+            && !record.proof_ref.is_empty()
+            && !record.content_hash.is_empty(),
+        "pending publication identity or content hash is empty"
+    );
+    anyhow::ensure!(
+        record
+            .owner_incarnations
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            == record.owner_incarnations.len(),
+        "pending publication contains duplicate owners"
+    );
+    anyhow::ensure!(
+        record.owner_incarnations.iter().all(|owner| {
+            tasks.values().any(|task| {
+                task.incarnation_id == *owner
+                    && task_matches_artifact_identity(
+                        task,
+                        &record.network_pair,
+                        record.pipeline_key,
+                        record.route,
+                        &record.proof_ref,
+                    )
+            })
+        }),
+        "pending publication owner does not match its artifact identity"
+    );
+    Ok(())
 }
 
 fn ensure_artifact_preconditions(
@@ -2810,49 +3158,16 @@ fn ensure_task_fingerprint_available(
     state: &RuntimeState,
     record: &RuntimeTaskRecord,
 ) -> Result<()> {
-    if let Some(fingerprint) = record.request_fingerprint.as_deref()
-        && state.tasks.values().any(|task| {
-            task.task_id != record.task_id
-                && task.request_fingerprint.as_deref() == Some(fingerprint)
-        })
-    {
+    if state.tasks.values().any(|task| {
+        task.task_id != record.task_id && task.request_fingerprint == record.request_fingerprint
+    }) {
         anyhow::bail!("request fingerprint already belongs to another task");
     }
     Ok(())
 }
 
-fn task_artifact_refs(metadata: &serde_json::Value, proof_ids: &[String]) -> Vec<String> {
-    let mut refs = proof_ids.to_vec();
-    if let Some(aggregate_task_id) = metadata
-        .get("aggregate_task_id")
-        .and_then(serde_json::Value::as_str)
-        && !refs.iter().any(|proof_ref| proof_ref == aggregate_task_id)
-    {
-        refs.push(aggregate_task_id.to_string());
-    }
-    if let Some(artifacts) = metadata
-        .get("aggregate_input_artifacts")
-        .and_then(serde_json::Value::as_array)
-    {
-        for proof_ref in artifacts.iter().filter_map(|artifact| {
-            artifact
-                .get("proof_ref")
-                .and_then(serde_json::Value::as_str)
-        }) {
-            if !refs.iter().any(|existing| existing == proof_ref) {
-                refs.push(proof_ref.to_string());
-            }
-        }
-    }
-    refs
-}
-
 fn task_references(record: &RuntimeTaskRecord, task_ref: &str) -> bool {
     record.task_id == task_ref || record.artifact_refs.iter().any(|id| id == task_ref)
-}
-
-fn task_network_pair(record: &RuntimeTaskRecord) -> Option<&str> {
-    (!record.network_pair.is_empty()).then_some(record.network_pair.as_str())
 }
 
 fn task_matches_artifact_identity(
@@ -2861,17 +3176,121 @@ fn task_matches_artifact_identity(
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_ref: &str,
-) -> Result<bool> {
+) -> bool {
     if !task_references(record, proof_ref)
         || record.pipeline_key != pipeline_key
         || record.route != route
     {
-        return Ok(false);
+        return false;
     }
-    Ok(
-        task_network_pair(record).context("runtime task metadata is missing network_pair")?
-            == network_pair,
+    record.network_pair == network_pair
+}
+
+fn pending_publication_has_live_owner(
+    state: &RuntimeState,
+    state_key: &str,
+    network_pair: &str,
+    pipeline_key: PipelineKey,
+    route: PipelineRoute,
+    proof_ref: &str,
+) -> bool {
+    state
+        .pending_publications
+        .get(state_key)
+        .is_some_and(|pending| {
+            pending.owner_incarnations.iter().any(|owner| {
+                state.tasks.values().any(|task| {
+                    task.incarnation_id == *owner
+                        && task_matches_artifact_identity(
+                            task,
+                            network_pair,
+                            pipeline_key,
+                            route,
+                            proof_ref,
+                        )
+                        && !matches!(
+                            task.runner_status,
+                            RunnerStatus::Failed | RunnerStatus::Cancelled
+                        )
+                })
+            })
+        })
+}
+
+fn mark_unowned_pending_publication_invalidated(
+    state: &mut RuntimeState,
+    key: &ProofArtifactKey,
+    canonical_record: Option<&ProofArtifactRecord>,
+) -> Option<bool> {
+    let state_key = artifact_record_key(
+        &key.network_pair,
+        key.pipeline_key,
+        key.route,
+        &key.proof_ref,
+    );
+    if pending_publication_has_live_owner(
+        state,
+        &state_key,
+        &key.network_pair,
+        key.pipeline_key,
+        key.route,
+        &key.proof_ref,
+    ) {
+        return None;
+    }
+    let has_live_task = artifact_task_records(
+        state,
+        &key.network_pair,
+        key.pipeline_key,
+        key.route,
+        &key.proof_ref,
     )
+    .iter()
+    .any(|task| {
+        !matches!(
+            task.runner_status,
+            RunnerStatus::Failed | RunnerStatus::Cancelled
+        )
+    });
+    let pending = state.pending_publications.get(&state_key);
+    let artifact = state.artifacts.get(&state_key);
+    let canonical_descriptor = canonical_record.map(ProofArtifactRecord::descriptor);
+    let canonical_has_lifecycle = |lifecycle| {
+        artifact.is_some_and(|record| {
+            canonical_descriptor
+                .as_ref()
+                .is_some_and(|descriptor| record.descriptor() == *descriptor)
+                && record.lifecycle == lifecycle
+        })
+    };
+    if has_live_task
+        && (pending.is_none() || canonical_has_lifecycle(ProofArtifactLifecycle::Active))
+    {
+        return None;
+    }
+    let pending_matches_canonical = pending.is_some_and(|pending| {
+        canonical_descriptor
+            .as_ref()
+            .is_some_and(|descriptor| pending.content_hash == descriptor.content_hash)
+    });
+    let invalidate_canonical = canonical_record.is_some()
+        && (canonical_has_lifecycle(ProofArtifactLifecycle::Invalidated)
+            || pending_matches_canonical
+            || !has_live_task);
+    if invalidate_canonical && let Some(canonical_record) = canonical_record {
+        match state.artifacts.get_mut(&state_key) {
+            None => {
+                state.artifacts.insert(state_key, canonical_record.clone());
+            }
+            Some(record) if record.descriptor() == canonical_record.descriptor() => {
+                record.lifecycle = ProofArtifactLifecycle::Invalidated;
+                record.invalidated_at.get_or_insert_with(now_ts);
+                record.updated_at = now_ts();
+            }
+            Some(_) => {}
+        }
+    }
+    Some(invalidate_canonical)
 }
 
 fn artifact_task_records(
@@ -2880,44 +3299,15 @@ fn artifact_task_records(
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_ref: &str,
-) -> Result<Vec<RuntimeTaskRecord>> {
+) -> Vec<RuntimeTaskRecord> {
     state
         .tasks
         .values()
-        .filter_map(|record| {
-            match task_matches_artifact_identity(
-                record,
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-            ) {
-                Ok(true) => Some(Ok(record.clone())),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            }
+        .filter(|record| {
+            task_matches_artifact_identity(record, network_pair, pipeline_key, route, proof_ref)
         })
+        .cloned()
         .collect()
-}
-
-fn set_json_integer(value: &mut serde_json::Value, fields: &[String], integer: i64) -> Result<()> {
-    let Some((head, tail)) = fields.split_first() else {
-        anyhow::bail!("metadata path must contain a field");
-    };
-    if tail.is_empty() {
-        let object = value
-            .as_object_mut()
-            .context("metadata path parent is not an object")?;
-        object.insert(head.clone(), integer.into());
-        return Ok(());
-    }
-    let object = value
-        .as_object_mut()
-        .context("metadata path parent is not an object")?;
-    let child = object
-        .entry(head.clone())
-        .or_insert_with(|| serde_json::json!({}));
-    set_json_integer(child, tail, integer)
 }
 
 fn now_ts() -> i64 {
@@ -2932,6 +3322,7 @@ fn now_ts() -> i64 {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     async fn current_test_task(
         runtime: &RuntimeManager,
@@ -2941,19 +3332,6 @@ mod tests {
             .get_task(task_id)
             .await?
             .with_context(|| format!("missing test runtime task {task_id}"))
-    }
-
-    async fn set_test_status(
-        runtime: &RuntimeManager,
-        task_id: &str,
-        status: RunnerStatus,
-        error: Option<String>,
-        proof_uri: Option<String>,
-    ) -> Result<RuntimeMutationOutcome> {
-        let record = current_test_task(runtime, task_id).await?;
-        runtime
-            .sync_nonterminal_status_if_current(&record.lifetime(), status, error, proof_uri)
-            .await
     }
 
     async fn cancel_test_task(
@@ -2971,7 +3349,42 @@ mod tests {
         task_id: &str,
     ) -> Result<RuntimeMutationOutcome> {
         let record = current_test_task(runtime, task_id).await?;
+        let retired = runtime.retire_task_if_unchanged(&record, None).await?;
+        anyhow::ensure!(
+            matches!(
+                retired,
+                RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied
+            ),
+            "test task {task_id} could not be retired before removal: {retired:?}"
+        );
         runtime.remove_task_if_current(&record.lifetime()).await
+    }
+
+    #[tokio::test]
+    async fn active_task_cannot_be_removed_without_retirement() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".into(), "remove-requires-retirement".into())?;
+        let root = register_native_task(&runtime, "root").await?;
+
+        assert_eq!(
+            runtime.remove_task_if_current(&root.lifetime()).await?,
+            RuntimeMutationOutcome::Blocked
+        );
+        assert!(runtime.get_task("root").await?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_state_keys_are_unambiguous() {
+        let pipeline = PipelineKey::ShastaRisc0;
+        let route = pipeline.route();
+        let middle = format!("{}|{route}", pipeline.as_str());
+
+        let first = artifact_record_key("left", pipeline, route, &format!("center|{middle}|right"));
+        let second =
+            artifact_record_key(&format!("left|{middle}|center"), pipeline, route, "right");
+
+        assert_ne!(first, second);
     }
 
     #[tokio::test]
@@ -2979,13 +3392,13 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "exact-root-commands".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: Some(PipelineKey::ShastaNative),
+            pipeline_key: PipelineKey::ShastaNative,
             route: PipelineKey::ShastaNative.route(),
             task_kind: "proposal".into(),
-            proposal_id: Some(1),
-            proof_ids: Vec::new(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: Vec::new(),
             metadata: serde_json::json!({}),
-            request_fingerprint: Some("root-request".into()),
+            request_fingerprint: "root-request".into(),
         };
         let first = runtime.register_task(registration.clone()).await?;
         assert_eq!(
@@ -3011,16 +3424,219 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_runtime_state_missing_unrecoverable_fields_fails_closed() -> Result<()> {
+    async fn stale_snapshot_cannot_cancel_or_retire_concurrent_progress() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "exact-cancel-snapshot".into())?;
+        let stale = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        runtime
+            .update_tasks_by_ref("root", |records| {
+                let current = records.first_mut().context("registered root")?;
+                current.runner_status = RunnerStatus::Running;
+                current.image_ref = Some("submitted-image".into());
+                current.updated_at = current.updated_at.saturating_add(1);
+                Ok(())
+            })
+            .await?;
+
+        assert_eq!(
+            runtime
+                .cancel_task_if_unchanged(&stale, Some("stale cleanup".into()))
+                .await?,
+            RuntimeMutationOutcome::Blocked
+        );
+        assert_eq!(
+            runtime
+                .retire_task_if_unchanged(&stale, Some("stale invalidation".into()))
+                .await?,
+            RuntimeMutationOutcome::Blocked
+        );
+        let current = current_test_task(&runtime, "root").await?;
+        assert_eq!(current.runner_status, RunnerStatus::Running);
+        assert_eq!(current.image_ref.as_deref(), Some("submitted-image"));
+
+        assert_eq!(
+            runtime
+                .cancel_task_if_unchanged(&current, Some("current cleanup".into()))
+                .await?,
+            RuntimeMutationOutcome::Applied
+        );
+        let cancelled = current_test_task(&runtime, "root").await?;
+        assert_eq!(
+            runtime.retire_task_if_unchanged(&current, None).await?,
+            RuntimeMutationOutcome::Blocked,
+            "a pre-cancellation snapshot must not bypass the exact retirement CAS"
+        );
+        assert_eq!(
+            runtime.retire_task_if_unchanged(&cancelled, None).await?,
+            RuntimeMutationOutcome::AlreadyApplied
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_recovery_snapshot_cannot_discard_new_checkpoint_metadata() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "exact-recovery-snapshot".into())?;
+        let registration = TaskRegistration {
+            task_id: "root".into(),
+            pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
+            task_kind: "proposal".into(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: Vec::new(),
+            metadata: serde_json::json!({ "checkpoint": "old" }),
+            request_fingerprint: "root-request".into(),
+        };
+        let root = runtime.register_task(registration).await?;
+        assert_eq!(
+            runtime
+                .fail_task_if_unchanged(&root, "retryable".into())
+                .await?,
+            RuntimeMutationOutcome::Applied,
+        );
+        let stale = current_test_task(&runtime, "root").await?;
+        runtime
+            .mutate(|state| {
+                let task = state.tasks.get_mut("root").context("registered root")?;
+                task.metadata = serde_json::json!({ "checkpoint": "new" });
+                task.updated_at = now_ts();
+                Ok(())
+            })
+            .await?;
+
+        assert!(
+            runtime
+                .prepare_task_for_recovery_if_unchanged(&stale)
+                .await?
+                .is_none()
+        );
+        let current = current_test_task(&runtime, "root").await?;
+        assert_eq!(current.runner_status, RunnerStatus::Failed);
+        assert_eq!(current.metadata, serde_json::json!({ "checkpoint": "new" }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_rollback_is_an_exact_snapshot_cas() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "exact-recovery-rollback".into())?;
+        let root = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        assert_eq!(
+            runtime
+                .fail_task_if_unchanged(&root, "retryable".into())
+                .await?,
+            RuntimeMutationOutcome::Applied,
+        );
+        let original = current_test_task(&runtime, "root").await?;
+        let reopened = runtime
+            .prepare_task_for_recovery_if_unchanged(&original)
+            .await?
+            .context("reopened root")?;
+
+        assert_eq!(
+            runtime
+                .restore_task_after_recovery_if_unchanged(&reopened, &original)
+                .await?,
+            RuntimeMutationOutcome::Applied,
+        );
+        assert_eq!(current_test_task(&runtime, "root").await?, original);
+
+        let reopened = runtime
+            .prepare_task_for_recovery_if_unchanged(&original)
+            .await?
+            .context("reopened root")?;
+        runtime
+            .update_tasks_by_ref("root", |records| {
+                let current = records
+                    .iter_mut()
+                    .find(|record| record.incarnation_id == reopened.incarnation_id)
+                    .context("reopened root")?;
+                current.runner_status = RunnerStatus::Running;
+                current.error = Some("concurrent progress".into());
+                current.updated_at = now_ts();
+                Ok(())
+            })
+            .await?;
+        assert_eq!(
+            runtime
+                .restore_task_after_recovery_if_unchanged(&reopened, &original)
+                .await?,
+            RuntimeMutationOutcome::Blocked,
+        );
+        let current = current_test_task(&runtime, "root").await?;
+        assert_eq!(current.runner_status, RunnerStatus::Running);
+        assert_eq!(current.error.as_deref(), Some("concurrent progress"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_failure_snapshot_cannot_overwrite_concurrent_progress() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "exact-failure-cas".into())?;
+        let stale = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        runtime
+            .update_tasks_by_ref("root", |records| {
+                let current = records.first_mut().context("registered root")?;
+                current.runner_status = RunnerStatus::Running;
+                current.image_ref = Some("submitted-image".into());
+                current.updated_at = now_ts();
+                Ok(())
+            })
+            .await?;
+
+        assert_eq!(
+            runtime
+                .fail_task_if_unchanged(&stale, "stale failure".into())
+                .await?,
+            RuntimeMutationOutcome::Blocked
+        );
+        let current = current_test_task(&runtime, "root").await?;
+        assert_eq!(current.runner_status, RunnerStatus::Running);
+        assert_eq!(current.image_ref.as_deref(), Some("submitted-image"));
+        assert_eq!(current.error, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn superseded_runtime_state_schema_fails_closed() -> Result<()> {
         let record = build_task_record(&TaskRegistration {
             task_id: "legacy-root".into(),
-            pipeline_key: Some(PipelineKey::ShastaRisc0Network),
+            pipeline_key: PipelineKey::ShastaRisc0Network,
             route: PipelineKey::ShastaRisc0Network.route(),
             task_kind: "aggregate".into(),
-            proposal_id: Some(1),
-            proof_ids: vec!["legacy-proof".into()],
+            network_pair: "taiko_dev/taiko_dev_l1".into(),
+            artifact_refs: vec!["legacy-proof".into()],
             metadata: serde_json::json!({ "network_pair": "taiko_dev/taiko_dev_l1" }),
-            request_fingerprint: Some("legacy-request".into()),
+            request_fingerprint: "legacy-request".into(),
         })?;
         let artifact = serde_json::to_value(ProofArtifactRecord {
             environment: "test".into(),
@@ -3052,15 +3668,26 @@ mod tests {
             .as_object_mut()
             .context("legacy task must be an object")?
             .remove("incarnation_id");
-        let mut missing_network_pair_metadata = current_state.clone();
-        let task = missing_network_pair_metadata["tasks"]["legacy-root"]
+        let mut missing_network_pair = current_state.clone();
+        missing_network_pair["tasks"]["legacy-root"]
             .as_object_mut()
-            .context("legacy task must be an object")?;
-        task.remove("network_pair");
-        task.get_mut("metadata")
-            .and_then(serde_json::Value::as_object_mut)
-            .context("legacy task metadata must be an object")?
+            .context("legacy task must be an object")?
             .remove("network_pair");
+        let mut missing_artifact_refs = current_state.clone();
+        missing_artifact_refs["tasks"]["legacy-root"]
+            .as_object_mut()
+            .context("legacy task must be an object")?
+            .remove("artifact_refs");
+        let mut missing_request_fingerprint = current_state.clone();
+        missing_request_fingerprint["tasks"]["legacy-root"]
+            .as_object_mut()
+            .context("legacy task must be an object")?
+            .remove("request_fingerprint");
+        let mut superseded_proof_ids = current_state.clone();
+        superseded_proof_ids["tasks"]["legacy-root"]
+            .as_object_mut()
+            .context("legacy task must be an object")?
+            .insert("proof_ids".into(), serde_json::json!(["legacy-proof"]));
         let mut missing_artifact_lifecycle = current_state;
         missing_artifact_lifecycle["artifacts"]
             .get_mut(&legacy_artifact_key)
@@ -3070,10 +3697,13 @@ mod tests {
 
         for (namespace, legacy_state) in [
             ("legacy-missing-incarnation", missing_incarnation),
+            ("legacy-missing-network-pair", missing_network_pair),
+            ("legacy-missing-artifact-refs", missing_artifact_refs),
             (
-                "legacy-missing-network-pair-metadata",
-                missing_network_pair_metadata,
+                "legacy-missing-request-fingerprint",
+                missing_request_fingerprint,
             ),
+            ("legacy-superseded-proof-ids", superseded_proof_ids),
             (
                 "legacy-missing-artifact-lifecycle",
                 missing_artifact_lifecycle,
@@ -3098,57 +3728,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn legacy_runtime_state_derives_task_indexes_from_canonical_metadata() -> Result<()> {
-        let record = build_task_record(&TaskRegistration {
-            task_id: "legacy-root".into(),
-            pipeline_key: Some(PipelineKey::ShastaRisc0Network),
-            route: PipelineKey::ShastaRisc0Network.route(),
-            task_kind: "aggregate".into(),
-            proposal_id: Some(1),
-            proof_ids: vec!["proposal-proof".into()],
-            metadata: serde_json::json!({
-                "network_pair": "taiko_dev/taiko_dev_l1",
-                "aggregate_task_id": "aggregate-proof",
-            }),
-            request_fingerprint: Some("legacy-request".into()),
-        })?;
-        let mut state = serde_json::json!({
-            "tasks": { "legacy-root": serde_json::to_value(record)? },
-            "artifacts": {},
-            "pending_publications": {},
-        });
-        let task = state["tasks"]["legacy-root"]
-            .as_object_mut()
-            .context("legacy task must be an object")?;
-        task.remove("network_pair");
-        task.remove("artifact_refs");
-
-        let store = Arc::new(MemoryProofArtifactStore::new(
-            "test".into(),
-            "legacy-task-indexes".into(),
-        )?);
-        assert!(matches!(
-            store
-                .store_runtime_state(&serde_json::to_vec(&state)?, None)
-                .await?,
-            RuntimeStateWriteResult::Stored { .. }
-        ));
-        let runtime = RuntimeManager::with_store(store);
-        runtime.initialize().await?;
-
-        let migrated = runtime
-            .get_task("legacy-root")
-            .await?
-            .context("migrated task should exist")?;
-        assert_eq!(migrated.network_pair, "taiko_dev/taiko_dev_l1");
-        assert_eq!(
-            migrated.artifact_refs,
-            vec!["proposal-proof", "aggregate-proof"]
-        );
-        Ok(())
-    }
-
     #[derive(Debug)]
     struct RuntimeStateProbeStore {
         inner: MemoryProofArtifactStore,
@@ -3157,12 +3736,15 @@ mod tests {
         commit_then_error: AtomicBool,
         foreign_commit_then_error: AtomicBool,
         fail_before_commit: AtomicUsize,
+        rewrite_next_runtime_state_readback: AtomicBool,
         block_next_runtime_state_write: AtomicBool,
         runtime_state_write_entered: tokio::sync::Notify,
         allow_runtime_state_write: tokio::sync::Notify,
+        fail_next_artifact_put: AtomicBool,
         block_next_artifact_put: AtomicBool,
         artifact_put_entered: tokio::sync::Notify,
         allow_artifact_put: tokio::sync::Notify,
+        fail_next_artifact_delete: AtomicBool,
         block_next_artifact_delete: AtomicBool,
         artifact_delete_completed: tokio::sync::Notify,
         allow_artifact_delete_return: tokio::sync::Notify,
@@ -3177,12 +3759,15 @@ mod tests {
                 commit_then_error: AtomicBool::new(false),
                 foreign_commit_then_error: AtomicBool::new(false),
                 fail_before_commit: AtomicUsize::new(0),
+                rewrite_next_runtime_state_readback: AtomicBool::new(false),
                 block_next_runtime_state_write: AtomicBool::new(false),
                 runtime_state_write_entered: tokio::sync::Notify::new(),
                 allow_runtime_state_write: tokio::sync::Notify::new(),
+                fail_next_artifact_put: AtomicBool::new(false),
                 block_next_artifact_put: AtomicBool::new(false),
                 artifact_put_entered: tokio::sync::Notify::new(),
                 allow_artifact_put: tokio::sync::Notify::new(),
+                fail_next_artifact_delete: AtomicBool::new(false),
                 block_next_artifact_delete: AtomicBool::new(false),
                 artifact_delete_completed: tokio::sync::Notify::new(),
                 allow_artifact_delete_return: tokio::sync::Notify::new(),
@@ -3211,6 +3796,9 @@ mod tests {
             key: &ProofArtifactKey,
             bytes: &[u8],
         ) -> Result<ProofArtifactPutResult> {
+            if self.fail_next_artifact_put.swap(false, Ordering::SeqCst) {
+                anyhow::bail!("injected artifact put failure before commit");
+            }
             if self.block_next_artifact_put.swap(false, Ordering::SeqCst) {
                 self.artifact_put_entered.notify_one();
                 self.allow_artifact_put.notified().await;
@@ -3266,6 +3854,9 @@ mod tests {
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
         ) -> Result<ProofArtifactDeleteResult> {
+            if self.fail_next_artifact_delete.swap(false, Ordering::SeqCst) {
+                anyhow::bail!("injected artifact delete failure before commit");
+            }
             let result = self.inner.delete_exact(key, descriptor).await?;
             if self
                 .block_next_artifact_delete
@@ -3281,7 +3872,16 @@ mod tests {
     #[async_trait::async_trait]
     impl RuntimeStateStore for RuntimeStateProbeStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
-            self.inner.load_runtime_state().await
+            let mut stored = self.inner.load_runtime_state().await?;
+            if self
+                .rewrite_next_runtime_state_readback
+                .swap(false, Ordering::SeqCst)
+                && let Some(stored) = stored.as_mut()
+            {
+                let state = serde_json::from_slice::<serde_json::Value>(&stored.bytes)?;
+                stored.bytes = serde_json::to_vec_pretty(&state)?;
+            }
+            Ok(stored)
         }
 
         async fn store_runtime_state(
@@ -3340,13 +3940,13 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "one".into())?;
         let registration = TaskRegistration {
             task_id: "task-a".into(),
-            pipeline_key: Some(PipelineKey::ShastaNative),
+            pipeline_key: PipelineKey::ShastaNative,
             route: PipelineKey::ShastaNative.route(),
             task_kind: "proposal".into(),
-            proposal_id: Some(1),
-            proof_ids: Vec::new(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: Vec::new(),
             metadata: serde_json::json!({}),
-            request_fingerprint: Some("same".into()),
+            request_fingerprint: "same".into(),
         };
         assert!(matches!(
             runtime
@@ -3383,13 +3983,13 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
-                pipeline_key: Some(PipelineKey::ShastaSp1),
+                pipeline_key: PipelineKey::ShastaSp1,
                 route: PipelineKey::ShastaSp1.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "checkpoint-root".into(),
             })
             .await?;
         let first = runtime.acquire_submission_checkpoint_permit()?;
@@ -3485,20 +4085,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draining_does_not_wait_for_saga_between_commits() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new_memory(
-            "test".into(),
-            "between-commits-drain".into(),
-        )?);
-        let saga = runtime.pending_publication_mutation.lock().await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), {
+    async fn unrelated_artifacts_do_not_share_a_lifecycle_lock() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("artifact-lock-scope")?);
+        store.block_next_artifact_put.store(true, Ordering::SeqCst);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let blocked_ref = "blocked-proof";
+        let independent_ref = (0..ARTIFACT_LIFECYCLE_LOCK_SHARDS * 2)
+            .map(|index| format!("independent-proof-{index}"))
+            .find(|candidate| {
+                !std::ptr::eq(
+                    runtime.artifact_lifecycle_lock("l1-l2", pipeline, route, blocked_ref),
+                    runtime.artifact_lifecycle_lock("l1-l2", pipeline, route, candidate),
+                )
+            })
+            .context("failed to select a different artifact lock shard")?;
+        let blocked = tokio::spawn({
             let runtime = Arc::clone(&runtime);
-            async move { runtime.begin_draining().await }
-        })
+            async move {
+                runtime
+                    .publish_proof_artifact_bytes("l1-l2", pipeline, route, blocked_ref, b"blocked")
+                    .await
+            }
+        });
+        store.artifact_put_entered.notified().await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            runtime.publish_proof_artifact_bytes(
+                "l1-l2",
+                pipeline,
+                route,
+                &independent_ref,
+                b"independent",
+            ),
+        )
         .await
-        .context("drain waited for a lifecycle saga outside a storage commit")?;
-        drop(saga);
-        assert!(!runtime.accepts_mutations());
+        .context("unrelated artifact publication waited on a namespace-wide lock")??;
+
+        store.allow_artifact_put.notify_one();
+        blocked.await??;
         Ok(())
     }
 
@@ -3509,13 +4136,13 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
-                pipeline_key: Some(PipelineKey::ShastaSp1),
+                pipeline_key: PipelineKey::ShastaSp1,
                 route: PipelineKey::ShastaSp1.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "checkpoint-root".into(),
             })
             .await?;
         let permit = runtime.acquire_submission_checkpoint_permit()?;
@@ -3578,13 +4205,13 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
-                pipeline_key: Some(PipelineKey::ShastaSp1),
+                pipeline_key: PipelineKey::ShastaSp1,
                 route: PipelineKey::ShastaSp1.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "checkpoint-root".into(),
             })
             .await?;
         let permit = runtime.acquire_submission_checkpoint_permit()?;
@@ -3644,13 +4271,13 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: Some(PipelineKey::ShastaSp1),
+                pipeline_key: PipelineKey::ShastaSp1,
                 route: PipelineKey::ShastaSp1.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: vec!["pending".into()],
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec!["pending".into()],
                 metadata: serde_json::json!({"network_pair": "l1-l2"}),
-                request_fingerprint: None,
+                request_fingerprint: "pending-root".into(),
             })
             .await?;
         let active = registration("active", 1);
@@ -3658,15 +4285,6 @@ mod tests {
         pending.content_hash = artifact_store::content_hash(b"pending-proof");
         let invalidated = registration("invalidated", 3);
         runtime.upsert_proof_artifact(active.clone()).await?;
-        assert_eq!(
-            runtime
-                .register_pending_proof_artifact(pending.clone())
-                .await?,
-            ProofArtifactLifecycle::Pending
-        );
-        runtime
-            .register_invalidated_proof_artifact(invalidated.clone())
-            .await?;
         let owner = runtime
             .get_task("root")
             .await?
@@ -3684,6 +4302,15 @@ mod tests {
                 )
                 .await?
         );
+        assert_eq!(
+            runtime
+                .register_pending_proof_artifact(pending.clone())
+                .await?,
+            ProofArtifactLifecycle::Pending
+        );
+        runtime
+            .register_invalidated_proof_artifact(invalidated.clone())
+            .await?;
         let state = runtime.state.read().await;
         let before_artifacts = state.artifacts.clone();
         let before_tasks = state.tasks.clone();
@@ -3875,6 +4502,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readiness_rejects_out_of_band_runtime_generation_change() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "readiness-generation-conflict",
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        let stored = store
+            .inner
+            .load_runtime_state()
+            .await?
+            .context("runtime state")?;
+        assert!(matches!(
+            store
+                .inner
+                .store_runtime_state(&stored.bytes, stored.generation)
+                .await?,
+            RuntimeStateWriteResult::Stored { .. }
+        ));
+
+        let error = runtime
+            .check_readiness()
+            .await
+            .expect_err("foreign generation must fail readiness");
+        assert!(format!("{error:#}").contains("outside the authoritative repository"));
+        assert!(!runtime.accepts_mutations());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_state_transport_error_recovers_committed_write_by_readback() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("state-readback")?);
         store.commit_then_error.store(true, Ordering::SeqCst);
@@ -3883,13 +4550,13 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "committed-task".into(),
-                pipeline_key: Some(PipelineKey::ShastaNative),
+                pipeline_key: PipelineKey::ShastaNative,
                 route: PipelineKey::ShastaNative.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "committed-task".into(),
             })
             .await?;
 
@@ -3910,13 +4577,13 @@ mod tests {
         let error = runtime
             .register_task(TaskRegistration {
                 task_id: "must-not-commit".into(),
-                pipeline_key: Some(PipelineKey::ShastaNative),
+                pipeline_key: PipelineKey::ShastaNative,
                 route: PipelineKey::ShastaNative.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "must-not-commit".into(),
             })
             .await
             .expect_err("foreign read-back must fail closed");
@@ -3949,66 +4616,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_status_sync_cannot_reopen_terminal_task() -> Result<()> {
-        let runtime = RuntimeManager::new_memory("test".into(), "terminal-guard".into())?;
+    async fn precommit_transport_error_uses_generation_not_json_byte_order() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("state-reformatted-readback")?);
+        let runtime = RuntimeManager::with_store(store.clone());
         runtime
             .register_task(TaskRegistration {
-                task_id: "completed-task".into(),
-                pipeline_key: Some(PipelineKey::ShastaNative),
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
                 route: PipelineKey::ShastaNative.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "root-request".into(),
             })
             .await?;
+        store.fail_before_commit.store(3, Ordering::SeqCst);
+        store
+            .rewrite_next_runtime_state_readback
+            .store(true, Ordering::SeqCst);
+
         runtime
-            .complete_nonterminal_task(
-                "completed-task",
-                runtime
-                    .get_task("completed-task")
-                    .await?
-                    .context("registered task")?
-                    .incarnation_id,
-                "memory://proof",
-                &[],
-            )
-            .await?;
+            .mutate(|state| {
+                state
+                    .tasks
+                    .get_mut("root")
+                    .context("registered root")?
+                    .updated_at += 1;
+                Ok(())
+            })
+            .await
+            .expect_err("transport failures must exhaust the retry budget");
 
-        assert!(matches!(
-            set_test_status(
-                &runtime,
-                "completed-task",
-                RunnerStatus::Allocated,
-                Some("late retry".into()),
-                None,
-            )
-            .await?,
-            RuntimeMutationOutcome::Blocked
-        ));
-
-        let record = runtime
-            .get_task("completed-task")
-            .await?
-            .expect("registered task");
-        assert_eq!(record.runner_status, RunnerStatus::Completed);
-        assert_eq!(record.proof_uri.as_deref(), Some("memory://proof"));
-        assert_eq!(record.error, None);
+        assert!(runtime.mutation_failure_is_retryable());
+        runtime.check_readiness().await?;
+        assert!(runtime.accepts_mutations());
         Ok(())
     }
 
     #[tokio::test]
     async fn stale_artifact_completion_cannot_complete_replacement_task() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "stale-artifact-task".into())?;
-        let first = register_native_task(&runtime, "root", 1).await?;
+        let first = register_native_task(&runtime, "root").await?;
         let precondition = active_artifact_precondition(&runtime, "stale-task-proof").await?;
 
         assert!(matches!(
             remove_test_task(&runtime, "root").await?,
             RuntimeMutationOutcome::Applied
         ));
-        let replacement = register_native_task(&runtime, "root", 2).await?;
+        let replacement = register_native_task(&runtime, "root").await?;
 
         assert!(
             !runtime
@@ -4030,7 +4686,7 @@ mod tests {
     #[tokio::test]
     async fn stale_artifact_completion_requires_exact_active_descriptor() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "stale-artifact-record".into())?;
-        let task = register_native_task(&runtime, "root", 1).await?;
+        let task = register_native_task(&runtime, "root").await?;
         let precondition = active_artifact_precondition(&runtime, "stale-record-proof").await?;
         runtime
             .mark_proof_artifact_descriptor_invalidated(
@@ -4060,18 +4716,17 @@ mod tests {
     async fn register_native_task(
         runtime: &RuntimeManager,
         task_id: &str,
-        proposal_id: u64,
     ) -> Result<RuntimeTaskRecord> {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.into(),
-                pipeline_key: Some(PipelineKey::ShastaNative),
+                pipeline_key: PipelineKey::ShastaNative,
                 route: PipelineKey::ShastaNative.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(proposal_id),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: format!("request-{task_id}"),
             })
             .await
     }
@@ -4124,13 +4779,13 @@ mod tests {
         first
             .register_task(TaskRegistration {
                 task_id: "task-a".into(),
-                pipeline_key: Some(PipelineKey::ShastaSp1),
+                pipeline_key: PipelineKey::ShastaSp1,
                 route: PipelineKey::ShastaSp1.route(),
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: None,
+                request_fingerprint: "task-a".into(),
             })
             .await?;
 
@@ -4314,13 +4969,13 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "outbox-incarnation".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: Some(PipelineKey::ShastaSp1),
+            pipeline_key: PipelineKey::ShastaSp1,
             route: PipelineKey::ShastaSp1.route(),
             task_kind: "proposal".into(),
-            proposal_id: Some(1),
-            proof_ids: vec!["proposal-1".into()],
+            network_pair: "l1-l2".into(),
+            artifact_refs: vec!["proposal-1".into()],
             metadata: serde_json::json!({}),
-            request_fingerprint: Some("same-request".into()),
+            request_fingerprint: "same-request".into(),
         };
         let first = match runtime
             .register_task_if_absent(registration.clone())
@@ -4380,6 +5035,16 @@ mod tests {
                 )
                 .await?
         );
+        assert!(
+            !runtime
+                .invalidate_pending_proof_publication(
+                    "l1-l2",
+                    PipelineKey::ShastaSp1,
+                    PipelineKey::ShastaSp1.route(),
+                    "proposal-1",
+                )
+                .await?
+        );
         let pending = runtime
             .get_recoverable_pending_proof_publication(
                 "l1-l2",
@@ -4391,6 +5056,148 @@ mod tests {
             .context("replacement outbox")?;
         assert_eq!(pending.owner_incarnations, vec![second.incarnation_id]);
         assert_eq!(pending.bytes, b"proof");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_root_does_not_own_the_previous_incarnations_publication() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "replacement-outbox".into())?;
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let registration = TaskRegistration {
+            task_id: "root".into(),
+            pipeline_key: pipeline,
+            route,
+            task_kind: "proposal".into(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: vec![proof_ref.into()],
+            metadata: serde_json::json!({}),
+            request_fingerprint: "same-request".into(),
+        };
+        let first = runtime.register_task(registration.clone()).await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[first.incarnation_id],
+                    b"old-proof",
+                )
+                .await?
+        );
+        let old_artifact = runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, b"old-proof")
+            .await?
+            .try_object()
+            .context("old canonical artifact")?
+            .clone();
+        cancel_test_task(&runtime, "root").await?;
+        remove_test_task(&runtime, "root").await?;
+        let replacement = runtime.register_task(registration).await?;
+
+        assert!(
+            runtime
+                .invalidate_pending_proof_publication("l1-l2", pipeline, route, proof_ref,)
+                .await?
+        );
+        assert!(
+            runtime
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .proof_artifact_descriptor_is_invalidated(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &old_artifact.descriptor(),
+                )
+                .await?
+        );
+        assert_eq!(
+            runtime
+                .get_task("root")
+                .await?
+                .context("replacement root")?
+                .incarnation_id,
+            replacement.incarnation_id
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_owner_is_bound_to_the_full_artifact_identity() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "pending-owner-identity".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "shared-ref";
+        let root = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "network-a".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request".into(),
+            })
+            .await?;
+
+        assert!(
+            !runtime
+                .checkpoint_pending_proof_publication(
+                    "network-b",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[root.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
+        assert!(
+            !runtime
+                .checkpoint_pending_proof_publication(
+                    "network-a",
+                    PipelineKey::ShastaSp1,
+                    PipelineKey::ShastaSp1.route(),
+                    proof_ref,
+                    &[root.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
+        assert!(
+            !runtime
+                .checkpoint_pending_proof_publication(
+                    "network-a",
+                    pipeline,
+                    PipelineKey::ShastaRisc0.route(),
+                    proof_ref,
+                    &[root.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "network-a",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[root.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
         Ok(())
     }
 
@@ -4425,6 +5232,414 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_task_cannot_publish_active_input_artifacts() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "terminal-input-owner".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+
+        let failed = match runtime
+            .register_task_if_absent(TaskRegistration {
+                task_id: "failed-root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "aggregate".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec!["failed-input".into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "failed-request".into(),
+            })
+            .await?
+        {
+            TaskRegistrationOutcome::Created(record) => record,
+            TaskRegistrationOutcome::Existing(_) => anyhow::bail!("unexpected existing task"),
+        };
+        assert_eq!(
+            runtime
+                .fail_task_if_unchanged(&failed, "failed".into())
+                .await?,
+            RuntimeMutationOutcome::Applied
+        );
+
+        let completed = match runtime
+            .register_task_if_absent(TaskRegistration {
+                task_id: "completed-root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "aggregate".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec!["completed-input".into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "completed-request".into(),
+            })
+            .await?
+        {
+            TaskRegistrationOutcome::Created(record) => record,
+            TaskRegistrationOutcome::Existing(_) => anyhow::bail!("unexpected existing task"),
+        };
+        assert!(
+            runtime
+                .complete_nonterminal_task(
+                    &completed.task_id,
+                    completed.incarnation_id,
+                    "proof://completed",
+                    &[],
+                )
+                .await?
+        );
+
+        for (proof_ref, owner) in [
+            ("failed-input", failed.incarnation_id),
+            ("completed-input", completed.incarnation_id),
+        ] {
+            let error = runtime
+                .publish_active_proof_artifact_bytes(
+                    "l1-l2", pipeline, route, proof_ref, owner, b"proof",
+                )
+                .await
+                .expect_err("terminal task must not publish an active input artifact");
+            assert!(error.to_string().contains("durable task owner"));
+            assert!(
+                runtime
+                    .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                    .await?
+                    .is_none()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn activation_rechecks_pending_owner_liveness() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "activation-owner-fence".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let root = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request".into(),
+            })
+            .await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[root.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
+        let object = runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, b"proof")
+            .await?
+            .try_object()
+            .context("published proof")?
+            .clone();
+        let registration = ProofArtifactRegistration {
+            network_pair: "l1-l2".into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key: pipeline,
+            route,
+            proof_uri: object.proof_uri,
+            content_hash: object.content_hash,
+            generation: object.generation,
+        };
+        assert_eq!(
+            runtime
+                .register_pending_proof_artifact(registration.clone())
+                .await?,
+            ProofArtifactLifecycle::Pending
+        );
+        assert_eq!(
+            runtime
+                .cancel_task_if_current(&root.lifetime(), None)
+                .await?,
+            RuntimeMutationOutcome::Applied
+        );
+
+        assert!(
+            runtime
+                .activate_proof_artifact_with_tasks(
+                    proof_ref,
+                    registration,
+                    &[root.incarnation_id],
+                    |_| Ok(Some(())),
+                )
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .invalidate_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?,
+            "ownerless activation must remain eligible for exact saga cleanup"
+        );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none(),
+            "cancelled active publication must not leave a manifest that poisons re-publication"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn activation_accepts_a_distinct_owner_added_after_checkpoint() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "activation-owner-refresh".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let first = runtime
+            .register_task(TaskRegistration {
+                task_id: "root-a".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request-a".into(),
+            })
+            .await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[first.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
+        let second = runtime
+            .register_task(TaskRegistration {
+                task_id: "root-b".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request-b".into(),
+            })
+            .await?;
+        let object = runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, b"proof")
+            .await?
+            .try_object()
+            .context("published proof")?
+            .clone();
+        let registration = ProofArtifactRegistration {
+            network_pair: "l1-l2".into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key: pipeline,
+            route,
+            proof_uri: object.proof_uri,
+            content_hash: object.content_hash,
+            generation: object.generation,
+        };
+        assert_eq!(
+            runtime
+                .register_pending_proof_artifact(registration.clone())
+                .await?,
+            ProofArtifactLifecycle::Pending
+        );
+
+        assert!(
+            runtime
+                .activate_proof_artifact_with_tasks(
+                    proof_ref,
+                    registration,
+                    &[first.incarnation_id, second.incarnation_id],
+                    |_| Ok(Some(())),
+                )
+                .await?
+                .is_some()
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_owner_cannot_activate_an_inflight_artifact() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "cancel-during-active-publication",
+        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "external-input-0";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "aggregate".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request".into(),
+            })
+            .await?
+            .incarnation_id;
+
+        store.block_next_artifact_put.store(true, Ordering::SeqCst);
+        let publication = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .publish_active_proof_artifact_bytes(
+                        "l1-l2",
+                        pipeline,
+                        route,
+                        proof_ref,
+                        owner,
+                        br#"{"proof":"0xproof"}"#,
+                    )
+                    .await
+            }
+        });
+
+        store.artifact_put_entered.notified().await;
+        store.block_next_artifact_put.store(true, Ordering::SeqCst);
+        store.allow_artifact_put.notify_one();
+        store.artifact_put_entered.notified().await;
+        assert_eq!(
+            cancel_test_task(runtime.as_ref(), "root").await?,
+            RuntimeMutationOutcome::Applied
+        );
+        store.allow_artifact_put.notify_one();
+
+        let error = publication
+            .await?
+            .expect_err("cancelled owner must not activate an inflight artifact");
+        assert!(
+            error.to_string().contains("invalidated")
+                || error
+                    .to_string()
+                    .contains("owner changed before activation"),
+            "unexpected publication error: {error:#}"
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none(),
+            "cancelled active publication must not leave a manifest that poisons re-publication"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_publication_serializes_unowned_invalidation() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "canonical-publication-invalidation",
+        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-publication";
+        let proof = br#"{"proof":"0x01"}"#;
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    proof,
+                )
+                .await?
+        );
+
+        store.block_next_artifact_put.store(true, Ordering::SeqCst);
+        let publication = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .commit_proof_artifact_publication("l1-l2", pipeline, route, proof_ref, proof)
+                    .await
+            }
+        });
+        store.artifact_put_entered.notified().await;
+        assert_eq!(
+            cancel_test_task(runtime.as_ref(), "root").await?,
+            RuntimeMutationOutcome::Applied
+        );
+
+        let mut invalidation = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .invalidate_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut invalidation)
+                .await
+                .is_err(),
+            "unowned invalidation bypassed the canonical publication transaction"
+        );
+
+        store.allow_artifact_put.notify_one();
+        publication
+            .await?
+            .expect_err("cancelled publication must be invalidated");
+        assert!(invalidation.await??);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn active_artifact_publication_rejects_different_bytes() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "active-conflict".into())?;
         let pipeline = PipelineKey::ShastaNative;
@@ -4433,16 +5648,16 @@ mod tests {
         let owner = match runtime
             .register_task_if_absent(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "aggregate".into(),
-                proposal_id: None,
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
                 metadata: serde_json::json!({
                     "network_pair": "l1-l2",
                     "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
                 }),
-                request_fingerprint: Some("request".into()),
+                request_fingerprint: "request".into(),
             })
             .await?
         {
@@ -4450,15 +5665,12 @@ mod tests {
             TaskRegistrationOutcome::Existing(_) => anyhow::bail!("unexpected existing task"),
         };
 
+        let first = br#"{"proof":"0xfirst"}"#;
         runtime
-            .publish_active_proof_artifact_bytes(
-                "l1-l2", pipeline, route, proof_ref, owner, b"first",
-            )
+            .publish_active_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, owner, first)
             .await?;
         runtime
-            .publish_active_proof_artifact_bytes(
-                "l1-l2", pipeline, route, proof_ref, owner, b"first",
-            )
+            .publish_active_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, owner, first)
             .await?;
         assert_eq!(
             runtime
@@ -4475,7 +5687,7 @@ mod tests {
                 route,
                 proof_ref,
                 owner,
-                b"different",
+                br#"{"proof":"0xdifferent"}"#,
             )
             .await
             .expect_err("different bytes must remain a conflict");
@@ -4497,7 +5709,109 @@ mod tests {
                 .await?
                 .expect("original artifact")
                 .bytes,
-            b"first"
+            first
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_canonical_artifact_satisfies_a_conflicting_checkpoint() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "active-conflict-reuse".into())?;
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-conflict";
+        let root = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request".into(),
+            })
+            .await?;
+        let canonical_bytes = br#"{"proof":"0xcanonical"}"#;
+        let canonical = runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, canonical_bytes)
+            .await?
+            .try_object()
+            .context("canonical proof object")?
+            .clone();
+        let registration = ProofArtifactRegistration {
+            network_pair: "l1-l2".into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key: pipeline,
+            route,
+            proof_uri: canonical.proof_uri.clone(),
+            content_hash: canonical.content_hash.clone(),
+            generation: canonical.generation,
+        };
+        runtime.upsert_proof_artifact(registration.clone()).await?;
+        let conflicting_bytes = br#"{"proof":"0xlate"}"#;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[root.incarnation_id],
+                    conflicting_bytes,
+                )
+                .await?
+        );
+
+        let publication = runtime
+            .commit_proof_artifact_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                conflicting_bytes,
+            )
+            .await?;
+        assert!(matches!(publication, ProofArtifactPutResult::Conflict(_)));
+        assert!(
+            runtime
+                .activate_proof_artifact_with_tasks(
+                    proof_ref,
+                    registration,
+                    &[root.incarnation_id],
+                    |records| {
+                        let record = records
+                            .iter_mut()
+                            .find(|record| record.incarnation_id == root.incarnation_id)
+                            .context("active publication owner")?;
+                        record.runner_status = RunnerStatus::Completed;
+                        record.proof_uri = Some(canonical.proof_uri.clone());
+                        Ok(Some(()))
+                    },
+                )
+                .await?
+                .is_some()
+        );
+        assert!(
+            runtime
+                .remove_pending_proof_publication_if_unowned("l1-l2", pipeline, route, proof_ref,)
+                .await?
+        );
+        assert_eq!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .context("active canonical proof")?
+                .bytes,
+            canonical_bytes
+        );
+        assert_eq!(
+            runtime
+                .get_task("root")
+                .await?
+                .context("completed root")?
+                .runner_status,
+            RunnerStatus::Completed
         );
         Ok(())
     }
@@ -4510,20 +5824,20 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "external-aggregate-root".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route: pipeline.route(),
                 task_kind: "aggregate".into(),
-                proposal_id: None,
-                proof_ids: vec!["aggregate-output".into()],
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec!["aggregate-output".into(), proof_ref.into()],
                 metadata: serde_json::json!({
                     "network_pair": "l1-l2",
                     "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
                 }),
-                request_fingerprint: Some("external-aggregate-request".into()),
+                request_fingerprint: "external-aggregate-request".into(),
             })
             .await?;
 
-        let tasks = runtime.find_tasks_by_task_ref(proof_ref).await?;
+        let tasks = runtime.tasks_referencing(proof_ref).await;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "external-aggregate-root");
         Ok(())
@@ -4542,16 +5856,16 @@ mod tests {
         let owner = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "aggregate".into(),
-                proposal_id: None,
-                proof_ids: Vec::new(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
                 metadata: serde_json::json!({
                     "network_pair": "l1-l2",
                     "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
                 }),
-                request_fingerprint: Some("request".into()),
+                request_fingerprint: "request".into(),
             })
             .await?
             .incarnation_id;
@@ -4608,16 +5922,16 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "proposal".into(),
-                proposal_id: Some(1),
-                proof_ids: vec!["aggregate-task".into()],
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec!["aggregate-task".into(), proof_ref.into()],
                 metadata: serde_json::json!({
                     "network_pair": "l1-l2",
                     "aggregate_input_artifacts": [{ "proof_ref": proof_ref }],
                 }),
-                request_fingerprint: None,
+                request_fingerprint: "root-request".into(),
             })
             .await?;
 
@@ -4685,8 +5999,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "the test keeps the invalidation and admission race in one deterministic trace"
     )]
-    async fn descriptor_invalidation_serializes_new_task_admission_until_delete_finishes()
-    -> Result<()> {
+    async fn descriptor_invalidation_fences_task_admission_before_delete_finishes() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("artifact-admission-fence")?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let network_pair = "l1-l2";
@@ -4713,13 +6026,13 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "recoverable-root".into(),
-                pipeline_key: Some(pipeline),
+                pipeline_key: pipeline,
                 route,
                 task_kind: "proposal".into(),
-                proposal_id: Some(2),
-                proof_ids: vec![proof_ref.into()],
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
                 metadata: serde_json::json!({ "network_pair": network_pair }),
-                request_fingerprint: None,
+                request_fingerprint: "recoverable-root".into(),
             })
             .await?;
         cancel_test_task(runtime.as_ref(), "recoverable-root").await?;
@@ -4744,65 +6057,49 @@ mod tests {
         });
         store.artifact_delete_completed.notified().await;
 
-        let mut admission = tokio::spawn({
-            let runtime = Arc::clone(&runtime);
-            let precondition = ProofArtifactPrecondition {
-                network_pair: network_pair.into(),
-                proof_ref: proof_ref.into(),
-                pipeline_key: pipeline,
-                route,
-                descriptor: first.descriptor(),
-            };
-            async move {
-                runtime
-                    .register_task_if_absent_with_artifact_preconditions(
-                        TaskRegistration {
-                            task_id: "replacement-root".into(),
-                            pipeline_key: Some(pipeline),
-                            route,
-                            task_kind: "proposal".into(),
-                            proposal_id: Some(2),
-                            proof_ids: vec![proof_ref.into()],
-                            metadata: serde_json::json!({ "network_pair": network_pair }),
-                            request_fingerprint: Some("replacement-root".into()),
-                        },
-                        &[precondition],
-                    )
-                    .await
-            }
-        });
+        let precondition = ProofArtifactPrecondition {
+            network_pair: network_pair.into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key: pipeline,
+            route,
+            descriptor: first.descriptor(),
+        };
+        let admission = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            runtime.register_task_if_absent_with_artifact_preconditions(
+                TaskRegistration {
+                    task_id: "replacement-root".into(),
+                    pipeline_key: pipeline,
+                    route,
+                    task_kind: "proposal".into(),
+                    network_pair: network_pair.into(),
+                    artifact_refs: vec![proof_ref.into()],
+                    metadata: serde_json::json!({ "network_pair": network_pair }),
+                    request_fingerprint: "replacement-root".into(),
+                },
+                &[precondition],
+            ),
+        )
+        .await
+        .context("task admission waited for external artifact deletion")?;
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut admission)
-                .await
-                .is_err(),
-            "new task admission bypassed the artifact invalidation fence"
+            admission.is_err(),
+            "invalidated artifact precondition admitted a replacement task"
         );
         let recovery_root = current_test_task(runtime.as_ref(), "recoverable-root").await?;
-        let mut recovery = tokio::spawn({
-            let runtime = Arc::clone(&runtime);
-            async move {
-                runtime
-                    .reopen_task_for_recovery_if_current(
-                        &recovery_root.lifetime(),
-                        RunnerStatus::Cancelled,
-                    )
-                    .await
-            }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut recovery)
-                .await
-                .is_err(),
-            "task recovery bypassed the artifact invalidation fence"
-        );
+        let recovery = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            runtime.prepare_task_for_recovery_if_unchanged(&recovery_root),
+        )
+        .await
+        .context("task recovery waited for external artifact deletion")??;
+        assert!(recovery.is_none());
 
         store.allow_artifact_delete_return.notify_one();
         assert_eq!(
             invalidation.await??,
             ProofArtifactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
         );
-        assert!(admission.await?.is_err());
-        assert!(matches!(recovery.await??, RuntimeMutationOutcome::Applied));
         assert!(
             runtime
                 .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref,)
@@ -4839,13 +6136,13 @@ mod tests {
             runtime
                 .register_task(TaskRegistration {
                     task_id: task_id.into(),
-                    pipeline_key: Some(pipeline),
+                    pipeline_key: pipeline,
                     route,
                     task_kind: "proposal".into(),
-                    proposal_id: Some(1),
-                    proof_ids: vec![proof_ref.into()],
+                    network_pair: network_pair.into(),
+                    artifact_refs: vec![proof_ref.into()],
                     metadata: serde_json::json!({ "network_pair": network_pair }),
-                    request_fingerprint: None,
+                    request_fingerprint: format!("request-{task_id}"),
                 })
                 .await?;
         }
@@ -4904,13 +6201,13 @@ mod tests {
         )?);
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: Some(PipelineKey::ShastaSp1),
+            pipeline_key: PipelineKey::ShastaSp1,
             route: PipelineKey::ShastaSp1.route(),
             task_kind: "proposal".into(),
-            proposal_id: Some(1),
-            proof_ids: vec!["proposal-1".into()],
+            network_pair: "l1-l2".into(),
+            artifact_refs: vec!["proposal-1".into()],
             metadata: serde_json::json!({}),
-            request_fingerprint: Some("same-request".into()),
+            request_fingerprint: "same-request".into(),
         };
         let first = RuntimeManager::with_store(store.clone());
         let first_owner = first
@@ -4973,13 +6270,13 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "remove-incarnation".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: Some(PipelineKey::ShastaSp1),
+            pipeline_key: PipelineKey::ShastaSp1,
             route: PipelineKey::ShastaSp1.route(),
             task_kind: "proposal".into(),
-            proposal_id: Some(1),
-            proof_ids: Vec::new(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: Vec::new(),
             metadata: serde_json::json!({}),
-            request_fingerprint: None,
+            request_fingerprint: "root-request".into(),
         };
         let first = runtime.register_task(registration.clone()).await?;
         assert!(matches!(
@@ -5004,18 +6301,549 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_outbox_state_failure_does_not_create_an_untracked_object() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("pending-state-failure")?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        store.fail_before_commit.store(3, Ordering::SeqCst);
+
+        runtime
+            .checkpoint_pending_proof_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &[owner],
+                b"proof",
+            )
+            .await
+            .expect_err("publication intent persistence must precede the pending object write");
+
+        assert!(
+            runtime
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(runtime.state.read().await.pending_publications.is_empty());
+        drop(runtime);
+
+        let recovered = RuntimeManager::with_store(store);
+        recovered.initialize().await?;
+        assert_eq!(
+            recovered
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_outbox_object_failure_keeps_its_durable_intent() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("pending-object-failure")?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        store.fail_next_artifact_put.store(true, Ordering::SeqCst);
+
+        runtime
+            .checkpoint_pending_proof_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &[owner],
+                b"proof",
+            )
+            .await
+            .expect_err("pending object materialization failure must retain the intent");
+        assert_eq!(runtime.state.read().await.pending_publications.len(), 1);
+        assert!(
+            runtime
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        drop(runtime);
+
+        let recovered = RuntimeManager::with_store(store);
+        recovered.initialize().await?;
+        assert!(
+            recovered
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"proof",
+                )
+                .await?
+        );
+        let pending = recovered
+            .get_recoverable_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+            .await?
+            .context("recovered publication")?;
+        assert_eq!(pending.bytes, b"proof");
+        assert_eq!(pending.owner_incarnations, vec![owner]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialized_live_outbox_is_first_write_wins() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "pending-first-write".into())?;
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"first-proof",
+                )
+                .await?
+        );
+
+        runtime
+            .checkpoint_pending_proof_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &[owner],
+                b"different-proof",
+            )
+            .await
+            .expect_err("a live materialized intent must not be replaced");
+
+        let pending = runtime
+            .get_recoverable_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+            .await?
+            .context("first publication")?;
+        assert_eq!(pending.bytes, b"first-proof");
+        assert_eq!(pending.owner_incarnations, vec![owner]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_content_checkpoints_merge_live_owners() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "pending-owner-merge".into())?;
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let mut owners = Vec::new();
+        for task_id in ["root-a", "root-b"] {
+            owners.push(
+                runtime
+                    .register_task(TaskRegistration {
+                        task_id: task_id.into(),
+                        pipeline_key: pipeline,
+                        route,
+                        task_kind: "proposal".into(),
+                        network_pair: "l1-l2".into(),
+                        artifact_refs: vec![proof_ref.into()],
+                        metadata: serde_json::json!({}),
+                        request_fingerprint: format!("request-{task_id}"),
+                    })
+                    .await?
+                    .incarnation_id,
+            );
+        }
+
+        for owner in &owners {
+            assert!(
+                runtime
+                    .checkpoint_pending_proof_publication(
+                        "l1-l2",
+                        pipeline,
+                        route,
+                        proof_ref,
+                        &[*owner],
+                        b"shared-proof",
+                    )
+                    .await?
+            );
+        }
+
+        owners.sort_unstable();
+        let mut checkpointed = runtime
+            .get_recoverable_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+            .await?
+            .context("shared pending publication")?
+            .owner_incarnations;
+        checkpointed.sort_unstable();
+        assert_eq!(checkpointed, owners);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmaterialized_live_intent_is_first_write_wins() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("pending-intent-first-write")?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        store.fail_next_artifact_put.store(true, Ordering::SeqCst);
+        runtime
+            .checkpoint_pending_proof_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &[owner],
+                b"first-proof",
+            )
+            .await
+            .expect_err("injected object write failure must leave the first intent durable");
+
+        runtime
+            .checkpoint_pending_proof_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &[owner],
+                b"different-proof",
+            )
+            .await
+            .expect_err("a live durable intent must not be replaced before materialization");
+        assert!(
+            runtime
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .state
+                .read()
+                .await
+                .pending_publications
+                .values()
+                .next()
+                .context("durable pending intent")?
+                .content_hash,
+            artifact_store::content_hash(b"first-proof")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_outbox_delete_failure_remains_recoverable_after_restart() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("pending-delete-recovery")?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"proof",
+                )
+                .await?
+        );
+        cancel_test_task(&runtime, "root").await?;
+
+        store
+            .fail_next_artifact_delete
+            .store(true, Ordering::SeqCst);
+        runtime
+            .remove_pending_proof_publication_if_unowned("l1-l2", pipeline, route, proof_ref)
+            .await
+            .expect_err("failed object deletion must keep its durable cleanup intent");
+        drop(runtime);
+
+        let recovered = RuntimeManager::with_store(store);
+        recovered.initialize().await?;
+        assert!(
+            recovered
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_some()
+        );
+        assert_eq!(
+            recovered
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            1
+        );
+        assert!(
+            recovered
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            recovered
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_invalidates_a_cancelled_unregistered_canonical_publication() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("cancelled-canonical-recovery")?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let network_pair = "l1-l2";
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"proof",
+                )
+                .await?
+        );
+        let descriptor = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"proof")
+            .await?
+            .try_object()
+            .context("canonical proof object")?
+            .descriptor();
+        cancel_test_task(&runtime, "root").await?;
+        drop(runtime);
+
+        let recovered = RuntimeManager::with_store(store);
+        recovered.initialize().await?;
+        assert_eq!(
+            recovered
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            1
+        );
+        assert!(
+            recovered
+                .get_pending_proof_publication(network_pair, pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        let artifact = recovered
+            .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref)
+            .await?
+            .context("invalidated lifecycle record")?;
+        assert_eq!(artifact.lifecycle, ProofArtifactLifecycle::Invalidated);
+        assert_eq!(artifact.descriptor(), descriptor);
+        assert!(
+            recovered
+                .proof_artifact_descriptor_is_invalidated(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &descriptor,
+                )
+                .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn activated_outbox_is_retained_until_object_cleanup_succeeds() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("activated-pending-delete")?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let network_pair = "l1-l2";
+        let proof_ref = "proposal-1";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"proof",
+                )
+                .await?
+        );
+        let object = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"proof")
+            .await?
+            .try_object()
+            .context("canonical proof object")?
+            .clone();
+        let registration = ProofArtifactRegistration {
+            network_pair: network_pair.into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key: pipeline,
+            route,
+            proof_uri: object.proof_uri.clone(),
+            content_hash: object.content_hash.clone(),
+            generation: object.generation,
+        };
+        assert_eq!(
+            runtime
+                .register_pending_proof_artifact(registration.clone())
+                .await?,
+            ProofArtifactLifecycle::Pending
+        );
+        assert!(
+            runtime
+                .activate_proof_artifact_with_tasks(proof_ref, registration, &[owner], |records| {
+                    let record = records
+                        .iter_mut()
+                        .find(|record| record.incarnation_id == owner)
+                        .context("runtime owner")?;
+                    record.runner_status = RunnerStatus::Completed;
+                    record.proof_uri = Some(object.proof_uri.clone());
+                    Ok(Some(()))
+                },)
+                .await?
+                .is_some()
+        );
+
+        store
+            .fail_next_artifact_delete
+            .store(true, Ordering::SeqCst);
+        runtime
+            .remove_pending_proof_publication_if_unowned(network_pair, pipeline, route, proof_ref)
+            .await
+            .expect_err("activated outbox cleanup failure must remain durable");
+        drop(runtime);
+
+        let recovered = RuntimeManager::with_store(store);
+        recovered.initialize().await?;
+        assert_eq!(
+            recovered
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            1
+        );
+        assert!(
+            recovered
+                .get_pending_proof_publication(network_pair, pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelled_owner_cleans_outbox_that_finishes_put_late() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("cancel-during-outbox-put")?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: Some(PipelineKey::ShastaSp1),
+            pipeline_key: PipelineKey::ShastaSp1,
             route: PipelineKey::ShastaSp1.route(),
             task_kind: "proposal".into(),
-            proposal_id: Some(1),
-            proof_ids: vec!["proposal-1".into()],
+            network_pair: "l1-l2".into(),
+            artifact_refs: vec!["proposal-1".into()],
             metadata: serde_json::json!({}),
-            request_fingerprint: None,
+            request_fingerprint: "root-request".into(),
         };
         runtime.register_task(registration.clone()).await?;
         let owner = runtime

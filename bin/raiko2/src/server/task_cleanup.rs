@@ -1,18 +1,15 @@
 use crate::config::Config;
 use crate::server::lifecycle::ProofLifecycle;
 use crate::server::state::PipelineFactory;
-use crate::server::state::{EngineHandle, EngineQueueTaskState};
 use crate::server::task_metadata::{
     TaskMetadata, proposal_proof_artifact_refs, root_proof_artifact_refs,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
-use raiko2_pipeline::PipelineKey;
 use raiko2_queue::DetachMode;
 use raiko2_runtime::{
     ExpiredTaskCursor, ProofArtifactRecord, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
 };
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::MissedTickBehavior;
@@ -100,14 +97,9 @@ pub(crate) async fn run_runtime_cleanup_pass(
     }
     let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
 
-    let orphaned_cancelled = cancel_orphaned_runtime_tasks(
-        runtime.as_ref(),
-        pipelines.as_ref(),
-        &lifecycle,
-        ttl_secs,
-        orphan_cursor,
-    )
-    .await?;
+    let orphaned_cancelled =
+        cancel_orphaned_runtime_tasks(runtime.as_ref(), &lifecycle, ttl_secs, orphan_cursor)
+            .await?;
     let records = runtime
         .list_expired_terminal_tasks(
             now_ts(),
@@ -128,7 +120,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
     };
 
     for record in records {
-        match cleanup_expired_root_task(runtime.as_ref(), &lifecycle, &record).await {
+        match cleanup_expired_root_task(&lifecycle, &record).await {
             Ok(Some(outcome)) => {
                 stats.removed_roots += 1;
                 stats.skipped_shared_children += outcome.skipped_shared_children;
@@ -146,7 +138,6 @@ pub(crate) async fn run_runtime_cleanup_pass(
 
 async fn cancel_orphaned_runtime_tasks(
     runtime: &RuntimeManager,
-    pipelines: &dyn PipelineFactory,
     lifecycle: &ProofLifecycle,
     ttl_secs: u64,
     cursor: &mut Option<ExpiredTaskCursor>,
@@ -166,14 +157,7 @@ async fn cancel_orphaned_runtime_tasks(
     let mut cancelled = 0usize;
 
     for record in records {
-        if runtime
-            .get_task(&record.task_id)
-            .await?
-            .is_none_or(|current| current.incarnation_id != record.incarnation_id)
-        {
-            continue;
-        }
-        let metadata: TaskMetadata = match serde_json::from_value(record.metadata.clone()) {
+        let metadata = match TaskMetadata::decode_for_record(&record) {
             Ok(metadata) => metadata,
             Err(err) => {
                 warn!(
@@ -196,18 +180,8 @@ async fn cancel_orphaned_runtime_tasks(
             continue;
         }
 
-        if let Some(engine) = pipelines.get(&metadata.network_pair, record.pipeline_key)
-            && has_active_queue_task(
-                engine.as_ref(),
-                &metadata_queue_task_ids(&metadata, record.pipeline_key),
-            )
-            .await?
-        {
-            continue;
-        }
-
         let cancellation = lifecycle
-            .cancel(&record, &metadata, Some(ORPHANED_RUNTIME_ERROR.to_string()))
+            .cancel_orphaned_if_unchanged(&record, ORPHANED_RUNTIME_ERROR.to_string())
             .await
             .with_context(|| format!("failed cancel orphaned runtime task {}", record.task_id))?;
         if !matches!(
@@ -224,32 +198,6 @@ async fn cancel_orphaned_runtime_tasks(
     Ok(cancelled)
 }
 
-async fn has_active_queue_task(
-    engine: &dyn EngineHandle,
-    task_ids: &HashSet<EngineTaskId>,
-) -> Result<bool> {
-    for task_id in task_ids {
-        let Some(view) = engine
-            .get_task_state(task_id.clone())
-            .await
-            .map_err(|err| anyhow!("failed load queue task: {err}"))?
-        else {
-            continue;
-        };
-        if matches!(
-            view.state,
-            EngineQueueTaskState::Pending
-                | EngineQueueTaskState::Ready
-                | EngineQueueTaskState::Retrying
-                | EngineQueueTaskState::Running
-        ) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 pub(crate) async fn reconcile_runtime_task_from_artifacts(
     runtime: &RuntimeManager,
     record: &RuntimeTaskRecord,
@@ -264,17 +212,14 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
 
     let mut artifacts = Vec::new();
     if let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
-        let Some(artifact) =
-            load_first_artifact(runtime, record, metadata, &root_refs.refs).await?
-        else {
+        let Some(artifact) = load_first_artifact(runtime, record, &root_refs.refs).await? else {
             return Ok(None);
         };
         artifacts.push(artifact);
     } else {
         for proposal in &metadata.proposals {
             let refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
-            let Some(artifact) = load_first_artifact(runtime, record, metadata, &refs).await?
-            else {
+            let Some(artifact) = load_first_artifact(runtime, record, &refs).await? else {
                 return Ok(None);
             };
             artifacts.push(artifact);
@@ -311,13 +256,12 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
 async fn load_first_artifact(
     runtime: &RuntimeManager,
     record: &RuntimeTaskRecord,
-    metadata: &TaskMetadata,
     proof_refs: &[String],
 ) -> Result<Option<ProofArtifactRecord>> {
     for proof_ref in proof_refs {
         if let Some(material) = crate::server::proof_artifact::load_proof_artifact_material(
             runtime,
-            &metadata.network_pair,
+            &record.network_pair,
             record.pipeline_key,
             record.route,
             proof_ref,
@@ -328,23 +272,6 @@ async fn load_first_artifact(
         }
     }
     Ok(None)
-}
-
-fn metadata_queue_task_ids(
-    metadata: &TaskMetadata,
-    pipeline_key: PipelineKey,
-) -> HashSet<EngineTaskId> {
-    let mut task_ids = HashSet::new();
-    for proposal in &metadata.proposals {
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
-        task_ids.extend(proposal_task_chain_ids(&task_id));
-    }
-    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
-        task_ids.insert(task_id);
-    }
-    task_ids
 }
 
 pub(crate) fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
@@ -377,36 +304,16 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
 }
 
 async fn cleanup_expired_root_task(
-    runtime: &RuntimeManager,
     lifecycle: &ProofLifecycle,
     record: &RuntimeTaskRecord,
 ) -> Result<Option<ChildCleanupOutcome>> {
-    if runtime
-        .get_task(&record.task_id)
-        .await?
-        .is_none_or(|current| current.incarnation_id != record.incarnation_id)
-    {
-        return Ok(None);
-    }
-    let metadata: TaskMetadata =
-        serde_json::from_value(record.metadata.clone()).context("failed to parse task metadata")?;
-    let (retirement, detached) = lifecycle
-        .retire(record, &metadata, DetachMode::Remove)
-        .await?;
-    if !matches!(
-        retirement,
-        raiko2_runtime::RuntimeMutationOutcome::Applied
-            | raiko2_runtime::RuntimeMutationOutcome::AlreadyApplied
-    ) {
+    let (removal, detached) = lifecycle.remove(record, DetachMode::Remove).await?;
+    if !matches!(removal, raiko2_runtime::RuntimeMutationOutcome::Applied) {
         return Ok(None);
     }
     let outcome = ChildCleanupOutcome {
         skipped_shared_children: detached.retained.len(),
     };
-    runtime
-        .remove_task_if_current(&record.lifetime())
-        .await
-        .with_context(|| format!("failed to remove runtime task {}", record.task_id))?;
     Ok(Some(outcome))
 }
 
@@ -439,12 +346,13 @@ mod tests {
     };
     use crate::server::task_metadata::{
         ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
+        publication_proof_artifact_refs,
     };
     use anyhow::{Context, Result};
     use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
-    use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
+    use raiko2_queue::{RootOwner, TaskStoreError, decode_task_id, encode_task_id};
     use raiko2_runtime::{
         ProofArtifactRegistration, RunnerStatus, RuntimeManager, TaskRegistration,
     };
@@ -474,10 +382,6 @@ mod tests {
         let orphaned_task_id = encoded_proposal_task_id(10)?;
         let remote_task_id = encoded_proposal_task_id(11)?;
         let queued_task_id = encoded_proposal_task_id(13)?;
-        let engine = Arc::new(MockEngine::with_queue_tasks(HashSet::from([
-            queued_task_id.clone(),
-        ])));
-        let factory = Arc::new(build_factory(engine));
         let now = now_ts();
         let stale = now.saturating_sub(7_201);
 
@@ -492,7 +396,7 @@ mod tests {
         register_runtime_task(
             runtime.as_ref(),
             "fresh-root",
-            &encoded_proposal_task_id(12)?,
+            &queued_task_id,
             RunnerStatus::Running,
             now,
         )
@@ -508,7 +412,7 @@ mod tests {
 
         let mut remote_metadata = metadata_for_task(&remote_task_id);
         remote_metadata.runtime.proposals.insert(
-            remote_task_id.clone(),
+            remote_metadata.proposals[0].task_id.clone(),
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xremote".to_string()),
                 ..TaskRuntimeMetadata::default()
@@ -522,6 +426,17 @@ mod tests {
             stale,
         )
         .await?;
+
+        let active_owner = runtime
+            .get_task("fresh-root")
+            .await?
+            .map(|record| RootOwner::new(record.task_id, record.incarnation_id))
+            .expect("fresh root");
+        let engine = Arc::new(MockEngine::with_active_projection(
+            HashSet::from([active_owner]),
+            HashSet::from([queued_task_id]),
+        ));
+        let factory = Arc::new(build_factory(engine));
 
         let mut orphan_cursor = None;
         let mut terminal_cursor = None;
@@ -561,16 +476,16 @@ mod tests {
 
     struct MockEngine {
         failing_owners: HashSet<String>,
+        active_owners: HashSet<RootOwner>,
         queue_task_ids: HashSet<String>,
-        queue_task_state: EngineQueueTaskState,
     }
 
     impl Default for MockEngine {
         fn default() -> Self {
             Self {
                 failing_owners: HashSet::new(),
+                active_owners: HashSet::new(),
                 queue_task_ids: HashSet::new(),
-                queue_task_state: EngineQueueTaskState::Succeeded,
             }
         }
     }
@@ -579,25 +494,18 @@ mod tests {
         fn with_failing_owners(failing_owners: HashSet<String>) -> Self {
             Self {
                 failing_owners,
+                active_owners: HashSet::new(),
                 queue_task_ids: HashSet::new(),
-                queue_task_state: EngineQueueTaskState::Succeeded,
             }
         }
 
-        fn with_queue_tasks(queue_task_ids: HashSet<String>) -> Self {
-            Self {
-                queue_task_ids,
-                ..Self::default()
-            }
-        }
-
-        fn with_queue_task_state(
+        fn with_active_projection(
+            active_owners: HashSet<RootOwner>,
             queue_task_ids: HashSet<String>,
-            queue_task_state: EngineQueueTaskState,
         ) -> Self {
             Self {
+                active_owners,
                 queue_task_ids,
-                queue_task_state,
                 ..Self::default()
             }
         }
@@ -620,8 +528,19 @@ mod tests {
             let present = self
                 .queue_task_ids
                 .contains(&encode_task_id(&id).expect("encode task id"));
-            let state = self.queue_task_state;
-            Box::pin(async move { Ok(present.then_some(EngineQueueTaskView { id, state })) })
+            Box::pin(async move {
+                Ok(present.then_some(EngineQueueTaskView {
+                    state: EngineQueueTaskState::Running,
+                }))
+            })
+        }
+
+        fn has_active_execution(
+            &self,
+            owner: RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            let active = self.active_owners.contains(&owner);
+            Box::pin(async move { Ok(active) })
         }
 
         fn attach_execution_plan(
@@ -655,11 +574,6 @@ mod tests {
     async fn runtime_cleanup_keeps_stale_root_with_active_queue_task() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned-active"))?);
         let active_task_id = encoded_proposal_task_id(14)?;
-        let engine = Arc::new(MockEngine::with_queue_task_state(
-            HashSet::from([active_task_id.clone()]),
-            EngineQueueTaskState::Running,
-        ));
-        let factory = Arc::new(build_factory(engine.clone()));
         let stale = now_ts().saturating_sub(7_201);
 
         register_runtime_task(
@@ -670,6 +584,17 @@ mod tests {
             stale,
         )
         .await?;
+
+        let active_owner = runtime
+            .get_task("active-root")
+            .await?
+            .map(|record| RootOwner::new(record.task_id, record.incarnation_id))
+            .expect("active root");
+        let engine = Arc::new(MockEngine::with_active_projection(
+            HashSet::from([active_owner]),
+            HashSet::from([active_task_id]),
+        ));
+        let factory = Arc::new(build_factory(engine));
 
         let mut orphan_cursor = None;
         let mut terminal_cursor = None;
@@ -695,9 +620,7 @@ mod tests {
             "orphaned-artifact-complete",
         ))?);
         let encoded_proposal_ref = encoded_proposal_task_id(15)?;
-        let engine = Arc::new(MockEngine::with_queue_tasks(HashSet::from([
-            encoded_proposal_ref.clone(),
-        ])));
+        let engine = Arc::new(MockEngine::default());
         let factory = Arc::new(build_factory(engine));
         let stale = now_ts().saturating_sub(7_201);
 
@@ -710,13 +633,7 @@ mod tests {
         )
         .await?;
         let metadata = metadata_for_task(&encoded_proposal_ref);
-        let proof_ref = proposal_task_ref(
-            PipelineKey::ShastaRisc0,
-            metadata.proposals[0]
-                .request
-                .as_ref()
-                .expect("proposal request"),
-        );
+        let proof_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &metadata.proposals[0].request);
         let artifact = runtime
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
@@ -961,6 +878,10 @@ mod tests {
         .await?;
         let stale = runtime.get_task("root").await?.expect("stale root");
         assert!(matches!(
+            runtime.retire_task_if_unchanged(&stale, None).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+        assert!(matches!(
             runtime.remove_task_if_current(&stale.lifetime()).await?,
             raiko2_runtime::RuntimeMutationOutcome::Applied
         ));
@@ -975,7 +896,6 @@ mod tests {
 
         assert!(
             cleanup_expired_root_task(
-                runtime.as_ref(),
                 &crate::server::lifecycle::ProofLifecycle::new(Arc::clone(&runtime), factory),
                 &stale,
             )
@@ -1025,19 +945,18 @@ mod tests {
         updated_at: i64,
         network_pair: &str,
     ) -> Result<()> {
+        let metadata = metadata_for_task_with_pair(proposal_task_id, network_pair);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
-                pipeline_key: None,
+                pipeline_key: PipelineKey::ShastaRisc0,
                 route: "risc0/local".parse().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(1),
-                proof_ids: vec![proposal_task_id.to_string()],
-                metadata: serde_json::to_value(metadata_for_task_with_pair(
-                    proposal_task_id,
-                    network_pair,
-                ))?,
-                request_fingerprint: None,
+                network_pair: network_pair.to_string(),
+                artifact_refs,
+                metadata: serde_json::to_value(metadata)?,
+                request_fingerprint: format!("request-{task_id}"),
             })
             .await?;
         let mut record = runtime.get_task(task_id).await?.expect("runtime task");
@@ -1054,20 +973,17 @@ mod tests {
         status: RunnerStatus,
         updated_at: i64,
     ) -> Result<()> {
+        let artifact_refs = publication_proof_artifact_refs(metadata, PipelineKey::ShastaRisc0);
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
-                pipeline_key: None,
+                pipeline_key: PipelineKey::ShastaRisc0,
                 route: "risc0/local".parse().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
-                proposal_id: Some(1),
-                proof_ids: metadata
-                    .proposals
-                    .iter()
-                    .map(|proposal| proposal.task_id.clone())
-                    .collect(),
+                network_pair: metadata.network_pair.clone(),
+                artifact_refs,
                 metadata: serde_json::to_value(metadata)?,
-                request_fingerprint: None,
+                request_fingerprint: format!("request-{task_id}"),
             })
             .await?;
         let mut record = runtime.get_task(task_id).await?.expect("runtime task");
@@ -1092,6 +1008,11 @@ mod tests {
         let (network, l1_network) = network_pair
             .split_once('/')
             .unwrap_or((network_pair, "ethereum"));
+        let task_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &request);
+        let l2_block_numbers = request
+            .l2_block_range
+            .map(|range| (range.start..=range.end).collect())
+            .unwrap_or_default();
         TaskMetadata {
             network_pair: network_pair.to_string(),
             network: network.to_string(),
@@ -1102,13 +1023,13 @@ mod tests {
             execution_mode: None,
             aggregate_requested: false,
             proposals: vec![ProposalTask {
-                proposal_id: 1,
-                checkpoint: None,
-                l1_inclusion_block_number: 0,
-                l2_block_numbers: vec![1],
-                last_anchor_block_number: 0,
-                task_id: proposal_task_id.to_string(),
-                request: Some(request),
+                proposal_id: request.proposal_id,
+                checkpoint: request.checkpoint,
+                l1_inclusion_block_number: request.l1_inclusion_block_number,
+                l2_block_numbers,
+                last_anchor_block_number: request.last_anchor_block_number,
+                task_id: task_ref,
+                request,
             }],
             aggregate_task_id: None,
             aggregate_request: None,
@@ -1120,7 +1041,10 @@ mod tests {
     fn encoded_proposal_task_id(proposal_id: u64) -> Result<String> {
         let request = ProposalTaskRequest {
             proposal_id,
-            l2_block_range: None,
+            l2_block_range: Some(raiko2_primitives::L2BlockRange {
+                start: proposal_id,
+                end: proposal_id,
+            }),
             l1_inclusion_block_number: 0,
             last_anchor_block_number: 0,
             checkpoint: None,

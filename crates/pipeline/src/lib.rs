@@ -5,7 +5,7 @@
 
 //! Raiko2 Pipeline - hardfork-specific manifest builders and pipeline specs.
 
-use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
+use raiko2_primitives::{ProofContext, ProofType, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,15 @@ pub enum PipelineKey {
 }
 
 impl PipelineKey {
+    pub const ALL: [Self; 6] = [
+        Self::ShastaRisc0,
+        Self::ShastaSp1,
+        Self::ShastaNative,
+        Self::ShastaRisc0Network,
+        Self::ShastaSgx,
+        Self::ShastaSgxGeth,
+    ];
+
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -69,6 +78,55 @@ impl PipelineKey {
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }
+
+    #[must_use]
+    pub const fn proof_type(self) -> ProofType {
+        match self {
+            Self::ShastaRisc0 | Self::ShastaRisc0Network => ProofType::Risc0,
+            Self::ShastaSp1 => ProofType::Sp1,
+            Self::ShastaNative => ProofType::Native,
+            Self::ShastaSgx => ProofType::Sgx,
+            Self::ShastaSgxGeth => ProofType::SgxGeth,
+        }
+    }
+
+    #[must_use]
+    pub const fn supports_route(self, route: PipelineRoute) -> bool {
+        matches!(
+            (self, route),
+            (
+                Self::ShastaRisc0,
+                PipelineRoute {
+                    guest_system: GuestSystem::Risc0,
+                    runner: RunnerKind::Local,
+                }
+            ) | (
+                Self::ShastaRisc0Network,
+                PipelineRoute {
+                    guest_system: GuestSystem::Risc0,
+                    runner: RunnerKind::Network,
+                }
+            ) | (
+                Self::ShastaSp1,
+                PipelineRoute {
+                    guest_system: GuestSystem::Sp1,
+                    runner: RunnerKind::Local | RunnerKind::Network,
+                }
+            ) | (
+                Self::ShastaNative,
+                PipelineRoute {
+                    guest_system: GuestSystem::Native,
+                    runner: RunnerKind::Local,
+                }
+            ) | (
+                Self::ShastaSgx | Self::ShastaSgxGeth,
+                PipelineRoute {
+                    guest_system: GuestSystem::Sgx,
+                    runner: RunnerKind::Remote,
+                }
+            )
+        )
+    }
 }
 
 impl fmt::Display for PipelineKey {
@@ -87,7 +145,7 @@ impl FromStr for PipelineKey {
             "shasta-native-local" => Ok(Self::ShastaNative),
             "shasta-sgx-remote" => Ok(Self::ShastaSgx),
             "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
-            "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
+            "shasta-risc0-network" => Ok(Self::ShastaRisc0Network),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -169,7 +227,7 @@ impl FromStr for RunnerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
-            "network" | "boundless" => Ok(Self::Network),
+            "network" => Ok(Self::Network),
             "remote" => Ok(Self::Remote),
             _ => Err(format!("Unknown runner: {s}")),
         }
@@ -190,52 +248,6 @@ impl PipelineRoute {
             guest_system,
             runner,
         }
-    }
-
-    #[must_use]
-    pub const fn proof_type(self) -> raiko2_primitives::ProofType {
-        match self.guest_system {
-            GuestSystem::Risc0 => raiko2_primitives::ProofType::Risc0,
-            GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
-            GuestSystem::Native => raiko2_primitives::ProofType::Native,
-            GuestSystem::Sgx => raiko2_primitives::ProofType::Sgx,
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the guest system and runner combination is not supported by the
-    /// current canonical pipeline set.
-    pub fn pipeline_key(self) -> Result<PipelineKey, String> {
-        match (self.guest_system, self.runner) {
-            (GuestSystem::Risc0, RunnerKind::Local) => Ok(PipelineKey::ShastaRisc0),
-            (GuestSystem::Risc0, RunnerKind::Network) => Ok(PipelineKey::ShastaRisc0Network),
-            (GuestSystem::Sp1, RunnerKind::Local | RunnerKind::Network) => {
-                Ok(PipelineKey::ShastaSp1)
-            }
-            (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
-            (GuestSystem::Native, RunnerKind::Network | RunnerKind::Remote) => {
-                Err("Unsupported proving route: native/network".to_string())
-            }
-            (GuestSystem::Sgx, RunnerKind::Remote) => Ok(PipelineKey::ShastaSgx),
-            (GuestSystem::Sgx, RunnerKind::Local) => {
-                Err("Unsupported proving route: sgx/local".to_string())
-            }
-            (GuestSystem::Sgx, RunnerKind::Network) => {
-                Err("Unsupported proving route: sgx/network".to_string())
-            }
-            (GuestSystem::Sp1, RunnerKind::Remote) => {
-                Err("Unsupported proving route: sp1/remote".to_string())
-            }
-            (GuestSystem::Risc0, RunnerKind::Remote) => {
-                Err("Unsupported proving route: risc0/remote".to_string())
-            }
-        }
-    }
-
-    #[must_use]
-    pub const fn from_pipeline_key(pipeline_key: PipelineKey) -> Self {
-        pipeline_key.route()
     }
 }
 
@@ -259,14 +271,14 @@ impl FromStr for PipelineRoute {
 #[cfg(test)]
 mod route_tests {
     use super::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
+    use raiko2_primitives::ProofType;
 
     #[test]
-    fn pipeline_route_roundtrips_with_pipeline_key() {
-        let route = PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network);
-        let pipeline_key = route.pipeline_key().expect("supported route");
+    fn pipeline_key_is_the_canonical_route_owner() {
+        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let route = pipeline_key.route();
 
-        assert_eq!(pipeline_key, PipelineKey::ShastaRisc0Network);
-        assert_eq!(PipelineRoute::from_pipeline_key(pipeline_key), route);
+        assert!(pipeline_key.supports_route(route));
         assert_eq!(
             "shasta-risc0-network"
                 .parse::<PipelineKey>()
@@ -276,52 +288,33 @@ mod route_tests {
     }
 
     #[test]
-    fn pipeline_route_accepts_legacy_boundless_persisted_names() {
-        assert_eq!(
-            "shasta-risc0-boundless"
-                .parse::<PipelineKey>()
-                .expect("parse legacy pipeline key"),
-            PipelineKey::ShastaRisc0Network
-        );
-        assert_eq!(
-            "boundless"
-                .parse::<RunnerKind>()
-                .expect("parse legacy runner"),
-            RunnerKind::Network
-        );
-        assert_eq!(
-            "risc0/boundless"
-                .parse::<PipelineRoute>()
-                .expect("parse legacy route"),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
-        );
+    fn superseded_boundless_route_aliases_are_rejected() {
+        assert!("shasta-risc0-boundless".parse::<PipelineKey>().is_err());
+        assert!("boundless".parse::<RunnerKind>().is_err());
+        assert!("risc0/boundless".parse::<PipelineRoute>().is_err());
     }
 
     #[test]
     fn pipeline_route_rejects_unsupported_combo() {
         let route = PipelineRoute::new(GuestSystem::Native, RunnerKind::Network);
-        assert_eq!(
-            route.pipeline_key().expect_err("unsupported route"),
-            "Unsupported proving route: native/network"
+        assert!(
+            !PipelineKey::ALL
+                .into_iter()
+                .any(|pipeline| pipeline.supports_route(route))
         );
     }
 
     #[test]
     fn sp1_network_route_uses_sp1_pipeline() {
         let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
-        assert_eq!(
-            route.pipeline_key().expect("supported route"),
-            PipelineKey::ShastaSp1
-        );
+        assert!(PipelineKey::ShastaSp1.supports_route(route));
     }
 
     #[test]
     fn sgx_remote_route_uses_sgx_pipeline() {
         let route = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
-        assert_eq!(
-            route.pipeline_key().expect("supported route"),
-            PipelineKey::ShastaSgx
-        );
+        assert!(PipelineKey::ShastaSgx.supports_route(route));
+        assert!(PipelineKey::ShastaSgxGeth.supports_route(route));
         assert_eq!(
             "shasta-sgx-remote"
                 .parse::<PipelineKey>()
@@ -348,6 +341,20 @@ mod route_tests {
                 .expect("sgxgeth key"),
             PipelineKey::ShastaSgxGeth
         );
+    }
+
+    #[test]
+    fn pipeline_key_owns_proof_type_and_route_identity() {
+        let sp1_network = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
+        assert!(PipelineKey::ShastaSp1.supports_route(sp1_network));
+        assert_eq!(PipelineKey::ShastaSp1.proof_type(), ProofType::Sp1);
+
+        let sgx_remote = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
+        assert!(PipelineKey::ShastaSgx.supports_route(sgx_remote));
+        assert!(PipelineKey::ShastaSgxGeth.supports_route(sgx_remote));
+        assert_eq!(PipelineKey::ShastaSgx.proof_type(), ProofType::Sgx);
+        assert_eq!(PipelineKey::ShastaSgxGeth.proof_type(), ProofType::SgxGeth);
+        assert!(!PipelineKey::ShastaNative.supports_route(sp1_network));
     }
 }
 

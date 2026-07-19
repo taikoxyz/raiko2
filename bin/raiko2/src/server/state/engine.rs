@@ -27,6 +27,8 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
+    fn has_active_execution(&self, owner: RootOwner)
+    -> BoxFuture<'_, Result<bool, TaskStoreError>>;
     fn attach_execution_plan(
         &self,
         owner: RootOwner,
@@ -55,7 +57,6 @@ pub(crate) enum EngineQueueTaskState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct EngineQueueTaskView {
-    pub(crate) id: EngineTaskId,
     pub(crate) state: EngineQueueTaskState,
 }
 
@@ -144,10 +145,31 @@ where
         Box::pin(async move {
             Engine::get_task_state(self, id).await.map(|view| {
                 view.map(|view| EngineQueueTaskView {
-                    id: view.id,
                     state: queue_task_state(view.state),
                 })
             })
+        })
+    }
+
+    fn has_active_execution(
+        &self,
+        owner: RootOwner,
+    ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+        Box::pin(async move {
+            Ok(self
+                .inspect_execution(&owner)
+                .await?
+                .is_some_and(|projection| {
+                    projection.tasks.iter().any(|task| {
+                        matches!(
+                            task.state,
+                            TaskStateKind::Pending
+                                | TaskStateKind::Ready
+                                | TaskStateKind::Retrying
+                                | TaskStateKind::Running
+                        )
+                    })
+                }))
         })
     }
 

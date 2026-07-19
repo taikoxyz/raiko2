@@ -830,8 +830,8 @@ Operator notes:
   cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
   from GCS rather than Redis.
 - Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
-  complete lifecycle operation. A process-local lifecycle transition gate serializes only an
-  active-root decision with its one in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
+  complete lifecycle operation. A process-local lifecycle transition gate serializes one short
+  active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
   publication steps, invalidation, reconciliation, and cleanup writes. It waits only for short
   repository commits already admitted and request-ID checkpoints covered by permits acquired while
   active. `Inactive` rejects every write. There is deliberately no owner lease, owner epoch, or
@@ -839,20 +839,36 @@ Operator notes:
 - Treat `incarnation_id`, scheduler lease tokens, and GCS generations as separate stale-operation
   domains. A `TaskLifetime` rejects callbacks for a removed and recreated runtime record; a queue
   lease token identifies one execution attempt; a manifest generation performs exact artifact CAS.
-  None is runtime authority, and runtime-state generations remain repository-internal.
+  Runtime-state generation, not serialized JSON byte order, is the snapshot CAS identity. None is
+  runtime authority, and runtime-state generations remain repository-internal.
 - Submission, cancellation, terminal failure, cleanup, and invalidation commit runtime state first,
   then apply owner-aware execution-projection and exact proof-object effects. A partial effect is
   recovered by reconciliation; operators must not attempt to repair it by reverting the
-  authoritative root.
+  authoritative root. If terminal-failure persistence is unavailable, the queue task remains
+  retryable rather than becoming terminal ahead of its runtime root. Recovery, destructive cleanup,
+  and replacement are conditional on the complete observed task snapshot, so stale requests do not
+  detach a reopened root or install a second successor. Unowned pending-publication records retain
+  their artifact identity until deletion succeeds and are swept during startup reconciliation. A
+  successor at the same artifact key does not inherit the predecessor incarnation's publication
+  intent.
+- Proposal execution nodes are position-independent: batch order never creates dependencies between
+  proposals, and only aggregation depends on the proposal artifact tasks it consumes. Proof
+  activation refreshes current owners under the short local lifecycle gate; newly registered distinct
+  roots may share the result, but a replacement incarnation for a checkpointed task ID is excluded.
+  Execution owners are resolved from canonical task membership, not the artifact-reference index;
+  external aggregate inputs remain storage consumers without receiving proposal-stage callbacks.
+  Cached proposal artifacts are execution short-circuits, not graph-shape inputs, so restart and
+  failed-aggregate recovery rebuild the identical proposal and dependency graph.
 - This release requires an atomic configuration cutover. Before starting the new binary, remove
   legacy `[queue]` keys `backend`, `namespace`, and `redis_url`, remove legacy `[runtime]` keys
   `root` and `inactive_ttl_secs`, and add explicit `runtime.environment`, `runtime.namespace`, and
   `[runtime.store]` settings. Apply the new ConfigMap while the old instance is drained; old and new
   schemas are not dual-read. Keep the prior ConfigMap and GCS namespace together for rollback.
 - The runtime snapshot schema is also a hard cut: task `incarnation_id`, first-class artifact
-  identity fields, and publication intent owner/hash fields are required and are not reconstructed
-  from older snapshots. Deploy with a new empty namespace (or explicitly delete the old runtime
-  snapshot after the old instance exits);
+  identity fields, canonical proposal and aggregate requests, and publication intent owner/hash
+  fields are required. Unknown fields, missing requests, and derived identity drift fail startup and
+  are not reconstructed from older snapshots. Deploy with a new empty namespace (or explicitly
+  delete the old runtime snapshot after the old instance exits);
   there is no compatibility migration or fail-open recovery for legacy checkpoint state.
 - Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
   proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must

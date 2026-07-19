@@ -6,6 +6,7 @@ use raiko2_queue::{ReadyQueueSort, TaskId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProverTaskConfig {
     #[serde(default)]
     pub sp1: Option<Sp1ConfigOverrides>,
@@ -14,6 +15,7 @@ pub struct ProverTaskConfig {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProposalTaskRequest {
     pub proposal_id: u64,
     pub l2_block_range: Option<L2BlockRange>,
@@ -36,6 +38,7 @@ pub enum ProposalStage {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AggregationTaskRequest {
     pub request_id: String,
     pub proposal_ids: Vec<u64>,
@@ -46,7 +49,7 @@ pub struct AggregationTaskRequest {
 /// A root-owned proving execution submitted as one in-memory queue projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineExecutionPlan {
-    /// Proposal requests in execution order.
+    /// Canonical proposal requests; proposal nodes are mutually independent.
     pub proposals: Vec<ProposalTaskRequest>,
     /// Optional aggregate task consuming the proposal artifacts.
     pub aggregate: Option<EngineAggregationPlan>,

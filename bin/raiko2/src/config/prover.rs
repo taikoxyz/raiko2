@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
@@ -88,10 +88,16 @@ impl ProverConfig {
     ///
     /// Returns an error if the configured guest system and runner are incompatible.
     pub fn validate(&self) -> Result<()> {
-        self.route().pipeline_key().map_err(anyhow::Error::msg)?;
+        let route = self.route();
+        if !PipelineKey::ALL
+            .into_iter()
+            .any(|pipeline| pipeline.supports_route(route))
+        {
+            bail!("unsupported prover route: {route}");
+        }
 
         if matches!(
-            self.route(),
+            route,
             PipelineRoute {
                 guest_system: GuestSystem::Risc0,
                 runner: RunnerKind::Network,
@@ -109,7 +115,7 @@ impl ProverConfig {
             bail!("prover.risc0.execution_po2 must be greater than zero");
         }
         if matches!(
-            self.route(),
+            route,
             PipelineRoute {
                 guest_system: GuestSystem::Sgx,
                 runner: RunnerKind::Remote

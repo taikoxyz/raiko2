@@ -6,7 +6,7 @@ use axum::{
 };
 use raiko2_engine::{
     AggregateProofInput, AggregationTaskRequest, EngineAggregationPlan, EngineExecutionPlan,
-    EngineTaskId, EngineTaskKey, ProofArtifactRef, ProposalTaskRequest, ProverTaskConfig,
+    EngineTaskId, ProofArtifactRef, ProposalTaskRequest, ProverTaskConfig,
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
@@ -16,6 +16,7 @@ use raiko2_prover::sp1_config::{
     Sp1RequestContext, Sp1SystemConfig,
 };
 use raiko2_prover::validate_external_aggregate_proofs;
+use raiko2_queue::RootOwner;
 use raiko2_runtime::{
     RunnerStatus as RuntimeRunnerStatus, RuntimeManager, RuntimeMutationOutcome, TaskRegistration,
     TaskRegistrationOutcome,
@@ -98,16 +99,8 @@ struct PlannedAggregateTask {
 #[derive(Clone)]
 struct SubmissionPlan {
     proposals: Vec<PlannedProposalTask>,
-    proposal_sources: Vec<ProposalPlanSource>,
     aggregate: Option<PlannedAggregateTask>,
     aggregate_inputs: Vec<AggregateProofInput>,
-    cached_artifact_preconditions: Vec<raiko2_runtime::ProofArtifactPrecondition>,
-}
-
-#[derive(Clone)]
-enum ProposalPlanSource {
-    Pending,
-    Cached,
 }
 
 struct ExternalAggregateSubmission {
@@ -525,6 +518,11 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
     if req.proofs.is_empty() {
         return Err(ApiError::bad_request("proofs must not be empty"));
     }
+    if !req.aggregation_ids.is_empty() && req.aggregation_ids.len() != req.proofs.len() {
+        return Err(ApiError::bad_request(
+            "aggregation_ids must be empty or match proofs length",
+        ));
+    }
     for proposal_id in &req.aggregation_ids {
         validate_shasta_proposal_id("aggregation_ids[]", *proposal_id)?;
     }
@@ -568,7 +566,7 @@ async fn build_external_aggregate_submission(
         sp1_context,
     )?;
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
-    validate_external_aggregate_proofs(route.route, &req.proofs)
+    validate_external_aggregate_proofs(route.pipeline_key(), &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
     let request_fingerprint = external_aggregate_request_fingerprint(
         state.runtime.environment(),
@@ -640,6 +638,11 @@ async fn persist_external_aggregate_input_artifacts(
     input_bytes: &[Vec<u8>],
     owner_incarnation: uuid::Uuid,
 ) -> Result<(), ApiError> {
+    if input_artifacts.len() != input_bytes.len() {
+        return Err(ApiError::internal(
+            "aggregate input artifact and payload counts differ",
+        ));
+    }
     for (artifact, bytes) in input_artifacts.iter().zip(input_bytes) {
         let publication = runtime
             .publish_active_proof_artifact_bytes(
@@ -700,8 +703,7 @@ fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> 
     })
 }
 
-async fn build_submission_plan(
-    runtime: &RuntimeManager,
+fn build_submission_plan(
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
 ) -> Result<SubmissionPlan, ApiError> {
@@ -727,48 +729,28 @@ async fn build_submission_plan(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
 
-    let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
-    let mut cached_artifact_preconditions = Vec::new();
     if submission.aggregate_requested {
         aggregate_inputs.reserve(proposals.len());
         for proposal in &proposals {
-            if let Some(material) =
-                load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
-            {
-                proposal_sources.push(ProposalPlanSource::Cached);
-                cached_artifact_preconditions.push(material.record.precondition());
-                aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
-                    network_pair: material.record.network_pair,
-                    pipeline_key: material.record.pipeline_key,
-                    route: material.record.route,
-                    proof_ref: material.record.proof_ref,
-                }));
-            } else {
-                proposal_sources.push(ProposalPlanSource::Pending);
-                aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
-                    artifact: proof_artifact_ref(
-                        &submission.pair.key,
-                        submission.route.pipeline_key(),
-                        submission.route.route,
-                        &proposal.task_ref,
-                    ),
-                    dependency: Box::new(proposal.task_id.clone()),
-                });
-            }
+            aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
+                artifact: proof_artifact_ref(
+                    &submission.pair.key,
+                    submission.route.pipeline_key(),
+                    submission.route.route,
+                    &proposal.task_ref,
+                ),
+                dependency: Box::new(proposal.task_id.clone()),
+            });
         }
-    } else {
-        proposal_sources.resize(proposals.len(), ProposalPlanSource::Pending);
     }
 
     let aggregate = planned_batch_aggregate(submission, request_fingerprint);
 
     Ok(SubmissionPlan {
         proposals,
-        proposal_sources,
         aggregate,
         aggregate_inputs,
-        cached_artifact_preconditions,
     })
 }
 
@@ -822,10 +804,7 @@ async fn register_batch_task(
 
     state
         .runtime
-        .register_task_if_absent_with_artifact_preconditions(
-            registration,
-            &plan.cached_artifact_preconditions,
-        )
+        .register_task_if_absent(registration)
         .await
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
 }
@@ -849,29 +828,18 @@ fn build_batch_task_registration(
         &plan.proposals,
         plan.aggregate.as_ref(),
     );
+    let artifact_refs = publication_proof_artifact_refs(&metadata, submission.route.pipeline_key());
 
     Ok(TaskRegistration {
         task_id: submission.public_task_id.clone(),
-        pipeline_key: Some(submission.route.pipeline_key()),
+        pipeline_key: submission.route.pipeline_key(),
         route: submission.route.route,
         task_kind: "hoodi_batch".to_string(),
-        proposal_id: submission
-            .proposals
-            .first()
-            .map(|proposal| proposal.proposal_id),
-        proof_ids: plan
-            .proposals
-            .iter()
-            .map(|proposal| proposal.task_ref.clone())
-            .chain(
-                plan.aggregate
-                    .iter()
-                    .map(|aggregate| aggregate.task_ref.clone()),
-            )
-            .collect(),
+        network_pair: submission.pair.key.clone(),
+        artifact_refs,
         metadata: serde_json::to_value(metadata)
             .map_err(|err| ApiError::internal(format!("failed to serialize metadata: {err}")))?,
-        request_fingerprint: Some(request_fingerprint.to_string()),
+        request_fingerprint: request_fingerprint.to_string(),
     })
 }
 
@@ -899,20 +867,21 @@ async fn register_external_aggregate_task(
         Some(aggregate),
     );
     metadata.aggregate_input_artifacts = submission.input_artifacts.clone();
+    let artifact_refs = publication_proof_artifact_refs(&metadata, submission.route.pipeline_key());
 
     state
         .runtime
         .register_task_if_absent(TaskRegistration {
             task_id: submission.public_task_id.clone(),
-            pipeline_key: Some(submission.route.pipeline_key()),
+            pipeline_key: submission.route.pipeline_key(),
             route: submission.route.route,
             task_kind: "hoodi_aggregate".to_string(),
-            proposal_id: None,
-            proof_ids: vec![aggregate.task_ref.clone()],
+            network_pair: submission.pair.key.clone(),
+            artifact_refs,
             metadata: serde_json::to_value(metadata).map_err(|err| {
                 ApiError::internal(format!("failed to serialize metadata: {err}"))
             })?,
-            request_fingerprint: Some(submission.request_fingerprint.clone()),
+            request_fingerprint: submission.request_fingerprint.clone(),
         })
         .await
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
@@ -943,10 +912,10 @@ async fn persist_registered_external_aggregate_inputs(
     if let TaskRegistrationOutcome::Existing(record) = registration
         && record.runner_status == RuntimeRunnerStatus::Failed
     {
-        reopened_failed = Some(record.clone());
-        reset_runtime_task_to_allocated(state, record).await?;
-        record.runner_status = RuntimeRunnerStatus::Allocated;
-        record.error = None;
+        let original = record.clone();
+        let prepared = reset_runtime_task_to_allocated(state, &original).await?;
+        *record = prepared.clone();
+        reopened_failed = Some((original, prepared));
     }
     let owner_incarnation = match &*registration {
         TaskRegistrationOutcome::Created(record) | TaskRegistrationOutcome::Existing(record) => {
@@ -968,36 +937,44 @@ async fn persist_registered_external_aggregate_inputs(
     } else {
         Ok(())
     };
-    if let Some(original) = &reopened_failed {
-        state
+    if let Some((original, prepared)) = &reopened_failed {
+        let outcome = state
             .runtime
-            .sync_nonterminal_status_if_current(
-                &original.lifetime(),
-                original.runner_status,
-                original.error.clone(),
-                original.proof_uri.clone(),
-            )
+            .restore_task_after_recovery_if_unchanged(prepared, original)
             .await
             .map_err(|error| {
                 ApiError::internal(format!(
                     "failed to restore aggregate root after input repair: {error}"
                 ))
             })?;
+        if outcome != RuntimeMutationOutcome::Applied {
+            return Err(ApiError::internal(format!(
+                "aggregate root changed during input repair: {outcome:?}"
+            )));
+        }
         if let TaskRegistrationOutcome::Existing(record) = registration {
             *record = original.clone();
         }
     }
     if let Err(error) = persistence {
         if let TaskRegistrationOutcome::Created(record) = registration {
-            let _ = state
+            match state
                 .runtime
-                .sync_nonterminal_status_if_current(
-                    &record.lifetime(),
-                    RuntimeRunnerStatus::Failed,
-                    Some(error.message.clone()),
-                    None,
-                )
-                .await;
+                .fail_task_if_unchanged(record, error.message.clone())
+                .await
+            {
+                Ok(RuntimeMutationOutcome::Applied) => {}
+                Ok(outcome) => warn!(
+                    task_id = record.task_id,
+                    outcome = ?outcome,
+                    "aggregate root changed before input persistence failure was recorded"
+                ),
+                Err(failure_error) => warn!(
+                    task_id = record.task_id,
+                    error = %failure_error,
+                    "failed to record aggregate input persistence failure"
+                ),
+            }
         }
         return Err(error);
     }
@@ -1029,7 +1006,7 @@ fn build_task_metadata(
                 l2_block_numbers: proposal.proposal.l2_block_numbers.clone(),
                 last_anchor_block_number: proposal.proposal.last_anchor_block_number,
                 task_id: proposal.task_ref.clone(),
-                request: Some(proposal.request.clone()),
+                request: proposal.request.clone(),
             })
             .collect(),
         aggregate_task_id: aggregate.map(|task| task.task_ref.clone()),
@@ -1043,9 +1020,7 @@ fn execution_plan(plan: &SubmissionPlan) -> EngineExecutionPlan {
     let proposals = plan
         .proposals
         .iter()
-        .zip(&plan.proposal_sources)
-        .filter(|(_, source)| matches!(source, ProposalPlanSource::Pending))
-        .map(|(proposal, _)| proposal.request.clone())
+        .map(|proposal| proposal.request.clone())
         .collect();
     let aggregate = plan
         .aggregate
@@ -1080,10 +1055,7 @@ async fn handle_existing_batch_task(
     existing: raiko2_runtime::RuntimeTaskRecord,
     replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
-    let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
-        .map_err(|err| {
-            ApiError::internal(format!("failed to parse existing task metadata: {err}"))
-        })?;
+    let existing_metadata = parse_task_metadata(&existing)?;
     let log_context = duplicate_task_log_context(&existing, &existing_metadata);
     info!(
         task_id = %existing.task_id,
@@ -1113,11 +1085,6 @@ async fn handle_existing_batch_task(
         ),
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
-    if let Some(response) =
-        readable_completed_response(state, &existing, missing_completed_artifact).await?
-    {
-        return Ok(response);
-    }
     if existing.pipeline_key != submission.route.pipeline_key()
         || existing.route != submission.route.route
     {
@@ -1125,10 +1092,14 @@ async fn handle_existing_batch_task(
             state,
             submission,
             &existing,
-            &existing_metadata,
             replacement_request_fingerprint,
         )
         .await;
+    }
+    if let Some(response) =
+        readable_completed_response(state, &existing, missing_completed_artifact).await?
+    {
+        return Ok(response);
     }
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
@@ -1153,7 +1124,6 @@ async fn handle_existing_batch_task(
                 state,
                 submission,
                 &existing,
-                &existing_metadata,
                 replacement_request_fingerprint,
             )
             .await;
@@ -1178,7 +1148,6 @@ async fn replace_existing_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     existing: &raiko2_runtime::RuntimeTaskRecord,
-    existing_metadata: &TaskMetadata,
     replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
     let request_fingerprint = replacement_request_fingerprint
@@ -1193,21 +1162,44 @@ async fn replace_existing_batch_task(
             },
             Ok,
         )?;
-    let plan =
-        build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
-    cleanup_stale_root_before_replacement(state, existing, existing_metadata).await?;
-
+    let plan = build_submission_plan(submission, &request_fingerprint)?;
+    let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())?;
     let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
-    state
-        .runtime
-        .register_task_with_artifact_preconditions(
-            registration,
-            &plan.cached_artifact_preconditions,
-        )
+    let Some(_replacement) = state
+        .lifecycle
+        .replace(existing, registration, &[], &engine, execution_plan(&plan))
         .await
-        .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?;
+        .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?
+    else {
+        let matching = state
+            .runtime
+            .find_task_by_request_fingerprint(&request_fingerprint)
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to find concurrent replacement: {err}"))
+            })?;
+        if let Some(current) = matching {
+            return compatibility_response_for_task(state, &current.task_id).await;
+        }
 
-    handle_created_batch_task(state, submission, &plan).await
+        let occupying = state
+            .runtime
+            .get_task(&submission.public_task_id)
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to load concurrent replacement: {err}"))
+            })?;
+        return Err(if let Some(occupying) = occupying {
+            ApiError::conflict(format!(
+                "task {} changed to a different request while replacement was in progress",
+                occupying.task_id
+            ))
+        } else {
+            ApiError::internal("runtime task changed during replacement and then disappeared")
+        });
+    };
+
+    Ok(registered_batch_response(submission))
 }
 
 async fn reenqueue_existing_batch_task(
@@ -1215,27 +1207,8 @@ async fn reenqueue_existing_batch_task(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
 ) -> Result<(), ApiError> {
-    let engine = resolve_engine(
-        state,
-        &existing_metadata.network_pair,
-        existing.pipeline_key,
-    )?;
-    if matches!(
-        FailedStage::from_active_stage(existing_metadata.runtime.active_stage.as_deref()),
-        Some(FailedStage::Aggregate)
-    ) {
-        return reenqueue_existing_batch_aggregate_task(
-            state,
-            &engine,
-            existing,
-            existing_metadata,
-        )
-        .await;
-    }
-
-    let recovery_plan =
-        build_recovery_plan_from_metadata(state.runtime.as_ref(), existing, existing_metadata)
-            .await?;
+    let engine = resolve_engine(state, &existing.network_pair, existing.pipeline_key)?;
+    let recovery_plan = build_recovery_plan_from_metadata(existing, existing_metadata)?;
     attach_submission_plan(state, &engine, existing, &recovery_plan)
         .await
         .map_err(|err| {
@@ -1246,51 +1219,25 @@ async fn reenqueue_existing_batch_task(
         })
 }
 
-async fn build_recovery_plan_from_metadata(
-    runtime: &RuntimeManager,
+fn build_recovery_plan_from_metadata(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
 ) -> Result<SubmissionPlan, ApiError> {
-    let route =
-        CanonicalProofRoute::new(existing.route, existing.pipeline_key, metadata.proof_type);
     let proposals = planned_recovery_proposals(existing, metadata)?;
-    let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
-    let mut cached_artifact_preconditions = Vec::new();
     if metadata.aggregate_requested {
         aggregate_inputs.reserve(proposals.len());
-        for (proposal, persisted) in proposals.iter().zip(&metadata.proposals) {
-            if let Some(material) = load_first_cached_proposal_artifact(
-                runtime,
-                &metadata.network_pair,
-                route,
-                &proposal_proof_artifact_refs(existing.pipeline_key, persisted),
-            )
-            .await?
-            {
-                proposal_sources.push(ProposalPlanSource::Cached);
-                cached_artifact_preconditions.push(material.record.precondition());
-                aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
-                    network_pair: material.record.network_pair,
-                    pipeline_key: material.record.pipeline_key,
-                    route: material.record.route,
-                    proof_ref: material.record.proof_ref,
-                }));
-            } else {
-                proposal_sources.push(ProposalPlanSource::Pending);
-                aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
-                    artifact: proof_artifact_ref(
-                        &metadata.network_pair,
-                        existing.pipeline_key,
-                        existing.route,
-                        &proposal.task_ref,
-                    ),
-                    dependency: Box::new(proposal.task_id.clone()),
-                });
-            }
+        for proposal in &proposals {
+            aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
+                artifact: proof_artifact_ref(
+                    &existing.network_pair,
+                    existing.pipeline_key,
+                    existing.route,
+                    &proposal.task_ref,
+                ),
+                dependency: Box::new(proposal.task_id.clone()),
+            });
         }
-    } else {
-        proposal_sources.resize(proposals.len(), ProposalPlanSource::Pending);
     }
 
     let aggregate = planned_recovery_aggregate(existing, metadata);
@@ -1303,10 +1250,8 @@ async fn build_recovery_plan_from_metadata(
 
     Ok(SubmissionPlan {
         proposals,
-        proposal_sources,
         aggregate,
         aggregate_inputs,
-        cached_artifact_preconditions,
     })
 }
 
@@ -1316,23 +1261,7 @@ fn planned_recovery_proposals(
 ) -> Result<Vec<PlannedProposalTask>, ApiError> {
     let mut proposals = Vec::with_capacity(metadata.proposals.len());
     for proposal in &metadata.proposals {
-        let request = proposal
-            .request
-            .clone()
-            .or_else(|| {
-                proposal
-                    .engine_task_id(existing.pipeline_key)
-                    .and_then(|task_id| match task_id.0 {
-                        EngineTaskKey::Proposal { request, .. } => Some(request),
-                        EngineTaskKey::Aggregate { .. } => None,
-                    })
-            })
-            .ok_or_else(|| {
-                ApiError::internal(format!(
-                    "task {} is missing persisted proposal request {}",
-                    existing.task_id, proposal.task_id
-                ))
-            })?;
+        let request = proposal.request.clone();
         let task_ref = proposal_task_ref(existing.pipeline_key, &request);
         proposals.push(PlannedProposalTask {
             task_id: proposal_task_id(existing.pipeline_key, request.clone()),
@@ -1361,113 +1290,19 @@ fn planned_recovery_aggregate(
     })
 }
 
-async fn reenqueue_existing_batch_aggregate_task(
-    state: &AppState,
-    engine: &Arc<dyn EngineHandle>,
-    existing: &raiko2_runtime::RuntimeTaskRecord,
-    existing_metadata: &TaskMetadata,
-) -> Result<(), ApiError> {
-    let request = existing_metadata
-        .aggregate_request
-        .clone()
-        .ok_or_else(|| ApiError::internal("existing batch task missing aggregate_request"))?;
-    let inputs =
-        existing_batch_aggregate_inputs(state.runtime.as_ref(), existing, existing_metadata)
-            .await?;
-    state
-        .lifecycle
-        .attach(
-            existing,
-            engine,
-            EngineExecutionPlan {
-                proposals: Vec::new(),
-                aggregate: Some(EngineAggregationPlan { request, inputs }),
-            },
-        )
-        .await
-        .map_err(|err| {
-            ApiError::internal(format!(
-                "failed to recover dormant aggregate task {}: {err}",
-                existing.task_id
-            ))
-        })?;
-    Ok(())
-}
-
-async fn existing_batch_aggregate_inputs(
-    runtime: &RuntimeManager,
-    existing: &raiko2_runtime::RuntimeTaskRecord,
-    existing_metadata: &TaskMetadata,
-) -> Result<Vec<AggregateProofInput>, ApiError> {
-    let route = CanonicalProofRoute::new(
-        existing.route,
-        existing.pipeline_key,
-        existing_metadata.proof_type,
-    );
-    let mut inputs = Vec::with_capacity(existing_metadata.proposals.len());
-
-    for proposal in &existing_metadata.proposals {
-        if let Some(material) = load_first_cached_proposal_artifact(
-            runtime,
-            &existing_metadata.network_pair,
-            route,
-            &proposal_proof_artifact_refs(existing.pipeline_key, proposal),
-        )
-        .await?
-        {
-            inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
-                network_pair: material.record.network_pair,
-                pipeline_key: material.record.pipeline_key,
-                route: material.record.route,
-                proof_ref: material.record.proof_ref,
-            }));
-            continue;
-        }
-
-        return Err(ApiError::internal(format!(
-            "existing aggregate task {} missing completed proposal proof artifact {}",
-            existing.task_id, proposal.task_id
-        )));
-    }
-
-    if inputs.is_empty() {
-        return Err(ApiError::internal(
-            "existing aggregate task has no proposal proof inputs",
-        ));
-    }
-    Ok(inputs)
-}
-
-async fn load_first_cached_proposal_artifact(
-    runtime: &RuntimeManager,
-    network_pair: &str,
-    route: CanonicalProofRoute,
-    proof_refs: &[String],
-) -> Result<Option<ProofArtifactMaterial>, ApiError> {
-    for proof_ref in proof_refs {
-        if let Some(material) =
-            load_cached_proposal_artifact_for_route(runtime, network_pair, route, proof_ref).await?
-        {
-            return Ok(Some(material));
-        }
-    }
-    Ok(None)
-}
-
 async fn handle_created_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     plan: &SubmissionPlan,
+    root: &raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
     let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())?;
-    let root = state
-        .runtime
-        .get_task(&submission.public_task_id)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load registered task: {err}")))?
-        .ok_or_else(|| ApiError::internal("registered runtime task disappeared"))?;
-    attach_submission_plan(state, &engine, &root, plan).await?;
+    attach_submission_plan(state, &engine, root, plan).await?;
 
+    Ok(registered_batch_response(submission))
+}
+
+fn registered_batch_response(submission: &CanonicalBatchSubmission) -> Response {
     telemetry::record_request_registered(
         &MetricContext::new(
             submission.route.route.to_string(),
@@ -1478,11 +1313,11 @@ async fn handle_created_batch_task(
         submission.aggregate_requested,
     );
 
-    Ok(registered_response(
+    registered_response(
         hoodi_response_proof_type(submission),
         submission.public_task_id.clone(),
     )
-    .into_response())
+    .into_response()
 }
 
 async fn handle_existing_external_aggregate_task(
@@ -1491,10 +1326,7 @@ async fn handle_existing_external_aggregate_task(
     submission: &ExternalAggregateSubmission,
     existing: raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
-    let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
-        .map_err(|err| {
-            ApiError::internal(format!("failed to parse existing task metadata: {err}"))
-        })?;
+    let existing_metadata = parse_task_metadata(&existing)?;
     let log_context = duplicate_task_log_context(&existing, &existing_metadata);
     info!(
         task_id = %existing.task_id,
@@ -1554,9 +1386,9 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), ApiError>> + 'a,
 {
-    reset_runtime_task_to_allocated(state, existing).await?;
+    let reopened = reset_runtime_task_to_allocated(state, existing).await?;
     if let Err(err) = reenqueue().await {
-        restore_runtime_task_status(state, existing, &err).await;
+        restore_runtime_task_status(state, &reopened, existing, &err).await;
         return Err(err);
     }
     Ok(())
@@ -1565,10 +1397,10 @@ where
 async fn reset_runtime_task_to_allocated(
     state: &AppState,
     record: &raiko2_runtime::RuntimeTaskRecord,
-) -> Result<(), ApiError> {
+) -> Result<raiko2_runtime::RuntimeTaskRecord, ApiError> {
     let reopened = state
         .runtime
-        .reopen_task_for_recovery_if_current(&record.lifetime(), record.runner_status)
+        .prepare_task_for_recovery_if_unchanged(record)
         .await
         .map_err(|err| {
             ApiError::internal(format!(
@@ -1576,89 +1408,41 @@ async fn reset_runtime_task_to_allocated(
                 record.task_id
             ))
         })?;
-    if !matches!(reopened, RuntimeMutationOutcome::Applied) {
-        return Err(ApiError::internal(format!(
+    reopened.ok_or_else(|| {
+        ApiError::internal(format!(
             "task {} is no longer eligible for failed-task recovery",
             record.task_id
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 async fn restore_runtime_task_status(
     state: &AppState,
+    reopened: &raiko2_runtime::RuntimeTaskRecord,
     existing: &raiko2_runtime::RuntimeTaskRecord,
     enqueue_error: &ApiError,
 ) {
-    if let Err(err) = state
+    match state
         .runtime
-        .sync_nonterminal_status_if_current(
-            &existing.lifetime(),
-            existing.runner_status,
-            existing.error.clone(),
-            None,
-        )
+        .restore_task_after_recovery_if_unchanged(reopened, existing)
         .await
     {
-        warn!(
+        Ok(RuntimeMutationOutcome::Applied) => {}
+        Ok(outcome) => warn!(
+            task_id = existing.task_id,
+            original_status = existing.runner_status.as_str(),
+            enqueue_error = %enqueue_error.message,
+            outcome = ?outcome,
+            "runtime task changed before recovery rollback"
+        ),
+        Err(err) => warn!(
             task_id = existing.task_id,
             original_status = existing.runner_status.as_str(),
             enqueue_error = %enqueue_error.message,
             restore_error = %err,
             "failed to restore runtime status after recovery enqueue failure"
-        );
+        ),
     }
-}
-
-async fn cleanup_stale_root_before_replacement(
-    state: &AppState,
-    existing: &raiko2_runtime::RuntimeTaskRecord,
-    existing_metadata: &TaskMetadata,
-) -> Result<(), ApiError> {
-    state
-        .lifecycle
-        .retire(
-            existing,
-            existing_metadata,
-            raiko2_queue::DetachMode::Remove,
-        )
-        .await
-        .map_err(|err| {
-            ApiError::internal(format!(
-                "failed to retire stale root {} before replacement: {err}",
-                existing.task_id
-            ))
-        })?;
-    clear_task_publication_outboxes(state.runtime.as_ref(), existing, existing_metadata).await?;
-    Ok(())
-}
-
-pub(crate) async fn clear_task_publication_outboxes(
-    runtime: &RuntimeManager,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &TaskMetadata,
-) -> Result<(), ApiError> {
-    let proof_refs = publication_proof_artifact_refs(metadata, record.pipeline_key);
-    if proof_refs.is_empty() {
-        return Ok(());
-    }
-    for proof_ref in proof_refs {
-        runtime
-            .release_pending_proof_publication_owner(
-                &metadata.network_pair,
-                record.pipeline_key,
-                record.route,
-                &proof_ref,
-                record.incarnation_id,
-            )
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!(
-                    "failed to clear pending proof publication {proof_ref}: {err}"
-                ))
-            })?;
-    }
-    Ok(())
 }
 
 async fn reenqueue_existing_external_aggregate_task(
@@ -1683,7 +1467,7 @@ async fn reenqueue_existing_external_aggregate_task(
             })?
     } else {
         aggregate_inputs_from_artifacts(
-            &existing_metadata.network_pair,
+            &existing.network_pair,
             existing.pipeline_key,
             existing.route,
             &existing_metadata.aggregate_input_artifacts,
@@ -1709,137 +1493,106 @@ async fn reenqueue_existing_external_aggregate_task(
     Ok(())
 }
 
+pub(crate) async fn validate_persisted_runtime_task_metadata(
+    state: &AppState,
+) -> anyhow::Result<()> {
+    for record in state.runtime.list_tasks().await? {
+        TaskMetadata::decode_for_record(&record).map_err(|error| {
+            anyhow::anyhow!(
+                "runtime task {} has invalid canonical metadata: {error}",
+                record.task_id
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::Result<usize> {
     let records = state.runtime.list_tasks().await?;
     let mut recovered = 0;
     for record in records {
+        let metadata = TaskMetadata::decode_for_record(&record).map_err(|error| {
+            anyhow::anyhow!(
+                "runtime task {} has invalid canonical metadata during recovery: {error}",
+                record.task_id
+            )
+        })?;
         if matches!(
             record.runner_status,
             RuntimeRunnerStatus::Completed | RuntimeRunnerStatus::Cancelled
         ) {
             continue;
         }
-        let metadata = match serde_json::from_value::<TaskMetadata>(record.metadata.clone()) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                state
-                    .runtime
-                    .sync_nonterminal_status_if_current(
-                        &record.lifetime(),
-                        RuntimeRunnerStatus::Failed,
-                        Some(format!("runtime recovery metadata is invalid: {error}")),
-                        None,
-                    )
-                    .await?;
-                continue;
-            }
-        };
         if record.runner_status == RuntimeRunnerStatus::Failed
             && !failed_stage_is_reenqueueable(&record, &metadata)
         {
             continue;
         }
 
+        let Some(recovery_record) = state
+            .runtime
+            .prepare_task_for_recovery_if_unchanged(&record)
+            .await?
+        else {
+            warn!(
+                task_id = record.task_id,
+                "runtime root changed before startup recovery preparation"
+            );
+            continue;
+        };
+
         let external_aggregate =
             metadata.proposals.is_empty() && metadata.aggregate_request.is_some();
-        let mut reopened_before_enqueue = false;
         let result = if external_aggregate {
-            match recover_external_aggregate_runtime_task(state, &record, &metadata).await {
-                Ok(reopened) => {
-                    reopened_before_enqueue = reopened;
-                    Ok(())
-                }
-                Err(error) => Err(error),
-            }
+            recover_external_aggregate_runtime_task(state, &recovery_record, &metadata).await
         } else {
-            let mut recovery_record = record.clone();
-            if record.runner_status == RuntimeRunnerStatus::Failed {
-                let reopened = state
-                    .runtime
-                    .reopen_task_for_recovery_if_current(&record.lifetime(), record.runner_status)
-                    .await?;
-                if !matches!(reopened, RuntimeMutationOutcome::Applied) {
-                    return Err(anyhow::anyhow!(
-                        "runtime root {} is no longer eligible for recovery",
-                        record.task_id
-                    ));
-                }
-                recovery_record.runner_status = RuntimeRunnerStatus::Allocated;
-                recovery_record.error = None;
-                reopened_before_enqueue = true;
-            }
             reenqueue_existing_batch_task(state, &recovery_record, &metadata).await
         };
         match result {
             Ok(()) => {
-                if record.runner_status == RuntimeRunnerStatus::Failed && !reopened_before_enqueue {
-                    state
-                        .runtime
-                        .reopen_task_for_recovery_if_current(
-                            &record.lifetime(),
-                            record.runner_status,
-                        )
-                        .await?;
-                } else {
-                    state
-                        .runtime
-                        .sync_nonterminal_status_if_current(
-                            &record.lifetime(),
-                            RuntimeRunnerStatus::Allocated,
-                            None,
-                            None,
-                        )
-                        .await?;
-                }
                 recovered += 1;
             }
             Err(error) => {
-                state
-                    .runtime
-                    .sync_nonterminal_status_if_current(
-                        &record.lifetime(),
-                        RuntimeRunnerStatus::Failed,
-                        Some(format!("runtime recovery failed: {}", error.message)),
-                        None,
-                    )
-                    .await?;
+                record_recovery_failure_if_unchanged(
+                    state,
+                    &recovery_record,
+                    format!("runtime recovery failed: {}", error.message),
+                )
+                .await?;
             }
         }
     }
     Ok(recovered)
 }
 
+async fn record_recovery_failure_if_unchanged(
+    state: &AppState,
+    expected: &raiko2_runtime::RuntimeTaskRecord,
+    error: String,
+) -> anyhow::Result<()> {
+    match state
+        .runtime
+        .fail_task_if_unchanged(expected, error)
+        .await?
+    {
+        RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied => {}
+        outcome => warn!(
+            task_id = expected.task_id,
+            outcome = ?outcome,
+            "runtime root changed before startup recovery failure was recorded"
+        ),
+    }
+    Ok(())
+}
+
 async fn recover_external_aggregate_runtime_task(
     state: &AppState,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
-) -> Result<bool, ApiError> {
-    let mut recovery_record = record.clone();
-    let reopened = if record.runner_status == RuntimeRunnerStatus::Failed {
-        let reopened = state
-            .runtime
-            .reopen_task_for_recovery_if_current(&record.lifetime(), record.runner_status)
-            .await
-            .map_err(|error| {
-                ApiError::internal(format!("failed to reopen aggregate root: {error}"))
-            })?;
-        if !matches!(reopened, RuntimeMutationOutcome::Applied) {
-            return Err(ApiError::internal(
-                "aggregate root is no longer eligible for recovery",
-            ));
-        }
-        recovery_record.runner_status = RuntimeRunnerStatus::Allocated;
-        recovery_record.error = None;
-        true
-    } else {
-        false
-    };
-    recover_external_aggregate_input_artifacts(state.runtime.as_ref(), &recovery_record, metadata)
-        .await?;
-    let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
-    reenqueue_existing_external_aggregate_task(state, &engine, None, &recovery_record, metadata)
-        .await?;
-    Ok(reopened)
+) -> Result<(), ApiError> {
+    recover_external_aggregate_input_artifacts(state.runtime.as_ref(), record, metadata).await?;
+    let engine = resolve_engine(state, &record.network_pair, record.pipeline_key)?;
+    reenqueue_existing_external_aggregate_task(state, &engine, None, record, metadata).await
 }
 
 fn aggregate_inputs_from_artifacts(
@@ -1870,7 +1623,7 @@ async fn recover_external_aggregate_input_artifacts(
     for artifact in &metadata.aggregate_input_artifacts {
         let pending = runtime
             .get_recoverable_pending_proof_publication(
-                &metadata.network_pair,
+                &record.network_pair,
                 record.pipeline_key,
                 record.route,
                 &artifact.proof_ref,
@@ -1884,7 +1637,7 @@ async fn recover_external_aggregate_input_artifacts(
         } else {
             let registration = runtime
                 .get_proof_artifact(
-                    &metadata.network_pair,
+                    &record.network_pair,
                     record.pipeline_key,
                     record.route,
                     &artifact.proof_ref,
@@ -1903,7 +1656,7 @@ async fn recover_external_aggregate_input_artifacts(
                 })?;
             let object = runtime
                 .read_proof_artifact_bytes(
-                    &metadata.network_pair,
+                    &record.network_pair,
                     record.pipeline_key,
                     record.route,
                     &artifact.proof_ref,
@@ -1930,7 +1683,7 @@ async fn recover_external_aggregate_input_artifacts(
     }
     persist_external_aggregate_input_artifacts(
         runtime,
-        &metadata.network_pair,
+        &record.network_pair,
         record.pipeline_key,
         record.route,
         &metadata.aggregate_input_artifacts,
@@ -1944,23 +1697,7 @@ async fn handle_created_external_aggregate_task(
     state: &AppState,
     engine: &Arc<dyn EngineHandle>,
     submission: &ExternalAggregateSubmission,
-    aggregate: &PlannedAggregateTask,
 ) -> Result<Response, ApiError> {
-    let mut metadata = build_task_metadata(
-        &submission.pair,
-        BuildTaskMetadataParams {
-            network: &submission.pair.network,
-            l1_network: &submission.pair.l1_network,
-            proof_type: submission.route.proof_type(),
-            requested_proof_type: None,
-            prover_type: submission.prover_type,
-            execution_mode: None,
-            aggregate_requested: true,
-        },
-        &[],
-        Some(aggregate),
-    );
-    metadata.aggregate_input_artifacts = submission.input_artifacts.clone();
     let root = state
         .runtime
         .get_task(&submission.public_task_id)
@@ -2091,68 +1828,6 @@ async fn load_persisted_root_proof(
     )
 }
 
-async fn load_cached_proposal_artifact(
-    runtime: &RuntimeManager,
-    submission: &CanonicalBatchSubmission,
-    proof_ref: &str,
-) -> Result<Option<ProofArtifactMaterial>, ApiError> {
-    load_cached_proposal_artifact_for_route(
-        runtime,
-        &submission.pair.key,
-        submission.route,
-        proof_ref,
-    )
-    .await
-}
-
-async fn load_cached_proposal_artifact_for_route(
-    runtime: &RuntimeManager,
-    network_pair: &str,
-    route: CanonicalProofRoute,
-    proof_ref: &str,
-) -> Result<Option<ProofArtifactMaterial>, ApiError> {
-    let Some(material) = load_proof_artifact_material(
-        runtime,
-        network_pair,
-        route.pipeline_key(),
-        route.route,
-        proof_ref,
-    )
-    .await
-    .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
-    else {
-        return Ok(None);
-    };
-
-    if material.record.pipeline_key != route.pipeline_key() || material.record.route != route.route
-    {
-        warn!(
-            network_pair = material.record.network_pair,
-            proof_ref = material.record.proof_ref,
-            artifact_pipeline = material.record.pipeline_key.as_str(),
-            artifact_route = %material.record.route,
-            request_pipeline = route.pipeline_key().as_str(),
-            request_route = %route.route,
-            "proof artifact route does not match request; treating it as a cache miss"
-        );
-        return Ok(None);
-    }
-
-    if let Err(err) =
-        validate_external_aggregate_proofs(route.route, std::slice::from_ref(&material.proof))
-    {
-        warn!(
-            network_pair = material.record.network_pair,
-            proof_ref = material.record.proof_ref,
-            error = %err,
-            "proof artifact is not valid aggregate input; treating it as a cache miss"
-        );
-        return Ok(None);
-    }
-
-    Ok(Some(material))
-}
-
 async fn load_persisted_root_proof_material(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
@@ -2164,7 +1839,7 @@ async fn load_persisted_root_proof_material(
     for proof_ref in refs.refs {
         if let Some(material) = load_proof_artifact_material(
             runtime,
-            &metadata.network_pair,
+            &record.network_pair,
             record.pipeline_key,
             record.route,
             &proof_ref,
@@ -2281,7 +1956,6 @@ async fn collect_prover_status(
     let mut skipped = ProverSkippedStatusCounts::default();
     let mut queue_groups: HashMap<ProverQueueKey, (Arc<dyn EngineHandle>, HashSet<EngineTaskId>)> =
         HashMap::new();
-    let mut queue_roots = Vec::new();
     let now_secs = unix_now_secs();
 
     for record in records {
@@ -2305,13 +1979,13 @@ async fn collect_prover_status(
             continue;
         }
         count_network_inflight(&metadata, &mut network, now_secs);
-        let engine = match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
+        let engine = match resolve_engine(state, &record.network_pair, record.pipeline_key) {
             Ok(engine) => engine,
             Err(err) if err.status == StatusCode::NOT_FOUND => {
                 skipped.unavailable_pipeline = skipped.unavailable_pipeline.saturating_add(1);
                 warn!(
                     task_id = %record.task_id,
-                    network_pair = %metadata.network_pair,
+                    network_pair = %record.network_pair,
                     pipeline = %record.pipeline_key,
                     error = %err.message,
                     "skipping prover status record with unavailable pipeline"
@@ -2320,33 +1994,32 @@ async fn collect_prover_status(
             }
             Err(err) => return Err(err),
         };
-        let engine_key = (metadata.network_pair.clone(), record.pipeline_key);
+        let has_active_execution = engine
+            .has_active_execution(RootOwner::new(
+                record.task_id.clone(),
+                record.incarnation_id,
+            ))
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!(
+                    "failed to inspect execution projection for {}: {err}",
+                    record.task_id
+                ))
+            })?;
+        if !has_active_execution && !metadata.has_remote_submission_progress() {
+            tasks.orphaned = tasks.orphaned.saturating_add(1);
+        }
+        let engine_key = (record.network_pair.clone(), record.pipeline_key);
         let task_ids = metadata_queue_task_ids(&metadata, record.pipeline_key);
         queue_groups
-            .entry(engine_key.clone())
+            .entry(engine_key)
             .or_insert_with(|| (engine, HashSet::new()))
             .1
             .extend(task_ids.iter().cloned());
-        queue_roots.push(ProverQueueRoot {
-            engine_key,
-            task_ids,
-            has_remote_progress: metadata.has_remote_submission_progress(),
-        });
     }
 
-    let mut seen_groups = HashMap::new();
-    for (engine_key, (engine, task_ids)) in queue_groups {
-        let seen = count_matching_queue_tasks(engine.as_ref(), &task_ids, &mut tasks).await?;
-        seen_groups.insert(engine_key, seen);
-    }
-
-    for root in queue_roots {
-        let has_queue_task = seen_groups
-            .get(&root.engine_key)
-            .is_some_and(|seen| root.task_ids.iter().any(|task_id| seen.contains(task_id)));
-        if !has_queue_task && !root.has_remote_progress {
-            tasks.orphaned = tasks.orphaned.saturating_add(1);
-        }
+    for (engine, task_ids) in queue_groups.into_values() {
+        count_matching_queue_tasks(engine.as_ref(), &task_ids, &mut tasks).await?;
     }
 
     Ok((tasks, network, skipped))
@@ -2399,7 +2072,7 @@ async fn clear_prover_tasks(
             continue;
         }
 
-        let cancelled = match state.lifecycle.cancel(&record, &metadata, None).await {
+        let cancelled = match state.lifecycle.cancel(&record, None).await {
             Ok(RuntimeMutationOutcome::Applied) => true,
             Ok(
                 RuntimeMutationOutcome::AlreadyApplied
@@ -2409,18 +2082,19 @@ async fn clear_prover_tasks(
                 | RuntimeMutationOutcome::Conflict,
             ) => false,
             Err(err) => {
-                if state
-                    .runtime
-                    .get_task(&record.task_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|current| {
-                        current.incarnation_id == record.incarnation_id
-                            && current.runner_status == RuntimeRunnerStatus::Cancelled
-                    })
-                {
-                    status.cancelled = status.cancelled.saturating_add(1);
+                match state.runtime.get_task(&record.task_id).await {
+                    Ok(Some(current))
+                        if current.incarnation_id == record.incarnation_id
+                            && current.runner_status == RuntimeRunnerStatus::Cancelled =>
+                    {
+                        status.cancelled = status.cancelled.saturating_add(1);
+                    }
+                    Ok(_) => {}
+                    Err(read_error) => warn!(
+                        task_id = %record.task_id,
+                        error = %read_error,
+                        "failed to confirm runtime root after prover clear error"
+                    ),
                 }
                 status.failed = status.failed.saturating_add(1);
                 warn!(
@@ -2433,7 +2107,7 @@ async fn clear_prover_tasks(
         };
         if state
             .pipelines
-            .get(&metadata.network_pair, record.pipeline_key)
+            .get(&record.network_pair, record.pipeline_key)
             .is_none()
         {
             status.skipped.unavailable_pipeline =
@@ -2455,16 +2129,10 @@ const fn operation_status(failed: usize) -> &'static str {
 
 type ProverQueueKey = (String, PipelineKey);
 
-struct ProverQueueRoot {
-    engine_key: ProverQueueKey,
-    task_ids: HashSet<EngineTaskId>,
-    has_remote_progress: bool,
-}
-
 fn parse_task_metadata(
     record: &raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<TaskMetadata, ApiError> {
-    serde_json::from_value(record.metadata.clone()).map_err(|err| {
+    TaskMetadata::decode_for_record(record).map_err(|err| {
         ApiError::internal(format!(
             "failed parse runtime task metadata {}: {err}",
             record.task_id
@@ -2491,9 +2159,7 @@ fn metadata_queue_task_ids(
 ) -> HashSet<EngineTaskId> {
     let mut task_ids = HashSet::new();
     for proposal in &metadata.proposals {
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
+        let task_id = proposal.engine_task_id(pipeline_key);
         task_ids.extend(proposal_task_chain_ids(&task_id));
     }
     if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
@@ -2506,11 +2172,10 @@ async fn count_matching_queue_tasks(
     engine: &dyn EngineHandle,
     task_ids: &HashSet<EngineTaskId>,
     counts: &mut ProverTaskStatusCounts,
-) -> Result<HashSet<EngineTaskId>, ApiError> {
+) -> Result<(), ApiError> {
     if task_ids.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(());
     }
-    let mut seen = HashSet::new();
     for task_id in task_ids {
         let Some(view) = engine
             .get_task_state(task_id.clone())
@@ -2519,37 +2184,28 @@ async fn count_matching_queue_tasks(
         else {
             continue;
         };
-        if count_queue_task_state(&view, counts) {
-            seen.insert(view.id.clone());
-        }
+        count_queue_task_state(&view, counts);
     }
-    Ok(seen)
+    Ok(())
 }
 
-const fn count_queue_task_state(
-    view: &EngineQueueTaskView,
-    counts: &mut ProverTaskStatusCounts,
-) -> bool {
+const fn count_queue_task_state(view: &EngineQueueTaskView, counts: &mut ProverTaskStatusCounts) {
     match view.state {
         EngineQueueTaskState::Pending => {
             counts.pending = counts.pending.saturating_add(1);
-            true
         }
         EngineQueueTaskState::Ready => {
             counts.ready = counts.ready.saturating_add(1);
-            true
         }
         EngineQueueTaskState::Retrying => {
             counts.retrying = counts.retrying.saturating_add(1);
-            true
         }
         EngineQueueTaskState::Running => {
             counts.running = counts.running.saturating_add(1);
-            true
         }
         EngineQueueTaskState::Succeeded
         | EngineQueueTaskState::Failed
-        | EngineQueueTaskState::Cancelled => false,
+        | EngineQueueTaskState::Cancelled => {}
     }
 }
 
@@ -2596,9 +2252,8 @@ async fn load_task_lookup(state: &AppState, id: &str) -> Result<TaskLookup, ApiE
         .await
         .map_err(|err| ApiError::internal(format!("failed to load task: {err}")))?
         .ok_or_else(|| ApiError::not_found(format!("task not found: {id}")))?;
-    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-        .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-    let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
+    let metadata = parse_task_metadata(&record)?;
+    let engine = resolve_engine(state, &record.network_pair, record.pipeline_key)?;
 
     Ok(TaskLookup {
         record,
@@ -2618,12 +2273,13 @@ async fn load_proposal_statuses(
 
     for (index, proposal) in metadata.proposals.iter().enumerate() {
         let mut stage_statuses = Vec::with_capacity(4);
-        if let Some(task_id) = proposal.engine_task_id(record.pipeline_key) {
-            for stage_id in proposal_task_chain_ids(&task_id) {
-                stage_statuses.push(engine.get_status(stage_id).await.map_err(|err| {
+        let task_id = proposal.engine_task_id(record.pipeline_key);
+        for stage_id in proposal_task_chain_ids(&task_id) {
+            stage_statuses.push(
+                engine.get_status(stage_id).await.map_err(|err| {
                     ApiError::internal(format!("failed to read task status: {err}"))
-                })?);
-            }
+                })?,
+            );
         }
 
         let engine_state_present = stage_statuses.iter().any(Option::is_some);
@@ -2640,7 +2296,7 @@ async fn load_proposal_statuses(
         let status = if should_probe_proof_artifact(&status, engine_state_present) {
             if let Some(material) = load_first_proof_artifact_material(
                 runtime_manager,
-                &metadata.network_pair,
+                &record.network_pair,
                 record.pipeline_key,
                 record.route,
                 &proof_refs,
@@ -2718,7 +2374,7 @@ async fn load_aggregate_status(
         if let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
             if let Some(material) = load_first_proof_artifact_material(
                 runtime_manager,
-                &metadata.network_pair,
+                &record.network_pair,
                 record.pipeline_key,
                 record.route,
                 &refs.refs,
@@ -3192,9 +2848,14 @@ async fn should_reenqueue_existing_submission(
         return Ok(false);
     }
 
-    let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
-    let engine_state_present =
-        registered_engine_state_present(&engine, record.pipeline_key, metadata).await?;
+    let engine = resolve_engine(state, &record.network_pair, record.pipeline_key)?;
+    let engine_state_present = engine
+        .has_active_execution(RootOwner::new(
+            record.task_id.clone(),
+            record.incarnation_id,
+        ))
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to inspect execution: {err}")))?;
     Ok(stale_nonterminal_runtime_is_reenqueueable(
         record,
         metadata,
@@ -3226,51 +2887,6 @@ fn stale_nonterminal_runtime_is_reenqueueable(
     ) && metadata.has_runtime_progress()
         && !metadata.has_remote_submission_progress()
         && !engine_state_present
-}
-
-async fn registered_engine_state_present(
-    engine: &Arc<dyn EngineHandle>,
-    pipeline_key: PipelineKey,
-    metadata: &TaskMetadata,
-) -> Result<bool, ApiError> {
-    for proposal in &metadata.proposals {
-        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-            continue;
-        };
-
-        for stage_id in proposal_task_chain_ids(&task_id) {
-            if engine
-                .get_task_state(stage_id)
-                .await
-                .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?
-                .is_some_and(|view| engine_state_blocks_reenqueue(view.state))
-            {
-                return Ok(true);
-            }
-        }
-    }
-
-    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key)
-        && engine
-            .get_task_state(task_id)
-            .await
-            .map_err(|err| ApiError::internal(format!("failed to read aggregation status: {err}")))?
-            .is_some_and(|view| engine_state_blocks_reenqueue(view.state))
-    {
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-const fn engine_state_blocks_reenqueue(state: EngineQueueTaskState) -> bool {
-    matches!(
-        state,
-        EngineQueueTaskState::Pending
-            | EngineQueueTaskState::Ready
-            | EngineQueueTaskState::Retrying
-            | EngineQueueTaskState::Running
-    )
 }
 
 fn failed_stage_is_reenqueueable(
@@ -3344,9 +2960,7 @@ fn proposal_stage_failed(
     metadata: &TaskMetadata,
     proposal: &ProposalTask,
 ) -> bool {
-    let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
-        return false;
-    };
+    let task_id = proposal.engine_task_id(pipeline_key);
     let timing_key = stage_task_ref(&task_id);
     metadata
         .runtime
@@ -3380,7 +2994,7 @@ async fn completed_root_artifact_missing(
     for proof_ref in &root_refs.refs {
         if load_proof_artifact_material(
             runtime,
-            &metadata.network_pair,
+            &record.network_pair,
             record.pipeline_key,
             record.route,
             proof_ref,
@@ -3538,16 +3152,35 @@ mod tests {
         assert_eq!(operation_status(0), "ok");
         assert_eq!(operation_status(1), "partial_failure");
     }
+
+    #[test]
+    fn aggregate_ids_must_match_proof_count_when_present() {
+        let request = AggregateProofRequest {
+            aggregation_ids: vec![1, 2],
+            proofs: vec![valid_native_proof()],
+            proof_type: BatchProofType::Risc0,
+            network: None,
+            l1_network: None,
+            graffiti: None,
+            prover: None,
+            blob_proof_type: None,
+            prover_args: PublicProverArgs::default(),
+        };
+
+        let error = validate_aggregate_request_shape(&request)
+            .expect_err("mismatched aggregate ids must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("match proofs length"));
+    }
     use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
-    use anyhow::{Result, anyhow};
+    use anyhow::{Context, Result, anyhow};
     use axum::{
         body::Body,
         extract::{Path, State},
         http::{HeaderMap, Request},
     };
-    use http_body_util::BodyExt;
-    use raiko2_engine::EngineTaskId;
+    use raiko2_engine::{EngineTaskId, EngineTaskKey};
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
     use raiko2_primitives::SupportedChainSpecs;
     use raiko2_queue::TaskStoreError;
@@ -3617,6 +3250,13 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn has_active_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async { Ok(false) })
+        }
+
         fn attach_execution_plan(
             &self,
             _owner: raiko2_queue::RootOwner,
@@ -3652,6 +3292,13 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn has_active_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async { Ok(false) })
+        }
+
         fn attach_execution_plan(
             &self,
             _owner: raiko2_queue::RootOwner,
@@ -3675,14 +3322,27 @@ mod tests {
     }
 
     struct ListingEngine {
-        views: Vec<EngineQueueTaskView>,
+        views: Vec<(EngineTaskId, EngineQueueTaskState)>,
+        active_owners: HashSet<raiko2_queue::RootOwner>,
         list_calls: AtomicUsize,
     }
 
     impl ListingEngine {
-        fn new(views: Vec<EngineQueueTaskView>) -> Self {
+        fn new(views: Vec<(EngineTaskId, EngineQueueTaskState)>) -> Self {
             Self {
                 views,
+                active_owners: HashSet::new(),
+                list_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_active_owners(
+            views: Vec<(EngineTaskId, EngineQueueTaskState)>,
+            active_owners: HashSet<raiko2_queue::RootOwner>,
+        ) -> Self {
+            Self {
+                views,
+                active_owners,
                 list_calls: AtomicUsize::new(0),
             }
         }
@@ -3701,8 +3361,20 @@ mod tests {
             id: EngineTaskId,
         ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
             self.list_calls.fetch_add(1, Ordering::Relaxed);
-            let view = self.views.iter().find(|view| view.id == id).cloned();
+            let view = self
+                .views
+                .iter()
+                .find(|(view_id, _)| *view_id == id)
+                .map(|(_, state)| EngineQueueTaskView { state: *state });
             Box::pin(async move { Ok(view) })
+        }
+
+        fn has_active_execution(
+            &self,
+            owner: raiko2_queue::RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            let active = self.active_owners.contains(&owner);
+            Box::pin(async move { Ok(active) })
         }
 
         fn attach_execution_plan(
@@ -3724,19 +3396,28 @@ mod tests {
     }
 
     struct RecordingEngine {
-        pipeline_key: PipelineKey,
+        runtime_on_attach: Option<Arc<RuntimeManager>>,
         proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
         aggregate_inputs: Mutex<Vec<AggregateProofInput>>,
+        attached: Mutex<Vec<raiko2_queue::RootOwner>>,
         detached: Mutex<Vec<raiko2_queue::RootOwner>>,
     }
 
     impl RecordingEngine {
-        const fn new(pipeline_key: PipelineKey) -> Self {
+        const fn new() -> Self {
             Self {
-                pipeline_key,
+                runtime_on_attach: None,
                 proposals: Mutex::new(Vec::new()),
                 aggregate_inputs: Mutex::new(Vec::new()),
+                attached: Mutex::new(Vec::new()),
                 detached: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn progressing(runtime: Arc<RuntimeManager>) -> Self {
+            Self {
+                runtime_on_attach: Some(runtime),
+                ..Self::new()
             }
         }
     }
@@ -3744,16 +3425,37 @@ mod tests {
     impl EngineHandle for RecordingEngine {
         fn attach_execution_plan(
             &self,
-            _owner: raiko2_queue::RootOwner,
+            owner: raiko2_queue::RootOwner,
             plan: EngineExecutionPlan,
         ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
             Box::pin(async move {
-                let mut previous = None;
+                if let Some(runtime) = &self.runtime_on_attach {
+                    let task_id = owner.task_id.clone();
+                    let incarnation_id = owner.incarnation_id;
+                    runtime
+                        .update_tasks_by_ref(&task_id, |records| {
+                            let record = records
+                                .iter_mut()
+                                .find(|record| record.incarnation_id == incarnation_id)
+                                .ok_or_else(|| {
+                                    anyhow!("attached root incarnation is no longer current")
+                                })?;
+                            record.runner_status = RuntimeRunnerStatus::Running;
+                            record.error = None;
+                            Ok(())
+                        })
+                        .await
+                        .map_err(|error| {
+                            TaskStoreError::backend(std::io::Error::other(error.to_string()))
+                        })?;
+                }
+                self.attached
+                    .lock()
+                    .expect("attached owners mutex")
+                    .push(owner);
                 let mut proposals = self.proposals.lock().expect("proposal submissions mutex");
                 for request in plan.proposals {
-                    let task_id = proposal_task_id(self.pipeline_key, request.clone());
-                    proposals.push((request, previous.into_iter().collect()));
-                    previous = Some(task_id);
+                    proposals.push((request, Vec::new()));
                 }
                 drop(proposals);
                 if let Some(aggregate) = plan.aggregate {
@@ -3778,6 +3480,23 @@ mod tests {
             _id: EngineTaskId,
         ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
             Box::pin(async { Ok(None) })
+        }
+
+        fn has_active_execution(
+            &self,
+            owner: raiko2_queue::RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            let active = self
+                .attached
+                .lock()
+                .expect("attached owners mutex")
+                .contains(&owner)
+                && !self
+                    .detached
+                    .lock()
+                    .expect("detached owners mutex")
+                    .contains(&owner);
+            Box::pin(async move { Ok(active) })
         }
 
         fn detach_execution(
@@ -3873,7 +3592,6 @@ mod tests {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
             PipelineKey::ShastaNative,
-            ProofType::Native,
         )
     }
 
@@ -3881,7 +3599,6 @@ mod tests {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
             PipelineKey::ShastaSgx,
-            ProofType::Sgx,
         )
     }
 
@@ -3889,7 +3606,6 @@ mod tests {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
-            ProofType::SgxGeth,
         )
     }
 
@@ -3953,16 +3669,6 @@ mod tests {
         Ok(())
     }
 
-    async fn read_json_response(response: Response) -> serde_json::Value {
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("read response body")
-            .to_bytes();
-        serde_json::from_slice(&bytes).expect("parse JSON response")
-    }
-
     fn test_state(runtime: Arc<RuntimeManager>, engine: Arc<dyn EngineHandle>) -> AppState {
         let config = Config::default();
         let mut factory = StaticPipelineFactory::default();
@@ -3986,27 +3692,74 @@ mod tests {
         runner_status: RuntimeRunnerStatus,
         metadata: &TaskMetadata,
     ) -> RuntimeTaskRecord {
+        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let mut metadata = metadata.clone();
+        canonicalize_test_metadata(&mut metadata, pipeline_key);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, pipeline_key);
         RuntimeTaskRecord {
             task_id: "task_public".to_string(),
             incarnation_id: uuid::Uuid::new_v4(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            route: "risc0/network".parse().expect("parse route"),
+            pipeline_key,
+            route: pipeline_key.route(),
             task_kind: "hoodi_batch".to_string(),
-            proposal_id: Some(42),
             network_pair: metadata.network_pair.clone(),
-            artifact_refs: Vec::new(),
-            proof_ids: vec![],
+            artifact_refs,
             runner_status,
             image_ref: None,
             proof_uri: None,
             error: None,
-            metadata: serde_json::to_value(metadata).expect("serialize metadata"),
-            request_fingerprint: Some("0xfingerprint".to_string()),
+            metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+            request_fingerprint: "0xfingerprint".to_string(),
             updated_at: 1,
         }
     }
 
+    fn align_runtime_record_identity(
+        record: &mut RuntimeTaskRecord,
+        metadata: &mut TaskMetadata,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+    ) {
+        canonicalize_test_metadata(metadata, pipeline_key);
+        assert!(pipeline_key.supports_route(route));
+        assert_eq!(metadata.proof_type, pipeline_key.proof_type());
+        record.pipeline_key = pipeline_key;
+        record.route = route;
+        record.network_pair.clone_from(&metadata.network_pair);
+        record.artifact_refs = publication_proof_artifact_refs(metadata, pipeline_key);
+        record.metadata = serde_json::to_value(metadata).expect("serialize task metadata");
+    }
+
+    fn canonicalize_test_metadata(metadata: &mut TaskMetadata, pipeline_key: PipelineKey) {
+        for proposal in &mut metadata.proposals {
+            let request = &proposal.request;
+            let previous_task_id = proposal.task_id.clone();
+            proposal.proposal_id = request.proposal_id;
+            proposal.checkpoint = request.checkpoint;
+            proposal.l1_inclusion_block_number = request.l1_inclusion_block_number;
+            proposal.last_anchor_block_number = request.last_anchor_block_number;
+            if let Some(range) = request.l2_block_range {
+                proposal.l2_block_numbers = (range.start..=range.end).collect();
+            }
+            proposal.task_id = proposal_task_ref(pipeline_key, request);
+            if previous_task_id != proposal.task_id
+                && let Some(runtime) = metadata.runtime.proposals.remove(&previous_task_id)
+            {
+                metadata
+                    .runtime
+                    .proposals
+                    .insert(proposal.task_id.clone(), runtime);
+            }
+        }
+        metadata.aggregate_requested = metadata.aggregate_request.is_some();
+        metadata.aggregate_task_id = metadata
+            .aggregate_request
+            .as_ref()
+            .map(|request| aggregate_task_ref(pipeline_key, request));
+    }
+
     fn task_metadata_with_stage(stage: Option<&str>) -> TaskMetadata {
+        let request = test_proposal_request(42);
         TaskMetadata {
             network_pair: "taiko_dev/ethereum".to_string(),
             network: "taiko_dev".to_string(),
@@ -4015,15 +3768,15 @@ mod tests {
             requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
-            aggregate_requested: true,
+            aggregate_requested: false,
             proposals: vec![ProposalTask {
                 proposal_id: 42,
                 checkpoint: None,
                 l1_inclusion_block_number: 1,
                 l2_block_numbers: vec![42],
                 last_anchor_block_number: 41,
-                task_id: "proposal-task".to_string(),
-                request: None,
+                task_id: proposal_task_ref(PipelineKey::ShastaRisc0, &request),
+                request,
             }],
             aggregate_task_id: None,
             aggregate_request: None,
@@ -4058,6 +3811,11 @@ mod tests {
         }
     }
 
+    fn set_test_proposal_runtime(metadata: &mut TaskMetadata, runtime: TaskRuntimeMetadata) {
+        let task_id = metadata.proposals[0].task_id.clone();
+        metadata.runtime.proposals.insert(task_id, runtime);
+    }
+
     async fn upsert_test_record(
         runtime: &RuntimeManager,
         task_id: &str,
@@ -4067,8 +3825,14 @@ mod tests {
     ) -> Result<()> {
         let mut record = runtime_record(runner_status, metadata);
         record.task_id = task_id.to_string();
-        record.pipeline_key = pipeline_key;
-        record.request_fingerprint = Some(format!("fingerprint-{task_id}"));
+        let mut canonical_metadata = metadata.clone();
+        align_runtime_record_identity(
+            &mut record,
+            &mut canonical_metadata,
+            pipeline_key,
+            pipeline_key.route(),
+        );
+        record.request_fingerprint = format!("fingerprint-{task_id}");
         runtime.upsert_task(&record).await?;
         Ok(())
     }
@@ -4079,7 +3843,7 @@ mod tests {
             &zk_any_metadata(Some("prove")),
         );
         record.task_id = task_id.to_string();
-        record.request_fingerprint = Some(format!("fingerprint-{task_id}"));
+        record.request_fingerprint = format!("fingerprint-{task_id}");
         record.metadata = serde_json::json!({ "invalid": true });
         runtime.upsert_task(&record).await?;
         Ok(())
@@ -4111,6 +3875,7 @@ mod tests {
         let metadata = zk_any_metadata(Some("prove"));
         let mut missing_pipeline_metadata = metadata.clone();
         missing_pipeline_metadata.network_pair = "missing/ethereum".to_string();
+        missing_pipeline_metadata.network = "missing".to_string();
         upsert_invalid_metadata_record(&runtime, "bad-metadata").await?;
         upsert_test_record(
             &runtime,
@@ -4140,8 +3905,8 @@ mod tests {
             "prover-status-expired-boundless",
         ))?);
         let mut metadata = zk_any_metadata(Some("prove"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xexpired".to_string()),
                 expires_at: Some(unix_now_secs().saturating_sub(1)),
@@ -4180,7 +3945,7 @@ mod tests {
         ))?);
         let request = test_proposal_request(42);
         let mut metadata = zk_any_metadata(Some("prove"));
-        metadata.proposals[0].request = Some(request);
+        metadata.proposals[0].request = request;
         upsert_test_record(
             &runtime,
             "orphaned-root",
@@ -4215,7 +3980,7 @@ mod tests {
         ))?);
         let request = test_proposal_request(42);
         let mut metadata = zk_any_metadata(Some("prove"));
-        metadata.proposals[0].request = Some(request.clone());
+        metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaRisc0Network,
             request,
@@ -4229,10 +3994,10 @@ mod tests {
         )
         .await?;
 
-        let engine = Arc::new(ListingEngine::new(vec![EngineQueueTaskView {
-            id: task_id,
-            state: EngineQueueTaskState::Succeeded,
-        }]));
+        let engine = Arc::new(ListingEngine::new(vec![(
+            task_id,
+            EngineQueueTaskState::Succeeded,
+        )]));
         let state = test_state_with_engines(
             runtime,
             [(
@@ -4261,7 +4026,7 @@ mod tests {
         ))?);
         let request = test_proposal_request(42);
         let mut metadata = zk_any_metadata(Some("prove"));
-        metadata.proposals[0].request = Some(request.clone());
+        metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaRisc0Network,
             request,
@@ -4283,10 +4048,16 @@ mod tests {
         )
         .await?;
 
-        let engine = Arc::new(ListingEngine::new(vec![EngineQueueTaskView {
-            id: task_id,
-            state: EngineQueueTaskState::Running,
-        }]));
+        let active_owner = runtime
+            .get_task("root-a")
+            .await?
+            .map(|record| RootOwner::new(record.task_id, record.incarnation_id))
+            .expect("root-a");
+
+        let engine = Arc::new(ListingEngine::with_active_owners(
+            vec![(task_id, EngineQueueTaskState::Running)],
+            HashSet::from([active_owner]),
+        ));
         let state = test_state_with_engines(
             runtime,
             [(
@@ -4300,6 +4071,7 @@ mod tests {
 
         assert_eq!(engine.list_calls.load(Ordering::Relaxed), 1);
         assert_eq!(tasks.running, 1);
+        assert_eq!(tasks.orphaned, 1);
         assert!(network.is_clean());
         assert!(skipped.is_clean());
         Ok(())
@@ -4313,6 +4085,7 @@ mod tests {
         let metadata = zk_any_metadata(Some("prove"));
         let mut missing_pipeline_metadata = metadata.clone();
         missing_pipeline_metadata.network_pair = "missing/ethereum".to_string();
+        missing_pipeline_metadata.network = "missing".to_string();
         upsert_invalid_metadata_record(&runtime, "bad-metadata").await?;
         upsert_test_record(
             &runtime,
@@ -4331,8 +4104,8 @@ mod tests {
         )
         .await?;
         let mut remote_metadata = metadata.clone();
-        remote_metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut remote_metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xremote".to_string()),
                 ..TaskRuntimeMetadata::default()
@@ -4397,7 +4170,7 @@ mod tests {
         ))?);
         let request = test_proposal_request(42);
         let mut metadata = zk_any_metadata(Some("prove"));
-        metadata.proposals[0].request = Some(request);
+        metadata.proposals[0].request = request;
         upsert_test_record(
             &runtime,
             "clearable",
@@ -4477,8 +4250,8 @@ mod tests {
     #[test]
     fn failed_submission_with_remote_progress_is_not_reenqueueable() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0x1234".to_string()),
                 ..TaskRuntimeMetadata::default()
@@ -4494,8 +4267,8 @@ mod tests {
     #[test]
     fn failed_submission_with_boundless_resume_metadata_is_reenqueueable_for_failed_prove_stage() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0x1234".to_string()),
                 expires_at: Some(123_456),
@@ -4527,8 +4300,8 @@ mod tests {
     #[test]
     fn failed_submission_with_incomplete_boundless_metadata_is_not_reenqueueable() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0x1234".to_string()),
                 expires_at: Some(123_456),
@@ -4555,8 +4328,8 @@ mod tests {
     fn failed_submission_with_sp1_resume_metadata_is_reenqueueable_for_failed_prove_stage() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.proof_type = ProofType::Sp1;
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xsp1".to_string()),
                 expires_at: Some(7_200),
@@ -4611,30 +4384,60 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn only_active_engine_states_block_runtime_reenqueue() {
-        for state in [
-            EngineQueueTaskState::Pending,
-            EngineQueueTaskState::Ready,
-            EngineQueueTaskState::Retrying,
-            EngineQueueTaskState::Running,
-        ] {
-            assert!(engine_state_blocks_reenqueue(state));
-        }
-        for state in [
-            EngineQueueTaskState::Succeeded,
-            EngineQueueTaskState::Failed,
-            EngineQueueTaskState::Cancelled,
-        ] {
-            assert!(!engine_state_blocks_reenqueue(state));
-        }
+    #[tokio::test]
+    async fn another_owner_of_a_shared_task_does_not_block_reenqueue() -> Result<()> {
+        let metadata = task_metadata_with_stage(Some("prove"));
+        let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: record.pipeline_key,
+            request: metadata.proposals[0].request.clone(),
+        });
+        let queue_views = vec![(task_id, EngineQueueTaskState::Running)];
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "shared-task-reenqueue-owner",
+        ))?);
+        let other_owner = RootOwner::new("other-root", uuid::Uuid::new_v4());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                record.pipeline_key,
+                Arc::new(ListingEngine::with_active_owners(
+                    queue_views.clone(),
+                    HashSet::from([other_owner]),
+                )) as Arc<dyn EngineHandle>,
+            )],
+        );
+
+        assert!(
+            should_reenqueue_existing_submission(&state, &record, &metadata)
+                .await
+                .map_err(|error| anyhow!(error.message))?
+        );
+
+        let exact_owner = RootOwner::new(record.task_id.clone(), record.incarnation_id);
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                record.pipeline_key,
+                Arc::new(ListingEngine::with_active_owners(
+                    queue_views,
+                    HashSet::from([exact_owner]),
+                )) as Arc<dyn EngineHandle>,
+            )],
+        );
+        assert!(
+            !should_reenqueue_existing_submission(&state, &record, &metadata)
+                .await
+                .map_err(|error| anyhow!(error.message))?
+        );
+        Ok(())
     }
 
     #[test]
     fn running_submission_with_remote_progress_is_not_reenqueueable() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xsp1".to_string()),
                 sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
@@ -4656,8 +4459,8 @@ mod tests {
         ))?);
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.requested_proof_type = Some("zk_any".to_string());
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0x1234".to_string()),
                 expires_at: Some(123_456),
@@ -4699,10 +4502,14 @@ mod tests {
             submission.prover_config.clone(),
         );
         let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
-        metadata.proposals[0].request = Some(request);
+        metadata.proposals[0].request = request;
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
-        record.pipeline_key = PipelineKey::ShastaNative;
-        record.route = "native/local".parse().expect("parse route");
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
+        );
         record.error = Some("stale running".to_string());
         runtime.upsert_task(&record).await?;
         write_test_proof_artifact(
@@ -4739,15 +4546,18 @@ mod tests {
         let mut metadata = task_metadata_with_stage(None);
         metadata.proof_type = ProofType::Native;
         metadata.aggregate_requested = false;
-        metadata.proposals[0].task_id = "proposal-task".to_string();
         let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
-        record.pipeline_key = PipelineKey::ShastaNative;
-        record.route = "native/local".parse().expect("parse route");
-        record.request_fingerprint = Some(batch_request_fingerprint_for_test(&submission)?);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
+        );
+        record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         runtime.upsert_task(&record).await?;
         submission.public_task_id.clone_from(&record.task_id);
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let recorder = Arc::new(RecordingEngine::new());
         let state = test_state(Arc::clone(&runtime), recorder.clone());
 
         let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
@@ -4801,12 +4611,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_failed_sgx_record_is_recreated_under_sgxgeth_pipeline() -> Result<()> {
+    async fn inconsistent_sgx_record_is_rejected_before_pipeline_replacement() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "stale-sgx-to-sgxgeth-retry",
         ))?);
-        let sgx_engine = Arc::new(RecordingEngine::new(PipelineKey::ShastaSgx));
-        let sgxgeth_engine = Arc::new(RecordingEngine::new(PipelineKey::ShastaSgxGeth));
+        let sgx_engine = Arc::new(RecordingEngine::new());
+        let sgxgeth_engine = Arc::new(RecordingEngine::new());
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [
@@ -4823,12 +4633,10 @@ mod tests {
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
-            ProofType::SgxGeth,
         );
         let submission = canonical_submission(route, false);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &request_fingerprint)
             .map_err(|err| anyhow!(err.message))?;
         let metadata = build_task_metadata(
             &submission.pair,
@@ -4848,23 +4656,20 @@ mod tests {
         record.task_id.clone_from(&submission.public_task_id);
         record.pipeline_key = PipelineKey::ShastaSgx;
         record.route = PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote);
-        record.request_fingerprint = Some(request_fingerprint);
+        record.artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSgx);
+        record.request_fingerprint = request_fingerprint;
         runtime.upsert_task(&record).await?;
 
-        let response = handle_existing_batch_task(&state, &submission, record, None)
+        let error = handle_existing_batch_task(&state, &submission, record.clone(), None)
             .await
-            .map_err(|err| anyhow!(err.message))?;
-        let response = read_json_response(response).await;
-
-        assert_eq!(response["status"], "ok");
-        assert_eq!(response["proof_type"], "sgxgeth");
-        assert_eq!(response["data"]["status"], "registered");
+            .expect_err("inconsistent durable identity must fail closed");
+        assert!(error.message.contains("proof_type does not match"));
 
         let stored = runtime
             .get_task(&submission.public_task_id)
             .await?
             .expect("runtime task exists");
-        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSgxGeth);
+        assert_eq!(stored, record);
 
         let sgx_submissions = sgx_engine.proposals.lock().expect("sgx submissions");
         assert!(
@@ -4873,12 +4678,13 @@ mod tests {
         );
         drop(sgx_submissions);
 
-        let sgxgeth_submissions = sgxgeth_engine
-            .proposals
-            .lock()
-            .expect("sgxgeth submissions");
-        assert_eq!(sgxgeth_submissions.len(), 1);
-        assert_eq!(sgxgeth_submissions[0].0.proposal_id, 7);
+        assert!(
+            sgxgeth_engine
+                .proposals
+                .lock()
+                .expect("sgxgeth submissions")
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -4887,7 +4693,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "running-sp1-network-to-local",
         ))?);
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaSp1));
+        let recorder = Arc::new(RecordingEngine::new());
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
@@ -4898,13 +4704,11 @@ mod tests {
         let requested_route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
             PipelineKey::ShastaSp1,
-            ProofType::Sp1,
         );
         let mut submission = canonical_submission(requested_route, false);
         submission.requested_proof_type = BatchProofType::Sp1;
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &request_fingerprint)
             .map_err(|err| anyhow!(err.message))?;
         let mut metadata = build_task_metadata(
             &submission.pair,
@@ -4929,9 +4733,13 @@ mod tests {
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
-        record.pipeline_key = PipelineKey::ShastaSp1;
-        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network);
-        record.request_fingerprint = Some(request_fingerprint);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaSp1,
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
+        );
+        record.request_fingerprint = request_fingerprint;
         runtime.upsert_task(&record).await?;
 
         let response = handle_existing_batch_task(&state, &submission, record, None)
@@ -4957,18 +4765,20 @@ mod tests {
         let requested_route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
             PipelineKey::ShastaSp1,
-            ProofType::Sp1,
         );
         let mut submission = canonical_submission(requested_route, false);
         submission.requested_proof_type = BatchProofType::Sp1;
         let mut metadata = task_metadata_with_stage(None);
         metadata.proof_type = ProofType::Sp1;
         metadata.aggregate_requested = false;
-        metadata.proposals[0].task_id = "sp1-completed-proposal".to_string();
         let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
-        record.pipeline_key = PipelineKey::ShastaSp1;
-        record.route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaSp1,
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
+        );
         runtime.upsert_task(&record).await?;
         write_test_proof_artifact_for_route(
             &runtime,
@@ -4979,7 +4789,7 @@ mod tests {
             &valid_native_proof(),
         )
         .await?;
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaSp1));
+        let recorder = Arc::new(RecordingEngine::new());
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
@@ -5013,7 +4823,7 @@ mod tests {
         aggregate_metadata.aggregate_requested = true;
         let shared_request = test_proposal_request(42);
         let shared_ref = proposal_task_ref(pipeline, &shared_request);
-        aggregate_metadata.proposals[0].request = Some(shared_request.clone());
+        aggregate_metadata.proposals[0].request = shared_request.clone();
         aggregate_metadata.proposals.push(ProposalTask {
             proposal_id: 43,
             checkpoint: None,
@@ -5021,7 +4831,7 @@ mod tests {
             l2_block_numbers: vec![43],
             last_anchor_block_number: 42,
             task_id: "unique-proposal".to_string(),
-            request: Some(test_proposal_request(43)),
+            request: test_proposal_request(43),
         });
         aggregate_metadata.aggregate_request = Some(AggregationTaskRequest {
             request_id: "aggregate-request".to_string(),
@@ -5031,24 +4841,22 @@ mod tests {
         let mut aggregate_record =
             runtime_record(RuntimeRunnerStatus::Running, &aggregate_metadata);
         aggregate_record.task_id = "aggregate-root".to_string();
-        aggregate_record.request_fingerprint = Some("aggregate-root-fingerprint".to_string());
+        aggregate_record.request_fingerprint = "aggregate-root-fingerprint".to_string();
         aggregate_record.pipeline_key = pipeline;
         aggregate_record.route = route;
         let aggregate_refs = publication_proof_artifact_refs(&aggregate_metadata, pipeline);
-        aggregate_record.proof_ids = aggregate_refs.clone();
         aggregate_record.artifact_refs = aggregate_refs.clone();
         runtime.upsert_task(&aggregate_record).await?;
 
         let mut proposal_metadata = task_metadata_with_stage(Some("prove"));
         proposal_metadata.proof_type = ProofType::Native;
         proposal_metadata.aggregate_requested = false;
-        proposal_metadata.proposals[0].request = Some(shared_request);
+        proposal_metadata.proposals[0].request = shared_request;
         let mut proposal_record = runtime_record(RuntimeRunnerStatus::Running, &proposal_metadata);
         proposal_record.task_id = "proposal-root".to_string();
-        proposal_record.request_fingerprint = Some("proposal-root-fingerprint".to_string());
+        proposal_record.request_fingerprint = "proposal-root-fingerprint".to_string();
         proposal_record.pipeline_key = pipeline;
         proposal_record.route = route;
-        proposal_record.proof_ids = vec![shared_ref.clone()];
         proposal_record.artifact_refs = vec![shared_ref.clone()];
         runtime.upsert_task(&proposal_record).await?;
 
@@ -5071,9 +4879,9 @@ mod tests {
             );
         }
 
-        clear_task_publication_outboxes(&runtime, &aggregate_record, &aggregate_metadata)
-            .await
-            .map_err(|err| anyhow!(err.message))?;
+        runtime
+            .release_task_pending_publications(&aggregate_record)
+            .await?;
 
         assert!(
             runtime
@@ -5106,13 +4914,19 @@ mod tests {
 
         assert!(matches!(
             runtime
+                .retire_task_if_unchanged(&aggregate_record, None)
+                .await?,
+            RuntimeMutationOutcome::Applied
+        ));
+        assert!(matches!(
+            runtime
                 .remove_task_if_current(&aggregate_record.lifetime())
                 .await?,
             RuntimeMutationOutcome::Applied
         ));
-        clear_task_publication_outboxes(&runtime, &proposal_record, &proposal_metadata)
-            .await
-            .map_err(|err| anyhow!(err.message))?;
+        runtime
+            .release_task_pending_publications(&proposal_record)
+            .await?;
         assert!(
             runtime
                 .get_pending_proof_publication(
@@ -5139,7 +4953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_cleanup_preserves_proposal_shared_by_another_root() -> Result<()> {
+    async fn replacement_swaps_only_the_observed_root_projection() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "replacement-preserves-shared-proposal",
         ))?);
@@ -5152,14 +4966,13 @@ mod tests {
         first_metadata.proposals[0]
             .task_id
             .clone_from(&shared_task_ref);
-        first_metadata.proposals[0].request = Some(request.clone());
+        first_metadata.proposals[0].request = request.clone();
         let mut first = runtime_record(RuntimeRunnerStatus::Failed, &first_metadata);
         first.task_id = "root-being-replaced".to_string();
         first.pipeline_key = pipeline;
         first.route = pipeline.route();
-        first.proof_ids = vec![shared_task_ref.clone()];
         first.artifact_refs = vec![shared_task_ref.clone()];
-        first.request_fingerprint = Some("root-being-replaced-fingerprint".to_string());
+        first.request_fingerprint = "root-being-replaced-fingerprint".to_string();
         runtime.upsert_task(&first).await?;
 
         let mut second_metadata = first_metadata.clone();
@@ -5168,19 +4981,40 @@ mod tests {
         second.task_id = "root-still-live".to_string();
         second.pipeline_key = pipeline;
         second.route = pipeline.route();
-        second.proof_ids = vec![shared_task_ref.clone()];
         second.artifact_refs = vec![shared_task_ref];
-        second.request_fingerprint = Some("root-still-live-fingerprint".to_string());
+        second.request_fingerprint = "root-still-live-fingerprint".to_string();
         runtime.upsert_task(&second).await?;
 
-        let recorder = Arc::new(RecordingEngine::new(pipeline));
+        let recorder = Arc::new(RecordingEngine::new());
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(pipeline, recorder.clone() as Arc<dyn EngineHandle>)],
         );
-        cleanup_stale_root_before_replacement(&state, &first, &first_metadata)
+        let replacement_engine: Arc<dyn EngineHandle> = recorder.clone();
+        let replacement = state
+            .lifecycle
+            .replace(
+                &first,
+                TaskRegistration {
+                    task_id: first.task_id.clone(),
+                    pipeline_key: pipeline,
+                    route: pipeline.route(),
+                    task_kind: first.task_kind.clone(),
+                    network_pair: first.network_pair.clone(),
+                    artifact_refs: first.artifact_refs.clone(),
+                    metadata: first.metadata.clone(),
+                    request_fingerprint: "replacement-fingerprint".to_string(),
+                },
+                &[],
+                &replacement_engine,
+                EngineExecutionPlan {
+                    proposals: vec![request],
+                    aggregate: None,
+                },
+            )
             .await
-            .map_err(|err| anyhow!(err.message))?;
+            .context("replace observed root")?
+            .context("replacement must win")?;
 
         assert_eq!(
             recorder
@@ -5192,14 +5026,304 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["root-being-replaced"],
         );
+        assert_eq!(
+            recorder
+                .attached
+                .lock()
+                .expect("attached owners")
+                .as_slice(),
+            &[raiko2_queue::RootOwner::new(
+                replacement.task_id.clone(),
+                replacement.incarnation_id,
+            )],
+        );
+        assert_eq!(
+            runtime
+                .get_task(&first.task_id)
+                .await?
+                .context("replacement root")?
+                .incarnation_id,
+            replacement.incarnation_id,
+        );
+        assert_eq!(
+            runtime
+                .get_task(&second.task_id)
+                .await?
+                .context("shared root")?
+                .incarnation_id,
+            second.incarnation_id,
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_replacement_commits_one_successor_projection() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "concurrent-root-replacement",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = test_proposal_request(42);
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.proof_type = ProofType::Native;
+        metadata.aggregate_requested = false;
+        metadata.proposals[0].task_id.clone_from(&proof_ref);
+        metadata.proposals[0].request = request.clone();
+        let mut expected = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        expected.task_id = "concurrent-root".to_string();
+        expected.pipeline_key = pipeline;
+        expected.route = pipeline.route();
+        expected.artifact_refs = vec![proof_ref.clone()];
+        expected.request_fingerprint = "previous-fingerprint".to_string();
+        runtime.upsert_task(&expected).await?;
+        let proof = br#"{"proof":"0x01"}"#;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    &expected.network_pair,
+                    pipeline,
+                    expected.route,
+                    &proof_ref,
+                    &[expected.incarnation_id],
+                    proof,
+                )
+                .await?
+        );
+        runtime
+            .commit_proof_artifact_publication(
+                &expected.network_pair,
+                pipeline,
+                expected.route,
+                &proof_ref,
+                proof,
+            )
+            .await?;
+
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(pipeline, recorder.clone() as Arc<dyn EngineHandle>)],
+        );
+        let replacement_engine: Arc<dyn EngineHandle> = recorder.clone();
+        let registration = |fingerprint: &str| TaskRegistration {
+            task_id: expected.task_id.clone(),
+            pipeline_key: pipeline,
+            route: pipeline.route(),
+            task_kind: expected.task_kind.clone(),
+            network_pair: expected.network_pair.clone(),
+            artifact_refs: vec![proof_ref.clone()],
+            metadata: expected.metadata.clone(),
+            request_fingerprint: fingerprint.to_string(),
+        };
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let registration_a = registration("replacement-a");
+        let registration_b = registration("replacement-b");
+        let request_a = request.clone();
+        let state_ref = &state;
+        let expected_ref = &expected;
+        let first = {
+            let barrier = Arc::clone(&barrier);
+            let engine = Arc::clone(&replacement_engine);
+            async move {
+                barrier.wait().await;
+                state_ref
+                    .lifecycle
+                    .replace(
+                        expected_ref,
+                        registration_a,
+                        &[],
+                        &engine,
+                        EngineExecutionPlan {
+                            proposals: vec![request_a],
+                            aggregate: None,
+                        },
+                    )
+                    .await
+            }
+        };
+        let second = {
+            let barrier = Arc::clone(&barrier);
+            let engine = Arc::clone(&replacement_engine);
+            async move {
+                barrier.wait().await;
+                state_ref
+                    .lifecycle
+                    .replace(
+                        expected_ref,
+                        registration_b,
+                        &[],
+                        &engine,
+                        EngineExecutionPlan {
+                            proposals: vec![request],
+                            aggregate: None,
+                        },
+                    )
+                    .await
+            }
+        };
+        let release = async { barrier.wait().await };
+        let (first, second, _) = tokio::join!(first, second, release);
+        let first = first?;
+        let second = second?;
+        assert_eq!(
+            usize::from(first.is_some()) + usize::from(second.is_some()),
+            1
+        );
+        let winner = first.or(second).context("one replacement must win")?;
+
+        let attached = recorder.attached.lock().expect("attached owners");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].incarnation_id, winner.incarnation_id);
+        drop(attached);
+        assert_eq!(recorder.detached.lock().expect("detached owners").len(), 1);
+        assert_eq!(
+            runtime
+                .get_task(&expected.task_id)
+                .await?
+                .context("successor root")?
+                .incarnation_id,
+            winner.incarnation_id,
+        );
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &expected.network_pair,
+                    pipeline,
+                    expected.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_none(),
+            "the winning replacement must clean the predecessor publication intent"
+        );
+        assert_eq!(
+            runtime
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            0,
+        );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    &expected.network_pair,
+                    pipeline,
+                    expected.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_none(),
+            "the winning replacement must invalidate the predecessor canonical manifest"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_replacement_does_not_return_a_conflicting_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "stale-replacement-conflict",
+        ))?);
+        let route = native_local_route();
+        let mut submission = canonical_submission(route, false);
+        submission.public_task_id = "replacement-conflict-root".to_string();
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &request_fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let stale = runtime
+            .register_task(
+                build_batch_task_registration(&submission, &plan, &request_fingerprint)
+                    .map_err(|error| anyhow!(error.message))?,
+            )
+            .await?;
+        let mut occupying = stale.clone();
+        occupying.request_fingerprint = "concurrent-request".to_string();
+        occupying.updated_at = occupying.updated_at.saturating_add(1);
+        runtime.upsert_task(&occupying).await?;
+
+        let state = test_state(Arc::clone(&runtime), Arc::new(RecordingEngine::new()));
+        let error =
+            replace_existing_batch_task(&state, &submission, &stale, Some(&request_fingerprint))
+                .await
+                .expect_err("a stale replacement must not adopt another request");
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(
+            runtime
+                .get_task(&submission.public_task_id)
+                .await?
+                .context("occupying root")?
+                .request_fingerprint,
+            "concurrent-request"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_retirement_cannot_remove_a_reopened_attached_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "stale-retirement-after-recovery",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let metadata = task_metadata_with_stage(Some("prove"));
+        let mut stale = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        stale.task_id = "recovered-root".to_string();
+        stale.pipeline_key = pipeline;
+        stale.route = pipeline.route();
+        stale.request_fingerprint = "recovered-root-fingerprint".to_string();
+        runtime.upsert_task(&stale).await?;
+
+        let recovered = runtime
+            .prepare_task_for_recovery_if_unchanged(&stale)
+            .await?
+            .context("reopened root")?;
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(pipeline, recorder.clone() as Arc<dyn EngineHandle>)],
+        );
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        state
+            .lifecycle
+            .attach(
+                &recovered,
+                &engine,
+                EngineExecutionPlan {
+                    proposals: Vec::new(),
+                    aggregate: None,
+                },
+            )
+            .await?;
+
+        assert_eq!(
+            state
+                .lifecycle
+                .remove(&stale, raiko2_queue::DetachMode::Remove)
+                .await?
+                .0,
+            RuntimeMutationOutcome::Blocked,
+        );
+        assert!(
+            recorder
+                .detached
+                .lock()
+                .expect("detached owners")
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .get_task(&stale.task_id)
+                .await?
+                .context("current root")?
+                .runner_status,
+            RuntimeRunnerStatus::Allocated,
+        );
         Ok(())
     }
 
     #[test]
     fn failed_submission_after_remote_stage_without_resume_metadata_is_not_reenqueueable() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 remote_tx_hash: Some("0xremote".to_string()),
                 ..TaskRuntimeMetadata::default()
@@ -5226,8 +5350,8 @@ mod tests {
     #[test]
     fn failed_aggregate_ignores_proposal_resume_metadata() {
         let mut metadata = task_metadata_with_stage(Some("aggregate"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xproposal".to_string()),
                 expires_at: Some(123_456),
@@ -5248,8 +5372,8 @@ mod tests {
     #[test]
     fn failed_aggregate_with_aggregate_resume_metadata_is_reenqueueable() {
         let mut metadata = task_metadata_with_stage(Some("aggregate"));
-        metadata.runtime.proposals.insert(
-            "proposal-task".to_string(),
+        set_test_proposal_runtime(
+            &mut metadata,
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xproposal".to_string()),
                 expires_at: Some(123_456),
@@ -5282,8 +5406,7 @@ mod tests {
         let single_fingerprint =
             batch_request_fingerprint("test", "raiko2-test", &single_submission)
                 .expect("single fingerprint");
-        let single = build_submission_plan(&runtime, &single_submission, &single_fingerprint)
-            .await
+        let single = build_submission_plan(&single_submission, &single_fingerprint)
             .expect("single submission plan");
         runtime
             .register_task(
@@ -5296,10 +5419,8 @@ mod tests {
         let aggregate_fingerprint =
             batch_request_fingerprint("test", "raiko2-test", &aggregate_submission)
                 .expect("aggregate fingerprint");
-        let aggregate =
-            build_submission_plan(&runtime, &aggregate_submission, &aggregate_fingerprint)
-                .await
-                .expect("aggregate submission plan");
+        let aggregate = build_submission_plan(&aggregate_submission, &aggregate_fingerprint)
+            .expect("aggregate submission plan");
 
         assert_eq!(single.proposals.len(), 1);
         assert_eq!(aggregate.proposals.len(), 1);
@@ -5335,27 +5456,17 @@ mod tests {
         ))?);
         let submission = canonical_submission(native_local_route(), false);
         let fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
         let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
         let task_id = registration.task_id.clone();
         runtime.register_task(registration).await?;
-        let registered = runtime.get_task(&task_id).await?.expect("registered task");
-        assert!(matches!(
-            runtime
-                .sync_nonterminal_status_if_current(
-                    &registered.lifetime(),
-                    RuntimeRunnerStatus::Running,
-                    None,
-                    None,
-                )
-                .await?,
-            RuntimeMutationOutcome::Applied
-        ));
+        let mut registered = runtime.get_task(&task_id).await?.expect("registered task");
+        registered.runner_status = RuntimeRunnerStatus::Running;
+        runtime.upsert_task(&registered).await?;
 
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let recorder = Arc::new(RecordingEngine::new());
         let state = test_state(runtime.clone(), recorder.clone());
         assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
         assert_eq!(
@@ -5378,33 +5489,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_rejects_noncanonical_metadata_before_recovery() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "startup-metadata-hard-cut",
+        ))?);
+        let submission = canonical_submission(native_local_route(), false);
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let task_id = registration.task_id.clone();
+        runtime.register_task(registration).await?;
+        let mut record = runtime.get_task(&task_id).await?.expect("registered task");
+        record.runner_status = RuntimeRunnerStatus::Completed;
+        record.metadata["proof_ids"] = serde_json::json!(["removed-legacy-index"]);
+        runtime.upsert_task(&record).await?;
+
+        let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
+        let validation_error = validate_persisted_runtime_task_metadata(&state)
+            .await
+            .expect_err("startup validation must reject removed metadata fields");
+        assert!(validation_error.to_string().contains(&task_id));
+        assert!(recover_pending_runtime_tasks(&state).await.is_err());
+        assert_eq!(
+            runtime
+                .get_task(&task_id)
+                .await?
+                .expect("runtime task")
+                .runner_status,
+            RuntimeRunnerStatus::Completed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_does_not_overwrite_progress_from_attachment() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "startup-attachment-progress",
+        ))?);
+        let submission = canonical_submission(native_local_route(), false);
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let task_id = registration.task_id.clone();
+        runtime.register_task(registration).await?;
+
+        let recorder = Arc::new(RecordingEngine::progressing(Arc::clone(&runtime)));
+        let state = test_state(Arc::clone(&runtime), recorder);
+
+        assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
+        assert_eq!(
+            runtime
+                .get_task(&task_id)
+                .await?
+                .expect("runtime task")
+                .runner_status,
+            RuntimeRunnerStatus::Running
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn startup_recovery_reopens_failed_runtime_task_before_attaching() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "startup-failed-recovery",
         ))?);
         let submission = canonical_submission(native_local_route(), false);
         let fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
         let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
         let task_id = registration.task_id.clone();
         runtime.register_task(registration).await?;
-        let registered = runtime.get_task(&task_id).await?.expect("registered task");
-        assert!(matches!(
-            runtime
-                .sync_nonterminal_status_if_current(
-                    &registered.lifetime(),
-                    RuntimeRunnerStatus::Failed,
-                    Some("recoverable fixture failure".to_string()),
-                    None,
-                )
-                .await?,
-            RuntimeMutationOutcome::Applied
-        ));
+        let mut registered = runtime.get_task(&task_id).await?.expect("registered task");
+        registered.runner_status = RuntimeRunnerStatus::Failed;
+        registered.error = Some("recoverable fixture failure".to_string());
+        runtime.upsert_task(&registered).await?;
 
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let recorder = Arc::new(RecordingEngine::new());
         let state = test_state(runtime.clone(), recorder.clone());
         assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
         assert_eq!(
@@ -5433,8 +5599,7 @@ mod tests {
         ))?);
         let submission = canonical_submission(native_local_route(), false);
         let fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
         let root = runtime
             .register_task(
@@ -5442,12 +5607,38 @@ mod tests {
                     .map_err(|error| anyhow!(error.message))?,
             )
             .await?;
-        let metadata: TaskMetadata = serde_json::from_value(root.metadata.clone())?;
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let recorder = Arc::new(RecordingEngine::new());
         let engine: Arc<dyn EngineHandle> = recorder.clone();
         let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
+        let proof_ref = root
+            .artifact_refs
+            .first()
+            .expect("root proof artifact")
+            .clone();
+        let proof = br#"{"proof":"0x01"}"#;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    &root.network_pair,
+                    root.pipeline_key,
+                    root.route,
+                    &proof_ref,
+                    &[root.incarnation_id],
+                    proof,
+                )
+                .await?
+        );
+        runtime
+            .commit_proof_artifact_publication(
+                &root.network_pair,
+                root.pipeline_key,
+                root.route,
+                &proof_ref,
+                proof,
+            )
+            .await?;
 
-        state.lifecycle.cancel(&root, &metadata, None).await?;
+        state.lifecycle.cancel(&root, None).await?;
         let err = attach_submission_plan(&state, &engine, &root, &plan)
             .await
             .expect_err("cancelled root must not reattach execution");
@@ -5468,6 +5659,62 @@ mod tests {
                 .runner_status,
             RuntimeRunnerStatus::Cancelled
         );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(
+                    &root.network_pair,
+                    root.pipeline_key,
+                    root.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_none(),
+            "root cancellation must invalidate its unowned canonical publication"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_root_skips_a_late_execution_attachment() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "completed-root-attach-fence",
+        ))?);
+        let submission = canonical_submission(native_local_route(), false);
+        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let mut root = runtime
+            .register_task(
+                build_batch_task_registration(&submission, &plan, &fingerprint)
+                    .map_err(|error| anyhow!(error.message))?,
+            )
+            .await?;
+        root.runner_status = RuntimeRunnerStatus::Completed;
+        root.proof_uri = Some("memory://canonical-proof".into());
+        runtime.upsert_task(&root).await?;
+        let recorder = Arc::new(RecordingEngine::new());
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
+
+        attach_submission_plan(&state, &engine, &root, &plan)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+
+        assert!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .get_task(&root.task_id)
+                .await?
+                .expect("runtime task")
+                .runner_status,
+            RuntimeRunnerStatus::Completed
+        );
         Ok(())
     }
 
@@ -5478,8 +5725,7 @@ mod tests {
         ))?);
         let submission = canonical_submission(native_local_route(), false);
         let fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
         let root = runtime
             .register_task(
@@ -5487,7 +5733,7 @@ mod tests {
                     .map_err(|error| anyhow!(error.message))?,
             )
             .await?;
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let recorder = Arc::new(RecordingEngine::new());
         let engine: Arc<dyn EngineHandle> = recorder.clone();
         let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
 
@@ -5507,11 +5753,9 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn aggregate_plan_uses_request_fingerprint_as_idempotent_key() {
+    #[test]
+    fn aggregate_plan_uses_request_fingerprint_as_idempotent_key() {
         let route = native_local_route();
-        let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-idempotent-key"))
-            .expect("runtime manager");
         let mut first_submission = canonical_submission(route, true);
         first_submission.public_task_id = "task-public-a".to_string();
         let mut second_submission = first_submission.clone();
@@ -5524,11 +5768,9 @@ mod tests {
                 .expect("second fingerprint");
         assert_eq!(first_fingerprint, second_fingerprint);
 
-        let first = build_submission_plan(&runtime, &first_submission, &first_fingerprint)
-            .await
+        let first = build_submission_plan(&first_submission, &first_fingerprint)
             .expect("first submission plan");
-        let second = build_submission_plan(&runtime, &second_submission, &second_fingerprint)
-            .await
+        let second = build_submission_plan(&second_submission, &second_fingerprint)
             .expect("second submission plan");
 
         let first_aggregate = first.aggregate.expect("first aggregate");
@@ -5559,8 +5801,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals()
-    -> Result<()> {
+    async fn aggregate_plan_keeps_one_graph_shape_when_a_proposal_is_cached() -> Result<()> {
         let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("mixed-cache-plan"))
             .expect("runtime manager");
@@ -5577,6 +5818,9 @@ mod tests {
             prover_config: ProverTaskConfig::default(),
         };
         let cached_ref = proposal_task_ref(PipelineKey::ShastaNative, &first_request);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let uncached_plan = build_submission_plan(&submission, &request_fingerprint)
+            .expect("uncached submission plan");
         write_test_proof_artifact(
             &runtime,
             &submission.pair.key,
@@ -5586,20 +5830,11 @@ mod tests {
         .await
         .expect("write cached proof");
 
-        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
-            .await
-            .expect("submission plan");
-        assert!(matches!(
-            plan.proposal_sources[0],
-            ProposalPlanSource::Cached
-        ));
-        assert!(matches!(
-            plan.proposal_sources[1],
-            ProposalPlanSource::Pending
-        ));
+        let plan = build_submission_plan(&submission, &request_fingerprint)
+            .expect("cached submission plan");
+        assert_eq!(execution_plan(&plan), execution_plan(&uncached_plan));
 
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let recorder = Arc::new(RecordingEngine::new());
         recorder
             .attach_execution_plan(
                 raiko2_queue::RootOwner::new("mixed-cache-root", uuid::Uuid::new_v4()),
@@ -5609,21 +5844,29 @@ mod tests {
             .expect("attach execution plan");
 
         let proposals = recorder.proposals.lock().expect("proposal submissions");
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(proposals[0].0.proposal_id, 8);
-        assert!(proposals[0].1.is_empty());
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0].0.proposal_id, 7);
+        assert_eq!(proposals[1].0.proposal_id, 8);
+        assert!(
+            proposals
+                .iter()
+                .all(|(_, dependencies)| dependencies.is_empty())
+        );
         drop(proposals);
 
         let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
         assert_eq!(aggregate_inputs.len(), 2);
         assert_eq!(
             aggregate_inputs[0],
-            AggregateProofInput::ProofArtifact(proof_artifact_ref(
-                &submission.pair.key,
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
-                &cached_ref
-            ))
+            AggregateProofInput::PendingProofArtifact {
+                artifact: proof_artifact_ref(
+                    &submission.pair.key,
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    &cached_ref
+                ),
+                dependency: Box::new(plan.proposals[0].task_id.clone()),
+            }
         );
         assert_eq!(
             aggregate_inputs[1],
@@ -5641,7 +5884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_admission_rejects_artifact_invalidated_after_planning() -> Result<()> {
+    async fn aggregate_admission_does_not_depend_on_cached_artifact_lifetime() -> Result<()> {
         let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("cached-admission-race"))?;
         let submission = canonical_multi_submission(route);
@@ -5665,22 +5908,25 @@ mod tests {
         )
         .await?;
         let fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &fingerprint)
-            .await
+        let plan = build_submission_plan(&submission, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
-        let expected = plan
-            .cached_artifact_preconditions
-            .first()
-            .expect("cached descriptor")
-            .clone();
+        let cached = runtime
+            .get_proof_artifact(
+                &submission.pair.key,
+                PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
+                &proof_ref,
+            )
+            .await?
+            .expect("cached artifact registration");
         assert!(matches!(
             runtime
                 .invalidate_proof_artifact_descriptor_if_unowned(
-                    &expected.network_pair,
-                    expected.pipeline_key,
-                    expected.route,
-                    &expected.proof_ref,
-                    &expected.descriptor,
+                    &submission.pair.key,
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    &proof_ref,
+                    &cached.descriptor(),
                 )
                 .await?,
             raiko2_runtime::ProofArtifactInvalidationResult::Invalidated(_)
@@ -5688,26 +5934,19 @@ mod tests {
 
         let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;
-        assert!(
-            runtime
-                .register_task_if_absent_with_artifact_preconditions(
-                    registration,
-                    &plan.cached_artifact_preconditions,
-                )
-                .await
-                .is_err()
-        );
+        runtime.register_task_if_absent(registration).await?;
         assert!(
             runtime
                 .get_task(&submission.public_task_id)
                 .await?
-                .is_none()
+                .is_some()
         );
+        assert_eq!(execution_plan(&plan).proposals.len(), 2);
         Ok(())
     }
 
     #[tokio::test]
-    async fn aggregate_recovery_only_reenqueues_aggregate_from_artifacts() -> Result<()> {
+    async fn aggregate_recovery_preserves_the_original_execution_graph() -> Result<()> {
         let route = native_local_route();
         let runtime = Arc::new(
             RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
@@ -5715,9 +5954,28 @@ mod tests {
         );
         let submission = canonical_multi_submission(route);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
-            .await
-            .expect("submission plan");
+        let plan =
+            build_submission_plan(&submission, &request_fingerprint).expect("submission plan");
+        let mut metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: true,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        metadata.runtime.active_stage = Some("aggregate".to_string());
+        let mut registration =
+            build_batch_task_registration(&submission, &plan, &request_fingerprint)
+                .map_err(|error| anyhow!(error.message))?;
+        registration.metadata = serde_json::to_value(&metadata)?;
+        let record = runtime.register_task(registration).await?;
         for proposal in &plan.proposals {
             write_test_proof_artifact(
                 &runtime,
@@ -5727,38 +5985,24 @@ mod tests {
             )
             .await?;
         }
+        let recovery_plan = build_recovery_plan_from_metadata(&record, &metadata)
+            .map_err(|error| anyhow!(error.message))?;
+        assert_eq!(execution_plan(&recovery_plan), execution_plan(&plan));
 
-        let mut metadata = build_task_metadata(
-            &submission.pair,
-            BuildTaskMetadataParams {
-                network: &submission.pair.network,
-                l1_network: &submission.pair.l1_network,
-                proof_type: submission.route.proof_type(),
-                requested_proof_type: Some(submission.requested_proof_type.as_str()),
-                prover_type: submission.prover_type,
-                execution_mode: submission.execution_mode,
-                aggregate_requested: true,
-            },
-            &plan.proposals,
-            plan.aggregate.as_ref(),
-        );
-        metadata.runtime.active_stage = Some("aggregate".to_string());
-        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        record.task_id.clone_from(&submission.public_task_id);
-        record.pipeline_key = route.pipeline_key();
-        record.route = route.route;
-        record.runner_status = RuntimeRunnerStatus::Allocated;
-
-        let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
+        let recorder = Arc::new(RecordingEngine::new());
         let engine: Arc<dyn EngineHandle> = recorder.clone();
-        runtime.upsert_task(&record).await?;
         let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
-        reenqueue_existing_batch_aggregate_task(&state, &engine, &record, &metadata)
+        reenqueue_existing_batch_task(&state, &record, &metadata)
             .await
-            .expect("aggregate recovery should use persisted proof artifacts");
+            .expect("aggregate recovery should keep its canonical graph");
 
         let proposals = recorder.proposals.lock().expect("proposal submissions");
-        assert!(proposals.is_empty());
+        assert_eq!(proposals.len(), 2);
+        assert!(
+            proposals
+                .iter()
+                .all(|(_, dependencies)| dependencies.is_empty())
+        );
         drop(proposals);
 
         let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
@@ -5766,7 +6010,7 @@ mod tests {
         assert!(aggregate_inputs.iter().all(|input| {
             matches!(
                 input,
-                AggregateProofInput::ProofArtifact(artifact)
+                AggregateProofInput::PendingProofArtifact { artifact, .. }
                     if artifact.proof_ref.starts_with("task_")
             )
         }));
@@ -5774,7 +6018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_recovery_does_not_resubmit_missing_proposal_artifacts() -> Result<()> {
+    async fn aggregate_recovery_reenqueues_missing_proposal_artifacts() -> Result<()> {
         let route = native_local_route();
         let runtime = Arc::new(
             RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-missing"))
@@ -5782,9 +6026,8 @@ mod tests {
         );
         let submission = canonical_multi_submission(route);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
-            .await
-            .expect("submission plan");
+        let plan =
+            build_submission_plan(&submission, &request_fingerprint).expect("submission plan");
         let mut metadata = build_task_metadata(
             &submission.pair,
             BuildTaskMetadataParams {
@@ -5800,32 +6043,38 @@ mod tests {
             plan.aggregate.as_ref(),
         );
         metadata.runtime.active_stage = Some("aggregate".to_string());
-        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        record.task_id.clone_from(&submission.public_task_id);
-        record.pipeline_key = route.pipeline_key();
-        record.route = route.route;
+        let mut registration =
+            build_batch_task_registration(&submission, &plan, &request_fingerprint)
+                .map_err(|error| anyhow!(error.message))?;
+        registration.metadata = serde_json::to_value(&metadata)?;
+        let record = runtime.register_task(registration).await?;
 
-        let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
+        let recorder = Arc::new(RecordingEngine::new());
         let engine: Arc<dyn EngineHandle> = recorder.clone();
         let state = test_state(Arc::clone(&runtime), Arc::clone(&engine));
-        let err = reenqueue_existing_batch_aggregate_task(&state, &engine, &record, &metadata)
+        reenqueue_existing_batch_task(&state, &record, &metadata)
             .await
-            .expect_err("missing proposal artifact should fail aggregate recovery");
+            .expect("missing proposal artifacts should be re-enqueued");
 
-        assert!(
-            err.message.contains("missing completed proposal proof"),
-            "unexpected error: {}",
-            err.message
-        );
         let proposals = recorder.proposals.lock().expect("proposal submissions");
-        assert!(proposals.is_empty());
+        assert_eq!(proposals.len(), 2);
+        assert!(
+            proposals
+                .iter()
+                .all(|(_, dependencies)| dependencies.is_empty())
+        );
         let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
-        assert!(aggregate_inputs.is_empty());
+        assert_eq!(aggregate_inputs.len(), 2);
+        assert!(
+            aggregate_inputs
+                .iter()
+                .all(|input| matches!(input, AggregateProofInput::PendingProofArtifact { .. }))
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn corrupt_proof_artifact_blocks_reproving() -> Result<()> {
+    async fn corrupt_proof_artifact_does_not_change_plan_and_fails_read() -> Result<()> {
         let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("corrupt-cache-plan"))
             .expect("runtime manager");
@@ -5869,14 +6118,25 @@ mod tests {
             .expect("register corrupt artifact");
 
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let Err(error) = build_submission_plan(&runtime, &submission, &request_fingerprint).await
-        else {
-            panic!("corrupt canonical artifact must require explicit invalidation");
+        let plan = build_submission_plan(&submission, &request_fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        assert_eq!(execution_plan(&plan).proposals.len(), 1);
+        let error = match load_proof_artifact_material(
+            &runtime,
+            &submission.pair.key,
+            PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
+            &plan.proposals[0].task_ref,
+        )
+        .await
+        {
+            Ok(_) => panic!("corrupt canonical artifact must fail the cache read"),
+            Err(error) => error,
         };
         assert!(
-            error.message.contains("invalid JSON"),
+            error.to_string().contains("invalid JSON"),
             "unexpected error: {}",
-            error.message
+            error
         );
         Ok(())
     }
@@ -5917,13 +6177,15 @@ mod tests {
         let owner = match runtime
             .register_task_if_absent(TaskRegistration {
                 task_id: "external-aggregate-root".into(),
-                pipeline_key: Some(route.pipeline_key()),
+                pipeline_key: route.pipeline_key(),
                 route: route.route,
                 task_kind: "hoodi_aggregate".into(),
-                proposal_id: None,
-                proof_ids: vec!["aggregate-root".into()],
+                network_pair: "taiko_dev/ethereum".into(),
+                artifact_refs: std::iter::once("aggregate-root".into())
+                    .chain(artifacts.iter().map(|artifact| artifact.proof_ref.clone()))
+                    .collect(),
                 metadata: serde_json::to_value(&metadata)?,
-                request_fingerprint: Some("0xfingerprint".into()),
+                request_fingerprint: "0xfingerprint".into(),
             })
             .await?
         {
@@ -6109,7 +6371,6 @@ mod tests {
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
             PipelineKey::ShastaSp1,
-            ProofType::Sp1,
         );
         let proof = Proof {
             proof: Some("0xproof".to_string()),
@@ -6128,14 +6389,15 @@ mod tests {
             )
             .await?;
 
-        let recovered = load_cached_proposal_artifact_for_route(
+        let recovered = load_proof_artifact_material(
             &runtime,
             "taiko_dev/ethereum",
-            route,
+            route.pipeline_key(),
+            route.route,
             "sp1-network-proposal",
         )
         .await
-        .map_err(|err| anyhow!(err.message))?;
+        .map_err(|err| anyhow!(err.to_string()))?;
 
         assert!(recovered.is_none());
         Ok(())
@@ -6429,67 +6691,5 @@ mod tests {
             "unexpected error: {}",
             err.message
         );
-    }
-
-    #[tokio::test]
-    async fn load_proposal_statuses_tolerates_invalid_legacy_child_id() -> Result<()> {
-        let engine: Arc<dyn EngineHandle> = Arc::new(NoopEngine);
-        let metadata = TaskMetadata {
-            network_pair: "taiko_dev/ethereum".to_string(),
-            network: "taiko_dev".to_string(),
-            l1_network: "ethereum".to_string(),
-            proof_type: ProofType::Sp1,
-            requested_proof_type: None,
-            prover_type: None,
-            execution_mode: None,
-            aggregate_requested: false,
-            proposals: vec![ProposalTask {
-                proposal_id: 42,
-                checkpoint: None,
-                l1_inclusion_block_number: 1,
-                l2_block_numbers: vec![42],
-                last_anchor_block_number: 0,
-                task_id: "legacy-corrupt-id".to_string(),
-                request: None,
-            }],
-            aggregate_task_id: None,
-            aggregate_request: None,
-            aggregate_input_artifacts: Vec::new(),
-            runtime: RuntimeMetadata {
-                active_stage: Some("prove".to_string()),
-                ..RuntimeMetadata::default()
-            },
-        };
-        let record = RuntimeTaskRecord {
-            task_id: "task_public".to_string(),
-            incarnation_id: uuid::Uuid::new_v4(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: "sp1/local".parse().expect("parse route"),
-            task_kind: "hoodi_batch".to_string(),
-            proposal_id: Some(42),
-            network_pair: metadata.network_pair.clone(),
-            artifact_refs: vec!["legacy-corrupt-id".to_string()],
-            proof_ids: vec!["legacy-corrupt-id".to_string()],
-            runner_status: RuntimeRunnerStatus::Allocated,
-            image_ref: None,
-            proof_uri: None,
-            error: None,
-            metadata: serde_json::to_value(&metadata)?,
-            request_fingerprint: None,
-            updated_at: 1,
-        };
-
-        let runtime = RuntimeManager::new(unique_test_runtime_root("legacy-child-id"))
-            .expect("runtime manager");
-        let (proposals, engine_state_present) =
-            load_proposal_statuses(&runtime, &engine, &metadata, &record)
-                .await
-                .expect("legacy child id should not fail task loading");
-
-        assert!(!engine_state_present);
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(proposals[0].task_id, "legacy-corrupt-id");
-        assert!(matches!(proposals[0].status, ProofStatus::Proving));
-        Ok(())
     }
 }

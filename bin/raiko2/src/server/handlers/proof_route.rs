@@ -14,19 +14,13 @@ use crate::server::state::AppState;
 pub(super) struct CanonicalProofRoute {
     pub(super) route: PipelineRoute,
     pipeline_key: PipelineKey,
-    proof_type: ProofType,
 }
 
 impl CanonicalProofRoute {
-    pub(super) const fn new(
-        route: PipelineRoute,
-        pipeline_key: PipelineKey,
-        proof_type: ProofType,
-    ) -> Self {
+    pub(super) const fn new(route: PipelineRoute, pipeline_key: PipelineKey) -> Self {
         Self {
             route,
             pipeline_key,
-            proof_type,
         }
     }
 
@@ -35,7 +29,7 @@ impl CanonicalProofRoute {
     }
 
     pub(super) const fn proof_type(self) -> ProofType {
-        self.proof_type
+        self.pipeline_key.proof_type()
     }
 }
 
@@ -101,22 +95,7 @@ pub(super) fn route_for_proof_type(
             unreachable!("unsupported proof type is filtered before canonical route build")
         }
     };
-    let canonical_proof_type = match proof_type {
-        BatchProofType::Sp1 => ProofType::Sp1,
-        BatchProofType::Risc0 => ProofType::Risc0,
-        BatchProofType::Native => ProofType::Native,
-        BatchProofType::Sgx => ProofType::Sgx,
-        BatchProofType::SgxGeth => ProofType::SgxGeth,
-        BatchProofType::Boundless | BatchProofType::ZkAny => {
-            unreachable!("unsupported proof type is filtered before canonical route build")
-        }
-    };
-
-    Ok(CanonicalProofRoute::new(
-        route,
-        pipeline_key,
-        canonical_proof_type,
-    ))
+    Ok(CanonicalProofRoute::new(route, pipeline_key))
 }
 
 pub(super) fn validate_hosted_proof_type(

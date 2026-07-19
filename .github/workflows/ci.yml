@@ -265,6 +265,11 @@ jobs:
         with:
           shared-key: ci-rust-prover
 
+      # prost-build in the prover dependency tree shells out to protoc, which the hosted
+      # runner image does not ship.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: test prover
         run: cargo test -p raiko2-prover --lib
 

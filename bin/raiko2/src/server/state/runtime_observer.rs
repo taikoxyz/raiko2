@@ -364,6 +364,17 @@ impl RuntimeObserver {
             .next())
     }
 
+    async fn load_root_record_including_completed(
+        &self,
+        id: &EngineTaskId,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        let records = self.find_root_records(id).await?;
+        Ok(self
+            .matching_root_records(id, records, TerminalRootPolicy::IncludeCompleted)?
+            .into_iter()
+            .next())
+    }
+
     fn matching_active_root_records(
         &self,
         id: &EngineTaskId,
@@ -569,7 +580,7 @@ impl RuntimeObserver {
                 .expect("stage task telemetry mutex poisoned");
             started.remove(&self.metric_tracking_key(task_id))
         };
-        match self.load_root_record(id).await {
+        match self.load_root_record_including_completed(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
                 Ok(context) => {
                     telemetry::record_stage_task_terminal(
@@ -4242,6 +4253,68 @@ mod tests {
         assert!(
             !body.contains(
                 "raiko2_stage_tasks_inflight{aggregate=\"false\",pair=\"telemetry_restart/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"preflight\"} -1"
+            ),
+            "{body}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_decrements_inflight_for_completed_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-terminal-metrics",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::Preflight {
+            request: request.clone(),
+        };
+        let network_pair = "terminal_metrics/ethereum";
+        register_observer_task(
+            runtime.as_ref(),
+            "task_terminal_metrics",
+            network_pair,
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            network_pair.to_string(),
+            pipeline.route(),
+        );
+        observer
+            .on_task_started(&proposal_task_id, &task, "worker-a")
+            .await;
+        let mut root = runtime
+            .get_task("task_terminal_metrics")
+            .await?
+            .context("runtime root should exist")?;
+        root.runner_status = RunnerStatus::Completed;
+        runtime.upsert_task(&root).await?;
+
+        observer
+            .observe_stage_terminal_metrics(
+                &proposal_task_id,
+                &RuntimeObserver::timing_key_for_task(&proposal_task_id, &task),
+                "preflight",
+                "completed",
+                now_ms(),
+                None,
+            )
+            .await;
+
+        let (_, body) = telemetry::render().expect("render telemetry");
+        let body = String::from_utf8(body).expect("utf8 telemetry");
+        assert!(
+            body.contains(
+                "raiko2_stage_tasks_inflight{aggregate=\"false\",pair=\"terminal_metrics/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"preflight\"} 0"
             ),
             "{body}"
         );

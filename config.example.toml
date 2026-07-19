@@ -89,6 +89,10 @@ cycle_limit = 1000000000000
 # proposal_cycle_limit = 1000000000000
 # aggregation_cycle_limit = 1000000000000
 timeout_secs = 7200
+# Maximum number of paid network proof requests per prove call. Each retryable
+# terminal state (unfulfillable, timed out, auction timed out) consumes one
+# attempt; exhausting the budget fails the task instead of resubmitting forever.
+max_request_attempts = 3
 # rpc_url = "https://rpc.production.succinct.xyz"
 
 [prover.boundless]

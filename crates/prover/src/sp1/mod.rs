@@ -1691,13 +1691,13 @@ async fn request_network_proof(
                 });
             }
             Sp1NetworkWaitOutcome::RetryRequest(reason) => {
-                tracing::warn!(
+                consume_sp1_submission_budget(
+                    config,
                     stage,
-                    request_id = %request_id_string,
+                    &request_id_string,
                     request_attempt,
-                    reason,
-                    "SP1 network proof request reached a retryable terminal state; submitting a new request"
-                );
+                    &reason,
+                )?;
                 request_attempt = request_attempt.saturating_add(1);
                 tokio::time::sleep(SP1_NETWORK_REQUEST_RETRY_DELAY).await;
             }
@@ -1708,6 +1708,42 @@ async fn request_network_proof(
 enum Sp1NetworkWaitOutcome {
     Fulfilled(Box<SP1ProofWithPublicValues>),
     RetryRequest(String),
+}
+
+/// Charge one paid submission against the configured budget after a retryable
+/// terminal state. Errors instead of allowing another paid request once
+/// `request_attempt` reaches `max_request_attempts`.
+fn consume_sp1_submission_budget(
+    config: &Sp1Config,
+    stage: &str,
+    request_id: &str,
+    request_attempt: u64,
+    reason: &str,
+) -> RaikoResult<()> {
+    if config.resubmission_budget_exhausted(request_attempt) {
+        tracing::error!(
+            stage,
+            request_id,
+            request_attempt,
+            max_request_attempts = config.max_request_attempts,
+            reason,
+            "SP1 network proof request exhausted its submission budget"
+        );
+        return Err(RaikoError::Guest(format!(
+            "SP1 {stage} proof request exhausted its submission budget \
+             after {request_attempt} of {} attempts (last: {reason})",
+            config.max_request_attempts
+        )));
+    }
+    tracing::warn!(
+        stage,
+        request_id,
+        request_attempt,
+        max_request_attempts = config.max_request_attempts,
+        reason,
+        "SP1 network proof request reached a retryable terminal state; submitting a new request"
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

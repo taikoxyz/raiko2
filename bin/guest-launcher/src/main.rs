@@ -318,6 +318,7 @@ impl Args {
             timeout_secs: self.sp1_timeout_secs,
             max_price_per_pgu: None,
             auction_timeout_secs: None,
+            max_request_attempts: Sp1Config::default().max_request_attempts,
             rpc_url: None,
             remote_verify: None,
         };

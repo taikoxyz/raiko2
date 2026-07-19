@@ -20,6 +20,8 @@ pub enum Sp1ConfigError {
     TimeoutSecsMustBePositive,
     MaxPricePerPguMustBePositive,
     AuctionTimeoutSecsMustBePositive,
+    AuctionTimeoutRequiresMainnet,
+    MaxRequestAttemptsMustBePositive,
     RpcUrlMustNotBeEmpty,
     RpcUrlInvalid(String),
     RemoteVerifyRpcUrlMustNotBeEmpty,
@@ -58,6 +60,12 @@ impl std::fmt::Display for Sp1ConfigError {
             }
             Self::AuctionTimeoutSecsMustBePositive => {
                 f.write_str("sp1.auction_timeout_secs must be greater than 0")
+            }
+            Self::AuctionTimeoutRequiresMainnet => f.write_str(
+                "sp1.auction_timeout_secs is only supported with sp1.network_mode=mainnet",
+            ),
+            Self::MaxRequestAttemptsMustBePositive => {
+                f.write_str("sp1.max_request_attempts must be greater than 0")
             }
             Self::RpcUrlMustNotBeEmpty => f.write_str("sp1.rpc_url must not be empty"),
             Self::RpcUrlInvalid(url) => write!(f, "sp1.rpc_url is invalid: {url}"),
@@ -134,8 +142,15 @@ pub struct Sp1Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_price_per_pgu: Option<u64>,
     /// Optional assignment wait timeout before retrying an SP1 network proof request.
+    /// Only supported with `network_mode = "mainnet"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auction_timeout_secs: Option<u64>,
+    /// Maximum number of paid network proof requests per prove call before giving up.
+    /// Each retryable terminal state (unfulfillable, timed out, auction timed out)
+    /// consumes one attempt; exhausting the budget fails the task instead of
+    /// submitting another paid request.
+    #[serde(default = "default_max_request_attempts")]
+    pub max_request_attempts: u64,
     /// Optional override for the Succinct network RPC URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
@@ -160,6 +175,10 @@ const fn default_timeout_secs() -> u64 {
     7_200
 }
 
+const fn default_max_request_attempts() -> u64 {
+    3
+}
+
 impl Default for Sp1Config {
     fn default() -> Self {
         Self {
@@ -176,6 +195,7 @@ impl Default for Sp1Config {
             timeout_secs: default_timeout_secs(),
             max_price_per_pgu: None,
             auction_timeout_secs: None,
+            max_request_attempts: default_max_request_attempts(),
             rpc_url: None,
             remote_verify: None,
         }
@@ -243,6 +263,7 @@ impl Sp1Config {
             timeout_secs: overrides.timeout_secs.unwrap_or(self.timeout_secs),
             max_price_per_pgu: overrides.max_price_per_pgu.or(self.max_price_per_pgu),
             auction_timeout_secs: overrides.auction_timeout_secs.or(self.auction_timeout_secs),
+            max_request_attempts: self.max_request_attempts,
             rpc_url: self.rpc_url.clone(),
             remote_verify: self.remote_verify.clone(),
         }
@@ -313,6 +334,12 @@ impl Sp1Config {
         if self.auction_timeout_secs == Some(0) {
             return Err(Sp1ConfigError::AuctionTimeoutSecsMustBePositive);
         }
+        if self.auction_timeout_secs.is_some() && self.network_mode != Sp1NetworkMode::Mainnet {
+            return Err(Sp1ConfigError::AuctionTimeoutRequiresMainnet);
+        }
+        if self.max_request_attempts == 0 {
+            return Err(Sp1ConfigError::MaxRequestAttemptsMustBePositive);
+        }
         if self
             .rpc_url
             .as_deref()
@@ -360,6 +387,13 @@ impl Sp1Config {
         }
 
         Ok(())
+    }
+
+    /// Whether the submission that was just waited on (`request_attempt`, 1-based)
+    /// used up the last allowed paid network request.
+    #[must_use]
+    pub const fn resubmission_budget_exhausted(&self, request_attempt: u64) -> bool {
+        request_attempt >= self.max_request_attempts
     }
 
     const fn cycle_limit_for_context(&self, context: Sp1RequestContext) -> u64 {
@@ -606,5 +640,64 @@ mod tests {
         };
 
         assert!(overrides.has_network_overrides());
+    }
+
+    #[test]
+    fn sp1_default_bounds_network_request_attempts() {
+        let config = Sp1Config::default();
+
+        assert_eq!(config.max_request_attempts, 3);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn sp1_zero_max_request_attempts_rejected() {
+        let config = Sp1Config {
+            max_request_attempts: 0,
+            ..Sp1Config::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("zero submission budget should be rejected");
+        assert_eq!(err, Sp1ConfigError::MaxRequestAttemptsMustBePositive);
+    }
+
+    #[test]
+    fn sp1_reserved_mode_rejects_auction_timeout() {
+        let config = Sp1Config {
+            auction_timeout_secs: Some(300),
+            ..Sp1Config::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("auction timeout should require mainnet network mode");
+        assert_eq!(err, Sp1ConfigError::AuctionTimeoutRequiresMainnet);
+    }
+
+    #[test]
+    fn sp1_mainnet_accepts_auction_timeout() {
+        let config = Sp1Config {
+            network_mode: Sp1NetworkMode::Mainnet,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Auction,
+            auction_timeout_secs: Some(300),
+            ..Sp1Config::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn sp1_submission_budget_exhaustion_boundary() {
+        let config = Sp1Config {
+            max_request_attempts: 3,
+            ..Sp1Config::default()
+        };
+
+        assert!(!config.resubmission_budget_exhausted(1));
+        assert!(!config.resubmission_budget_exhausted(2));
+        assert!(config.resubmission_budget_exhausted(3));
+        assert!(config.resubmission_budget_exhausted(4));
     }
 }

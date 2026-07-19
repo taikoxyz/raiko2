@@ -597,7 +597,7 @@ async fn remove_invalidated_tasks(
             .remove(&record, raiko2_queue::DetachMode::Remove)
             .await
         {
-            Ok((RuntimeMutationOutcome::Applied, _)) => {}
+            Ok((RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::Missing, _)) => {}
             Ok((outcome, _)) => {
                 data.tasks.failed = data.tasks.failed.saturating_add(1);
                 tracing::warn!(
@@ -2106,6 +2106,85 @@ mod tests {
             .expect("current task");
         assert_eq!(current.incarnation_id, stale.incarnation_id);
         assert_eq!(current.runner_status, RuntimeTaskRunnerStatus::Allocated);
+    }
+
+    #[tokio::test]
+    async fn remove_invalidated_tasks_accepts_concurrent_removal() {
+        let engine: Arc<dyn EngineHandle> = Arc::new(TestRemoveEngine { fail_remove: false });
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_dev/taiko_dev_l1",
+            PipelineKey::ShastaSp1,
+            Arc::clone(&engine),
+        );
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-concurrent-removal"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        );
+        let metadata = task_log_metadata(&[57], false);
+        let mut record = runtime
+            .register_task(TaskRegistration {
+                task_id: "task_removed_before_invalidation".to_string(),
+                pipeline_key: PipelineKey::ShastaSp1,
+                route: PipelineKey::ShastaSp1.route(),
+                task_kind: "hoodi_proposal".to_string(),
+                network_pair: metadata.network_pair.clone(),
+                artifact_refs: publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1),
+                metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+                request_fingerprint: "task-removed-before-invalidation".into(),
+            })
+            .await
+            .expect("register runtime task");
+        record.runner_status = RuntimeTaskRunnerStatus::Completed;
+        runtime
+            .upsert_task(&record)
+            .await
+            .expect("complete runtime task");
+
+        assert_eq!(
+            state
+                .lifecycle
+                .remove(&record, raiko2_queue::DetachMode::Remove)
+                .await
+                .expect("concurrent removal")
+                .0,
+            RuntimeMutationOutcome::Applied
+        );
+
+        let artifact_refs = invalidation_artifact_refs(
+            &record.network_pair,
+            &metadata,
+            record.pipeline_key,
+            record.route,
+            None,
+        );
+        let root_artifact_refs = root_invalidation_artifact_refs(
+            &record.network_pair,
+            &metadata,
+            record.pipeline_key,
+            record.route,
+        );
+        let mut data = wire::InvalidateArtifactsData::default();
+        let blocked_refs = remove_invalidated_tasks(
+            &state,
+            vec![MatchedInvalidationTask {
+                record,
+                metadata,
+                artifact_refs,
+                root_artifact_refs,
+            }],
+            &mut data,
+        )
+        .await;
+
+        assert_eq!(data.tasks.failed, 0);
+        assert_eq!(data.tasks.removed, 1);
+        assert!(blocked_refs.is_empty());
     }
 
     #[tokio::test]

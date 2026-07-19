@@ -1095,10 +1095,12 @@ Returns the root-task view derived from the original batch request.
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
-- Terminal root tasks and remote inputs use a seven-day retention policy. Active manifests must not
-  have a bucket age rule, and immutable proof or program content must remain available until every
-  manifest that references it is gone. Generation-scoped tombstones and unreferenced content use a
-  minimum thirty-day retention window. Active root tasks are never removed by runtime cleanup.
+- Terminal root task records use a seven-day retention policy. Artifact manifests, including
+  external aggregation inputs, remain governed by explicit activation and invalidation rather than
+  root-record age. Active manifests must not have a bucket age rule, and immutable proof or program
+  content must remain available until every manifest that references it is gone. Generation-scoped
+  tombstones and unreferenced content use a minimum thirty-day retention window. Active root tasks
+  are never removed by runtime cleanup.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 

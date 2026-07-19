@@ -351,7 +351,6 @@ mod tests {
     use anyhow::{Context, Result};
     use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::PipelineKey;
-    use raiko2_primitives::ProofType;
     use raiko2_queue::{RootOwner, TaskStoreError, decode_task_id, encode_task_id};
     use raiko2_runtime::{
         ProofArtifactRegistration, RunnerStatus, RuntimeManager, TaskRegistration,
@@ -380,7 +379,8 @@ mod tests {
     async fn runtime_cleanup_cancels_orphaned_roots_without_remote_progress() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned"))?);
         let orphaned_task_id = encoded_proposal_task_id(10)?;
-        let remote_task_id = encoded_proposal_task_id(11)?;
+        let remote_task_id =
+            encoded_proposal_task_id_for_pipeline(11, PipelineKey::ShastaRisc0Network)?;
         let queued_task_id = encoded_proposal_task_id(13)?;
         let now = now_ts();
         let stale = now.saturating_sub(7_201);
@@ -415,6 +415,17 @@ mod tests {
             remote_metadata.proposals[0].task_id.clone(),
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xremote".to_string()),
+                image_ref: Some("0ximage".to_string()),
+                deployment: Some("base".to_string()),
+                offchain: Some(false),
+                expires_at: Some(1_000),
+                lock_expires_at: Some(900),
+                submitted_at: Some(800),
+                quoted_mcycles_count: Some(1),
+                evaluated_mcycles_count: Some(1),
+                max_price_multiplier: Some(1),
+                max_price_wei: Some("1000".to_string()),
+                rebid_attempt: Some(1),
                 ..TaskRuntimeMetadata::default()
             },
         );
@@ -422,6 +433,7 @@ mod tests {
             runtime.as_ref(),
             "remote-root",
             &remote_metadata,
+            PipelineKey::ShastaRisc0Network,
             RunnerStatus::Running,
             stale,
         )
@@ -731,7 +743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cleanup_retains_root_when_projection_detach_fails() -> Result<()> {
+    async fn runtime_cleanup_retries_a_durable_retirement_after_projection_failure() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("ttl-failure"))?);
         let engine = Arc::new(MockEngine::with_failing_owners(HashSet::from([
             "expired-root".to_string(),
@@ -770,7 +782,45 @@ mod tests {
                 orphaned_cancelled: 0,
             }
         );
-        assert!(runtime.get_task("expired-root").await?.is_some());
+        let retired = runtime
+            .get_task("expired-root")
+            .await?
+            .expect("retired root remains recoverable");
+        assert_eq!(retired.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(retired.updated_at, 1);
+
+        let healthy_factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        let empty_page = run_runtime_cleanup_pass(
+            runtime.clone(),
+            healthy_factory.clone(),
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+        assert_eq!(empty_page, RuntimeCleanupStats::default());
+        assert!(terminal_cursor.is_none());
+
+        let retry = run_runtime_cleanup_pass(
+            runtime.clone(),
+            healthy_factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+        assert_eq!(
+            retry,
+            RuntimeCleanupStats {
+                scanned: 1,
+                expired: 1,
+                removed_roots: 1,
+                skipped_shared_children: 0,
+                retained_failures: 0,
+                orphaned_cancelled: 0,
+            }
+        );
+        assert!(runtime.get_task("expired-root").await?.is_none());
         Ok(())
     }
 
@@ -970,15 +1020,16 @@ mod tests {
         runtime: &RuntimeManager,
         task_id: &str,
         metadata: &TaskMetadata,
+        pipeline_key: PipelineKey,
         status: RunnerStatus,
         updated_at: i64,
     ) -> Result<()> {
-        let artifact_refs = publication_proof_artifact_refs(metadata, PipelineKey::ShastaRisc0);
+        let artifact_refs = publication_proof_artifact_refs(metadata, pipeline_key);
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
-                pipeline_key: PipelineKey::ShastaRisc0,
-                route: "risc0/local".parse().expect("parse route"),
+                pipeline_key,
+                route: pipeline_key.route(),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: metadata.network_pair.clone(),
                 artifact_refs,
@@ -998,17 +1049,17 @@ mod tests {
     }
 
     fn metadata_for_task_with_pair(proposal_task_id: &str, network_pair: &str) -> TaskMetadata {
-        let request = match decode_task_id::<EngineTaskKey>(proposal_task_id)
+        let (pipeline_key, request) = match decode_task_id::<EngineTaskKey>(proposal_task_id)
             .expect("decode proposal task id")
             .0
         {
-            EngineTaskKey::Proposal { request, .. } => request,
+            EngineTaskKey::Proposal { pipeline, request } => (pipeline, request),
             EngineTaskKey::Aggregate { .. } => unreachable!("expected proposal task id"),
         };
         let (network, l1_network) = network_pair
             .split_once('/')
             .unwrap_or((network_pair, "ethereum"));
-        let task_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &request);
+        let task_ref = proposal_task_ref(pipeline_key, &request);
         let l2_block_numbers = request
             .l2_block_range
             .map(|range| (range.start..=range.end).collect())
@@ -1017,7 +1068,7 @@ mod tests {
             network_pair: network_pair.to_string(),
             network: network.to_string(),
             l1_network: l1_network.to_string(),
-            proof_type: ProofType::Risc0,
+            proof_type: pipeline_key.proof_type(),
             requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
@@ -1039,6 +1090,13 @@ mod tests {
     }
 
     fn encoded_proposal_task_id(proposal_id: u64) -> Result<String> {
+        encoded_proposal_task_id_for_pipeline(proposal_id, PipelineKey::ShastaRisc0)
+    }
+
+    fn encoded_proposal_task_id_for_pipeline(
+        proposal_id: u64,
+        pipeline_key: PipelineKey,
+    ) -> Result<String> {
         let request = ProposalTaskRequest {
             proposal_id,
             l2_block_range: Some(raiko2_primitives::L2BlockRange {
@@ -1053,7 +1111,7 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let task_id = proposal_task_id(PipelineKey::ShastaRisc0, request);
+        let task_id = proposal_task_id(pipeline_key, request);
         encode_task_id(&task_id).context("encode proposal task id")
     }
 

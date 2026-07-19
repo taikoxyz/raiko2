@@ -1460,7 +1460,9 @@ impl RuntimeManager {
             task.runner_status = RunnerStatus::Cancelled;
             task.error.clone_from(&error);
             task.proof_uri = None;
-            task.updated_at = now_ts();
+            // Retirement is cleanup admission for an already-observed snapshot, not a new
+            // retention event. Preserve the terminal timestamp so a failed queue detach remains
+            // eligible for the next cleanup scan instead of being retained for another full TTL.
             Ok(RuntimeMutationOutcome::Applied)
         })
         .await
@@ -1829,12 +1831,19 @@ impl RuntimeManager {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        artifacts.sort_by_key(|record| {
-            (
-                record.updated_at,
-                record.network_pair.clone(),
-                record.proof_ref.clone(),
-            )
+        artifacts.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.network_pair.cmp(&right.network_pair))
+                .then_with(|| left.pipeline_key.as_str().cmp(right.pipeline_key.as_str()))
+                .then_with(|| {
+                    left.route
+                        .guest_system
+                        .as_str()
+                        .cmp(right.route.guest_system.as_str())
+                })
+                .then_with(|| left.route.runner.as_str().cmp(right.route.runner.as_str()))
+                .then_with(|| left.proof_ref.cmp(&right.proof_ref))
         });
         Ok(artifacts)
     }

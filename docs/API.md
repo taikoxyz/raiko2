@@ -1174,6 +1174,15 @@ All API errors use the Hoodi-style envelope:
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
+- `prover.sp1.max_request_attempts` defaults to `3` and caps paid SP1 network submissions for each
+  proposal or aggregation stage. Terminal network statuses consume an attempt before resubmission.
+  The current attempt is persisted with the provider request ID, so process restarts and queue
+  retries resume the same budget instead of resetting it. This is an operator-only limit and cannot
+  be changed through request-scoped `prover_args.sp1` overrides.
+- `prover.sp1.auction_timeout_secs` is valid only with `network_mode = "mainnet"`. When a
+  request-scoped override switches a globally configured mainnet prover to
+  `network_mode = "reserved"`, the inherited auction timeout is cleared automatically; explicitly
+  supplying an auction timeout for a reserved request remains invalid.
 - `rpc.client.timeout_ms` defaults to `600000` to tolerate slow preflight witness and
   `eth_getProof` RPC calls. It controls provider RPC calls, not remote prover request deadlines.
 - `preflight.verify_checkpoint_l2_rpcs` is an optional map from `rpc.pairs[*].network` to a
@@ -1198,7 +1207,8 @@ All API errors use the Hoodi-style envelope:
   proving. This verifier is separate from the Taiko Shasta verifier address in the chain spec.
 - Queue tasks use a renewable lease for worker ownership but no global wall-clock timeout. RISC0
   network routes own retry/rebid behavior in the Boundless prover. SP1 network routes retry failed
-  root tasks up to twenty times with a fixed five-minute delay.
+  root tasks up to twenty times with a fixed five-minute delay, while reusing the persisted SP1
+  request-attempt budget across those retries.
 - Boundless storage upload is environment-driven. Set `BOUNDLESS_STORAGE_UPLOADER=gcs`,
   `GCS_BUCKET=<your-gcs-bucket>`, and
   `GCS_PUBLIC_URL=false` to use a private GCS bucket. The GCP

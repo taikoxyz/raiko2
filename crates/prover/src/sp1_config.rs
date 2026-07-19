@@ -179,6 +179,10 @@ const fn default_max_request_attempts() -> u64 {
     3
 }
 
+const fn default_request_attempt() -> u64 {
+    1
+}
+
 impl Default for Sp1Config {
     fn default() -> Self {
         Self {
@@ -280,6 +284,11 @@ impl Sp1Config {
         let empty_overrides = Sp1ConfigOverrides::default();
         let overrides = overrides.unwrap_or(&empty_overrides);
         let mut effective_config = self.merged_with(overrides);
+        if overrides.network_mode == Some(Sp1NetworkMode::Reserved)
+            && overrides.auction_timeout_secs.is_none()
+        {
+            effective_config.auction_timeout_secs = None;
+        }
         if overrides.cycle_limit.is_none() {
             effective_config.cycle_limit = effective_config.cycle_limit_for_context(context);
         }
@@ -539,6 +548,9 @@ impl std::fmt::Display for Sp1FulfillmentStrategy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sp1NetworkSubmissionProgress {
     pub provider_request_id: String,
+    /// One-based paid request attempt that produced `provider_request_id`.
+    #[serde(default = "default_request_attempt")]
+    pub request_attempt: u64,
     pub network_mode: Sp1NetworkMode,
     pub fulfillment_strategy: Sp1FulfillmentStrategy,
     pub skip_simulation: bool,
@@ -546,6 +558,14 @@ pub struct Sp1NetworkSubmissionProgress {
     pub timeout_secs: u64,
     pub max_price_per_pgu: Option<u64>,
     pub auction_timeout_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Sp1NetworkSubmissionResume {
+    pub provider_request_id: String,
+    /// One-based paid request attempt. Legacy records without this field resume at attempt one.
+    #[serde(default = "default_request_attempt")]
+    pub request_attempt: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -580,7 +600,7 @@ impl Sp1NetworkMetadata {
 mod tests {
     use super::{
         ExecutionMode, ProverMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
-        Sp1FulfillmentStrategy, Sp1NetworkMode,
+        Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionResume, Sp1RequestContext,
     };
 
     #[test]
@@ -686,6 +706,41 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn sp1_reserved_override_clears_inherited_auction_timeout() {
+        let base = Sp1Config {
+            network_mode: Sp1NetworkMode::Mainnet,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Auction,
+            auction_timeout_secs: Some(300),
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            network_mode: Some(Sp1NetworkMode::Reserved),
+            fulfillment_strategy: Some(Sp1FulfillmentStrategy::Reserved),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let effective = base
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect("reserved override should discard a mainnet-only timeout");
+
+        assert_eq!(effective.network_mode, Sp1NetworkMode::Reserved);
+        assert_eq!(effective.auction_timeout_secs, None);
+    }
+
+    #[test]
+    fn sp1_legacy_submission_resume_defaults_to_first_attempt() {
+        let resume: Sp1NetworkSubmissionResume = serde_json::from_value(serde_json::json!({
+            "provider_request_id": "0x1234"
+        }))
+        .expect("legacy submission metadata should deserialize");
+
+        assert_eq!(resume.request_attempt, 1);
     }
 
     #[test]

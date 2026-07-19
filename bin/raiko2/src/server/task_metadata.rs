@@ -154,6 +154,8 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) sp1_max_price_per_pgu: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_auction_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_request_attempt: Option<u64>,
 }
 
 impl TaskMetadata {
@@ -563,6 +565,7 @@ impl TaskRuntimeMetadata {
         self.sp1_timeout_secs = Some(progress.timeout_secs);
         self.sp1_max_price_per_pgu = progress.max_price_per_pgu;
         self.sp1_auction_timeout_secs = progress.auction_timeout_secs;
+        self.sp1_request_attempt = Some(progress.request_attempt.max(1));
     }
 }
 

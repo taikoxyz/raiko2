@@ -28,7 +28,10 @@ use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
-use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver};
+use raiko2_prover::{
+    BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver,
+    Sp1NetworkSubmissionResume,
+};
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
@@ -99,6 +102,19 @@ pub trait EngineObserver: Send + Sync {
         None
     }
 
+    async fn load_sp1_network_submission(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Option<Sp1NetworkSubmissionResume> {
+        self.load_sp1_network_request_id(id, task)
+            .await
+            .map(|provider_request_id| Sp1NetworkSubmissionResume {
+                provider_request_id,
+                request_attempt: 1,
+            })
+    }
+
     async fn load_boundless_submission(
         &self,
         _id: &EngineTaskId,
@@ -163,6 +179,12 @@ impl ProverProgressObserver for EngineProgressObserver {
     async fn load_sp1_network_request_id(&self) -> Option<String> {
         self.observer
             .load_sp1_network_request_id(&self.task_id, &self.task)
+            .await
+    }
+
+    async fn load_sp1_network_submission(&self) -> Option<Sp1NetworkSubmissionResume> {
+        self.observer
+            .load_sp1_network_submission(&self.task_id, &self.task)
             .await
     }
 

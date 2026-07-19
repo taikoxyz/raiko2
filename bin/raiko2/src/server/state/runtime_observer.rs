@@ -4,7 +4,7 @@ use raiko2_engine::{
     EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
     tasks::EngineTask,
 };
-use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
+use raiko2_prover::{BoundlessSubmissionResume, ProverProgress, Sp1NetworkSubmissionResume};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
@@ -802,6 +802,16 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
     ) -> Option<String> {
+        self.load_sp1_network_submission(id, task)
+            .await
+            .map(|resume| resume.provider_request_id)
+    }
+
+    async fn load_sp1_network_submission(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Option<Sp1NetworkSubmissionResume> {
         let record = match task {
             EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
                 .load_root_record_for_resume(id, task)
@@ -816,21 +826,25 @@ impl EngineObserver for RuntimeObserver {
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
         let task_id = Self::root_task_ref(id);
-        match task {
+        let runtime = match task {
             EngineTask::ProveProposal { .. } => metadata
                 .proposal_runtime(&task_id)
-                .and_then(|runtime| runtime.provider_request_id.clone()),
+                .filter(|runtime| runtime.provider_request_id.is_some()),
             // Proposal and aggregation must keep distinct SP1 network requests. Reusing the
             // root-level request id causes aggregate=true flows to resume the proposal request
             // instead of creating a new aggregation request.
             EngineTask::Aggregate { .. } => metadata
                 .aggregate_runtime()
-                .and_then(|runtime| runtime.provider_request_id.clone()),
+                .filter(|runtime| runtime.provider_request_id.is_some()),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-        }
+        }?;
+        Some(Sp1NetworkSubmissionResume {
+            provider_request_id: runtime.provider_request_id.clone()?,
+            request_attempt: runtime.sp1_request_attempt.unwrap_or(1).max(1),
+        })
     }
 
     async fn load_boundless_submission(
@@ -1666,6 +1680,7 @@ mod tests {
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                     provider_request_id: "0xsp1".to_string(),
+                    request_attempt: 3,
                     network_mode: Sp1NetworkMode::Reserved,
                     fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                     skip_simulation: true,
@@ -1699,25 +1714,25 @@ mod tests {
         assert_eq!(runtime_entry.sp1_timeout_secs, Some(3_600));
         assert_eq!(runtime_entry.sp1_max_price_per_pgu, Some(42));
         assert_eq!(runtime_entry.sp1_auction_timeout_secs, Some(120));
+        assert_eq!(runtime_entry.sp1_request_attempt, Some(3));
         let mut record = runtime
             .get_task("task_public_sp1")
             .await?
             .expect("runtime task exists");
         record.runner_status = RunnerStatus::Failed;
         runtime.upsert_task(&record).await?;
-        assert_eq!(
-            observer
-                .load_sp1_network_request_id(
-                    &proposal_task_id,
-                    &EngineTask::ProveProposal {
-                        request: proposal_request(),
-                        input_task: proposal_task_id.clone(),
-                    },
-                )
-                .await
-                .as_deref(),
-            Some("0xsp1")
-        );
+        let resume = observer
+            .load_sp1_network_submission(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+            )
+            .await
+            .expect("SP1 submission should be resumable");
+        assert_eq!(resume.provider_request_id, "0xsp1");
+        assert_eq!(resume.request_attempt, 3);
         Ok(())
     }
 
@@ -1797,6 +1812,7 @@ mod tests {
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                     provider_request_id: "0xsp1-proposal".to_string(),
+                    request_attempt: 1,
                     network_mode: Sp1NetworkMode::Reserved,
                     fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                     skip_simulation: true,
@@ -1833,6 +1849,33 @@ mod tests {
                 .await,
             None
         );
+
+        let mut record = runtime
+            .get_task("task_public_sp1_load")
+            .await?
+            .expect("runtime task exists");
+        let mut metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
+        metadata
+            .runtime
+            .proposals
+            .get_mut(&task_ref)
+            .expect("proposal runtime exists")
+            .sp1_request_attempt = None;
+        record.metadata = serde_json::to_value(metadata)?;
+        runtime.upsert_task(&record).await?;
+
+        let legacy_resume = observer
+            .load_sp1_network_submission(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+            )
+            .await
+            .expect("legacy SP1 submission should remain resumable");
+        assert_eq!(legacy_resume.provider_request_id, "0xsp1-proposal");
+        assert_eq!(legacy_resume.request_attempt, 1);
         Ok(())
     }
 
@@ -1909,6 +1952,7 @@ mod tests {
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                     provider_request_id: "0xsp1-aggregate".to_string(),
+                    request_attempt: 1,
                     network_mode: Sp1NetworkMode::Reserved,
                     fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
                     skip_simulation: true,

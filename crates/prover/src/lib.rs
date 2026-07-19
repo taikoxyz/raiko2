@@ -42,6 +42,7 @@ pub mod sp1;
 pub mod sp1_config;
 pub use sp1_config::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
+    Sp1NetworkSubmissionResume,
 };
 
 #[cfg(any(feature = "risc0", feature = "boundless"))]
@@ -136,6 +137,15 @@ pub trait ProverProgressObserver: Send + Sync {
 
     async fn load_sp1_network_request_id(&self) -> Option<String> {
         None
+    }
+
+    async fn load_sp1_network_submission(&self) -> Option<Sp1NetworkSubmissionResume> {
+        self.load_sp1_network_request_id()
+            .await
+            .map(|provider_request_id| Sp1NetworkSubmissionResume {
+                provider_request_id,
+                request_attempt: 1,
+            })
     }
 
     async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {

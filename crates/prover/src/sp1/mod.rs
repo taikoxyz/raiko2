@@ -8,7 +8,7 @@ mod types;
 pub use crate::sp1_config::{
     ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
-    Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
+    Sp1NetworkSubmissionResume, Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
 };
 pub use types::{Sp1ExecutionMetadata, Sp1Response};
 
@@ -1561,10 +1561,12 @@ const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
 
 const fn sp1_network_submission_progress(
     provider_request_id: String,
+    request_attempt: u64,
     config: &Sp1Config,
 ) -> Sp1NetworkSubmissionProgress {
     Sp1NetworkSubmissionProgress {
         provider_request_id,
+        request_attempt,
         network_mode: config.network_mode,
         fulfillment_strategy: config.fulfillment_strategy,
         skip_simulation: config.skip_simulation,
@@ -1578,15 +1580,62 @@ const fn sp1_network_submission_progress(
 async fn notify_sp1_network_submission(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     provider_request_id: String,
+    request_attempt: u64,
     config: &Sp1Config,
 ) {
     if let Some(observer) = observer {
         observer
             .on_progress(&ProverProgress::Sp1NetworkSubmission(
-                sp1_network_submission_progress(provider_request_id, config),
+                sp1_network_submission_progress(provider_request_id, request_attempt, config),
             ))
             .await;
     }
+}
+
+async fn record_resumed_sp1_network_request(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    provider_request_id: String,
+    request_attempt: u64,
+    config: &Sp1Config,
+    stage: &str,
+) -> String {
+    notify_sp1_network_submission(
+        observer,
+        provider_request_id.clone(),
+        request_attempt,
+        config,
+    )
+    .await;
+    tracing::info!(
+        stage,
+        request_id = %provider_request_id,
+        timeout_secs = config.timeout_secs,
+        "Resuming SP1 network proof wait"
+    );
+    provider_request_id
+}
+
+fn sp1_network_resume_state(
+    stored_submission: Option<Sp1NetworkSubmissionResume>,
+) -> (Option<String>, u64) {
+    stored_submission.map_or_else(
+        || (None, 1),
+        |Sp1NetworkSubmissionResume {
+             provider_request_id,
+             request_attempt,
+         }| { (Some(provider_request_id), request_attempt.max(1)) },
+    )
+}
+
+async fn load_sp1_network_resume(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+) -> (Option<String>, u64) {
+    let stored_submission = if let Some(observer) = observer {
+        observer.load_sp1_network_submission().await
+    } else {
+        None
+    };
+    sp1_network_resume_state(stored_submission)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1605,25 +1654,19 @@ async fn request_network_proof(
     let auction_timeout = (config.network_mode == Sp1NetworkMode::Mainnet)
         .then(|| config.auction_timeout_secs.map(Duration::from_secs))
         .flatten();
-    let mut stored_request_id = if let Some(observer) = observer.as_ref() {
-        observer.load_sp1_network_request_id().await
-    } else {
-        None
-    };
-    let mut request_attempt = 1_u64;
+    let (mut stored_request_id, mut request_attempt) =
+        load_sp1_network_resume(observer.as_ref()).await;
 
     loop {
         let request_id_string = if let Some(request_id_string) = stored_request_id.take() {
-            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
-                .await;
-
-            tracing::info!(
+            record_resumed_sp1_network_request(
+                observer.as_ref(),
+                request_id_string,
+                request_attempt,
+                config,
                 stage,
-                request_id = %request_id_string,
-                timeout_secs = config.timeout_secs,
-                "Resuming SP1 network proof wait"
-            );
-            request_id_string
+            )
+            .await
         } else {
             tracing::info!(
                 stage,
@@ -1656,8 +1699,13 @@ async fn request_network_proof(
             })?;
 
             let request_id_string = request_id.to_string();
-            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
-                .await;
+            notify_sp1_network_submission(
+                observer.as_ref(),
+                request_id_string.clone(),
+                request_attempt,
+                config,
+            )
+            .await;
 
             tracing::info!(
                 stage,
@@ -1903,7 +1951,7 @@ mod tests {
         decode_execution_status, decode_fulfillment_status, default_sp1_network_rpc_url,
         encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
         remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
-        sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
+        sp1_network_resume_state, sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -2017,6 +2065,18 @@ mod tests {
             sp1_sdk_network_mode(super::Sp1NetworkMode::Reserved),
             Sp1SdkNetworkMode::Reserved
         );
+    }
+
+    #[test]
+    fn sp1_network_resume_restores_persisted_request_attempt() {
+        let (stored_request_id, request_attempt) =
+            sp1_network_resume_state(Some(super::Sp1NetworkSubmissionResume {
+                provider_request_id: "0x1234".to_string(),
+                request_attempt: 3,
+            }));
+
+        assert_eq!(stored_request_id.as_deref(), Some("0x1234"));
+        assert_eq!(request_attempt, 3);
     }
 
     #[test]

@@ -85,7 +85,13 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 #[allow(clippy::missing_const_for_fn)]
 #[cfg(feature = "host")]
 pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
-    scheduler_config(config)
+    SchedulerConfig {
+        lease_duration: task_lease_duration(config),
+        retry: RetryPolicy::Fixed {
+            max_attempts: 21,
+            delay: Duration::from_secs(5 * 60),
+        },
+    }
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -256,9 +262,15 @@ mod tests {
 
     #[cfg(feature = "local-provers")]
     #[test]
-    fn sp1_scheduler_disables_queue_retry() {
+    fn sp1_scheduler_retries_pre_checkpoint_failures() {
         let scheduler = sp1_scheduler_config(&Config::default());
-        assert_eq!(scheduler.retry, RetryPolicy::None);
+        assert_eq!(
+            scheduler.retry,
+            RetryPolicy::Fixed {
+                max_attempts: 21,
+                delay: Duration::from_secs(5 * 60),
+            }
+        );
     }
 
     #[test]

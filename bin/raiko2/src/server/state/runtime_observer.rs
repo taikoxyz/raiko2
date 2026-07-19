@@ -18,6 +18,7 @@ use raiko2_runtime::{
     ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1538,8 +1539,6 @@ impl EngineObserver for RuntimeObserver {
     ) -> std::result::Result<(), EngineObserverError> {
         let execution_owners = Self::execution_owners(execution_permit)?.clone();
         let stage = Self::stage_name(task);
-        self.record_external_submission_metrics(id, stage, progress)
-            .await;
         let runtime_permit = permit
             .guard::<raiko2_runtime::RuntimeSubmissionCheckpointPermit>()
             .ok_or_else(|| {
@@ -1563,6 +1562,7 @@ impl EngineObserver for RuntimeObserver {
                 Self::root_task_ref(id)
             )));
         }
+        let new_submission = AtomicBool::new(false);
         let result = self
             .checkpoint_retry_root_records(
                 id,
@@ -1571,16 +1571,13 @@ impl EngineObserver for RuntimeObserver {
                 |record, updated_at, _observed_at_ms| {
                     let task_id = Self::root_task_ref(id);
                     update_task_metadata(record, |metadata| {
-                        match progress {
+                        let applied_new_submission = match progress {
                             ProverProgress::BoundlessSubmission(submission) => {
                                 match task.publication_source() {
                                     EngineTask::ProveProposal { .. } => metadata
-                                        .upsert_proposal_runtime(
-                                            &task_id, submission, updated_at,
-                                        )?,
+                                        .upsert_proposal_runtime(&task_id, submission, updated_at),
                                     EngineTask::Aggregate { .. } => {
-                                        metadata
-                                            .upsert_aggregate_runtime(submission, updated_at)?;
+                                        metadata.upsert_aggregate_runtime(submission, updated_at)
                                     }
                                     EngineTask::Preflight { .. }
                                     | EngineTask::Validate { .. }
@@ -1594,11 +1591,11 @@ impl EngineObserver for RuntimeObserver {
                                     EngineTask::ProveProposal { .. } => metadata
                                         .upsert_proposal_sp1_network_runtime(
                                             &task_id, submission, updated_at,
-                                        )?,
+                                        ),
                                     EngineTask::Aggregate { .. } => metadata
                                         .upsert_aggregate_sp1_network_runtime(
                                             submission, updated_at,
-                                        )?,
+                                        ),
                                     EngineTask::Preflight { .. }
                                     | EngineTask::Validate { .. }
                                     | EngineTask::Encode { .. }
@@ -1606,7 +1603,8 @@ impl EngineObserver for RuntimeObserver {
                                     | EngineTask::PublishProof { .. } => unreachable!(),
                                 }
                             }
-                        }
+                        }?;
+                        new_submission.fetch_or(applied_new_submission, Ordering::Relaxed);
                         metadata.runtime.active_stage = Some(stage.to_string());
                         metadata.runtime.last_event = Some("submission_registered".to_string());
                         Ok(())
@@ -1623,7 +1621,13 @@ impl EngineObserver for RuntimeObserver {
             )
             .await;
         match result {
-            Ok(updated) if updated > 0 => Ok(()),
+            Ok(updated) if updated > 0 => {
+                if new_submission.load(Ordering::Relaxed) {
+                    self.record_external_submission_metrics(id, stage, progress)
+                        .await;
+                }
+                Ok(())
+            }
             Ok(_) => Err(EngineObserverError::RuntimeInactive(format!(
                 "provider checkpoint matched no active runtime root for {}",
                 Self::root_task_ref(id)
@@ -4216,6 +4220,70 @@ mod tests {
                 .map(|resume| resume.provider_request_id.as_str()),
             Some("0xsp1")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_counts_replayed_external_submission_once() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-submission-metrics",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request_with_id(9_901);
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let network_pair = "submission_metrics/ethereum";
+        register_observer_task(
+            runtime.as_ref(),
+            "task_submission_metrics",
+            network_pair,
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            network_pair.to_string(),
+            "sp1/network"
+                .parse::<PipelineRoute>()
+                .expect("parse SP1 network route"),
+        );
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: id.clone(),
+        };
+        let progress = ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+            attempt: 1,
+            provider_request_id: "0xmetric-submission".to_string(),
+            submitted_at: now_secs(),
+            network_mode: Sp1NetworkMode::Reserved,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+            skip_simulation: true,
+            cycle_limit: 1_000_000,
+            timeout_secs: 3_600,
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
+        });
+        let permit = checkpoint_permit(&runtime);
+
+        drive_engine_progress(&observer, &id, &task, &progress, &permit).await?;
+        drive_engine_progress(&observer, &id, &task, &progress, &permit).await?;
+
+        let (_, body) = telemetry::render()?;
+        let body = String::from_utf8(body)?;
+        let metric = body
+            .lines()
+            .find(|line| {
+                line.starts_with("raiko2_external_submission_total{")
+                    && line.contains("pair=\"submission_metrics/ethereum\"")
+                    && line.contains("provider=\"sp1_network\"")
+                    && line.contains("stage=\"prove\"")
+            })
+            .context("external submission metric")?;
+        assert_eq!(metric.split_whitespace().last(), Some("1"));
         Ok(())
     }
 

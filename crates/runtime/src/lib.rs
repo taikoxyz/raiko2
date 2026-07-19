@@ -2618,11 +2618,11 @@ impl RuntimeManager {
         proof_ref: &str,
     ) -> Result<bool> {
         let key = Self::pending_artifact_key(network_pair, pipeline_key, route, proof_ref);
-        let Some(object) = self.store.get(&key).await? else {
+        let Some(descriptor) = self.store.get_descriptor(&key).await? else {
             return Ok(false);
         };
         let _commit = self.begin_object_commit()?;
-        self.store.delete_exact(&key, &object.descriptor()).await?;
+        self.store.delete_exact(&key, &descriptor).await?;
         Ok(true)
     }
 
@@ -2660,17 +2660,17 @@ impl RuntimeManager {
         proof_ref: &str,
     ) -> Result<bool> {
         let object_key = Self::artifact_key(network_pair, pipeline_key, route, proof_ref);
-        let canonical = self.store.get(&object_key).await?;
-        let canonical_record = canonical.as_ref().map(|object| {
+        let canonical = self.store.get_descriptor(&object_key).await?;
+        let canonical_record = canonical.as_ref().map(|descriptor| {
             self.proof_artifact_record(
                 ProofArtifactRegistration {
                     network_pair: network_pair.to_string(),
                     proof_ref: proof_ref.to_string(),
                     pipeline_key,
                     route,
-                    proof_uri: object.proof_uri.clone(),
-                    content_hash: object.content_hash.clone(),
-                    generation: object.generation,
+                    proof_uri: descriptor.proof_uri.clone(),
+                    content_hash: descriptor.content_hash.clone(),
+                    generation: descriptor.generation,
                 },
                 ProofArtifactLifecycle::Invalidated,
             )
@@ -2690,10 +2690,10 @@ impl RuntimeManager {
             return Ok(false);
         };
 
-        if invalidate_canonical && let Some(object) = canonical.as_ref() {
+        if invalidate_canonical && let Some(descriptor) = canonical {
             self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
                 key: object_key,
-                descriptor: object.descriptor(),
+                descriptor,
                 lifecycle: ProofArtifactLifecycle::Invalidated,
             })
             .await?;
@@ -3757,6 +3757,7 @@ mod tests {
         block_next_artifact_delete: AtomicBool,
         artifact_delete_completed: tokio::sync::Notify,
         allow_artifact_delete_return: tokio::sync::Notify,
+        dangling_artifacts: StdMutex<HashSet<ProofArtifactKey>>,
     }
 
     impl RuntimeStateProbeStore {
@@ -3780,7 +3781,16 @@ mod tests {
                 block_next_artifact_delete: AtomicBool::new(false),
                 artifact_delete_completed: tokio::sync::Notify::new(),
                 allow_artifact_delete_return: tokio::sync::Notify::new(),
+                dangling_artifacts: StdMutex::new(HashSet::new()),
             })
+        }
+
+        fn mark_artifact_content_missing(&self, key: ProofArtifactKey) -> Result<()> {
+            self.dangling_artifacts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("dangling artifact set poisoned"))?
+                .insert(key);
+            Ok(())
         }
     }
 
@@ -3816,6 +3826,14 @@ mod tests {
         }
 
         async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
+            let content_missing = self
+                .dangling_artifacts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("dangling artifact set poisoned"))?
+                .contains(key);
+            if content_missing && self.inner.get_descriptor(key).await?.is_some() {
+                anyhow::bail!("proof manifest references missing content");
+            }
             self.inner.get(key).await
         }
 
@@ -6742,6 +6760,87 @@ mod tests {
                 )
                 .await?
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_dangling_canonical_and_pending_manifests() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "dangling-publication-recovery",
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let network_pair = "l1-l2";
+        let proof_ref = "proposal-dangling";
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root-dangling".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: network_pair.into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-dangling-request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    b"proof",
+                )
+                .await?
+        );
+        let descriptor = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"proof")
+            .await?
+            .try_object()
+            .context("canonical proof object")?
+            .descriptor();
+        cancel_test_task(&runtime, "root-dangling").await?;
+
+        let canonical_key = RuntimeManager::artifact_key(network_pair, pipeline, route, proof_ref);
+        let pending_key =
+            RuntimeManager::pending_artifact_key(network_pair, pipeline, route, proof_ref);
+        store.mark_artifact_content_missing(canonical_key.clone())?;
+        store.mark_artifact_content_missing(pending_key.clone())?;
+        assert!(store.get(&canonical_key).await.is_err());
+        assert!(store.get(&pending_key).await.is_err());
+        drop(runtime);
+
+        let recovered = RuntimeManager::with_store(store.clone());
+        recovered.initialize().await?;
+        assert_eq!(
+            recovered
+                .reconcile_unowned_pending_proof_publications()
+                .await?,
+            1
+        );
+        let artifact = recovered
+            .get_proof_artifact_including_invalidated(network_pair, pipeline, route, proof_ref)
+            .await?
+            .context("invalidated lifecycle record")?;
+        assert_eq!(artifact.lifecycle, ProofArtifactLifecycle::Invalidated);
+        assert_eq!(artifact.descriptor(), descriptor);
+        assert!(
+            recovered
+                .proof_artifact_descriptor_is_invalidated(
+                    network_pair,
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &descriptor,
+                )
+                .await?
+        );
+        assert_eq!(store.get_descriptor(&pending_key).await?, None);
         Ok(())
     }
 

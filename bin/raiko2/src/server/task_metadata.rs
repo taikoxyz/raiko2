@@ -379,7 +379,7 @@ impl TaskMetadata {
         task_id: &str,
         progress: &BoundlessSubmissionProgress,
         updated_at: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.runtime
             .proposals
             .entry(task_id.to_string())
@@ -391,7 +391,7 @@ impl TaskMetadata {
         &mut self,
         progress: &BoundlessSubmissionProgress,
         updated_at: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.runtime
             .aggregate
             .get_or_insert_with(TaskRuntimeMetadata::default)
@@ -403,7 +403,7 @@ impl TaskMetadata {
         task_id: &str,
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.runtime
             .proposals
             .entry(task_id.to_string())
@@ -415,7 +415,7 @@ impl TaskMetadata {
         &mut self,
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.runtime
             .aggregate
             .get_or_insert_with(TaskRuntimeMetadata::default)
@@ -814,7 +814,7 @@ impl TaskRuntimeMetadata {
         &mut self,
         progress: &BoundlessSubmissionProgress,
         updated_at: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let candidate = Self {
             updated_at,
             provider_request_id: Some(progress.provider_request_id.clone()),
@@ -839,7 +839,7 @@ impl TaskRuntimeMetadata {
 
         let Some(current_kind) = self.validate_remote_submission()? else {
             *self = candidate;
-            return Ok(());
+            return Ok(true);
         };
         if !matches!(current_kind, RemoteSubmissionKind::Boundless) {
             return Err(RemoteSubmissionConflict::new(
@@ -859,7 +859,7 @@ impl TaskRuntimeMetadata {
             }
             std::cmp::Ordering::Greater => {
                 *self = candidate;
-                return Ok(());
+                return Ok(true);
             }
             std::cmp::Ordering::Equal => {}
         }
@@ -889,7 +889,7 @@ impl TaskRuntimeMetadata {
             .into()),
             _ => {
                 *self = candidate;
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -898,7 +898,7 @@ impl TaskRuntimeMetadata {
         &mut self,
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let expires_at = progress
             .submitted_at
             .checked_add(progress.timeout_secs)
@@ -925,7 +925,7 @@ impl TaskRuntimeMetadata {
 
         let Some(current_kind) = self.validate_remote_submission()? else {
             *self = candidate;
-            return Ok(());
+            return Ok(true);
         };
         if !matches!(current_kind, RemoteSubmissionKind::Sp1) {
             return Err(RemoteSubmissionConflict::new(
@@ -945,7 +945,7 @@ impl TaskRuntimeMetadata {
             }
             std::cmp::Ordering::Greater => {
                 *self = candidate;
-                return Ok(());
+                return Ok(true);
             }
             std::cmp::Ordering::Equal => {}
         }
@@ -960,7 +960,7 @@ impl TaskRuntimeMetadata {
         }
         candidate.updated_at = updated_at;
         *self = candidate;
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -1106,9 +1106,16 @@ mod tests {
     #[test]
     fn sp1_progress_merge_rejects_regression_and_same_attempt_identity_drift() {
         let mut runtime = TaskRuntimeMetadata::default();
-        runtime
-            .merge_sp1_network_submission(&sp1_progress("request-2", 2), 100)
-            .expect("initial checkpoint");
+        assert!(
+            runtime
+                .merge_sp1_network_submission(&sp1_progress("request-2", 2), 100)
+                .expect("initial checkpoint")
+        );
+        assert!(
+            !runtime
+                .merge_sp1_network_submission(&sp1_progress("request-2", 2), 101)
+                .expect("replayed checkpoint")
+        );
         let checkpoint = runtime.clone();
 
         let stale = runtime
@@ -1142,13 +1149,17 @@ mod tests {
             max_price_wei: Some("1".to_string()),
             rebid_attempt: 1,
         };
-        runtime
-            .merge_boundless_submission(&progress, 100)
-            .expect("initial checkpoint");
+        assert!(
+            runtime
+                .merge_boundless_submission(&progress, 100)
+                .expect("initial checkpoint")
+        );
         progress.remote_tx_hash = Some("0xtx".to_string());
-        runtime
-            .merge_boundless_submission(&progress, 101)
-            .expect("transaction hash enrichment");
+        assert!(
+            !runtime
+                .merge_boundless_submission(&progress, 101)
+                .expect("transaction hash enrichment")
+        );
 
         progress.remote_tx_hash = None;
         let stale_hash = runtime

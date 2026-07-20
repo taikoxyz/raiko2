@@ -342,7 +342,6 @@ impl BoundlessStatusSource {
         let (status, terminal_outcome) = classify_boundless_status(
             submission.id,
             &submission.provider_request_id,
-            poll_submission.request_id,
             &metadata,
             is_fulfilled,
             is_locked,
@@ -505,11 +504,9 @@ fn parse_rpc_hex_u64(value: &str) -> Result<u64, RemotePollError> {
         .map_err(|err| RemotePollError::Transient(format!("decode rpc hex u64 {value}: {err}")))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn classify_boundless_status(
     submission_id: RemoteSubmissionId,
     provider_request_id: &str,
-    request_id: U256,
     metadata: &BoundlessSubmissionMetadata,
     is_fulfilled: bool,
     is_locked: bool,
@@ -569,7 +566,6 @@ fn classify_boundless_status(
         (RemoteStatus::Pending, None, None)
     };
 
-    let _ = (request_id, is_fulfilled, is_locked, request_deadline);
     (
         RemoteSubmissionStatus {
             submission_id,
@@ -581,6 +577,13 @@ fn classify_boundless_status(
     )
 }
 
+/// Whether the overall poll timeout must be deferred for the current submission.
+///
+/// On the final attempt (`Abort`) the request stays payable until its lock deadline, and a
+/// timeout-triggered replacement could reopen the double-pay window under another request id,
+/// so the overall timeout only takes effect once the payable window has closed. The deferral
+/// is bounded by `expires_at` so a corrupt stored record (or one with an implausibly distant
+/// lock deadline) cannot keep the poll loop open forever.
 const fn should_defer_boundless_poll_timeout(
     metadata: &BoundlessSubmissionMetadata,
     block_timestamp: u64,
@@ -821,7 +824,7 @@ const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool 
 }
 
 /// Total market submissions allowed per proof task: the initial attempt plus `max_attempts`
-/// rebids. The no-lock path already enforces this bound through [`NoLockTimeoutAction::Abort`];
+/// rebids. The no-lock path already enforces this bound through [`BoundlessTimeoutAction::Abort`];
 /// this check extends the same budget to the `Expired` and poll-timeout retry paths, which would
 /// otherwise mint replacement requests without limit.
 const fn exceeds_submission_budget(attempt: u64, max_attempts: u32) -> bool {
@@ -829,15 +832,9 @@ const fn exceeds_submission_budget(attempt: u64, max_attempts: u32) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NoLockTimeoutAction {
-    Rebid,
-    Abort,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NoLockTimeout {
     delay: Duration,
-    action: NoLockTimeoutAction,
+    action: BoundlessTimeoutAction,
 }
 
 fn no_lock_timeout_for_attempt(
@@ -846,9 +843,9 @@ fn no_lock_timeout_for_attempt(
     max_attempts: u32,
 ) -> NoLockTimeout {
     let action = if should_rebid_unlocked_request(attempt, max_attempts) {
-        NoLockTimeoutAction::Rebid
+        BoundlessTimeoutAction::Rebid
     } else {
-        NoLockTimeoutAction::Abort
+        BoundlessTimeoutAction::Abort
     };
     NoLockTimeout {
         delay: Duration::from_millis(rebid_timeout_ms.max(MIN_REBID_TIMEOUT_MS)),
@@ -860,45 +857,15 @@ fn no_lock_timeout_for_attempt(
 ///
 /// Rebid attempts use the configured rebid delay: the request is abandoned early in favor of a
 /// higher-priced resubmission. The final attempt (`Abort`) instead waits out the offer's lock
-/// deadline when known: the market pays nothing for fulfillments past `lock_expires_at`, so that
-/// is the exact end of the payable window — aborting sooner walks away from a live request the
-/// client could still be charged for, and waiting longer cannot yield a paid fulfillment.
+/// deadline: the market pays nothing for fulfillments past `lock_expires_at`, so that is the
+/// exact end of the payable window — aborting sooner walks away from a live request the client
+/// could still be charged for, and waiting longer cannot yield a paid fulfillment.
 const fn no_lock_deadline(submitted_at: u64, lock_expires_at: u64, timeout: NoLockTimeout) -> u64 {
     let rebid_deadline = submitted_at.saturating_add(timeout.delay.as_secs());
     match timeout.action {
-        NoLockTimeoutAction::Rebid => rebid_deadline,
-        NoLockTimeoutAction::Abort => lock_expires_at,
+        BoundlessTimeoutAction::Rebid => rebid_deadline,
+        BoundlessTimeoutAction::Abort => lock_expires_at,
     }
-}
-
-#[cfg(test)]
-const fn no_lock_deadline_elapsed(
-    submitted_at: u64,
-    lock_expires_at: u64,
-    timeout: NoLockTimeout,
-    now_secs: u64,
-) -> bool {
-    now_secs >= no_lock_deadline(submitted_at, lock_expires_at, timeout)
-}
-
-/// Whether the overall poll timeout must be deferred for the current submission.
-///
-/// On the final attempt (`Abort`) the request stays payable until its lock deadline, and a
-/// timeout-triggered resubmission can reopen the double-pay window through the fresh-id
-/// fallback, so the overall timeout only takes effect once the payable window has closed.
-/// The deferral is bounded by `expires_at` so a corrupt stored record (or one with an
-/// implausibly distant lock deadline) cannot keep the poll loop open forever.
-#[cfg(test)]
-const fn defer_poll_timeout_while_payable(
-    submitted_at: u64,
-    lock_expires_at: u64,
-    expires_at: u64,
-    timeout: NoLockTimeout,
-    now_secs: u64,
-) -> bool {
-    matches!(timeout.action, NoLockTimeoutAction::Abort)
-        && now_secs < expires_at
-        && !no_lock_deadline_elapsed(submitted_at, lock_expires_at, timeout, now_secs)
 }
 
 const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
@@ -1060,6 +1027,20 @@ struct FreshSubmissionContext<'a> {
     // task shares an id: the market keys locks and paid fulfillments on the id, which makes
     // paying more than one rung impossible by construction. `None` mints a fresh id.
     reuse_request_id: Option<U256>,
+}
+
+/// Verification and telemetry inputs that stay constant across one proof's whole fulfillment
+/// chain (status poll → fulfillment-read retry loop → fulfillment read). Built once per proof in
+/// `prove_boundless` and passed by reference, mirroring [`FreshSubmissionContext`] on the submit
+/// side, so the chain doesn't thread seven unchanged arguments through every hop.
+struct FulfillmentContext<'a> {
+    proof_type: &'static str,
+    image_id: Digest,
+    block_image_id: Option<Digest>,
+    expected_input_hash: B256,
+    quoted_mcycles_count: u32,
+    evaluated_mcycles_count: u32,
+    proposal_carry_data: Option<&'a ProofCarryData>,
 }
 
 enum BoundlessAttemptError {
@@ -1981,18 +1962,11 @@ impl BoundlessProver {
         .await
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn poll_until_fulfilled(
         &self,
         client: &Client,
         submission: &Submission,
-        elf_type: ElfType,
-        image_id: Digest,
-        block_image_id: Option<Digest>,
-        expected_input_hash: B256,
-        quoted_mcycles_count: u32,
-        evaluated_mcycles_count: u32,
-        proposal_carry_data: Option<&ProofCarryData>,
+        context: &FulfillmentContext<'_>,
         no_lock_timeout: NoLockTimeout,
     ) -> Result<Proof, BoundlessAttemptError> {
         let timeout = Duration::from_millis(self.config.timeout_ms.max(1));
@@ -2017,10 +1991,7 @@ impl BoundlessProver {
                             submission.lock_expires_at,
                             no_lock_timeout,
                         ),
-                        no_lock_timeout_action: match no_lock_timeout.action {
-                            NoLockTimeoutAction::Rebid => BoundlessTimeoutAction::Rebid,
-                            NoLockTimeoutAction::Abort => BoundlessTimeoutAction::Abort,
-                        },
+                        no_lock_timeout_action: no_lock_timeout.action,
                         poll_timeout_at,
                     },
                     terminal_outcome: None,
@@ -2055,19 +2026,8 @@ impl BoundlessProver {
 
         match terminal {
             RemoteTerminalResult::Fulfilled { .. } => {
-                self.fetch_boundless_fulfillment_until(
-                    client,
-                    submission,
-                    elf_type.proof_type_str(),
-                    image_id,
-                    block_image_id,
-                    expected_input_hash,
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
-                    proposal_carry_data,
-                    poll_timeout_at,
-                )
-                .await
+                self.fetch_boundless_fulfillment_until(client, submission, context, poll_timeout_at)
+                    .await
             }
             RemoteTerminalResult::Expired { reason, .. } => Err(BoundlessAttemptError::Retryable {
                 reason: reason.message,
@@ -2143,33 +2103,16 @@ impl BoundlessProver {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn fetch_boundless_fulfillment_until(
         &self,
         client: &Client,
         submission: &Submission,
-        proof_type: &'static str,
-        image_id: Digest,
-        block_image_id: Option<Digest>,
-        expected_input_hash: B256,
-        quoted_mcycles_count: u32,
-        evaluated_mcycles_count: u32,
-        proposal_carry_data: Option<&ProofCarryData>,
+        context: &FulfillmentContext<'_>,
         deadline: Instant,
     ) -> Result<Proof, BoundlessAttemptError> {
         loop {
             match self
-                .fetch_boundless_fulfillment(
-                    client,
-                    submission,
-                    proof_type,
-                    image_id,
-                    block_image_id,
-                    expected_input_hash,
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
-                    proposal_carry_data,
-                )
+                .fetch_boundless_fulfillment(client, submission, context)
                 .await
             {
                 Ok(proof) => return Ok(proof),
@@ -2192,18 +2135,38 @@ impl BoundlessProver {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Stage metadata recorded on the finished proof for telemetry/debugging.
+    fn boundless_stage_metadata(
+        &self,
+        submission: &Submission,
+        context: &FulfillmentContext<'_>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "zkvm": "risc0",
+            "runner": "network",
+            "proof_type": context.proof_type,
+            "quoted_mcycles_count": context.quoted_mcycles_count,
+            "evaluated_mcycles_count": context.evaluated_mcycles_count,
+            "boundless": {
+                "provider_request_id": submission.provider_request_id,
+                "remote_tx_hash": submission.remote_tx_hash,
+                "expires_at": submission.expires_at,
+                "lock_expires_at": submission.lock_expires_at,
+                "submitted_at": submission.submitted_at,
+                "max_price_multiplier": submission.max_price_multiplier,
+                "max_price_wei": submission.max_price_wei.to_string(),
+                "image_id": alloy_primitives::hex::encode_prefixed(context.image_id.as_bytes()),
+                "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
+                "offchain": self.config.offchain,
+            }
+        })
+    }
+
     async fn fetch_boundless_fulfillment(
         &self,
         client: &Client,
         submission: &Submission,
-        proof_type: &'static str,
-        image_id: Digest,
-        block_image_id: Option<Digest>,
-        expected_input_hash: B256,
-        quoted_mcycles_count: u32,
-        evaluated_mcycles_count: u32,
-        proposal_carry_data: Option<&ProofCarryData>,
+        context: &FulfillmentContext<'_>,
     ) -> Result<Proof, BoundlessAttemptError> {
         let fulfillment = retry_external("read boundless fulfillment", || async {
             client
@@ -2230,59 +2193,43 @@ impl BoundlessProver {
             ))
         })?;
         let seal = fulfillment.seal.clone();
-        let receipt_json = if proof_type == "proposal" {
-            match decode_seal(seal.clone(), image_id, journal.to_vec()) {
+        let receipt_json = if context.proof_type == "proposal" {
+            match decode_seal(seal.clone(), context.image_id, journal.to_vec()) {
                 Ok(ContractReceipt::Base(receipt)) => serde_json::to_string(&receipt).ok(),
                 Ok(ContractReceipt::SetInclusion(_)) | Err(_) => None,
             }
         } else {
             None
         };
-        let input_hash = match proof_type {
+        let input_hash = match context.proof_type {
             "proposal" => parse_shasta_proposal_input_hash(journal)?,
             _ => parse_shasta_aggregation_input_hash(journal)?,
         };
-        if let ("proposal", Some(carry)) = (proof_type, proposal_carry_data) {
+        if let ("proposal", Some(carry)) = (context.proof_type, context.proposal_carry_data) {
             ensure_shasta_proposal_input_matches_carry(input_hash, carry, "boundless")?;
         }
-        if input_hash != expected_input_hash {
+        if input_hash != context.expected_input_hash {
             return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
                 "Boundless fulfillment journal does not match local dry-run journal".to_string(),
             )));
         }
-        let stage_metadata = serde_json::json!({
-            "zkvm": "risc0",
-            "runner": "network",
-            "proof_type": proof_type,
-            "quoted_mcycles_count": quoted_mcycles_count,
-            "evaluated_mcycles_count": evaluated_mcycles_count,
-            "boundless": {
-                "provider_request_id": submission.provider_request_id,
-                "remote_tx_hash": submission.remote_tx_hash,
-                "expires_at": submission.expires_at,
-                "lock_expires_at": submission.lock_expires_at,
-                "submitted_at": submission.submitted_at,
-                "max_price_multiplier": submission.max_price_multiplier,
-                "max_price_wei": submission.max_price_wei.to_string(),
-                "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
-                "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
-                "offchain": self.config.offchain,
-            }
-        });
-        let extra_data = match (proof_type, proposal_carry_data) {
+        let stage_metadata = self.boundless_stage_metadata(submission, context);
+        let extra_data = match (context.proof_type, context.proposal_carry_data) {
             ("proposal", Some(carry)) => {
                 with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?
             }
             _ => Some(stage_metadata),
         };
-        let proof = match proof_type {
-            "proposal" => {
-                encode_risc0_proposal_seal_payload(&seal, B256::from_slice(image_id.as_bytes()))
-            }
+        let proof = match context.proof_type {
+            "proposal" => encode_risc0_proposal_seal_payload(
+                &seal,
+                B256::from_slice(context.image_id.as_bytes()),
+            ),
             _ => encode_risc0_aggregation_seal_payload(
                 &seal,
                 B256::from_slice(
-                    block_image_id
+                    context
+                        .block_image_id
                         .ok_or_else(|| {
                             RaikoError::Guest(
                                 "missing block image id for aggregation proof".to_string(),
@@ -2290,14 +2237,16 @@ impl BoundlessProver {
                         })?
                         .as_bytes(),
                 ),
-                B256::from_slice(image_id.as_bytes()),
+                B256::from_slice(context.image_id.as_bytes()),
             ),
         };
         Ok(Proof {
             proof: Some(proof),
             input: Some(input_hash),
             quote: receipt_json,
-            uuid: Some(alloy_primitives::hex::encode_prefixed(image_id.as_bytes())),
+            uuid: Some(alloy_primitives::hex::encode_prefixed(
+                context.image_id.as_bytes(),
+            )),
             kzg_proof: None,
             extra_data,
         })
@@ -2341,6 +2290,15 @@ impl BoundlessProver {
         // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.
         let image_ref = alloy_primitives::hex::encode_prefixed(seed_program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
+        let fulfillment_context = FulfillmentContext {
+            proof_type: elf_type.proof_type_str(),
+            image_id,
+            block_image_id,
+            expected_input_hash,
+            quoted_mcycles_count,
+            evaluated_mcycles_count,
+            proposal_carry_data: proposal_carry_data.as_ref(),
+        };
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
             observer
@@ -2455,18 +2413,7 @@ impl BoundlessProver {
             );
 
             match self
-                .poll_until_fulfilled(
-                    client,
-                    &submission,
-                    elf_type,
-                    program.image_id,
-                    block_image_id,
-                    expected_input_hash,
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
-                    proposal_carry_data.as_ref(),
-                    no_lock_timeout,
-                )
+                .poll_until_fulfilled(client, &submission, &fulfillment_context, no_lock_timeout)
                 .await
             {
                 Ok(proof) => return Ok(proof),
@@ -2518,22 +2465,11 @@ where
     async fn prove_encoded(
         &self,
         input: Bytes,
-        _config: &ProverConfig,
+        config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
-            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
-        let elf = backend.elf(ProofStage::Proposal)?.to_vec();
-        Box::pin(self.prove_boundless(
-            ElfType::Batch,
-            &self.config.offer_params.batch,
-            input,
-            &elf,
-            None,
-            Some(guest_input.proof_carry_data),
-            None,
-        ))
-        .await
+        self.prove_encoded_with_observer(input, config, backend, None)
+            .await
     }
 
     async fn prove_encoded_with_observer(
@@ -2561,25 +2497,11 @@ where
     async fn aggregate(
         &self,
         input: AggregationGuestInput,
-        _config: &ProverConfig,
+        config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let proposal_image_id =
-            compute_boundless_image_id(backend.elf(ProofStage::Proposal)?.to_vec(), "proposal")
-                .await?;
-        let aggregation_input =
-            build_boundless_aggregation_input(input.proofs, proposal_image_id).await?;
-        let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
-        Box::pin(self.prove_boundless(
-            ElfType::Aggregation,
-            &self.config.offer_params.aggregation,
-            Bytes::from(aggregation_input),
-            &aggregation_elf,
-            Some(proposal_image_id),
-            None,
-            None,
-        ))
-        .await
+        self.aggregate_with_observer(input, config, backend, None)
+            .await
     }
 
     async fn aggregate_with_observer(
@@ -2684,15 +2606,34 @@ fn escalate_and_cap_market_prices(
     max_attempts: u32,
     max_price_cap: Option<&Amount>,
 ) -> RaikoResult<MarketOfferPrices> {
-    let escalated_max = escalated_price(autopriced_max, attempt, step_bps, max_attempts)?;
-    let (max_price, clamped_to_cap) = match max_price_cap {
-        Some(cap) if escalated_max > cap.value => (cap.value, true),
-        _ => (escalated_max, false),
-    };
+    let (max_price, clamped_to_cap) = escalate_then_clamp(
+        autopriced_max,
+        attempt,
+        step_bps,
+        max_attempts,
+        max_price_cap.map(|cap| cap.value),
+    )?;
     Ok(MarketOfferPrices {
         max_price,
         min_price: autopriced_min.min(max_price),
         clamped_to_cap,
+    })
+}
+
+/// Shared escalate-then-clamp core for both pricing modes: compound `base` by the bps ladder for
+/// `attempt`, then clamp the result to `cap` when one is configured. Returns the final price and
+/// whether the cap was applied.
+fn escalate_then_clamp(
+    base: U256,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
+    cap: Option<U256>,
+) -> RaikoResult<(U256, bool)> {
+    let escalated = escalated_price(base, attempt, step_bps, max_attempts)?;
+    Ok(match cap {
+        Some(cap) if escalated > cap => (cap, true),
+        _ => (escalated, false),
     })
 }
 
@@ -2719,11 +2660,8 @@ fn escalate_and_clamp_manual_max_price(
     max_attempts: u32,
     ceiling: Option<U256>,
 ) -> RaikoResult<ManualOfferMaxPrice> {
-    let escalated = escalated_price(configured_max, attempt, step_bps, max_attempts)?;
-    let (max_price, clamped_to_ceiling) = match ceiling {
-        Some(ceiling) if escalated > ceiling => (ceiling, true),
-        _ => (escalated, false),
-    };
+    let (max_price, clamped_to_ceiling) =
+        escalate_then_clamp(configured_max, attempt, step_bps, max_attempts, ceiling)?;
     Ok(ManualOfferMaxPrice {
         max_price,
         clamped_to_ceiling,
@@ -2925,12 +2863,12 @@ mod tests {
         BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
         BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessSubmissionState,
         BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
-        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        Submission, TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
-        defer_poll_timeout_while_payable, dispatch_offchain_after_checkpoint,
-        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
-        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
-        publish_boundless_progress, quote_batch_mcycles, should_rebid_unlocked_request,
+        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, Submission, TimeoutPolicy,
+        boundless_poll_error_statuses, classify_boundless_status,
+        dispatch_offchain_after_checkpoint, escalate_and_cap_market_prices,
+        exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
+        parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
+        quote_batch_mcycles, should_defer_boundless_poll_timeout, should_rebid_unlocked_request,
         storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
         validate_resume_context,
     };
@@ -3597,7 +3535,6 @@ mod tests {
     fn classify_boundless_status_covers_timeout_actions_and_rotate_boundary() {
         let now = now_secs();
         let submission_id = RemoteSubmissionId::new();
-        let request_id = U256::from(1);
         let rebid_state = boundless_submission_state(
             now,
             BoundlessTimeoutAction::Rebid,
@@ -3614,7 +3551,6 @@ mod tests {
         let (status, outcome) = classify_boundless_status(
             submission_id,
             "0x1",
-            request_id,
             &rebid_state.metadata,
             false,
             false,
@@ -3627,7 +3563,6 @@ mod tests {
         let (status, outcome) = classify_boundless_status(
             submission_id,
             "0x1",
-            request_id,
             &abort_state.metadata,
             false,
             false,
@@ -3647,7 +3582,6 @@ mod tests {
         let (status, outcome) = classify_boundless_status(
             submission_id,
             "0x1",
-            request_id,
             &locked_state.metadata,
             false,
             true,
@@ -3667,7 +3601,6 @@ mod tests {
         let (status, outcome) = classify_boundless_status(
             submission_id,
             "0x1",
-            request_id,
             &poll_timeout_state.metadata,
             false,
             false,
@@ -3901,9 +3834,7 @@ mod tests {
 
         // Rebid attempts abandon the request after the configured rebid delay; the offer's lock
         // deadline (here far in the future) must not stretch that window.
-        assert!(!no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_299));
-        assert!(no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_300));
-        assert!(no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_600));
+        assert_eq!(no_lock_deadline(1_000, 10_000, timeout), 1_300);
     }
 
     #[test]
@@ -3913,43 +3844,53 @@ mod tests {
         // away from a live request after only the rebid delay.
         let timeout =
             no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
-        assert_eq!(timeout.action, NoLockTimeoutAction::Abort);
+        assert_eq!(timeout.action, BoundlessTimeoutAction::Abort);
 
-        assert!(!no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_300));
-        assert!(!no_lock_deadline_elapsed(1_000, 10_000, timeout, 9_999));
-        assert!(no_lock_deadline_elapsed(1_000, 10_000, timeout, 10_000));
+        assert_eq!(no_lock_deadline(1_000, 10_000, timeout), 10_000);
     }
 
     #[test]
     fn poll_timeout_defers_while_final_attempt_is_payable() {
-        // submitted_at = 1_000, lock deadline = 10_000, request expiry = 20_000.
+        // submitted_at = 1_000, lock deadline = 10_000, request expiry = 20_000. Asserts run
+        // against the production predicate on real metadata (deadline derived via
+        // `no_lock_deadline`), so they cannot drift from the shipped deferral logic.
         let abort = no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
-        assert_eq!(abort.action, NoLockTimeoutAction::Abort);
+        assert_eq!(abort.action, BoundlessTimeoutAction::Abort);
+        let metadata = |lock_expires_at: u64, expires_at: u64, timeout: super::NoLockTimeout| {
+            BoundlessSubmissionMetadata {
+                expires_at,
+                lock_expires_at,
+                submitted_at: 1_000,
+                no_lock_deadline: no_lock_deadline(1_000, lock_expires_at, timeout),
+                no_lock_timeout_action: timeout.action,
+                poll_timeout_at: Instant::now(),
+            }
+        };
 
         // Within the payable window the overall poll timeout must not fire: a timeout-triggered
         // replacement could reopen the double-pay window under another request id.
-        assert!(defer_poll_timeout_while_payable(
-            1_000, 10_000, 20_000, abort, 9_999
+        assert!(should_defer_boundless_poll_timeout(
+            &metadata(10_000, 20_000, abort),
+            9_999
         ));
         // Once the lock deadline passes, the timeout may fire again.
-        assert!(!defer_poll_timeout_while_payable(
-            1_000, 10_000, 20_000, abort, 10_000
+        assert!(!should_defer_boundless_poll_timeout(
+            &metadata(10_000, 20_000, abort),
+            10_000
         ));
         // The deferral is bounded by the request expiry even when a (corrupt) record claims a
         // later lock deadline, so the poll loop cannot be pinned open forever.
-        assert!(!defer_poll_timeout_while_payable(
-            1_000,
-            u64::MAX,
-            20_000,
-            abort,
+        assert!(!should_defer_boundless_poll_timeout(
+            &metadata(u64::MAX, 20_000, abort),
             20_000
         ));
 
         // Rebid attempts never defer the overall timeout.
         let rebid = no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
-        assert_eq!(rebid.action, NoLockTimeoutAction::Rebid);
-        assert!(!defer_poll_timeout_while_payable(
-            1_000, 10_000, 20_000, rebid, 9_999
+        assert_eq!(rebid.action, BoundlessTimeoutAction::Rebid);
+        assert!(!should_defer_boundless_poll_timeout(
+            &metadata(10_000, 20_000, rebid),
+            9_999
         ));
     }
 
@@ -3958,7 +3899,7 @@ mod tests {
         let timeout = no_lock_timeout_for_attempt(1, 900_000, TEST_REBID_MAX_ATTEMPTS);
 
         assert_eq!(timeout.delay, Duration::from_millis(900_000));
-        assert_eq!(timeout.action, NoLockTimeoutAction::Rebid);
+        assert_eq!(timeout.action, BoundlessTimeoutAction::Rebid);
     }
 
     #[test]
@@ -3967,7 +3908,7 @@ mod tests {
             let timeout = no_lock_timeout_for_attempt(1, rebid_timeout_ms, TEST_REBID_MAX_ATTEMPTS);
 
             assert_eq!(timeout.delay, Duration::from_millis(MIN_REBID_TIMEOUT_MS));
-            assert_eq!(timeout.action, NoLockTimeoutAction::Rebid);
+            assert_eq!(timeout.action, BoundlessTimeoutAction::Rebid);
         }
     }
 
@@ -3992,19 +3933,19 @@ mod tests {
     fn no_lock_timeout_aborts_after_final_rebid_attempt() {
         assert_eq!(
             no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS).action,
-            NoLockTimeoutAction::Rebid
+            BoundlessTimeoutAction::Rebid
         );
         assert_eq!(
             no_lock_timeout_for_attempt(4, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS).action,
-            NoLockTimeoutAction::Rebid
+            BoundlessTimeoutAction::Rebid
         );
         assert_eq!(
             no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS).action,
-            NoLockTimeoutAction::Abort
+            BoundlessTimeoutAction::Abort
         );
         assert_eq!(
             no_lock_timeout_for_attempt(6, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS).action,
-            NoLockTimeoutAction::Abort
+            BoundlessTimeoutAction::Abort
         );
     }
 

@@ -19,7 +19,8 @@ The architecture is organized around these invariants:
    deployment invariant, not a distributed coordination feature. The runtime intentionally has no
    owner lease, owner epoch, or ownership heartbeat.
 3. Proof computation is not completion. A task becomes completed only after its normalized proof is
-   durably published, registered, and synchronized to its runtime root.
+   durably published, registered, validated against the proposal-or-aggregate payload contract, and
+   synchronized to its runtime root.
 4. Proof manifests are create-only and first-valid-wins. Content objects are immutable and addressed
    by SHA-256; a conflicting publication cannot replace the canonical proof.
 5. Invalidation targets one manifest generation and content hash. A later proof lifecycle may publish
@@ -176,6 +177,26 @@ publication retries reuse the computed proof and do not pay to prove again.
 Cached proposal artifacts short-circuit proposal execution through the observer; they never remove a
 proposal node or change an aggregate input from dependent to independent. Initial admission and every
 recovery therefore reconstruct the same task set, payloads, and dependency edges.
+
+Artifact payload policy follows the canonical engine task kind, not the current root-owner set. A
+proposal task accepts a normal proof payload; `ShastaSp1` proposal tasks additionally accept a
+complete Compressed payload containing `quote`, `input`, `uuid`, and `extra_data`. Aggregate tasks
+always require a non-null final `proof`. The same proposal artifact is therefore valid whether it is
+owned by a standalone root, an aggregate root, or both, including when an owner joins after proving
+has started. Ownership controls which exact root lifetimes may be synchronized; it never changes the
+artifact's payload class.
+
+```mermaid
+flowchart LR
+  Task["Canonical engine task identity"] --> Kind{Task kind}
+  Kind -->|Proposal| Proposal["Proposal payload policy"]
+  Proposal --> Full["Non-null proof"]
+  Proposal -->|ShastaSp1 only| Compressed["quote + input + uuid + extra_data"]
+  Kind -->|Aggregate| Aggregate["Final payload policy"]
+  Aggregate --> Final["Non-null proof"]
+  Owners["Current RootOwner set"] --> Activation["Eligible root synchronization"]
+  Owners -. no influence .-> Kind
+```
 
 Execution ownership is derived from canonical proposal or aggregate task membership in
 `TaskMetadata`, not from the broad artifact-reference index. That index also includes external

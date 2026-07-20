@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::server::proof_artifact::ProofArtifactPayload;
 #[cfg(test)]
 use crate::server::task_metadata::publication_proof_artifact_refs;
 use crate::server::task_metadata::{
@@ -404,22 +405,11 @@ impl RuntimeObserver {
         Ok(metadata.owns_engine_task(id))
     }
 
-    const fn is_sp1_proposal_artifact(id: &EngineTaskId) -> bool {
-        matches!(
-            id.0,
-            EngineTaskKey::Proposal {
-                pipeline: raiko2_pipeline::PipelineKey::ShastaSp1,
-                ..
-            }
-        )
-    }
-
-    const fn has_sp1_proposal_payload(id: &EngineTaskId, proof: &raiko2_primitives::Proof) -> bool {
-        Self::is_sp1_proposal_artifact(id)
-            && proof.quote.is_some()
-            && proof.input.is_some()
-            && proof.uuid.is_some()
-            && proof.extra_data.is_some()
+    const fn expected_proof_payload(id: &EngineTaskId) -> ProofArtifactPayload {
+        match id.0 {
+            EngineTaskKey::Proposal { .. } => ProofArtifactPayload::Proposal,
+            EngineTaskKey::Aggregate { .. } => ProofArtifactPayload::Final,
+        }
     }
 
     fn metric_context(record: &RuntimeTaskRecord) -> Result<MetricContext> {
@@ -704,8 +694,9 @@ impl RuntimeObserver {
             .into());
         }
         anyhow::ensure!(
-            proof.proof.is_some() || Self::has_sp1_proposal_payload(id, proof),
-            "refusing to publish proof artifact without a proof payload"
+            Self::expected_proof_payload(id).accepts(id.0.pipeline_key(), proof),
+            "refusing to publish an invalid {:?} proof artifact payload",
+            Self::expected_proof_payload(id)
         );
 
         let proof_bytes = serde_json::to_vec(proof).context("failed to serialize proof output")?;
@@ -1446,26 +1437,15 @@ impl EngineObserver for RuntimeObserver {
             | EngineTaskKey::Aggregate { pipeline, .. } => pipeline,
         };
         let proof_ref = Self::root_task_ref(id);
-        let is_sp1_proposal = Self::is_sp1_proposal_artifact(id);
-        let material = if is_sp1_proposal {
-            crate::server::proof_artifact::load_aggregate_input_artifact_material(
-                &self.runtime,
-                &self.network_pair,
-                pipeline_key,
-                self.route,
-                &proof_ref,
-            )
-            .await
-        } else {
-            crate::server::proof_artifact::load_proof_artifact_material(
-                &self.runtime,
-                &self.network_pair,
-                pipeline_key,
-                self.route,
-                &proof_ref,
-            )
-            .await
-        }
+        let material = crate::server::proof_artifact::load_proof_artifact_material(
+            &self.runtime,
+            &self.network_pair,
+            pipeline_key,
+            self.route,
+            &proof_ref,
+            Self::expected_proof_payload(id),
+        )
+        .await
         .map_err(|error| error.to_string())?;
         let proof = if let Some(material) = material {
             material.proof
@@ -1487,9 +1467,10 @@ impl EngineObserver for RuntimeObserver {
                 format!("invalid pending proof publication {proof_ref}: {error}")
             })?
         };
-        if proof.proof.is_none() && !Self::has_sp1_proposal_payload(id, &proof) {
+        if !Self::expected_proof_payload(id).accepts(pipeline_key, &proof) {
             return Err(format!(
-                "completed proof artifact {proof_ref} has no proof payload"
+                "completed proof artifact {proof_ref} has an invalid {:?} payload",
+                Self::expected_proof_payload(id)
             ));
         }
         Ok(Some(proof))
@@ -1670,12 +1651,13 @@ impl EngineObserver for RuntimeObserver {
         &self,
         artifact: &ProofArtifactRef,
     ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
-        let material = crate::server::proof_artifact::load_aggregate_input_artifact_material(
+        let material = crate::server::proof_artifact::load_proof_artifact_material(
             &self.runtime,
             &artifact.network_pair,
             artifact.pipeline_key,
             artifact.route,
             &artifact.proof_ref,
+            ProofArtifactPayload::AggregateInput,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -3109,6 +3091,148 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compressed_sp1_proposal_remains_valid_when_standalone_owner_joins_late() -> Result<()>
+    {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-late-standalone-owner",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = "sp1/network"
+            .parse::<PipelineRoute>()
+            .expect("parse SP1 network route");
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: proposal_task_id.clone(),
+        };
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "agg-late-owner".to_string(),
+            proposal_ids: vec![42],
+            prover_config: ProverTaskConfig::default(),
+        };
+        let aggregate_metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Sp1,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: Some(ExecutionMode::Prove),
+            aggregate_requested: true,
+            proposals: vec![proposal_metadata_task(pipeline, &request)],
+            aggregate_task_id: Some(aggregate_task_ref(pipeline, &aggregate_request)),
+            aggregate_request: Some(aggregate_request),
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "aggregate-root".to_string(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "hoodi_batch".to_string(),
+                network_pair: "taiko_dev/ethereum".to_string(),
+                artifact_refs: publication_proof_artifact_refs(&aggregate_metadata, pipeline),
+                metadata: serde_json::to_value(aggregate_metadata)?,
+                request_fingerprint: "aggregate-root".to_string(),
+            })
+            .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+        let execution_permit = engine_execution_permit(&observer, &proposal_task_id, &task).await?;
+        let proof = compressed_sp1_proof_fixture();
+        let completion_permit = EngineObserver::checkpoint_completed_proof(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &proof,
+            &execution_permit,
+        )
+        .await?;
+
+        register_observer_task(
+            runtime.as_ref(),
+            "standalone-root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        EngineObserver::on_task_succeeded(
+            &observer,
+            &proposal_task_id,
+            &task,
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof.clone(),
+            },
+            Some(&completion_permit),
+            &execution_permit,
+        )
+        .await?;
+
+        let aggregate = runtime
+            .get_task("aggregate-root")
+            .await?
+            .expect("aggregate root");
+        assert_eq!(aggregate.runner_status, RunnerStatus::Allocated);
+        let mut standalone = runtime
+            .get_task("standalone-root")
+            .await?
+            .expect("standalone root");
+        if standalone.runner_status != RunnerStatus::Completed {
+            let metadata = TaskMetadata::decode_for_record(&standalone)?;
+            crate::server::task_cleanup::reconcile_runtime_task_from_artifacts(
+                runtime.as_ref(),
+                &standalone,
+                &metadata,
+            )
+            .await?;
+            standalone = runtime
+                .get_task("standalone-root")
+                .await?
+                .expect("reconciled standalone root");
+        }
+        assert_eq!(standalone.runner_status, RunnerStatus::Completed);
+
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let proposal_artifact = crate::server::proof_artifact::load_proof_artifact_material(
+            runtime.as_ref(),
+            "taiko_dev/ethereum",
+            pipeline,
+            route,
+            &proof_ref,
+            ProofArtifactPayload::Proposal,
+        )
+        .await?
+        .expect("proposal artifact");
+        assert_eq!(proposal_artifact.proof, proof);
+        assert!(
+            crate::server::proof_artifact::load_proof_artifact_material(
+                runtime.as_ref(),
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                ProofArtifactPayload::Final,
+            )
+            .await
+            .is_err(),
+            "a compressed proposal must never become a final aggregate proof"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_observer_publishes_compressed_sp1_root_artifact() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-compressed-sp1-root",
@@ -3212,7 +3336,11 @@ mod tests {
         .await
         .expect_err("incomplete SP1 root proof must be rejected");
 
-        assert!(error.to_string().contains("without a proof payload"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid Proposal proof artifact payload")
+        );
         Ok(())
     }
 
@@ -3748,6 +3876,7 @@ mod tests {
                 pipeline,
                 route,
                 &loading_ref,
+                ProofArtifactPayload::Final,
             )
             .await
         });
@@ -3816,6 +3945,7 @@ mod tests {
                 pipeline,
                 route,
                 &loading_ref,
+                ProofArtifactPayload::Final,
             )
             .await
         });

@@ -1683,6 +1683,8 @@ mod tests {
         fail_remove: bool,
     }
 
+    struct ActiveEngine;
+
     #[derive(Debug)]
     struct DeleteFailArtifactStore;
 
@@ -1830,6 +1832,48 @@ mod tests {
         }
     }
 
+    impl EngineHandle for ActiveEngine {
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> TestBoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> TestBoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn has_active_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+        ) -> TestBoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: raiko2_engine::EngineExecutionPlan,
+        ) -> TestBoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            Box::pin(async { Ok(raiko2_queue::AttachOutcome::Attached) })
+        }
+
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> TestBoxFuture<
+            '_,
+            Result<raiko2_queue::DetachOutcome<raiko2_engine::EngineTaskKey>, TaskStoreError>,
+        > {
+            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
+        }
+    }
+
     #[test]
     fn invalidation_task_log_context_describes_single_proposal() {
         let metadata = task_log_metadata(&[21], false);
@@ -1926,6 +1970,57 @@ mod tests {
             result.is_err(),
             "empty test factory should reject submission"
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_post_and_get_keep_compressed_sp1_aggregate_pending_pollable() {
+        let (state, task_id, request) =
+            existing_sp1_aggregate_fixture("aggregate-pending-poll", false).await;
+
+        for _ in 0..2 {
+            let posted = post_proof_request(&state, &request).await;
+            assert_eq!(posted.task_id, task_id);
+            assert_eq!(posted.status, "work_in_progress");
+            assert!(posted.proof.is_none());
+
+            let task = get_proof_task(&state, &task_id).await;
+            assert!(matches!(task.status, ProofStatus::Proving));
+            assert_eq!(task.proposals.len(), 1);
+            assert!(matches!(task.proposals[0].status, ProofStatus::Completed));
+            assert!(task.proposals[0].proof.is_none());
+            assert!(task.proposals[0].proof_ref.is_some());
+            assert!(task.proposals[0].proof_uri.is_some());
+            let aggregate = task.aggregate.expect("aggregate status");
+            assert!(matches!(aggregate.status, ProofStatus::Proving));
+            assert!(aggregate.proof.is_none());
+            assert!(task.error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_post_and_get_return_completed_sp1_aggregate_proof() {
+        let (state, task_id, request) =
+            existing_sp1_aggregate_fixture("aggregate-completed-poll", true).await;
+
+        for _ in 0..2 {
+            let posted = post_proof_request(&state, &request).await;
+            assert_eq!(posted.task_id, task_id);
+            assert_eq!(posted.status, "completed");
+            assert_eq!(posted.proof.as_deref(), Some("0xaggregate"));
+
+            let task = get_proof_task(&state, &task_id).await;
+            assert!(matches!(task.status, ProofStatus::Completed));
+            assert_eq!(task.proof.as_deref(), Some("0xaggregate"));
+            assert!(matches!(task.proposals[0].status, ProofStatus::Completed));
+            assert!(task.proposals[0].proof.is_none());
+            assert!(task.proposals[0].proof_ref.is_some());
+            let aggregate = task.aggregate.expect("aggregate status");
+            assert!(matches!(aggregate.status, ProofStatus::Completed));
+            assert_eq!(aggregate.proof.as_deref(), Some("0xaggregate"));
+            assert!(aggregate.proof_ref.is_some());
+            assert!(aggregate.proof_uri.is_some());
+            assert!(task.error.is_none());
+        }
     }
 
     #[tokio::test]
@@ -2467,6 +2562,7 @@ mod tests {
                 pipeline_key,
                 pipeline_key.route(),
                 proof_ref,
+                crate::server::proof_artifact::ProofArtifactPayload::Final,
             )
             .await
             .expect("load invalidated proof artifact")
@@ -3234,6 +3330,126 @@ mod tests {
         assert!(response.error.is_none());
     }
 
+    async fn existing_sp1_aggregate_fixture(
+        label: &str,
+        completed: bool,
+    ) -> (AppState, String, wire::ProofRequest) {
+        let runtime =
+            Arc::new(RuntimeManager::new(test_runtime_root(label)).expect("runtime manager"));
+        let mut config = Config::default();
+        config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_hoodi/hoodi",
+            PipelineKey::ShastaSp1,
+            Arc::new(ActiveEngine),
+        );
+        let state = AppState::from_parts(Arc::new(config), Arc::new(factory), Arc::clone(&runtime));
+        let request = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals: vec![wire::ProposalRequest {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_number_start: 7,
+                l2_block_number_end: 7,
+                last_anchor_block_number: 6,
+            }],
+        };
+        let mut submission = proposal_submission(&state, &request).expect("canonical submission");
+        let fingerprint =
+            proposal_request_fingerprint(runtime.environment(), runtime.namespace(), &submission)
+                .expect("request fingerprint");
+        submission.public_task_id = fingerprint.public_task_id();
+        let plan =
+            build_submission_plan(&submission, fingerprint.as_str()).expect("submission plan");
+        let mut record = match register_batch_task(&state, &submission, &plan, fingerprint.as_str())
+            .await
+            .expect("register aggregate root")
+        {
+            raiko2_runtime::TaskRegistrationOutcome::Created(record) => record,
+            raiko2_runtime::TaskRegistrationOutcome::Existing(_) => {
+                panic!("fixture task id must be unique")
+            }
+        };
+        let mut metadata = parse_task_metadata(&record).expect("task metadata");
+        metadata.runtime.active_stage = Some("aggregate".to_string());
+        metadata.runtime.last_event = Some("started:test".to_string());
+        record.metadata = serde_json::to_value(&metadata).expect("serialize task metadata");
+        record.runner_status = if completed {
+            RuntimeTaskRunnerStatus::Completed
+        } else {
+            RuntimeTaskRunnerStatus::Running
+        };
+        runtime.upsert_task(&record).await.expect("update task");
+
+        let compressed_proposal = Proof {
+            input: Some(alloy_primitives::B256::ZERO),
+            quote: Some(r#"{"Compressed":{}}"#.to_string()),
+            uuid: Some("sp1-verifying-key".to_string()),
+            extra_data: Some(serde_json::json!({ "shasta": {} })),
+            ..Proof::default()
+        };
+        register_test_proof_artifact(
+            runtime.as_ref(),
+            &record.network_pair,
+            record.pipeline_key,
+            record.route,
+            &plan.proposals[0].task_ref,
+            &compressed_proposal,
+        )
+        .await;
+        if completed {
+            register_test_proof_artifact(
+                runtime.as_ref(),
+                &record.network_pair,
+                record.pipeline_key,
+                record.route,
+                &plan.aggregate.as_ref().expect("aggregate task").task_ref,
+                &Proof {
+                    proof: Some("0xaggregate".to_string()),
+                    ..Proof::default()
+                },
+            )
+            .await;
+        }
+
+        (state, submission.public_task_id, request)
+    }
+
+    async fn post_proof_request(
+        state: &AppState,
+        request: &wire::ProofRequest,
+    ) -> wire::ProofTaskData {
+        let http_request = Request::builder()
+            .method("POST")
+            .uri("/v4/proof/proposal")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(request).expect("serialize proof request"),
+            ))
+            .expect("build proof request");
+        match request_proposal_proof(State(state.clone()), HeaderMap::new(), http_request).await {
+            Ok(Json(response)) => response.data,
+            Err(error) => panic!("proof POST failed: {}", error.message),
+        }
+    }
+
+    async fn get_proof_task(state: &AppState, task_id: &str) -> TaskData {
+        match get_task(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(task_id.to_string()),
+        )
+        .await
+        {
+            Ok(Json(response)) => response.data,
+            Err(error) => panic!("proof GET failed: {}", error.message),
+        }
+    }
+
     fn task_log_metadata(proposal_ids: &[u64], aggregate: bool) -> TaskMetadata {
         let pipeline_key = PipelineKey::ShastaSp1;
         let proposals = proposal_ids
@@ -3297,11 +3513,29 @@ mod tests {
         proof_ref: &str,
         proof: &str,
     ) {
-        let bytes = serde_json::to_vec(&Proof {
-            proof: Some(proof.to_string()),
-            ..Proof::default()
-        })
-        .expect("serialize proof");
+        register_test_proof_artifact(
+            runtime,
+            network_pair,
+            pipeline,
+            route,
+            proof_ref,
+            &Proof {
+                proof: Some(proof.to_string()),
+                ..Proof::default()
+            },
+        )
+        .await;
+    }
+
+    async fn register_test_proof_artifact(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        pipeline: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        proof: &Proof,
+    ) {
+        let bytes = serde_json::to_vec(proof).expect("serialize proof");
         let publication = runtime
             .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, &bytes)
             .await

@@ -8,35 +8,41 @@ pub(crate) struct ProofArtifactMaterial {
     pub(crate) proof: Proof,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProofArtifactPayload {
+    Proposal,
+    AggregateInput,
+    Final,
+}
+
+impl ProofArtifactPayload {
+    pub(crate) fn accepts(self, pipeline_key: PipelineKey, proof: &Proof) -> bool {
+        match self {
+            Self::Proposal => {
+                proof.proof.is_some()
+                    || (matches!(pipeline_key, PipelineKey::ShastaSp1)
+                        && proof.quote.is_some()
+                        && proof.input.is_some()
+                        && proof.uuid.is_some()
+                        && proof.extra_data.is_some())
+            }
+            Self::AggregateInput => raiko2_prover::validate_external_aggregate_proofs(
+                pipeline_key,
+                std::slice::from_ref(proof),
+            )
+            .is_ok(),
+            Self::Final => proof.proof.is_some(),
+        }
+    }
+}
+
 pub(crate) async fn load_proof_artifact_material(
     runtime: &RuntimeManager,
     network_pair: &str,
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_ref: &str,
-) -> Result<Option<ProofArtifactMaterial>> {
-    load_proof_artifact_material_inner(runtime, network_pair, pipeline_key, route, proof_ref, true)
-        .await
-}
-
-pub(crate) async fn load_aggregate_input_artifact_material(
-    runtime: &RuntimeManager,
-    network_pair: &str,
-    pipeline_key: PipelineKey,
-    route: PipelineRoute,
-    proof_ref: &str,
-) -> Result<Option<ProofArtifactMaterial>> {
-    load_proof_artifact_material_inner(runtime, network_pair, pipeline_key, route, proof_ref, false)
-        .await
-}
-
-async fn load_proof_artifact_material_inner(
-    runtime: &RuntimeManager,
-    network_pair: &str,
-    pipeline_key: PipelineKey,
-    route: PipelineRoute,
-    proof_ref: &str,
-    require_proof_payload: bool,
+    expected_payload: ProofArtifactPayload,
 ) -> Result<Option<ProofArtifactMaterial>> {
     let Some(record) = runtime
         .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
@@ -79,8 +85,11 @@ async fn load_proof_artifact_material_inner(
         }
     };
 
-    if require_proof_payload && proof.proof.is_none() {
-        anyhow::bail!("proof artifact {} has no proof payload", object.proof_uri);
+    if !expected_payload.accepts(pipeline_key, &proof) {
+        anyhow::bail!(
+            "proof artifact {} is not a valid {expected_payload:?} payload for {pipeline_key}",
+            object.proof_uri
+        );
     }
 
     let still_active = runtime
@@ -111,6 +120,30 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn artifact_payload_contract_is_derived_from_task_kind() {
+        let compressed_sp1 = Proof {
+            input: Some(alloy_primitives::B256::ZERO),
+            quote: Some(r#"{"Compressed":{}}"#.to_string()),
+            uuid: Some("sp1-verifying-key".to_string()),
+            extra_data: Some(serde_json::json!({ "shasta": {} })),
+            ..Proof::default()
+        };
+        let final_proof = Proof {
+            proof: Some("0xproof".to_string()),
+            ..Proof::default()
+        };
+
+        assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaSp1, &compressed_sp1));
+        assert!(
+            ProofArtifactPayload::AggregateInput.accepts(PipelineKey::ShastaSp1, &compressed_sp1)
+        );
+        assert!(!ProofArtifactPayload::Final.accepts(PipelineKey::ShastaSp1, &compressed_sp1));
+        assert!(!ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaRisc0, &compressed_sp1));
+        assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaSp1, &final_proof));
+        assert!(ProofArtifactPayload::Final.accepts(PipelineKey::ShastaSp1, &final_proof));
+    }
 
     #[derive(Debug)]
     struct PauseAfterInvalidationCheckStore {
@@ -255,6 +288,7 @@ mod tests {
                 pipeline_key,
                 route,
                 proof_ref,
+                ProofArtifactPayload::Final,
             )
             .await
         });

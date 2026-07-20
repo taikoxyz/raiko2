@@ -271,7 +271,7 @@ Response fields:
 | `proposal_id_end` | number | Last proposal ID covered by this request. |
 | `data.task_id` | string | Opaque root task ID derived from the normalized request fingerprint. Use it for task inspection and operational correlation. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
+| `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof. A completed standalone SP1 proposal may return `null` because its canonical artifact is a typed Compressed proposal payload; use `GET /v4/tasks/{id}` to inspect its `proof_ref` and `proof_uri`. |
 | `data.error` | string/null | Terminal root error detail when failed. Omitted when no error is present. |
 
 Polling and idempotency:
@@ -388,10 +388,20 @@ Response fields:
 | `data.proposals` | array | Proposal task views. |
 | `data.proposals[].l2_block_numbers` | array | L2 block numbers covered by the proposal. |
 | `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
-| `data.proof` | string/null | Final root proof hex string when completed. |
+| `data.proof` | string/null | Final root proof hex string when completed. A completed standalone SP1 proposal may be `null` when the canonical artifact is a Compressed proposal payload. |
 | `data.proof_ref` | string/null | Stable persisted proof reference. |
 | `data.proof_uri` | string/null | Backend-neutral persisted proof URI (`memory://` or `gs://`). |
 | `data.error` | string/null | Terminal error detail when failed. |
+
+SP1 proposal artifacts and final aggregate artifacts have different payload contracts:
+
+- A proposal artifact is readable when it contains a non-null `proof`, or, only for
+  `PipelineKey::ShastaSp1`, when it contains the complete Compressed payload fields `quote`,
+  `input`, `uuid`, and `extra_data`.
+- An aggregate artifact is readable only when it contains a non-null final `proof`.
+- Artifact validation is derived from the proposal or aggregate task identity. Whether the task is
+  currently referenced by a standalone root, an aggregate root, or both does not change the
+  accepted payload class.
 
 Validation:
 
@@ -722,8 +732,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.
-- `sp1.mode=execute` is rejected by the proof API because successful proof tasks must publish a
-  non-null proof artifact before reaching `Completed`.
+- `sp1.mode=execute` is rejected by the proof API because it does not produce the publishable
+  Compressed proposal or final aggregate payload required by the proof lifecycle.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires the selected `(network, l1_network)` pair
   to declare `sp1_verifier_rpc_url` and `sp1_verifier_address` in server config.
@@ -1091,6 +1101,10 @@ Returns the root-task view derived from the original batch request.
 - `proof_ref` and `proof_uri`, when present, point at the persisted proof artifact for the
   resolved concrete route. For `zk_any` requests these fields use the selected `sp1` or `risc0`
   artifact key, never `zk_any`.
+- A standalone SP1 proposal can be `completed` with `data.proof = null` when `proof_ref` and
+  `proof_uri` identify a readable Compressed proposal artifact. Proposal entries in an aggregate
+  task use the same contract. The aggregate root itself becomes `completed` only after a separate
+  final artifact with a non-null `proof` is readable.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
@@ -1160,7 +1174,9 @@ All API errors use the Hoodi-style envelope:
   unreferenced content without a bucket-wide age rule. Active manifests must not be deleted by age,
   and immutable content must remain available while any active manifest references it.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
-  registered, readable, and contains a non-null proof payload. Publication is create-only: an
+  registered, readable, and satisfies its task-identity payload contract. Proposal tasks accept a
+  non-null `proof`, plus the complete Compressed SP1 tuple (`quote`, `input`, `uuid`, `extra_data`)
+  on `ShastaSp1`; aggregate tasks require a non-null final `proof`. Publication is create-only: an
   identical existing object is idempotent, while a different late object is discarded.
 - Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
   `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.

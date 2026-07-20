@@ -51,7 +51,7 @@ use super::proof_types::{
 };
 use crate::config::{ResolvedNetworkPair, ServerAclFeature};
 use crate::server::proof_artifact::{
-    ProofArtifactMaterial, load_aggregate_input_artifact_material, load_proof_artifact_material,
+    ProofArtifactMaterial, ProofArtifactPayload, load_proof_artifact_material,
 };
 use crate::server::state::{
     AppState, EngineHandle, EngineQueueTaskState, EngineQueueTaskView, EngineStatusView,
@@ -61,8 +61,8 @@ use crate::server::task_cleanup::{
     proposal_task_chain_ids, proposal_task_id, reconcile_runtime_task_from_artifacts,
 };
 use crate::server::task_metadata::{
-    AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
-    RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref,
+    AggregateInputProofArtifact, BuildTaskMetadataParams, ProofArtifactKind, ProposalTask,
+    ProverType, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref,
     aggregate_task_ref, proposal_proof_artifact_refs, proposal_task_ref,
     publication_proof_artifact_refs, root_proof_artifact_refs, stage_task_ref,
 };
@@ -1838,18 +1838,21 @@ async fn load_persisted_root_proof_material(
     let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return Ok(None);
     };
-    let allow_quote_only =
-        record.pipeline_key == PipelineKey::ShastaSp1 && !metadata.aggregate_requested;
+    let expected_payload = match refs.kind {
+        ProofArtifactKind::Proposal => ProofArtifactPayload::Proposal,
+        ProofArtifactKind::Aggregate => ProofArtifactPayload::Final,
+    };
     for proof_ref in refs.refs {
-        if let Some(material) = load_artifact_material(
+        if let Some(material) = load_proof_artifact_material(
             runtime,
             &record.network_pair,
             record.pipeline_key,
             record.route,
             &proof_ref,
-            allow_quote_only,
+            expected_payload,
         )
-        .await?
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
         {
             return Ok(Some(material.proof));
         }
@@ -2303,7 +2306,7 @@ async fn load_proposal_statuses(
                 record.pipeline_key,
                 record.route,
                 &proof_refs,
-                record.pipeline_key == PipelineKey::ShastaSp1,
+                ProofArtifactPayload::Proposal,
             )
             .await?
             {
@@ -2382,7 +2385,7 @@ async fn load_aggregate_status(
                 record.pipeline_key,
                 record.route,
                 &refs.refs,
-                false,
+                ProofArtifactPayload::Final,
             )
             .await?
             {
@@ -2438,46 +2441,24 @@ async fn load_first_proof_artifact_material(
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_refs: &[String],
-    allow_quote_only: bool,
+    expected_payload: ProofArtifactPayload,
 ) -> Result<Option<ProofArtifactMaterial>, ApiError> {
     for proof_ref in proof_refs {
-        if let Some(material) = load_artifact_material(
+        if let Some(material) = load_proof_artifact_material(
             runtime,
             network_pair,
             pipeline_key,
             route,
             proof_ref,
-            allow_quote_only,
+            expected_payload,
         )
-        .await?
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
         {
             return Ok(Some(material));
         }
     }
     Ok(None)
-}
-
-async fn load_artifact_material(
-    runtime: &RuntimeManager,
-    network_pair: &str,
-    pipeline_key: PipelineKey,
-    route: PipelineRoute,
-    proof_ref: &str,
-    allow_quote_only: bool,
-) -> Result<Option<ProofArtifactMaterial>, ApiError> {
-    let material = if allow_quote_only {
-        load_aggregate_input_artifact_material(
-            runtime,
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-        )
-        .await
-    } else {
-        load_proof_artifact_material(runtime, network_pair, pipeline_key, route, proof_ref).await
-    };
-    material.map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))
 }
 
 fn require_published_proof(status: EngineStatusView, proof_ref: &str) -> EngineStatusView {
@@ -4929,13 +4910,13 @@ mod tests {
             Some(proof)
         );
         assert!(
-            load_artifact_material(
+            load_proof_artifact_material(
                 &runtime,
                 &metadata.network_pair,
                 PipelineKey::ShastaSp1,
                 route,
                 &proof_ref,
-                false,
+                ProofArtifactPayload::Final,
             )
             .await
             .is_err(),
@@ -6263,6 +6244,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaNative.route(),
             &plan.proposals[0].task_ref,
+            ProofArtifactPayload::Proposal,
         )
         .await
         {
@@ -6400,6 +6382,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaNative.route(),
             &artifacts[0].proof_ref,
+            ProofArtifactPayload::AggregateInput,
         )
         .await?
         .expect("stored aggregate input proof");
@@ -6494,6 +6477,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaNative.route(),
             "proposal-recovery",
+            ProofArtifactPayload::Proposal,
         )
         .await?;
 
@@ -6531,6 +6515,7 @@ mod tests {
             route.pipeline_key(),
             route.route,
             "sp1-network-proposal",
+            ProofArtifactPayload::Proposal,
         )
         .await
         .map_err(|err| anyhow!(err.to_string()))?;

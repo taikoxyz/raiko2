@@ -404,6 +404,29 @@ impl RuntimeObserver {
         Ok(metadata.owns_engine_task(id))
     }
 
+    fn is_sp1_aggregate_input_artifact(
+        id: &EngineTaskId,
+        records: &[RuntimeTaskRecord],
+    ) -> Result<bool> {
+        // Compressed SP1 proposal proofs carry recursion material in `quote`; only aggregate roots
+        // may publish that payload without weakening the non-null final-proof invariant.
+        if !matches!(
+            id.0,
+            EngineTaskKey::Proposal {
+                pipeline: raiko2_pipeline::PipelineKey::ShastaSp1,
+                ..
+            }
+        ) || records.is_empty()
+        {
+            return Ok(false);
+        }
+
+        records.iter().try_fold(true, |allowed, record| {
+            let metadata = TaskMetadata::decode_for_record(record)?;
+            Ok(allowed && metadata.aggregate_requested && metadata.aggregate_task_id.is_some())
+        })
+    }
+
     fn metric_context(record: &RuntimeTaskRecord) -> Result<MetricContext> {
         let metadata = TaskMetadata::decode_for_record(record)
             .context("failed to validate runtime task metadata for telemetry")?;
@@ -665,10 +688,6 @@ impl RuntimeObserver {
         // roots remain excluded so late worker results cannot reopen terminal requests.
         let records =
             self.matching_root_records(id, records, TerminalRootPolicy::IncludeCompleted)?;
-        anyhow::ensure!(
-            proof.proof.is_some(),
-            "refusing to publish proof artifact without a proof payload"
-        );
         if records.is_empty() {
             let invalidated = self
                 .runtime
@@ -689,6 +708,11 @@ impl RuntimeObserver {
             ))
             .into());
         }
+        anyhow::ensure!(
+            proof.proof.is_some()
+                || (proof.quote.is_some() && Self::is_sp1_aggregate_input_artifact(id, &records)?),
+            "refusing to publish proof artifact without a proof payload"
+        );
 
         let proof_bytes = serde_json::to_vec(proof).context("failed to serialize proof output")?;
         let publication = self
@@ -1428,14 +1452,34 @@ impl EngineObserver for RuntimeObserver {
             | EngineTaskKey::Aggregate { pipeline, .. } => pipeline,
         };
         let proof_ref = Self::root_task_ref(id);
-        let material = crate::server::proof_artifact::load_proof_artifact_material(
-            &self.runtime,
-            &self.network_pair,
-            pipeline_key,
-            self.route,
-            &proof_ref,
-        )
-        .await
+        let records = self
+            .matching_root_records(
+                id,
+                self.find_root_records(id).await,
+                TerminalRootPolicy::IncludeCompleted,
+            )
+            .map_err(|error| error.to_string())?;
+        let is_sp1_aggregate_input = Self::is_sp1_aggregate_input_artifact(id, &records)
+            .map_err(|error| error.to_string())?;
+        let material = if is_sp1_aggregate_input {
+            crate::server::proof_artifact::load_aggregate_input_artifact_material(
+                &self.runtime,
+                &self.network_pair,
+                pipeline_key,
+                self.route,
+                &proof_ref,
+            )
+            .await
+        } else {
+            crate::server::proof_artifact::load_proof_artifact_material(
+                &self.runtime,
+                &self.network_pair,
+                pipeline_key,
+                self.route,
+                &proof_ref,
+            )
+            .await
+        }
         .map_err(|error| error.to_string())?;
         let proof = if let Some(material) = material {
             material.proof
@@ -1457,7 +1501,7 @@ impl EngineObserver for RuntimeObserver {
                 format!("invalid pending proof publication {proof_ref}: {error}")
             })?
         };
-        if proof.proof.is_none() {
+        if proof.proof.is_none() && !(is_sp1_aggregate_input && proof.quote.is_some()) {
             return Err(format!(
                 "completed proof artifact {proof_ref} has no proof payload"
             ));
@@ -2667,6 +2711,17 @@ mod tests {
         }
     }
 
+    fn compressed_sp1_proof_fixture() -> raiko2_primitives::Proof {
+        raiko2_primitives::Proof {
+            proof: None,
+            input: None,
+            quote: Some(r#"{"Compressed":{}}"#.to_string()),
+            uuid: None,
+            kzg_proof: None,
+            extra_data: None,
+        }
+    }
+
     async fn checkpoint_proof_fixture(
         observer: &RuntimeObserver,
         id: &EngineTaskId,
@@ -2949,6 +3004,9 @@ mod tests {
             "runtime-observer-aggregate-pending",
         ))?);
         let pipeline = PipelineKey::ShastaSp1;
+        let route = "sp1/network"
+            .parse::<PipelineRoute>()
+            .expect("parse SP1 network route");
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -2981,7 +3039,7 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: "task_public_aggregate_pending".to_string(),
                 pipeline_key: PipelineKey::ShastaSp1,
-                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                route,
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs,
@@ -2993,31 +3051,52 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaSp1.route(),
+            route,
         );
-        checkpoint_proof_fixture(
+        let proof = compressed_sp1_proof_fixture();
+        engine_checkpoint_proof(
             &observer,
             &proposal_task_id,
             &EngineTask::ProveProposal {
                 request: request.clone(),
                 input_task: proposal_task_id.clone(),
             },
+            &proof,
         )
         .await?;
+        assert_eq!(
+            observer
+                .load_completed_proof(
+                    &proposal_task_id,
+                    &EngineTask::Proposal {
+                        request: request.clone(),
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::msg)?,
+            Some(proof.clone())
+        );
         drive_engine_success(
             &observer,
             &proposal_task_id,
             &EngineTask::ProveProposal {
-                request,
+                request: request.clone(),
                 input_task: proposal_task_id.clone(),
             },
             &EngineTaskSuccess::Proof {
                 stage: raiko2_pipeline::PipelineStage::Prove,
-                proof: proof_fixture(),
+                proof: proof.clone(),
             },
         )
         .await
         .map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            observer
+                .load_completed_proof(&proposal_task_id, &EngineTask::Proposal { request })
+                .await
+                .map_err(anyhow::Error::msg)?,
+            Some(proof)
+        );
 
         let record = runtime
             .get_task("task_public_aggregate_pending")
@@ -3031,25 +3110,62 @@ mod tests {
             Some("stage_completed")
         );
         runtime
-            .get_proof_artifact(
-                "taiko_dev/ethereum",
-                pipeline,
-                pipeline.route(),
-                &proposal_ref,
-            )
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proposal_ref)
             .await?
             .expect("proposal proof artifact");
         assert!(
             runtime
-                .read_proof_artifact_bytes(
-                    "taiko_dev/ethereum",
-                    pipeline,
-                    pipeline.route(),
-                    &proposal_ref,
-                )
+                .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proposal_ref,)
                 .await?
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_rejects_payloadless_sp1_root_artifact() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-payloadless-sp1-root",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        register_observer_task(
+            runtime.as_ref(),
+            "task_payloadless_sp1_root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            runtime,
+            "taiko_dev/ethereum".to_string(),
+            "sp1/network"
+                .parse::<PipelineRoute>()
+                .expect("parse SP1 network route"),
+        );
+
+        let error = drive_engine_success(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request,
+                input_task: task_id.clone(),
+            },
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: compressed_sp1_proof_fixture(),
+            },
+        )
+        .await
+        .expect_err("payloadless root proof must be rejected");
+
+        assert!(error.to_string().contains("without a proof payload"));
         Ok(())
     }
 

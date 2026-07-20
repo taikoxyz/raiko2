@@ -61,8 +61,8 @@ To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 - `sp1/local`
 - `sp1/network`
 
-Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`; Boundless
-does not need an extra feature flag in default builds.
+The queue is always in-process. Durable task state and remote-provider checkpoints use the
+configured namespaced GCS runtime store; Boundless does not need an extra feature flag.
 
 ## Hosted Aggregate Route
 
@@ -817,9 +817,74 @@ Full deployment and offer parameter examples live in
 Operator notes:
 
 - `raiko2` uploads guest ELFs and submits Boundless requests directly.
-- Runtime state and task workdirs are stored under `./data/runtime` by default.
-- `runtime.inactive_ttl_secs` controls automatic cleanup for terminal root tasks
-  (`completed`, `failed`, `cancelled`). `0` disables cleanup; the default is `7200` seconds.
+- Production runtime state, provider checkpoints, publication intents, pending proof blobs, and proof
+  manifests are stored in the configured GCS namespace. Proof bytes are immutable objects, not fields
+  in the runtime snapshot. The state and object repositories have separate semantics even when both
+  use that namespace. There are no local task workdirs.
+- Run exactly one live instance per namespace. Active/active replicas and rolling overlap are not
+  supported, even temporarily. Use a `Recreate`-equivalent deployment strategy: close admission and
+  readiness, stop new dispatch and provider submission, wait only for short repository commits and
+  pre-admitted provider checkpoint permits, then stop or abort and join every worker and maintenance
+  task. Start the replacement only after the old process exits. Do not wait for every proof task or
+  publication saga to finish; restart reconciliation resumes durable work. Namespace changes are hard
+  cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
+  from GCS rather than Redis.
+- Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
+  complete lifecycle operation. A process-local lifecycle transition gate serializes one short
+  active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
+  publication steps, invalidation, reconciliation, and cleanup writes. It waits only for short
+  repository commits already admitted and request-ID checkpoints covered by permits acquired while
+  active. `Inactive` rejects every write. There is deliberately no owner lease, owner epoch, or
+  ownership heartbeat.
+- Treat `incarnation_id`, scheduler lease tokens, and GCS generations as separate stale-operation
+  domains. A `TaskLifetime` rejects callbacks for a removed and recreated runtime record; a queue
+  lease token identifies one execution attempt; a manifest generation performs exact artifact CAS.
+  Runtime-state generation, not serialized JSON byte order, is the snapshot CAS identity. None is
+  runtime authority, and runtime-state generations remain repository-internal.
+- Submission, cancellation, terminal failure, cleanup, and invalidation commit runtime state first,
+  then apply owner-aware execution-projection and exact proof-object effects. A partial effect is
+  recovered by reconciliation; operators must not attempt to repair it by reverting the
+  authoritative root. If terminal-failure persistence is unavailable, the queue task remains
+  retryable rather than becoming terminal ahead of its runtime root. Recovery, destructive cleanup,
+  and replacement are conditional on the complete observed task snapshot, so stale requests do not
+  detach a reopened root or install a second successor. Unowned pending-publication records retain
+  their artifact identity until deletion succeeds and are swept during startup reconciliation. A
+  successor at the same artifact key does not inherit the predecessor incarnation's publication
+  intent.
+- Boundless finalizes a non-zero market request ID and checkpoints it before either offchain or
+  onchain dispatch. Treat that durable checkpoint as the dispatch admission boundary: cancellation
+  that commits first prevents the provider call, while a later cancellation never causes a fresh
+  request ID. An uncertain offchain response is polled under the checkpointed ID and is not sent a
+  second time. The checkpoint is also bound to the exact guest image, Boundless market deployment,
+  and submission transport. Before changing any of them, settle or explicitly abandon every
+  outstanding remote request, then start the new configuration in a new namespace. An existing
+  checkpoint fails closed rather than crossing that provider boundary.
+- SP1 checkpoints the provider-assigned request ID together with its original submission time. A
+  restart or late-joining root reprojects that exact timestamp and deadline; it never extends the
+  paid request's timeout by treating recovery as a new submission.
+- Proposal execution nodes are position-independent: batch order never creates dependencies between
+  proposals, and only aggregation depends on the proposal artifact tasks it consumes. Proof
+  activation refreshes current owners under the short local lifecycle gate; newly registered distinct
+  roots may share the result, but a replacement incarnation for a checkpointed task ID is excluded.
+  Execution owners are resolved from canonical task membership, not the artifact-reference index;
+  external aggregate inputs remain storage consumers without receiving proposal-stage callbacks.
+  Cached proposal artifacts are execution short-circuits, not graph-shape inputs, so restart and
+  failed-aggregate recovery rebuild the identical proposal and dependency graph.
+- This release requires an atomic configuration cutover. Before starting the new binary, remove
+  legacy `[queue]` keys `backend`, `namespace`, and `redis_url`, remove legacy `[runtime]` keys
+  `root` and `inactive_ttl_secs`, and add explicit `runtime.environment`, `runtime.namespace`, and
+  `[runtime.store]` settings. Apply the new ConfigMap while the old instance is drained; old and new
+  schemas are not dual-read. Keep the prior ConfigMap and GCS namespace together for rollback.
+- The runtime snapshot schema is also a hard cut: task `incarnation_id`, first-class artifact
+  identity fields, canonical proposal and aggregate requests, and publication intent owner/hash
+  fields are required. Unknown fields, missing requests, and derived identity drift fail startup and
+  are not reconstructed from older snapshots. Deploy with a new empty namespace (or explicitly
+  delete the old runtime snapshot after the old instance exits);
+  there is no compatibility migration or fail-open recovery for legacy checkpoint state.
+- Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
+  proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must
+  remain available until every manifest that references it is gone. Generation-scoped invalidation
+  markers and unreferenced content use a minimum 30-day retention window.
 - Proposal requests are sized by `prover.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`
@@ -960,8 +1025,13 @@ the proxy. If `l2_witness_rpc` is unset, the server falls back to `l2_rpc`.
 
 - `GET /health`: basic process health
 - `GET /metrics`: Prometheus text-format key service metrics
-- `GET /ready`: configured L1/L2 RPC chain-ID readiness, queue readiness, and prerequisite checks
-  for the hosted proving capabilities exposed by the endpoint
+- `GET /ready`: configured L1/L2 RPC chain-ID readiness, global runtime lifecycle and store
+  access, recent queue-maintenance success, and prerequisite checks for the hosted proving
+  capabilities exposed by the endpoint. Queue maintenance is stale after
+  `max(3 * queue.maintenance_interval_ms, 1000ms)`.
+
+The response reports separate `reth`, `runtime`, `queue`, and `prover` checks. See
+[Architecture](architecture.md#readiness) for the traffic-gating flow and lifecycle behavior.
 
 The hosted server exports a minimal Prometheus surface focused on request intake and proving-stage
 health:

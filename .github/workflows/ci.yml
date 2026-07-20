@@ -104,8 +104,9 @@ jobs:
         with:
           shared-key: ci-rust
 
-      # Keep the main clippy lane on fast foundational crates plus preflight. The heavier
-      # prover/engine/server stack is covered by the manually dispatched rust-heavy workflow.
+      # Keep clippy on fast foundational crates plus the backend-neutral engine
+      # core and preflight. Full prover-stack checks remain in the manual heavy
+      # workflow.
       - name: clippy
         run: >
           cargo clippy
@@ -123,6 +124,9 @@ jobs:
           -p preflight
           --
           -D warnings
+
+      - name: clippy engine core
+        run: cargo clippy -p raiko2-engine --no-default-features -- -D warnings
 
   rust-test-foundation:
     needs: changes
@@ -231,12 +235,18 @@ jobs:
           -p raiko2-queue
           -p raiko2-runtime
 
-  # First PR-gate lane for the prover crate: the boundless bidding/money-path unit tests
-  # previously ran only in the manually dispatched rust-heavy workflow, so a pricing or
-  # rebid regression could merge green. `--lib` keeps this lane to unit tests; integration
-  # tests and the engine/server stacks stay on rust-heavy. Debug info is disabled to keep
-  # the zk-stack build inside runner disk limits, and the cache key is separate from the
-  # light lanes so the heavy prover artifacts don't evict their shared cache.
+      # The engine state-machine tests only need the backend-neutral core.
+      # Disabling default features avoids compiling the RISC0, SP1, and
+      # Boundless prover stacks in the PR gate.
+      - name: test engine core
+        run: cargo test -p raiko2-engine --no-default-features
+
+  # PR-gate lane for the prover crate: the boundless bidding/money-path and recovery unit
+  # tests previously ran only in the manually dispatched rust-heavy workflow, so a pricing
+  # or rebid regression could merge green. `--lib` keeps this lane to unit tests;
+  # integration tests and the server stack stay on rust-heavy. Debug info is disabled to
+  # keep the zk-stack build inside runner disk limits, and the cache key is separate from
+  # the light lanes so the heavy prover artifacts don't evict their shared cache.
   rust-test-prover:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
@@ -257,6 +267,13 @@ jobs:
         with:
           toolchain: "1.94.0"
 
+      # prost-build in the prover dependency tree shells out to protoc, which the hosted
+      # runner image does not ship.
+      - name: install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
@@ -264,11 +281,6 @@ jobs:
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
         with:
           shared-key: ci-rust-prover
-
-      # prost-build in the prover dependency tree shells out to protoc, which the hosted
-      # runner image does not ship.
-      - name: install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: test prover
         run: cargo test -p raiko2-prover --lib
@@ -315,8 +327,12 @@ jobs:
       - name: test xtask register image
         run: cargo test -p xtask register_image
 
-  # The engine/server stacks stay out of the default PR gate for now (covered by the manually
-  # dispatched rust-heavy workflow); prover lib tests are gated via rust-test-prover.
+      - name: test fixture server feature
+        run: cargo test -p raiko2 --bin raiko2 --features fixture-server
+
+  # The server stack stays out of the default PR gate for now (covered by the manually
+  # dispatched rust-heavy workflow); prover lib tests are gated via rust-test-prover and
+  # the backend-neutral engine core via the runtime lane.
   rust:
     needs:
       - changes

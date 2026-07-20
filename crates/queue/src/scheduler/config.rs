@@ -9,6 +9,14 @@ pub struct TaskExecutionPolicy {
     pub retry: RetryPolicy,
 }
 
+impl TaskExecutionPolicy {
+    /// Returns whether a failure at `attempt` exhausts this task's retry policy.
+    #[must_use]
+    pub fn failure_is_terminal(&self, attempt: u32) -> bool {
+        self.retry.retry_delay(attempt).is_none()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulerConfig {
     pub lease_duration: Duration,

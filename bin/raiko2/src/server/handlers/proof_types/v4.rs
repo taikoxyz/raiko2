@@ -128,8 +128,8 @@ pub(crate) struct InvalidateArtifactsData {
 pub(crate) struct InvalidateArtifactCounts {
     pub(crate) matched: usize,
     pub(crate) removed: usize,
-    pub(crate) files_removed: usize,
-    pub(crate) files_missing: usize,
+    pub(crate) manifests_removed: usize,
+    pub(crate) manifests_missing: usize,
     pub(crate) failed: usize,
 }
 

@@ -62,7 +62,6 @@ pub(crate) fn build_provider(
     pair: &ResolvedNetworkPair,
 ) -> Result<NetworkProvider> {
     let rpc_config = config.rpc.provider_client_config();
-    let _ = config;
     NetworkProvider::new_pair_with_l2_provider_kind_and_chain_specs_and_config(
         &pair.l1_rpc,
         &pair.l2_rpc,
@@ -179,15 +178,6 @@ pub(crate) const fn remote_sgx_prover_config(
     }
 }
 
-#[cfg(feature = "redis-queue")]
-use raiko2_pipeline::PipelineKey;
-
-#[cfg(feature = "redis-queue")]
-pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: PipelineKey) -> String {
-    let base = base.trim_end_matches('/');
-    format!("{}/{}/{}", base, pair.key, key.as_str())
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "local-provers")]
@@ -272,7 +262,7 @@ mod tests {
 
     #[cfg(feature = "local-provers")]
     #[test]
-    fn sp1_scheduler_retries_twenty_times_every_five_minutes() {
+    fn sp1_scheduler_retries_pre_checkpoint_failures() {
         let scheduler = sp1_scheduler_config(&Config::default());
         assert_eq!(
             scheduler.retry,

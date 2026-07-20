@@ -25,6 +25,7 @@ reqwest.workspace = true
 tokio.workspace = true
 hex.workspace = true
 url.workspace = true
+thiserror.workspace = true
 
 # Alloy types
 alloy.workspace = true

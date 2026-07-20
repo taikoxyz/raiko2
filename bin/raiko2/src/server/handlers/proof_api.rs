@@ -2586,7 +2586,17 @@ fn resolve_root_task_state(
         .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()))
         .or_else(|| failed_runtime_error(&status, runtime_error));
     let root_requires_proof = aggregate.is_some() || proposals.len() == 1;
-    if root_requires_proof && matches!(status, ProofStatus::Completed) && proof.is_none() {
+    let root_has_readable_artifact = match aggregate {
+        Some(aggregate) => aggregate.proof_ref.is_some() && aggregate.proof_uri.is_some(),
+        None => proposals.first().is_some_and(|proposal| {
+            proposals.len() == 1 && proposal.proof_ref.is_some() && proposal.proof_uri.is_some()
+        }),
+    };
+    if root_requires_proof
+        && matches!(status, ProofStatus::Completed)
+        && proof.is_none()
+        && !root_has_readable_artifact
+    {
         status = ProofStatus::Failed;
         error = Some("completed task has no readable root proof artifact".to_string());
     }
@@ -4931,6 +4941,22 @@ mod tests {
             .is_err(),
             "compressed proposal material must not pass the final-proof loader"
         );
+
+        let state = test_state_with_engines(
+            Arc::new(runtime),
+            [(
+                PipelineKey::ShastaSp1,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let task = load_task_data(&state, &record.task_id)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        assert!(matches!(task.status, ProofStatus::Completed));
+        assert!(task.proof.is_none());
+        assert_eq!(task.proof_ref.as_deref(), Some(proof_ref.as_str()));
+        assert!(task.proof_uri.is_some());
+        assert!(task.error.is_none());
         Ok(())
     }
 

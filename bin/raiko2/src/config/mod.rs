@@ -15,10 +15,10 @@ mod validation;
 
 pub use preflight::PreflightConfig;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
-pub use queue::{QueueBackend, QueueConfig};
+pub use queue::QueueConfig;
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
-pub use runtime::RuntimeConfig;
+pub use runtime::{RuntimeConfig, RuntimeStoreBackend};
 #[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};
@@ -33,7 +33,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub rpc: RpcConfig,
     pub prover: ProverConfig,
-    #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
@@ -101,24 +100,12 @@ impl Config {
             config.prover.remote_sgx.timeout_ms = timeout_ms;
         }
 
-        if let Some(queue_backend) = &cli.queue_backend {
-            config.queue.backend = queue_backend
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
-        }
-        if let Some(queue_namespace) = &cli.queue_namespace {
-            config.queue.namespace.clone_from(queue_namespace);
-        }
         if let Some(queue_workers) = cli.queue_workers {
             config.queue.workers = queue_workers;
         }
         if let Some(interval_ms) = cli.queue_maintenance_interval_ms {
             config.queue.maintenance_interval_ms = interval_ms;
         }
-        if let Some(redis_url) = &cli.redis_url {
-            config.queue.redis_url = Some(redis_url.clone());
-        }
-
         config.normalize();
 
         // Validate configuration
@@ -544,12 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_config_defaults_inactive_ttl_to_two_hours() {
-        let config = RuntimeConfig::default();
-        assert_eq!(config.inactive_ttl_secs, 7_200);
-    }
-
-    #[test]
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.offer_params.batch =
@@ -592,15 +573,11 @@ mod tests {
             "native/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
-        assert_eq!(
-            "risc0/boundless".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
-        );
-        assert_eq!(
+        assert!("risc0/boundless".parse::<PipelineRoute>().is_err());
+        assert!(
             "shasta-risc0-boundless"
                 .parse::<raiko2_pipeline::PipelineKey>()
-                .unwrap(),
-            raiko2_pipeline::PipelineKey::ShastaRisc0Network
+                .is_err()
         );
         assert_eq!(
             "sgx/remote".parse::<PipelineRoute>().unwrap(),
@@ -613,6 +590,20 @@ mod tests {
     fn test_config_default_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn file_config_requires_explicit_runtime_environment() {
+        let mut value = toml::Value::try_from(Config::default()).expect("serialize config");
+        value
+            .as_table_mut()
+            .expect("config table")
+            .remove("runtime");
+
+        let error = value
+            .try_into::<Config>()
+            .expect_err("runtime section must be explicit in deployment config");
+        assert!(error.to_string().contains("runtime"));
     }
 
     #[test]
@@ -696,10 +687,15 @@ sgxgeth_base_url = "http://127.0.0.1:8090"
 timeout_ms = 300000
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let _base_url_guard =
@@ -752,10 +748,15 @@ runner = "local"
 execution_po2 = 24
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -784,10 +785,15 @@ guest_system = "native"
 runner = "local"
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -860,10 +866,15 @@ guest_system = "native"
 runner = "local"
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -900,6 +911,13 @@ pairs = [
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from([
@@ -937,6 +955,13 @@ pairs = [
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -968,10 +993,16 @@ guest_system = "native"
 runner = "local"
 
 [queue]
-backend = "memory"
 
 [queue.retry]
 strategy = "fixed"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -1003,10 +1034,15 @@ guest_system = "risc0"
 runner = "local"
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -1039,10 +1075,15 @@ guest_system = "risc0"
 runner = "local"
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
@@ -1076,6 +1117,13 @@ taiko_hoodi = "https://verify.hoodi.example"
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -1112,6 +1160,13 @@ taiko_dev = "https://verify.dev.example"
 [prover]
 guest_system = "native"
 runner = "local"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -1121,96 +1176,6 @@ runner = "local"
         assert!(
             err_text.contains("ambiguous") && err_text.contains("taiko_dev"),
             "unexpected error: {err_text}"
-        );
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn test_queue_backend_cli_overrides_config_file() {
-        let config_toml = r#"
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[rpc]
-pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
-]
-
-[prover]
-guest_system = "risc0"
-runner = "local"
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-"#;
-        let path = write_temp_config(config_toml);
-
-        let cli = Cli::parse_from([
-            "raiko2",
-            "--config",
-            path.to_str().expect("path utf8"),
-            "--queue-backend",
-            "redis",
-            "--redis-url",
-            "redis://localhost:6379/",
-        ]);
-
-        let config = Config::load(&cli).expect("config load");
-        assert_eq!(config.queue.backend, QueueBackend::Redis);
-        assert_eq!(
-            config.queue.redis_url.as_deref(),
-            Some("redis://localhost:6379/")
-        );
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn test_queue_backend_redis_requires_url() {
-        let config_toml = r#"
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[rpc]
-pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
-]
-
-[prover]
-guest_system = "risc0"
-runner = "local"
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-"#;
-        let path = write_temp_config(config_toml);
-
-        let cli = Cli::parse_from([
-            "raiko2",
-            "--config",
-            path.to_str().expect("path utf8"),
-            "--queue-backend",
-            "redis",
-        ]);
-
-        let err = Config::load(&cli).expect_err("expected config error");
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("Queue configuration error"),
-            "unexpected error: {err_msg}"
-        );
-        assert!(
-            err.chain().any(|e| e.to_string().contains("redis_url")),
-            "missing redis_url detail in error chain: {err_msg}"
         );
 
         let _ = std::fs::remove_file(path);

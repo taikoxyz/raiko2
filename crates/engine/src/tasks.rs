@@ -1,11 +1,12 @@
 use alloy_primitives::Bytes;
-use raiko2_pipeline::{PipelineKey, PipelineStageResult};
+use raiko2_pipeline::{PipelineKey, PipelineRoute, PipelineStageResult};
 use raiko2_primitives::{L2BlockRange, Proof, ShastaCheckpoint};
 use raiko2_prover::sp1_config::{Sp1ConfigOverrides, Sp1SystemConfig};
 use raiko2_queue::{ReadyQueueSort, TaskId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProverTaskConfig {
     #[serde(default)]
     pub sp1: Option<Sp1ConfigOverrides>,
@@ -14,6 +15,7 @@ pub struct ProverTaskConfig {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProposalTaskRequest {
     pub proposal_id: u64,
     pub l2_block_range: Option<L2BlockRange>,
@@ -36,11 +38,28 @@ pub enum ProposalStage {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AggregationTaskRequest {
     pub request_id: String,
     pub proposal_ids: Vec<u64>,
     #[serde(default)]
     pub prover_config: ProverTaskConfig,
+}
+
+/// A root-owned proving execution submitted as one in-memory queue projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineExecutionPlan {
+    /// Canonical proposal requests; proposal nodes are mutually independent.
+    pub proposals: Vec<ProposalTaskRequest>,
+    /// Optional aggregate task consuming the proposal artifacts.
+    pub aggregate: Option<EngineAggregationPlan>,
+}
+
+/// Aggregate node included in an [`EngineExecutionPlan`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineAggregationPlan {
+    pub request: AggregationTaskRequest,
+    pub inputs: Vec<AggregateProofInput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,8 +79,9 @@ pub enum AggregateProofInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofArtifactRef {
     pub network_pair: String,
+    pub pipeline_key: PipelineKey,
+    pub route: PipelineRoute,
     pub proof_ref: String,
-    pub proof_path: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +134,7 @@ impl ReadyQueueSort for EngineTaskKey {
 
 pub type EngineTaskId = TaskId<EngineTaskKey>;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineTask {
     Proposal {
         request: ProposalTaskRequest,
@@ -138,6 +158,35 @@ pub enum EngineTask {
         request: AggregationTaskRequest,
         source: AggregationSource,
     },
+    /// Durable queue payload used after proving succeeds but artifact publication fails.
+    PublishProof {
+        task: Box<EngineTask>,
+        proof: Box<Proof>,
+    },
+}
+
+impl EngineTask {
+    #[must_use]
+    pub fn with_pending_publication(self, proof: Proof) -> Self {
+        match self {
+            Self::PublishProof { task, .. } => Self::PublishProof {
+                task,
+                proof: Box::new(proof),
+            },
+            task => Self::PublishProof {
+                task: Box::new(task),
+                proof: Box::new(proof),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn publication_source(&self) -> &Self {
+        match self {
+            Self::PublishProof { task, .. } => task.publication_source(),
+            task => task,
+        }
+    }
 }
 
 pub type EncodedGuestInput = Bytes;
@@ -182,8 +231,9 @@ mod tests {
     fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
+            pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
             proof_ref: proof_ref.to_string(),
-            proof_path: format!("/tmp/{proof_ref}.json"),
         }
     }
 

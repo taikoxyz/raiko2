@@ -1,4 +1,5 @@
-use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfig, RunnerKind};
+use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
+use crate::server::state::AppState;
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
@@ -55,48 +56,62 @@ pub struct ReadyResponse {
     pub status: &'static str,
     /// Legacy field name retained for compatibility; this covers configured L1/L2 RPC readiness.
     pub reth: ReadyCheck,
+    pub runtime: ReadyCheck,
     pub queue: ReadyCheck,
     pub prover: ReadyCheck,
 }
 
-pub async fn evaluate_readiness(config: &Config) -> ReadyResponse {
-    let reth = match check_rpc_pairs(config).await {
+pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
+    let reth = match check_rpc_pairs(&state.config).await {
         Ok(()) => ReadyCheck::ok(),
         Err(err) => ReadyCheck::err(&err),
     };
 
-    let queue = {
-        #[cfg(feature = "redis-queue")]
-        {
-            match check_queue(config).await {
-                Ok(()) => ReadyCheck::ok(),
-                Err(err) => ReadyCheck::err(&err),
-            }
-        }
-
-        #[cfg(not(feature = "redis-queue"))]
-        {
-            match check_queue(config) {
-                Ok(()) => ReadyCheck::ok(),
-                Err(err) => ReadyCheck::err(&err),
-            }
-        }
-    };
-
-    let prover = match check_prover(config) {
+    let runtime = match state.runtime.check_readiness().await {
         Ok(()) => ReadyCheck::ok(),
         Err(err) => ReadyCheck::err(&err),
     };
 
-    let status = if reth.ok && queue.ok && prover.ok {
+    let queue_max_age = std::time::Duration::from_millis(
+        state
+            .config
+            .queue
+            .maintenance_interval_ms
+            .saturating_mul(3)
+            .max(1_000),
+    );
+    let queue = if state.pipelines.queue_maintenance_ready(queue_max_age) {
+        ReadyCheck::ok()
+    } else {
+        ReadyCheck::err(&anyhow::anyhow!(
+            "queue maintenance has not completed within {}ms",
+            queue_max_age.as_millis()
+        ))
+    };
+
+    let prover = match check_prover(&state.config) {
+        Ok(()) => ReadyCheck::ok(),
+        Err(err) => ReadyCheck::err(&err),
+    };
+
+    readiness_response(reth, runtime, queue, prover)
+}
+
+const fn readiness_response(
+    reth: ReadyCheck,
+    runtime: ReadyCheck,
+    queue: ReadyCheck,
+    prover: ReadyCheck,
+) -> ReadyResponse {
+    let status = if reth.ok && runtime.ok && queue.ok && prover.ok {
         "ok"
     } else {
         "error"
     };
-
     ReadyResponse {
         status,
         reth,
+        runtime,
         queue,
         prover,
     }
@@ -106,13 +121,6 @@ pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
     check_rpc_pairs(config)
         .await
         .context("reth readiness failed")?;
-    #[cfg(feature = "redis-queue")]
-    check_queue(config)
-        .await
-        .context("queue readiness failed")?;
-
-    #[cfg(not(feature = "redis-queue"))]
-    check_queue(config).context("queue readiness failed")?;
     check_prover(config).context("prover readiness failed")?;
     Ok(())
 }
@@ -281,41 +289,6 @@ fn sp1_effective_pair_config(
         .applied_to(global),
         _ => global.clone(),
     }
-}
-
-#[cfg(feature = "redis-queue")]
-async fn check_queue(config: &Config) -> Result<()> {
-    match config.queue.backend {
-        QueueBackend::Memory => Ok(()),
-        QueueBackend::Redis => check_redis_queue(&config.queue).await,
-    }
-}
-
-#[cfg(not(feature = "redis-queue"))]
-fn check_queue(config: &Config) -> Result<()> {
-    match config.queue.backend {
-        QueueBackend::Memory => Ok(()),
-        QueueBackend::Redis => check_redis_queue(&config.queue),
-    }
-}
-
-#[cfg(feature = "redis-queue")]
-async fn check_redis_queue(config: &QueueConfig) -> Result<()> {
-    let url = config.redis_url.clone().unwrap_or_default();
-    let namespace = config.namespace.clone();
-    let _store = raiko2_queue::RedisStore::<(), (), ()>::connect(
-        &url,
-        &namespace,
-        std::time::Duration::from_secs(60),
-    )
-    .await
-    .context("failed to connect to redis queue")?;
-    Ok(())
-}
-
-#[cfg(not(feature = "redis-queue"))]
-fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
-    bail!("redis queue requires building raiko2 with `--features redis-queue`");
 }
 
 #[cfg(test)]

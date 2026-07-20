@@ -42,6 +42,26 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Do not reintroduce legacy paths or concepts from old docs such as `host/`, `lib/`, `core/`, `taskdb/`,
   or `reqpool/` unless the code in this repo actually adds them.
 
+## Deployment Model
+
+- Treat one live process per `(runtime.environment, runtime.namespace)` as a hard architecture
+  invariant. Active/active replicas, overlapping rolling replacements, and shared namespaces are
+  unsupported.
+- Namespaces are isolated persistence domains. Do not design task, artifact, checkpoint, or
+  invalidation behavior around cross-namespace data sharing.
+- A replacement must start only after the old process has stopped admissions, drained work, stopped
+  all workers, and exited. Deployment configuration must use a non-overlapping replacement strategy.
+- Runtime fencing is namespace-wide and instance-wide, never task-scoped. Once draining starts, no
+  new work or ordinary mutation may begin. A remote request admitted before the drain may persist
+  only its own request-ID checkpoint through its runtime-issued permit; inactive stops every write.
+- Do not add a distributed owner lease, owner epoch, or ownership heartbeat under this deployment
+  model. Non-overlap is enforced by the deployment strategy, not by application-level locking.
+  An immutable task-lifetime identity is allowed only to reject stale callbacks after a local task is
+  removed and recreated; it is not runtime authority and must never weaken the global lifecycle fence.
+- Keep GCS object generations for exact object-version CAS, invalidation, and conditional deletion.
+  Do not use task-lifetime identities as owner epochs or add distributed multi-writer coordination
+  unless the deployment model is explicitly changed first.
+
 ## Stable Command Entry Points
 
 - Main server: `cargo run -r -p raiko2 -- --config config.toml`

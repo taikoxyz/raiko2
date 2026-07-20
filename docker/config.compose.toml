@@ -17,7 +17,11 @@ initial_backoff_ms = 500
 compute_units_per_second = 1000
 
 [runtime]
-root = "./data/runtime"
+environment = "development"
+namespace = "raiko2-compose"
+
+[runtime.store]
+backend = "memory"
 
 [prover]
 guest_system = "sgx"
@@ -39,6 +43,7 @@ fulfillment_strategy = "reserved"
 skip_simulation = true
 cycle_limit = 1000000000000
 timeout_secs = 7200
+network_request_max_attempts = 3
 
 [prover.boundless]
 offchain = false
@@ -87,7 +92,5 @@ sgxgeth_base_url = "http://gaiko2-sgxgeth:8080"
 timeout_ms = 300000
 
 [queue]
-backend = "memory"
-namespace = "raiko2:docker"
 workers = 6
 maintenance_interval_ms = 200

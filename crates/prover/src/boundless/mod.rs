@@ -816,28 +816,6 @@ fn effective_price_multiplier(attempt: u64, step_bps: u32, max_attempts: u32) ->
     u32::try_from(scaled / U256::from(SCALE)).unwrap_or(u32::MAX)
 }
 
-/// Attempt number to resume a stored submission at. Records carry the real 1-based attempt.
-///
-/// Records written before `rebid_attempt` was persisted deserialize with `attempt == 0`. The first
-/// release carrying that field is also the first to resume such records, so on that one upgrade
-/// every in-flight submission would otherwise reset to attempt 1 — re-granting the full rebid budget
-/// and rebidding below prices the market already declined. The reconstruction inverts the old
-/// `max_price_multiplier = base_multiplier^(attempt - 1)` ladder as `1 + log2(max_price_multiplier)`,
-/// which is exact only for the ×2 default ladder (`rebid_price_multiplier = 2`) — the multiplier
-/// every known deployment ran, as the live k8s fleet never set a custom value. A legacy record from a
-/// non-default ladder (multiplier 3, 4, …) resolves to a conservative upper bound on the attempt:
-/// `log2` over-counts the rungs, so the resumed attempt is no smaller than the real one, leaving
-/// fewer remaining rebids at higher prices — never more. Post-upgrade records always carry a real
-/// `attempt`, so this branch is dead after one deploy.
-fn resume_attempt(submission: &Submission) -> u64 {
-    if submission.attempt > 0 {
-        return submission.attempt;
-    }
-    // TODO: delete this legacy branch, its tests, and this comment after one release carrying
-    // rebid_attempt has shipped — records with attempt == 0 cannot exist beyond that deploy.
-    1 + u64::from(submission.max_price_multiplier.max(1).ilog2())
-}
-
 const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool {
     attempt > 0 && attempt <= max_attempts as u64
 }
@@ -889,14 +867,7 @@ const fn no_lock_deadline(submitted_at: u64, lock_expires_at: u64, timeout: NoLo
     let rebid_deadline = submitted_at.saturating_add(timeout.delay.as_secs());
     match timeout.action {
         NoLockTimeoutAction::Rebid => rebid_deadline,
-        // `lock_expires_at == 0` means a legacy resume record; keep the old rebid-delay behavior.
-        NoLockTimeoutAction::Abort => {
-            if lock_expires_at > 0 {
-                lock_expires_at
-            } else {
-                rebid_deadline
-            }
-        }
+        NoLockTimeoutAction::Abort => lock_expires_at,
     }
 }
 
@@ -1054,7 +1025,7 @@ struct Submission {
     remote_tx_hash: Option<String>,
     expires_at: u64,
     // Offer lock deadline (`rampUpStart + lockTimeout`). The market pays nothing for fulfillments
-    // past this time, so it bounds the payable window; `0` when resumed from a legacy record.
+    // past this time, so it bounds the payable window.
     lock_expires_at: u64,
     submitted_at: u64,
     // Floored effective price multiplier at this attempt, for progress/metadata display only.
@@ -1062,8 +1033,7 @@ struct Submission {
     max_price_multiplier: u32,
     // Exact escalated max price this submission bid, in wei. The floored `max_price_multiplier`
     // renders the common attempt-2 (×1.5) rung as `1` — indistinguishable from an un-escalated bid —
-    // so this carries the precise value for telemetry. `0` when resumed from a record that predates
-    // the field.
+    // so this carries the precise value for telemetry.
     max_price_wei: U256,
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
     // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
@@ -1112,33 +1082,72 @@ impl From<RaikoError> for BoundlessAttemptError {
 
 async fn publish_boundless_progress(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
+    permit: &crate::SubmissionCheckpointPermit,
     submission: &Submission,
     image_ref: &str,
     deployment: &str,
     offchain: bool,
-    quoted_mcycles_count: u32,
-    evaluated_mcycles_count: u32,
-) {
-    if let Some(observer) = observer {
-        observer
-            .on_progress(&ProverProgress::BoundlessSubmission(
-                BoundlessSubmissionProgress {
-                    provider_request_id: submission.provider_request_id.clone(),
-                    remote_tx_hash: submission.remote_tx_hash.clone(),
-                    expires_at: submission.expires_at,
-                    lock_expires_at: submission.lock_expires_at,
-                    image_ref: image_ref.to_string(),
-                    deployment: deployment.to_string(),
-                    offchain,
-                    quoted_mcycles_count: Some(quoted_mcycles_count),
-                    evaluated_mcycles_count: Some(evaluated_mcycles_count),
-                    submitted_at: submission.submitted_at,
-                    max_price_multiplier: submission.max_price_multiplier,
-                    max_price_wei: Some(submission.max_price_wei.to_string()),
-                    rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
-                },
-            ))
-            .await;
+    mcycles_count: (u32, u32),
+) -> RaikoResult<()> {
+    let (quoted_mcycles_count, evaluated_mcycles_count) = mcycles_count;
+    let progress = ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+        provider_request_id: submission.provider_request_id.clone(),
+        remote_tx_hash: submission.remote_tx_hash.clone(),
+        expires_at: submission.expires_at,
+        lock_expires_at: submission.lock_expires_at,
+        image_ref: image_ref.to_string(),
+        deployment: deployment.to_string(),
+        offchain,
+        quoted_mcycles_count: Some(quoted_mcycles_count),
+        evaluated_mcycles_count: Some(evaluated_mcycles_count),
+        submitted_at: submission.submitted_at,
+        max_price_multiplier: submission.max_price_multiplier,
+        max_price_wei: Some(submission.max_price_wei.to_string()),
+        rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
+    });
+    crate::persist_prover_progress(observer, &progress, "boundless_submission", permit).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_offchain_after_checkpoint<F, Fut>(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    permit: crate::SubmissionCheckpointPermit,
+    submission: Submission,
+    image_ref: &str,
+    deployment: &str,
+    mcycles_count: (u32, u32),
+    dispatch: F,
+) -> RaikoResult<Submission>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = RaikoResult<U256>>,
+{
+    publish_boundless_progress(
+        observer,
+        &permit,
+        &submission,
+        image_ref,
+        deployment,
+        true,
+        mcycles_count,
+    )
+    .await?;
+    drop(permit);
+
+    match dispatch().await {
+        Ok(returned_id) if returned_id == submission.market_request_id => Ok(submission),
+        Ok(returned_id) => Err(RaikoError::Guest(format!(
+            "Boundless order stream returned request id 0x{returned_id:x}, expected checkpointed request id 0x{:x}",
+            submission.market_request_id
+        ))),
+        Err(error) => {
+            tracing::warn!(
+                provider_request_id = %submission.provider_request_id,
+                error = %error,
+                "Boundless offchain submission returned an uncertain error; polling checkpointed request id"
+            );
+            Ok(submission)
+        }
     }
 }
 
@@ -1146,7 +1155,12 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
     type Error = RaikoError;
 
     fn try_from(value: BoundlessSubmissionResume) -> Result<Self, Self::Error> {
-        let raw_id = value.provider_request_id.trim_start_matches("0x");
+        let raw_id = value.provider_request_id.strip_prefix("0x").ok_or_else(|| {
+            RaikoError::Guest(format!(
+                "Invalid stored Boundless provider_request_id {}: expected canonical 0x-prefixed hexadecimal",
+                value.provider_request_id
+            ))
+        })?;
         let market_request_id = U256::from_str_radix(raw_id, 16).map_err(|e| {
             RaikoError::Guest(format!(
                 "Invalid stored Boundless provider_request_id {}: {e}",
@@ -1158,6 +1172,12 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
                 "Invalid stored Boundless provider_request_id: zero".to_string(),
             ));
         }
+        if value.provider_request_id != format!("0x{market_request_id:x}") {
+            return Err(RaikoError::Guest(format!(
+                "Invalid stored Boundless provider_request_id {}: non-canonical encoding",
+                value.provider_request_id
+            )));
+        }
         if value.expires_at == 0 {
             return Err(RaikoError::Guest(
                 "Invalid stored Boundless submission: missing expires_at".to_string(),
@@ -1168,6 +1188,44 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
                 "Invalid stored Boundless submission: missing submitted_at".to_string(),
             ));
         }
+        if value.lock_expires_at == 0 {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: missing lock_expires_at".to_string(),
+            ));
+        }
+        if value.submitted_at >= value.lock_expires_at || value.lock_expires_at > value.expires_at {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: invalid deadline ordering".to_string(),
+            ));
+        }
+        if value.rebid_attempt == 0 {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: rebid_attempt must start at one".to_string(),
+            ));
+        }
+        if value.max_price_multiplier == 0 {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: max_price_multiplier must be non-zero"
+                    .to_string(),
+            ));
+        }
+        let max_price_wei = value
+            .max_price_wei
+            .as_deref()
+            .ok_or_else(|| {
+                RaikoError::Guest(
+                    "Invalid stored Boundless submission: missing max_price_wei".to_string(),
+                )
+            })?
+            .parse::<U256>()
+            .map_err(|error| {
+                RaikoError::Guest(format!("Invalid stored Boundless max_price_wei: {error}"))
+            })?;
+        if max_price_wei == U256::ZERO {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: max_price_wei must be non-zero".to_string(),
+            ));
+        }
         Ok(Self {
             market_request_id,
             provider_request_id: value.provider_request_id,
@@ -1175,17 +1233,38 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             expires_at: value.expires_at,
             lock_expires_at: value.lock_expires_at,
             submitted_at: value.submitted_at,
-            max_price_multiplier: value.max_price_multiplier.max(1),
-            // Display-only; `0` for records that predate the field. The next live submit overwrites
-            // it with the exact bid.
-            max_price_wei: value
-                .max_price_wei
-                .as_deref()
-                .and_then(|wei| wei.parse().ok())
-                .unwrap_or(U256::ZERO),
+            max_price_multiplier: value.max_price_multiplier,
+            max_price_wei,
             attempt: u64::from(value.rebid_attempt),
         })
     }
+}
+
+fn validate_resume_context(
+    resume: &BoundlessSubmissionResume,
+    image_ref: &str,
+    deployment: &str,
+    offchain: bool,
+) -> RaikoResult<()> {
+    if resume.image_ref != image_ref {
+        return Err(RaikoError::Guest(format!(
+            "Boundless checkpoint image {} does not match current image {image_ref}",
+            resume.image_ref
+        )));
+    }
+    if resume.deployment != deployment {
+        return Err(RaikoError::Guest(format!(
+            "Boundless checkpoint deployment {} does not match current deployment {deployment}",
+            resume.deployment
+        )));
+    }
+    if resume.offchain != offchain {
+        return Err(RaikoError::Guest(format!(
+            "Boundless checkpoint transport {} does not match current transport {offchain}",
+            resume.offchain
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1660,22 +1739,23 @@ impl BoundlessProver {
         Ok(request)
     }
 
-    /// Build a [`Submission`] record for a just-submitted request. Derives the provider id,
+    /// Builds the durable submission identity before dispatching a finalized request.
+    ///
+    /// Derives the provider id,
     /// deadlines, and exact escalated max price from `request`, and the floored display multiplier
-    /// from `attempt` + config. `market_request_id` is passed separately because the offchain submit
-    /// returns the market's assigned id, which need not equal `request.id`; the onchain path passes
-    /// `request.id`. `remote_tx_hash` is set later on the onchain path once the tx is sent.
-    fn make_submission(
-        &self,
-        market_request_id: U256,
-        remote_tx_hash: Option<String>,
-        request: &ProofRequest,
-        attempt: u64,
-    ) -> Submission {
-        Submission {
+    /// from `attempt` + config. Both dispatch paths checkpoint this exact non-zero request id before
+    /// sending; `remote_tx_hash` is populated later when the on-chain transport returns it.
+    fn make_submission(&self, request: &ProofRequest, attempt: u64) -> RaikoResult<Submission> {
+        let market_request_id = request.id;
+        if market_request_id == U256::ZERO {
+            return Err(RaikoError::InvalidRequestConfig(
+                "Finalized Boundless request id must be nonzero before submission".to_string(),
+            ));
+        }
+        Ok(Submission {
             market_request_id,
             provider_request_id: format!("0x{market_request_id:x}"),
-            remote_tx_hash,
+            remote_tx_hash: None,
             expires_at: request.expires_at(),
             lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
@@ -1686,24 +1766,42 @@ impl BoundlessProver {
             ),
             max_price_wei: U256::from(request.offer.maxPrice),
             attempt,
-        }
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit_request_offchain(
         &self,
         client: &Client,
         request: &ProofRequest,
+        observer: Option<&Arc<dyn ProverProgressObserver>>,
+        permit: crate::SubmissionCheckpointPermit,
+        image_ref: &str,
+        deployment: &str,
+        mcycles_count: (u32, u32),
         attempt: u64,
     ) -> RaikoResult<Submission> {
-        let market_request_id = retry_external("submit boundless offchain request", || async {
-            client
-                .submit_request_offchain(request)
-                .await
-                .map(|(id, _)| id)
-                .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))
-        })
-        .await?;
-        Ok(self.make_submission(market_request_id, None, request, attempt))
+        let submission = self.make_submission(request, attempt)?;
+        dispatch_offchain_after_checkpoint(
+            observer,
+            permit,
+            submission,
+            image_ref,
+            deployment,
+            mcycles_count,
+            || async {
+                client
+                    .submit_request_offchain(request)
+                    .await
+                    .map(|(id, _)| id)
+                    .map_err(|error| {
+                        RaikoError::Guest(format!(
+                            "Boundless offchain request dispatch failed: {error}"
+                        ))
+                    })
+            },
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1725,7 +1823,7 @@ impl BoundlessProver {
         // Sign the request before reserving on the balance gate: signing is independent of the
         // deposit value, so there's no reason to hold a reservation across it. The chain id query
         // and signing both retry transient RPC errors, so a hiccup here does not abort the reused-id
-        // submission and rotate to a fresh id. `get_chain_id` caches the value inside the SDK's
+        // submission. `get_chain_id` caches the value inside the SDK's
         // market service after the first fetch, and the `Client` is reused across proofs, so this
         // is effectively a single query per process despite the per-submission call.
         let chain_id =
@@ -1774,31 +1872,49 @@ impl BoundlessProver {
             .from(client.boundless_market.caller())
             .value(value);
 
-        let mut submission = self.make_submission(request.id, None, request, attempt);
+        let mut submission = self.make_submission(request, attempt)?;
+        let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
         publish_boundless_progress(
             observer,
+            &checkpoint_permit,
             &submission,
             image_ref,
             deployment,
             false,
-            quoted_mcycles_count,
-            evaluated_mcycles_count,
+            (quoted_mcycles_count, evaluated_mcycles_count),
         )
-        .await;
+        .await?;
+        drop(checkpoint_permit);
 
         match call.send().await {
             Ok(pending_tx) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
-                publish_boundless_progress(
-                    observer,
-                    &submission,
-                    image_ref,
-                    deployment,
-                    false,
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
-                )
-                .await;
+                match crate::acquire_submission_checkpoint_permit(observer).await {
+                    Ok(tx_hash_permit) => {
+                        if let Err(error) = publish_boundless_progress(
+                            observer,
+                            &tx_hash_permit,
+                            &submission,
+                            image_ref,
+                            deployment,
+                            false,
+                            (quoted_mcycles_count, evaluated_mcycles_count),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                provider_request_id = %submission.provider_request_id,
+                                error = %error,
+                                "Boundless request id is durable but its optional transaction hash was not checkpointed"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        provider_request_id = %submission.provider_request_id,
+                        error = %error,
+                        "Boundless request id is durable but transaction-hash checkpoint admission is closed"
+                    ),
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -1833,20 +1949,23 @@ impl BoundlessProver {
         .await?;
 
         if self.config.offchain {
-            let submission = self
-                .submit_request_offchain(context.client, &request, context.attempt)
-                .await?;
-            publish_boundless_progress(
-                context.observer,
-                &submission,
-                context.image_ref,
-                context.deployment,
-                true,
-                context.quoted_mcycles_count,
-                context.evaluated_mcycles_count,
-            )
-            .await;
-            return Ok(submission);
+            let checkpoint_permit =
+                crate::acquire_submission_checkpoint_permit(context.observer).await?;
+            return self
+                .submit_request_offchain(
+                    context.client,
+                    &request,
+                    context.observer,
+                    checkpoint_permit,
+                    context.image_ref,
+                    context.deployment,
+                    (
+                        context.quoted_mcycles_count,
+                        context.evaluated_mcycles_count,
+                    ),
+                    context.attempt,
+                )
+                .await;
         }
 
         self.submit_request_onchain(
@@ -2225,9 +2344,25 @@ impl BoundlessProver {
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
             observer
-                .load_boundless_submission()
+                .load_pending_proof_checkpoint(crate::NetworkProverBackend::Boundless)
                 .await
-                .map(Submission::try_from)
+                .map_err(|error| RaikoError::Guest(error.to_string()))?
+                .map(|checkpoint| {
+                    checkpoint.decode_payload_for::<BoundlessSubmissionResume>(
+                        crate::NetworkProverBackend::Boundless,
+                    )
+                })
+                .transpose()
+                .map_err(|error| RaikoError::Guest(error.to_string()))?
+                .map(|resume| {
+                    validate_resume_context(
+                        &resume,
+                        &image_ref,
+                        &deployment,
+                        self.config.offchain,
+                    )?;
+                    Submission::try_from(resume)
+                })
                 .transpose()?
         } else {
             None
@@ -2236,8 +2371,8 @@ impl BoundlessProver {
         let mut last_retry_reason: Option<String> = None;
         // Market request id shared by rebid rungs of this proof task. The market keys locks and
         // paid fulfillments on the id, so reusing it across rebids makes paying for more than one
-        // rung impossible by construction. `None` mints a fresh id (first attempt, or after the
-        // previous id became unusable).
+        // rung impossible by construction. `None` mints a fresh id only for the first attempt or
+        // after the provider has definitively terminalized the previous request.
         let mut reuse_request_id: Option<U256> = None;
         // Per-proof input-upload cache: the guest env is uploaded once and reused across rebids,
         // refreshed only when its presigned URL nears expiry.
@@ -2250,9 +2385,7 @@ impl BoundlessProver {
                 .ensure_uploaded(client, elf_type, elf, image_id)
                 .await?;
             let submission = if let Some(mut submission) = resume_submission.take() {
-                attempt = attempt.max(resume_attempt(&submission));
-                // Reflect the reconstructed attempt on the record so published telemetry reports the
-                // real rebid attempt for legacy resumes (persisted attempt == 0), not 0.
+                attempt = attempt.max(submission.attempt);
                 submission.attempt = attempt;
                 // Expired records are deliberately not short-circuited: the poll below gives
                 // them one final market status read. An expired-but-fulfilled request still
@@ -2260,16 +2393,18 @@ impl BoundlessProver {
                 // proof that is already paid for; an expired-unfulfilled one classifies as
                 // Expired and takes the normal retry arm, which escalates the attempt and
                 // draws down the submission budget.
+                let checkpoint_permit =
+                    crate::acquire_submission_checkpoint_permit(observer.as_ref()).await?;
                 publish_boundless_progress(
                     observer.as_ref(),
+                    &checkpoint_permit,
                     &submission,
                     &image_ref,
                     &deployment,
                     self.config.offchain,
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
+                    (quoted_mcycles_count, evaluated_mcycles_count),
                 )
-                .await;
+                .await?;
                 submission
             } else {
                 if exceeds_submission_budget(attempt, self.config.rebid_max_attempts) {
@@ -2284,11 +2419,10 @@ impl BoundlessProver {
                         self.config.rebid_max_attempts,
                     )));
                 }
-                // `input_cache` is threaded by `&mut` so the reused-id attempt and the fresh-id
-                // fallback below share a single per-proof input upload. The context is built inline
-                // (rather than via a closure) because it borrows `&mut input_cache`, whose lifetime
-                // a closure returning the borrow cannot name.
-                let first = Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                // Once an id has been assigned, an RPC failure may have happened after the market
+                // accepted the request. Keep retrying that id on the next engine attempt instead of
+                // opening a second payable request under a fresh id.
+                Box::pin(self.submit_fresh_request(FreshSubmissionContext {
                     client,
                     input: &input,
                     elf,
@@ -2304,41 +2438,7 @@ impl BoundlessProver {
                     input_cache: &mut input_cache,
                     reuse_request_id,
                 }))
-                .await;
-                match first {
-                    Ok(submission) => submission,
-                    Err(error) => {
-                        // Id reuse is best-effort: an order stream or RPC may refuse a same-id
-                        // resubmission. Fall back to a fresh id (the pre-reuse behavior, which
-                        // re-opens the double-pay window for this rung) instead of failing the
-                        // proof.
-                        let Some(previous_request_id) = reuse_request_id.take() else {
-                            return Err(error);
-                        };
-                        tracing::warn!(
-                            previous_request_id = format!("0x{previous_request_id:x}"),
-                            error = %error,
-                            "Boundless rebid under the reused request id failed; retrying once with a fresh id"
-                        );
-                        Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                            client,
-                            input: &input,
-                            elf,
-                            program: &program,
-                            offer_spec,
-                            journal: &journal,
-                            image_ref: &image_ref,
-                            deployment: &deployment,
-                            observer: observer.as_ref(),
-                            quoted_mcycles_count,
-                            evaluated_mcycles_count,
-                            attempt,
-                            input_cache: &mut input_cache,
-                            reuse_request_id: None,
-                        }))
-                        .await?
-                    }
-                }
+                .await?
             };
 
             tracing::info!(
@@ -2826,12 +2926,13 @@ mod tests {
         BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessSubmissionState,
         BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
         ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
-        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
-        exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
-        parse_bool_result, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
-        validate_offer_params,
+        Submission, TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
+        defer_poll_timeout_while_payable, dispatch_offchain_after_checkpoint,
+        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
+        publish_boundless_progress, quote_batch_mcycles, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
+        validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2839,13 +2940,15 @@ mod tests {
         price_oracle::{Amount, Asset},
         storage::StorageUploaderType,
     };
-    use raiko2_primitives::Proof;
-    use raiko2_primitives::ProofType;
+    use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmission, RemoteSubmissionId};
     use std::{
         collections::HashMap,
         env,
-        sync::{Arc, Mutex, MutexGuard},
+        sync::{
+            Arc, Mutex, MutexGuard,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::{Duration, Instant, SystemTime},
     };
     use url::Url;
@@ -2854,6 +2957,274 @@ mod tests {
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
     const TEST_REBID_PRICE_STEP_BPS: u32 = 5000;
     const TEST_REBID_MAX_ATTEMPTS: u32 = 4;
+
+    struct FlakyProgressObserver {
+        remaining_failures: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    struct PermanentProgressObserver {
+        calls: AtomicUsize,
+    }
+
+    struct RecordingProgressObserver {
+        persisted: Arc<AtomicBool>,
+    }
+
+    struct PermitDropSignal(Arc<AtomicBool>);
+
+    impl Drop for PermitDropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for FlakyProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::ProgressPersistenceError::Retryable(
+                    "checkpoint unavailable".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for PermanentProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::ProgressPersistenceError::Permanent(
+                "runtime is draining".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for RecordingProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.persisted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_submission() -> Submission {
+        Submission {
+            market_request_id: U256::from(1),
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            expires_at: 100,
+            lock_expires_at: 90,
+            submitted_at: 1,
+            max_price_multiplier: 1,
+            max_price_wei: U256::from(1),
+            attempt: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn boundless_checkpoint_retries_the_accepted_submission_in_place() {
+        let observer = Arc::new(FlakyProgressObserver {
+            remaining_failures: AtomicUsize::new(2),
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+        let submission = Submission {
+            market_request_id: U256::from(1),
+            provider_request_id: "0xaccepted".to_string(),
+            remote_tx_hash: None,
+            expires_at: 100,
+            lock_expires_at: 90,
+            submitted_at: 1,
+            max_price_multiplier: 1,
+            max_price_wei: U256::from(1),
+            attempt: 1,
+        };
+
+        publish_boundless_progress(
+            Some(&progress_observer),
+            &permit,
+            &submission,
+            "image",
+            "deployment",
+            true,
+            (1, 1),
+        )
+        .await
+        .expect("checkpoint eventually persists");
+
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn boundless_checkpoint_stops_on_permanent_runtime_fence() {
+        let observer = Arc::new(PermanentProgressObserver {
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+        let submission = Submission {
+            market_request_id: U256::from(1),
+            provider_request_id: "0xaccepted".to_string(),
+            remote_tx_hash: None,
+            expires_at: 100,
+            lock_expires_at: 90,
+            submitted_at: 1,
+            max_price_multiplier: 1,
+            max_price_wei: U256::from(1),
+            attempt: 1,
+        };
+
+        let error = publish_boundless_progress(
+            Some(&progress_observer),
+            &permit,
+            &submission,
+            "image",
+            "deployment",
+            true,
+            (1, 1),
+        )
+        .await
+        .expect_err("permanent runtime fence must stop checkpoint persistence");
+
+        assert!(error.to_string().contains("runtime is draining"));
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn offchain_dispatch_starts_only_after_checkpoint_is_durable() {
+        let persisted = Arc::new(AtomicBool::new(false));
+        let observer: Arc<dyn crate::ProverProgressObserver> =
+            Arc::new(RecordingProgressObserver {
+                persisted: Arc::clone(&persisted),
+            });
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_for_call = Arc::clone(&dispatched);
+        let persisted_for_call = Arc::clone(&persisted);
+        let permit_released = Arc::new(AtomicBool::new(false));
+        let permit = crate::SubmissionCheckpointPermit::tracked(PermitDropSignal(Arc::clone(
+            &permit_released,
+        )));
+        let permit_released_for_call = Arc::clone(&permit_released);
+
+        let submission = dispatch_offchain_after_checkpoint(
+            Some(&observer),
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            move || async move {
+                assert!(persisted_for_call.load(Ordering::SeqCst));
+                assert!(permit_released_for_call.load(Ordering::SeqCst));
+                dispatched_for_call.fetch_add(1, Ordering::SeqCst);
+                Ok(U256::from(1))
+            },
+        )
+        .await
+        .expect("checkpointed offchain request should dispatch");
+
+        assert_eq!(submission.market_request_id, U256::from(1));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_checkpoint_failure_prevents_offchain_dispatch() {
+        let observer: Arc<dyn crate::ProverProgressObserver> =
+            Arc::new(PermanentProgressObserver {
+                calls: AtomicUsize::new(0),
+            });
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_for_call = Arc::clone(&dispatched);
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let error = dispatch_offchain_after_checkpoint(
+            Some(&observer),
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            move || async move {
+                dispatched_for_call.fetch_add(1, Ordering::SeqCst);
+                Ok(U256::from(1))
+            },
+        )
+        .await
+        .expect_err("a fenced checkpoint must prevent provider dispatch");
+
+        assert!(error.to_string().contains("runtime is draining"));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn uncertain_offchain_dispatch_polls_the_checkpointed_request_once() {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_for_call = Arc::clone(&dispatched);
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let submission = dispatch_offchain_after_checkpoint(
+            None,
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            move || async move {
+                dispatched_for_call.fetch_add(1, Ordering::SeqCst);
+                Err(RaikoError::Guest("uncertain transport failure".to_string()))
+            },
+        )
+        .await
+        .expect("an uncertain response must retain the pre-dispatch request id");
+
+        assert_eq!(submission.market_request_id, U256::from(1));
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn offchain_dispatch_rejects_a_provider_id_mismatch() {
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let error = dispatch_offchain_after_checkpoint(
+            None,
+            permit,
+            test_submission(),
+            "image",
+            "deployment",
+            (1, 1),
+            || async { Ok(U256::from(2)) },
+        )
+        .await
+        .expect_err("provider must confirm the checkpointed request id");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected checkpointed request id")
+        );
+    }
 
     const STORAGE_ENV_VARS: &[&str] = &[
         "BOUNDLESS_STORAGE_UPLOADER",
@@ -3418,67 +3789,109 @@ mod tests {
         assert_eq!(super::effective_price_multiplier(5, bps, max), 5); // 5.06 -> 5
     }
 
-    fn test_submission(max_price_multiplier: u32, attempt: u64) -> super::Submission {
-        super::Submission {
-            market_request_id: U256::from(1u64),
-            provider_request_id: "0x1".to_string(),
-            remote_tx_hash: None,
-            expires_at: 1,
-            lock_expires_at: 1,
-            submitted_at: 1,
-            max_price_multiplier,
-            max_price_wei: U256::ZERO,
-            attempt,
-        }
-    }
-
-    #[test]
-    fn resume_attempt_uses_persisted_attempt() {
-        // A persisted attempt (> 0) is the sole source of truth, ignoring the multiplier.
-        assert_eq!(super::resume_attempt(&test_submission(4, 3)), 3);
-        assert_eq!(super::resume_attempt(&test_submission(1, 7)), 7);
-    }
-
-    #[test]
-    fn resume_attempt_reconstructs_legacy_attempt_from_multiplier() {
-        // Records predating `rebid_attempt` (attempt == 0) came from the ×2-per-rung ladder, so the
-        // attempt is recovered exactly as `1 + log2(max_price_multiplier)`.
-        assert_eq!(super::resume_attempt(&test_submission(1, 0)), 1);
-        assert_eq!(super::resume_attempt(&test_submission(2, 0)), 2);
-        assert_eq!(super::resume_attempt(&test_submission(4, 0)), 3);
-        assert_eq!(super::resume_attempt(&test_submission(8, 0)), 4);
-        assert_eq!(super::resume_attempt(&test_submission(16, 0)), 5);
-        // A malformed multiplier of 0 still resolves to attempt 1 (no ilog2(0) panic).
-        assert_eq!(super::resume_attempt(&test_submission(0, 0)), 1);
-    }
-
     #[test]
     fn resumed_submission_carries_lock_deadline() {
         let resume = crate::BoundlessSubmissionResume {
             provider_request_id: "0x1".to_string(),
             remote_tx_hash: None,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
             expires_at: 2_000,
             lock_expires_at: 1_500,
             submitted_at: 1_000,
             max_price_multiplier: 1,
-            max_price_wei: None,
+            max_price_wei: Some("1".to_string()),
             rebid_attempt: 1,
         };
-        let submission = super::Submission::try_from(resume).expect("valid resume record");
+        let submission = super::Submission::try_from(resume.clone()).expect("valid resume record");
         assert_eq!(submission.lock_expires_at, 1_500);
 
-        // Legacy records deserialize with lock_expires_at == 0 and must stay accepted.
-        let legacy: crate::BoundlessSubmissionResume = serde_json::from_value(serde_json::json!({
+        let mut invalid_deadlines = resume.clone();
+        invalid_deadlines.submitted_at = invalid_deadlines.lock_expires_at;
+        let deadline_error = super::Submission::try_from(invalid_deadlines)
+            .expect_err("invalid deadline ordering must fail closed");
+        assert!(deadline_error.to_string().contains("deadline ordering"));
+
+        let mut zero_price = resume.clone();
+        zero_price.max_price_wei = Some("0".to_string());
+        let price_error =
+            super::Submission::try_from(zero_price).expect_err("zero max price must fail closed");
+        assert!(
+            price_error
+                .to_string()
+                .contains("max_price_wei must be non-zero")
+        );
+
+        let mut noncanonical_id = resume.clone();
+        noncanonical_id.provider_request_id = "0x01".to_string();
+        let id_error = super::Submission::try_from(noncanonical_id)
+            .expect_err("non-canonical request identity must fail closed");
+        assert!(id_error.to_string().contains("non-canonical encoding"));
+
+        let mut zero_multiplier = resume;
+        zero_multiplier.max_price_multiplier = 0;
+        let multiplier_error = super::Submission::try_from(zero_multiplier)
+            .expect_err("zero max price multiplier must fail closed");
+        assert!(
+            multiplier_error
+                .to_string()
+                .contains("max_price_multiplier must be non-zero")
+        );
+
+        let error = serde_json::from_value::<crate::BoundlessSubmissionResume>(serde_json::json!({
             "provider_request_id": "0x1",
             "remote_tx_hash": null,
+            "image_ref": "0ximage",
+            "deployment": "base",
+            "offchain": false,
             "expires_at": 2_000,
             "submitted_at": 1_000,
             "max_price_multiplier": 1,
         }))
-        .expect("legacy record without lock_expires_at");
-        assert_eq!(legacy.lock_expires_at, 0);
-        let submission = super::Submission::try_from(legacy).expect("valid legacy record");
-        assert_eq!(submission.lock_expires_at, 0);
+        .expect_err("checkpoint without required fields must be rejected");
+        assert!(error.to_string().contains("lock_expires_at"));
+    }
+
+    #[test]
+    fn resumed_submission_rejects_a_different_provider_context() {
+        let resume = crate::BoundlessSubmissionResume {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            expires_at: 2_000,
+            lock_expires_at: 1_500,
+            submitted_at: 1_000,
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+
+        let image_error = validate_resume_context(&resume, "0xother", "base", false)
+            .expect_err("a different guest image must not resume a paid request");
+        assert!(
+            image_error
+                .to_string()
+                .contains("does not match current image")
+        );
+
+        let deployment_error = validate_resume_context(&resume, "0ximage", "sepolia", false)
+            .expect_err("a different market must not reuse the checkpointed request id");
+        assert!(
+            deployment_error
+                .to_string()
+                .contains("does not match current deployment")
+        );
+
+        let transport_error = validate_resume_context(&resume, "0ximage", "base", true)
+            .expect_err("a different transport must not reuse the checkpointed request id");
+        assert!(
+            transport_error
+                .to_string()
+                .contains("does not match current transport")
+        );
     }
 
     #[test]
@@ -3508,25 +3921,13 @@ mod tests {
     }
 
     #[test]
-    fn final_attempt_falls_back_to_rebid_delay_without_lock_deadline() {
-        // Legacy resume records predate the lock_expires_at field (stored as 0); keep the old
-        // rebid-delay behavior for them.
-        let timeout =
-            no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
-        assert_eq!(timeout.action, NoLockTimeoutAction::Abort);
-
-        assert!(!no_lock_deadline_elapsed(1_000, 0, timeout, 1_299));
-        assert!(no_lock_deadline_elapsed(1_000, 0, timeout, 1_300));
-    }
-
-    #[test]
     fn poll_timeout_defers_while_final_attempt_is_payable() {
         // submitted_at = 1_000, lock deadline = 10_000, request expiry = 20_000.
         let abort = no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
         assert_eq!(abort.action, NoLockTimeoutAction::Abort);
 
         // Within the payable window the overall poll timeout must not fire: a timeout-triggered
-        // resubmission could reopen the double-pay window through the fresh-id fallback.
+        // replacement could reopen the double-pay window under another request id.
         assert!(defer_poll_timeout_while_payable(
             1_000, 10_000, 20_000, abort, 9_999
         ));
@@ -3549,15 +3950,6 @@ mod tests {
         assert_eq!(rebid.action, NoLockTimeoutAction::Rebid);
         assert!(!defer_poll_timeout_while_payable(
             1_000, 10_000, 20_000, rebid, 9_999
-        ));
-
-        // Legacy records (lock_expires_at == 0) defer only for the rebid-delay window, matching
-        // their abort deadline.
-        assert!(defer_poll_timeout_while_payable(
-            1_000, 0, 20_000, abort, 1_299
-        ));
-        assert!(!defer_poll_timeout_while_payable(
-            1_000, 0, 20_000, abort, 1_300
         ));
     }
 

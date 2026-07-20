@@ -50,7 +50,9 @@ use super::proof_types::{
     ShastaProposal, TaskData, TaskRuntime,
 };
 use crate::config::{ResolvedNetworkPair, ServerAclFeature};
-use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
+use crate::server::proof_artifact::{
+    ProofArtifactMaterial, ProofArtifactPayload, load_proof_artifact_material,
+};
 use crate::server::state::{
     AppState, EngineHandle, EngineQueueTaskState, EngineQueueTaskView, EngineStatusView,
     ProofStatus,
@@ -59,8 +61,8 @@ use crate::server::task_cleanup::{
     proposal_task_chain_ids, proposal_task_id, reconcile_runtime_task_from_artifacts,
 };
 use crate::server::task_metadata::{
-    AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
-    RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref,
+    AggregateInputProofArtifact, BuildTaskMetadataParams, ProofArtifactKind, ProposalTask,
+    ProverType, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref,
     aggregate_task_ref, proposal_proof_artifact_refs, proposal_task_ref,
     publication_proof_artifact_refs, root_proof_artifact_refs, stage_task_ref,
 };
@@ -1836,6 +1838,10 @@ async fn load_persisted_root_proof_material(
     let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return Ok(None);
     };
+    let expected_payload = match refs.kind {
+        ProofArtifactKind::Proposal => ProofArtifactPayload::Proposal,
+        ProofArtifactKind::Aggregate => ProofArtifactPayload::Final,
+    };
     for proof_ref in refs.refs {
         if let Some(material) = load_proof_artifact_material(
             runtime,
@@ -1843,9 +1849,10 @@ async fn load_persisted_root_proof_material(
             record.pipeline_key,
             record.route,
             &proof_ref,
+            expected_payload,
         )
         .await
-        .map_err(|err| ApiError::internal(format!("failed to read proof artifact: {err}")))?
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
         {
             return Ok(Some(material.proof));
         }
@@ -2299,6 +2306,7 @@ async fn load_proposal_statuses(
                 record.pipeline_key,
                 record.route,
                 &proof_refs,
+                ProofArtifactPayload::Proposal,
             )
             .await?
             {
@@ -2377,6 +2385,7 @@ async fn load_aggregate_status(
                 record.pipeline_key,
                 record.route,
                 &refs.refs,
+                ProofArtifactPayload::Final,
             )
             .await?
             {
@@ -2432,14 +2441,19 @@ async fn load_first_proof_artifact_material(
     pipeline_key: PipelineKey,
     route: PipelineRoute,
     proof_refs: &[String],
+    expected_payload: ProofArtifactPayload,
 ) -> Result<Option<ProofArtifactMaterial>, ApiError> {
     for proof_ref in proof_refs {
-        if let Some(material) =
-            load_proof_artifact_material(runtime, network_pair, pipeline_key, route, proof_ref)
-                .await
-                .map_err(|err| {
-                    ApiError::internal(format!("failed to load proof artifact: {err}"))
-                })?
+        if let Some(material) = load_proof_artifact_material(
+            runtime,
+            network_pair,
+            pipeline_key,
+            route,
+            proof_ref,
+            expected_payload,
+        )
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
         {
             return Ok(Some(material));
         }
@@ -2553,7 +2567,17 @@ fn resolve_root_task_state(
         .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()))
         .or_else(|| failed_runtime_error(&status, runtime_error));
     let root_requires_proof = aggregate.is_some() || proposals.len() == 1;
-    if root_requires_proof && matches!(status, ProofStatus::Completed) && proof.is_none() {
+    let root_has_readable_artifact = match aggregate {
+        Some(aggregate) => aggregate.proof_ref.is_some() && aggregate.proof_uri.is_some(),
+        None => proposals.first().is_some_and(|proposal| {
+            proposals.len() == 1 && proposal.proof_ref.is_some() && proposal.proof_uri.is_some()
+        }),
+    };
+    if root_requires_proof
+        && matches!(status, ProofStatus::Completed)
+        && proof.is_none()
+        && !root_has_readable_artifact
+    {
         status = ProofStatus::Failed;
         error = Some("completed task has no readable root proof artifact".to_string());
     }
@@ -2990,20 +3014,11 @@ async fn completed_root_artifact_missing(
     let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return Ok(false);
     };
-    for proof_ref in &root_refs.refs {
-        if load_proof_artifact_material(
-            runtime,
-            &record.network_pair,
-            record.pipeline_key,
-            record.route,
-            proof_ref,
-        )
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+    if load_persisted_root_proof_material(runtime, record, metadata)
+        .await?
         .is_some()
-        {
-            return Ok(false);
-        }
+    {
+        return Ok(false);
     }
     warn!(
         task_id = record.task_id,
@@ -4855,6 +4870,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_sp1_root_accepts_compressed_proposal_artifact() -> Result<()> {
+        let runtime = RuntimeManager::new(unique_test_runtime_root(
+            "completed-sp1-compressed-proposal",
+        ))?;
+        let route = PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network);
+        let mut metadata = task_metadata_with_stage(None);
+        metadata.proof_type = ProofType::Sp1;
+        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        align_runtime_record_identity(&mut record, &mut metadata, PipelineKey::ShastaSp1, route);
+        runtime.upsert_task(&record).await?;
+        let proof_ref = metadata.proposals[0].task_id.clone();
+        let proof = Proof {
+            input: Some(alloy_primitives::B256::ZERO),
+            quote: Some(r#"{"Compressed":{}}"#.to_string()),
+            uuid: Some("sp1-verifying-key".to_string()),
+            extra_data: Some(serde_json::json!({ "shasta": {} })),
+            ..Proof::default()
+        };
+        write_test_proof_artifact_for_route(
+            &runtime,
+            &metadata.network_pair,
+            PipelineKey::ShastaSp1,
+            route,
+            &proof_ref,
+            &proof,
+        )
+        .await?;
+
+        assert!(
+            !completed_root_artifact_missing(&runtime, &record, &metadata)
+                .await
+                .map_err(|err| anyhow!(err.message))?
+        );
+        assert_eq!(
+            load_persisted_root_proof_material(&runtime, &record, &metadata)
+                .await
+                .map_err(|err| anyhow!(err.message))?,
+            Some(proof)
+        );
+        assert!(
+            load_proof_artifact_material(
+                &runtime,
+                &metadata.network_pair,
+                PipelineKey::ShastaSp1,
+                route,
+                &proof_ref,
+                ProofArtifactPayload::Final,
+            )
+            .await
+            .is_err(),
+            "compressed proposal material must not pass the final-proof loader"
+        );
+
+        let state = test_state_with_engines(
+            Arc::new(runtime),
+            [(
+                PipelineKey::ShastaSp1,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let task = load_task_data(&state, &record.task_id)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        assert!(matches!(task.status, ProofStatus::Completed));
+        assert!(task.proof.is_none());
+        assert_eq!(task.proof_ref.as_deref(), Some(proof_ref.as_str()));
+        assert!(task.proof_uri.is_some());
+        assert!(task.error.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn clearing_aggregate_outboxes_preserves_shared_proposal_until_last_root() -> Result<()> {
         let runtime = RuntimeManager::new(unique_test_runtime_root("shared-proposal-outbox"))?;
@@ -6157,6 +6244,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaNative.route(),
             &plan.proposals[0].task_ref,
+            ProofArtifactPayload::Proposal,
         )
         .await
         {
@@ -6294,6 +6382,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaNative.route(),
             &artifacts[0].proof_ref,
+            ProofArtifactPayload::AggregateInput,
         )
         .await?
         .expect("stored aggregate input proof");
@@ -6388,6 +6477,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaNative.route(),
             "proposal-recovery",
+            ProofArtifactPayload::Proposal,
         )
         .await?;
 
@@ -6425,6 +6515,7 @@ mod tests {
             route.pipeline_key(),
             route.route,
             "sp1-network-proposal",
+            ProofArtifactPayload::Proposal,
         )
         .await
         .map_err(|err| anyhow!(err.to_string()))?;

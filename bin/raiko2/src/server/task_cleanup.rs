@@ -1,8 +1,9 @@
 use crate::config::Config;
 use crate::server::lifecycle::ProofLifecycle;
+use crate::server::proof_artifact::ProofArtifactPayload;
 use crate::server::state::PipelineFactory;
 use crate::server::task_metadata::{
-    TaskMetadata, proposal_proof_artifact_refs, root_proof_artifact_refs,
+    ProofArtifactKind, TaskMetadata, proposal_proof_artifact_refs, root_proof_artifact_refs,
 };
 use anyhow::{Context, Result};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
@@ -212,14 +213,22 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
 
     let mut artifacts = Vec::new();
     if let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) {
-        let Some(artifact) = load_first_artifact(runtime, record, &root_refs.refs).await? else {
+        let expected_payload = match root_refs.kind {
+            ProofArtifactKind::Proposal => ProofArtifactPayload::Proposal,
+            ProofArtifactKind::Aggregate => ProofArtifactPayload::Final,
+        };
+        let Some(artifact) =
+            load_first_artifact(runtime, record, &root_refs.refs, expected_payload).await?
+        else {
             return Ok(None);
         };
         artifacts.push(artifact);
     } else {
         for proposal in &metadata.proposals {
             let refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
-            let Some(artifact) = load_first_artifact(runtime, record, &refs).await? else {
+            let Some(artifact) =
+                load_first_artifact(runtime, record, &refs, ProofArtifactPayload::Proposal).await?
+            else {
                 return Ok(None);
             };
             artifacts.push(artifact);
@@ -257,6 +266,7 @@ async fn load_first_artifact(
     runtime: &RuntimeManager,
     record: &RuntimeTaskRecord,
     proof_refs: &[String],
+    expected_payload: ProofArtifactPayload,
 ) -> Result<Option<ProofArtifactRecord>> {
     for proof_ref in proof_refs {
         if let Some(material) = crate::server::proof_artifact::load_proof_artifact_material(
@@ -265,6 +275,7 @@ async fn load_first_artifact(
             record.pipeline_key,
             record.route,
             proof_ref,
+            expected_payload,
         )
         .await?
         {
@@ -688,6 +699,65 @@ mod tests {
             .expect("artifact-complete root");
         assert_eq!(record.runner_status, RunnerStatus::Completed);
         assert!(record.proof_uri.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_reconciliation_completes_compressed_sp1_proposal_root() -> Result<()> {
+        let runtime = RuntimeManager::new(unique_runtime_root("sp1-artifact-reconcile"))?;
+        let encoded_task = encoded_proposal_task_id_for_pipeline(16, PipelineKey::ShastaSp1)?;
+        let metadata = metadata_for_task(&encoded_task);
+        register_runtime_task_with_metadata(
+            &runtime,
+            "sp1-root",
+            &metadata,
+            PipelineKey::ShastaSp1,
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        let record = runtime.get_task("sp1-root").await?.expect("SP1 root");
+        let proof_ref = proposal_task_ref(PipelineKey::ShastaSp1, &metadata.proposals[0].request);
+        let proof = raiko2_primitives::Proof {
+            input: Some(alloy_primitives::B256::ZERO),
+            quote: Some(r#"{"Compressed":{}}"#.to_string()),
+            uuid: Some("sp1-verifying-key".to_string()),
+            extra_data: Some(serde_json::json!({ "shasta": {} })),
+            ..raiko2_primitives::Proof::default()
+        };
+        let artifact = runtime
+            .publish_proof_artifact_bytes(
+                &record.network_pair,
+                record.pipeline_key,
+                record.route,
+                &proof_ref,
+                &serde_json::to_vec(&proof)?,
+            )
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: record.network_pair.clone(),
+                proof_ref,
+                pipeline_key: record.pipeline_key,
+                route: record.route,
+                proof_uri: artifact.proof_uri,
+                content_hash: artifact.content_hash,
+                generation: artifact.generation,
+            })
+            .await?;
+
+        let proof_uri = super::reconcile_runtime_task_from_artifacts(&runtime, &record, &metadata)
+            .await?
+            .expect("compressed proposal should reconcile root completion");
+        let completed = runtime
+            .get_task("sp1-root")
+            .await?
+            .expect("completed SP1 root");
+        assert_eq!(completed.runner_status, RunnerStatus::Completed);
+        assert_eq!(completed.proof_uri.as_deref(), Some(proof_uri.as_str()));
         Ok(())
     }
 

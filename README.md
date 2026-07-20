@@ -152,7 +152,10 @@ flowchart LR
 - Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
   regression when the server route is `native/local`.
-- Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
+- Hosted SP1 proposal proving emits Compressed proposal artifacts and SP1 aggregation emits Plonk
+  final proofs. A standalone SP1 proposal may therefore complete with `proof = null` while its
+  readable artifact carries `quote`, `input`, `uuid`, and `extra_data`; aggregate completion always
+  requires a separate artifact with a non-null final `proof`.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
   is not a separate proof type.

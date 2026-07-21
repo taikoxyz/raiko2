@@ -34,9 +34,10 @@ Run `cargo test -p raiko2 config::` and confirm the new TOML fails under the old
 
 **Step 3: Implement minimal structs and route helpers**
 
-Make all route defaults disabled. Add `ProverConfig::runner`, `is_enabled`, `iter_routes`, and the
-atomic route-override application. Derive SP1 runner from `Sp1Config.prover`; use fixed runners for
-native and both SGX lanes. Keep serde `deny_unknown_fields` at every configuration boundary.
+Enable only native local execution by default. Add `ProverConfig::runner`, `is_enabled`,
+`iter_routes`, and the atomic route-override application. An explicit route override disables all
+omitted proof types, including native. Derive SP1 runner from `Sp1Config.prover`; use fixed runners
+for native and both SGX lanes. Keep serde `deny_unknown_fields` at every configuration boundary.
 
 **Step 4: Verify green and commit**
 

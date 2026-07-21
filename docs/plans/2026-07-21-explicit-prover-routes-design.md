@@ -54,8 +54,11 @@ base_url = "http://sgxgeth-prover:8080"
 timeout_ms = 300000
 ```
 
-At least one proof type must be enabled. Disabled sections are not validated for credentials or
-connectivity. `ProverConfig` remains the sole code-level owner of route resolution through
+Native local execution is enabled by default so a minimal host configuration has one usable local
+route. An explicit `[prover.native] enabled = false` disables it. Operational route overrides remain
+atomic and disable every omitted proof type, including native. At least one proof type must be
+enabled after file configuration and overrides are applied. Disabled sections are not validated for
+credentials or connectivity. `ProverConfig` remains the sole code-level owner of route resolution through
 `runner(proof_type)`, `is_enabled(proof_type)`, and stable enabled-route iteration helpers.
 
 ## Boundless
@@ -147,6 +150,8 @@ Tests must cover:
 - parsing a combined self-contained production configuration,
 - rejection of the superseded standalone route/backend tables,
 - every proof type's enablement and runner derivation,
+- native local execution enabled by default and disabled by explicit configuration or omission from
+  an operational route override,
 - atomic CLI/environment route overrides,
 - disabled backend validation skipping,
 - the complete Boundless global configuration and every nested child table at its new path,

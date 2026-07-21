@@ -114,12 +114,19 @@ pub struct FixtureServerArgs {
 }
 
 #[cfg(test)]
+pub(crate) fn lock_test_cli_environment() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().expect("test CLI environment lock poisoned")
+}
+
+#[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, lock_test_cli_environment};
     use clap::Parser;
 
     #[test]
     fn prover_routes_flag_parses_complete_override() {
+        let _env_lock = lock_test_cli_environment();
         let cli = Cli::try_parse_from([
             "raiko2",
             "--prover-routes",
@@ -135,6 +142,7 @@ mod tests {
 
     #[test]
     fn removed_prover_flag_is_rejected() {
+        let _env_lock = lock_test_cli_environment();
         let result = Cli::try_parse_from(["raiko2", "--prover", "risc0/local"]);
 
         assert!(result.is_err(), "--prover must no longer be accepted");
@@ -143,6 +151,7 @@ mod tests {
     #[cfg(not(feature = "fixture-server"))]
     #[test]
     fn fixture_server_command_is_rejected_without_feature() {
+        let _env_lock = lock_test_cli_environment();
         let result = Cli::try_parse_from(["raiko2", "fixture-server"]);
 
         assert!(
@@ -154,6 +163,7 @@ mod tests {
     #[cfg(feature = "fixture-server")]
     #[test]
     fn fixture_server_command_parses_with_feature() {
+        let _env_lock = lock_test_cli_environment();
         let result = Cli::try_parse_from(["raiko2", "fixture-server", "--port", "8087"])
             .expect("fixture-server should parse when the feature is enabled");
 

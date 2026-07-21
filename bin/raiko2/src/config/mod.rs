@@ -182,13 +182,10 @@ fn override_single_rpc_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::Cli;
+    use crate::cli::{Cli, lock_test_cli_environment};
     use clap::Parser;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_temp_config(contents: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -202,7 +199,7 @@ mod tests {
     }
 
     fn parse_config_cli(path: &Path) -> Cli {
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _env_lock = lock_test_cli_environment();
         Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")])
     }
 
@@ -249,7 +246,7 @@ backend = "memory"
         #[allow(unsafe_code)]
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
-            // SAFETY: tests serialize environment mutation through ENV_LOCK.
+            // SAFETY: callers hold the shared test CLI environment lock.
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
@@ -257,7 +254,7 @@ backend = "memory"
         #[allow(unsafe_code)]
         fn remove(key: &'static str) -> Self {
             let previous = std::env::var(key).ok();
-            // SAFETY: tests serialize environment mutation through ENV_LOCK.
+            // SAFETY: callers hold the shared test CLI environment lock.
             unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
@@ -267,10 +264,10 @@ backend = "memory"
         #[allow(unsafe_code)]
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {
-                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                // SAFETY: the guard is dropped before the shared environment lock.
                 unsafe { std::env::set_var(self.key, previous) };
             } else {
-                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                // SAFETY: the guard is dropped before the shared environment lock.
                 unsafe { std::env::remove_var(self.key) };
             }
         }
@@ -713,7 +710,7 @@ backend = "memory"
 
     #[test]
     fn configless_load_requires_explicit_prover_routes() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _env_lock = lock_test_cli_environment();
         let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
         let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
         let cli = Cli::parse_from(["raiko2"]);
@@ -728,7 +725,7 @@ backend = "memory"
 
     #[test]
     fn configless_load_accepts_explicit_prover_routes() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _env_lock = lock_test_cli_environment();
         let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
         let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "native/local"]);
@@ -746,6 +743,7 @@ backend = "memory"
 
     #[test]
     fn prover_routes_cli_override_replaces_complete_file_table() {
+        let _env_lock = lock_test_cli_environment();
         let path = write_temp_config(route_override_config());
         let cli = Cli::parse_from([
             "raiko2",
@@ -766,7 +764,7 @@ backend = "memory"
 
     #[test]
     fn prover_routes_env_override_replaces_complete_file_table() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _env_lock = lock_test_cli_environment();
         let path = write_temp_config(route_override_config());
         let _routes_guard = EnvVarGuard::set("RAIKO2_PROVER_ROUTES", "sgx/remote");
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -782,6 +780,7 @@ backend = "memory"
 
     #[test]
     fn prover_routes_cli_override_rejects_duplicate_entries() {
+        let _env_lock = lock_test_cli_environment();
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "risc0/local,risc0/network"]);
 
         let err = Config::load(&cli).expect_err("duplicate route override must fail");
@@ -872,7 +871,7 @@ backend = "memory"
 
     #[test]
     fn test_sgx_remote_route_env_overrides_remote_sgx_config() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _env_lock = lock_test_cli_environment();
         let config_toml = r#"
 [server]
 host = "0.0.0.0"
@@ -1025,6 +1024,7 @@ backend = "memory"
 
     #[test]
     fn test_cli_sp1_network_route_does_not_mutate_sp1_backend_config() {
+        let _env_lock = lock_test_cli_environment();
         let default_sp1_prover = Config::default().prover.sp1.prover;
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "sp1/network"]);
 
@@ -1111,7 +1111,7 @@ namespace = "raiko2-test"
 backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _env_lock = lock_test_cli_environment();
         let cli = Cli::parse_from([
             "raiko2",
             "--config",

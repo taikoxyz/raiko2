@@ -182,9 +182,9 @@ pub(crate) const fn remote_sgx_prover_config(
 mod tests {
     #[cfg(feature = "local-provers")]
     use super::sp1_scheduler_config;
-    use super::{
-        boundless_prover_config, boundless_scheduler_config, build_context, scheduler_config,
-    };
+    #[cfg(feature = "host")]
+    use super::{boundless_prover_config, boundless_scheduler_config};
+    use super::{build_context, scheduler_config};
     use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
@@ -231,6 +231,7 @@ mod tests {
         assert!(context.config.get("sp1").is_none());
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn boundless_scheduler_uses_general_task_policy() {
         let config = Config::default();
@@ -294,6 +295,7 @@ mod tests {
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn boundless_prover_inherits_risc0_execution_po2() {
         let mut config = Config::default();
@@ -310,6 +312,7 @@ mod tests {
         assert_eq!(boundless.execution_po2, 24);
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();

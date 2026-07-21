@@ -203,8 +203,12 @@ struct PipelineResources {
     boundless_balance_gate: Option<BoundlessBalanceGate>,
 }
 
+#[cfg(any(feature = "host", feature = "local-provers"))]
 impl PipelineResources {
     fn prepare(config: &Config, pipelines: &[PipelineRegistration]) -> Result<Self> {
+        #[cfg(not(feature = "host"))]
+        let _ = config;
+
         #[cfg(feature = "local-provers")]
         let shasta_backends = if pipelines.iter().any(|registration| {
             matches!(
@@ -297,7 +301,8 @@ fn build_pipeline_factory(
     pipelines: &[PipelineRegistration],
     runtime: &Arc<RuntimeManager>,
     scheduler_config: &SchedulerConfig,
-    resources: &PipelineResources,
+    #[cfg(any(feature = "host", feature = "local-provers"))] resources: &PipelineResources,
+    #[cfg(not(any(feature = "host", feature = "local-provers")))] _resources: &PipelineResources,
 ) -> Result<StaticPipelineFactory> {
     let mut factory = StaticPipelineFactory::default();
     for pair in pairs {
@@ -331,7 +336,10 @@ impl AppState {
         let runtime = Arc::new(build_runtime(&config).await?);
         let scheduler_config = setup::scheduler_config(&config);
         let resolved_pairs = config.rpc.resolved_pairs()?;
+        #[cfg(any(feature = "host", feature = "local-provers"))]
         let resources = PipelineResources::prepare(&config, &pipeline_registrations)?;
+        #[cfg(not(any(feature = "host", feature = "local-provers")))]
+        let resources = PipelineResources {};
 
         runtime.initialize().await?;
         let factory = build_pipeline_factory(
@@ -836,6 +844,7 @@ mod tests {
         config
     }
 
+    #[cfg(feature = "host")]
     fn selected_pipeline_keys(config: &Config) -> Result<Vec<PipelineKey>> {
         Ok(enabled_pipeline_registrations(config)?
             .into_iter()

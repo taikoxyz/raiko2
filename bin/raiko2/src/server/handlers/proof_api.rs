@@ -1069,6 +1069,8 @@ async fn handle_existing_batch_task(
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
             .await?;
+    let canonical_existing_route = canonical_persisted_route(&existing)?;
+    let uses_legacy_route_alias = canonical_existing_route != existing.route;
     telemetry::record_duplicate_request(
         &MetricContext::new(
             submission.route.route.to_string(),
@@ -1079,7 +1081,10 @@ async fn handle_existing_batch_task(
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
     if existing.pipeline_key != submission.route.pipeline_key()
-        || canonical_persisted_route(&existing)? != submission.route.route
+        || canonical_existing_route != submission.route.route
+        || (uses_legacy_route_alias
+            && (existing.runner_status != RuntimeRunnerStatus::Completed
+                || missing_completed_artifact))
     {
         return replace_existing_batch_task(
             state,
@@ -1514,6 +1519,18 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
             record.runner_status,
             RuntimeRunnerStatus::Completed | RuntimeRunnerStatus::Cancelled
         ) {
+            continue;
+        }
+        if canonical_persisted_route(&record).map_err(|error| anyhow::anyhow!(error.message))?
+            != record.route
+        {
+            warn!(
+                task_id = record.task_id,
+                pipeline = %record.pipeline_key,
+                stored_route = %record.route,
+                canonical_route = %record.pipeline_key.route(),
+                "skipping startup recovery for a legacy route alias; a repeated request will replace the task canonically"
+            );
             continue;
         }
         if record.runner_status == RuntimeRunnerStatus::Failed
@@ -3628,6 +3645,40 @@ mod tests {
         )
     }
 
+    fn legacy_sgxgeth_record(
+        submission: &CanonicalBatchSubmission,
+        runner_status: RuntimeRunnerStatus,
+    ) -> Result<(TaskMetadata, RuntimeTaskRecord)> {
+        let request_fingerprint = batch_request_fingerprint_for_test(submission)?;
+        let plan = build_submission_plan(submission, &request_fingerprint)
+            .map_err(|err| anyhow!(err.message))?;
+        let mut metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: false,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        let mut record = runtime_record(runner_status, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaSgxGeth,
+            PipelineKey::ShastaSgxGeth.route(),
+        );
+        record.route = "sgx/remote".parse().expect("legacy SGXGETH route");
+        record.request_fingerprint = request_fingerprint;
+        Ok((metadata, record))
+    }
+
     fn valid_native_proof() -> Proof {
         Proof {
             proof: Some("0xproof".to_string()),
@@ -4754,7 +4805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_sgxgeth_record_matches_request_and_projects_canonical_route() -> Result<()> {
+    async fn legacy_sgxgeth_record_projects_canonical_route() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "legacy-sgxgeth-request",
         ))?);
@@ -4766,38 +4817,9 @@ mod tests {
             )],
         );
         let submission = canonical_submission(sgxgeth_remote_route(), false);
-        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&submission, &request_fingerprint)
-            .map_err(|err| anyhow!(err.message))?;
-        let mut metadata = build_task_metadata(
-            &submission.pair,
-            BuildTaskMetadataParams {
-                network: &submission.pair.network,
-                l1_network: &submission.pair.l1_network,
-                proof_type: submission.route.proof_type(),
-                requested_proof_type: Some(submission.requested_proof_type.as_str()),
-                prover_type: submission.prover_type,
-                execution_mode: submission.execution_mode,
-                aggregate_requested: false,
-            },
-            &plan.proposals,
-            plan.aggregate.as_ref(),
-        );
-        let mut record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
-        record.task_id.clone_from(&submission.public_task_id);
-        align_runtime_record_identity(
-            &mut record,
-            &mut metadata,
-            PipelineKey::ShastaSgxGeth,
-            PipelineKey::ShastaSgxGeth.route(),
-        );
-        record.route = "sgx/remote".parse().expect("legacy SGXGETH route");
-        record.request_fingerprint = request_fingerprint;
+        let (_metadata, record) =
+            legacy_sgxgeth_record(&submission, RuntimeRunnerStatus::Completed)?;
         runtime.upsert_task(&record).await?;
-
-        handle_existing_batch_task(&state, &submission, record.clone(), None)
-            .await
-            .map_err(|err| anyhow!(err.message))?;
 
         let stored = runtime
             .get_task(&record.task_id)
@@ -4809,6 +4831,81 @@ mod tests {
             .await
             .map_err(|err| anyhow!(err.message))?;
         assert_eq!(task.route, "sgxgeth/remote");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_skips_legacy_nonterminal_sgxgeth_record() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "startup-legacy-sgxgeth-skip",
+        ))?);
+        let submission = canonical_submission(sgxgeth_remote_route(), false);
+        let (_metadata, record) = legacy_sgxgeth_record(&submission, RuntimeRunnerStatus::Running)?;
+        runtime.upsert_task(&record).await?;
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSgxGeth,
+                recorder.clone() as Arc<dyn EngineHandle>,
+            )],
+        );
+
+        assert_eq!(recover_pending_runtime_tasks(&state).await?, 0);
+        assert!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .get_task(&record.task_id)
+                .await?
+                .expect("legacy runtime task"),
+            record
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_legacy_nonterminal_sgxgeth_is_replaced_canonically() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "duplicate-legacy-sgxgeth-replace",
+        ))?);
+        let submission = canonical_submission(sgxgeth_remote_route(), false);
+        let (_metadata, record) = legacy_sgxgeth_record(&submission, RuntimeRunnerStatus::Running)?;
+        runtime.upsert_task(&record).await?;
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSgxGeth,
+                recorder.clone() as Arc<dyn EngineHandle>,
+            )],
+        );
+
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(!response_is_completed(&response));
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("canonical replacement task");
+        assert_ne!(stored.incarnation_id, record.incarnation_id);
+        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSgxGeth);
+        assert_eq!(stored.route, PipelineKey::ShastaSgxGeth.route());
+        assert_eq!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions")
+                .len(),
+            1
+        );
         Ok(())
     }
 

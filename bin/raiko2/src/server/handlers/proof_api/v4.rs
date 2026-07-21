@@ -3337,6 +3337,7 @@ mod tests {
         let runtime =
             Arc::new(RuntimeManager::new(test_runtime_root(label)).expect("runtime manager"));
         let mut config = Config::default();
+        config.prover.routes = "sp1/local".parse().expect("valid SP1 route");
         config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
         let mut factory = StaticPipelineFactory::default();
         factory.insert(

@@ -15,15 +15,17 @@ mod server;
 mod validation;
 
 pub use preflight::PreflightConfig;
-pub use prover::{ProverConfig, ProverRoutesConfig, ZkAnyConfig, ZkAnyTargetConfig};
+pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::QueueConfig;
-pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+pub use raiko2_pipeline::{GuestSystem, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::{RuntimeConfig, RuntimeStoreBackend};
 #[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};
 
+#[cfg(test)]
+use raiko2_pipeline::PipelineRoute;
 #[cfg(test)]
 use raiko2_provider::L2ProviderKind;
 
@@ -186,7 +188,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use clap::Parser;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -201,6 +203,11 @@ mod tests {
         path.push(format!("raiko2-config-{nanos}.toml"));
         std::fs::write(&path, contents).expect("write temp config");
         path
+    }
+
+    fn parse_config_cli(path: &Path) -> Cli {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")])
     }
 
     fn workspace_config(path: &str) -> PathBuf {
@@ -814,7 +821,7 @@ backend = "memory"
     }
 
     #[test]
-    fn test_sgx_remote_route_requires_any_remote_sgx_base_url() {
+    fn test_sgx_remote_route_requires_sgx_base_url() {
         let mut config = Config::default();
         config.prover.routes = "sgx/remote".parse().expect("valid route");
 
@@ -822,7 +829,22 @@ backend = "memory"
             .prover
             .validate()
             .expect_err("missing remote sgx url");
-        assert!(err.to_string().contains("sgxgeth_base_url"));
+        assert!(err.to_string().contains("prover.remote_sgx.base_url"));
+    }
+
+    #[test]
+    fn test_sgxgeth_remote_route_requires_sgxgeth_base_url() {
+        let mut config = Config::default();
+        config.prover.routes = "sgxgeth/remote".parse().expect("valid route");
+
+        let err = config
+            .prover
+            .validate()
+            .expect_err("missing remote sgxgeth url");
+        assert!(
+            err.to_string()
+                .contains("prover.remote_sgx.sgxgeth_base_url")
+        );
     }
 
     #[test]
@@ -940,7 +962,7 @@ backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.prover.risc0.execution_po2, 24);
@@ -976,7 +998,7 @@ backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.server.host, "127.0.0.1");
@@ -1045,7 +1067,7 @@ backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let config = Config::load(&cli).expect("config load");
         let pair = config
@@ -1086,6 +1108,7 @@ namespace = "raiko2-test"
 backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::parse_from([
             "raiko2",
             "--config",
@@ -1129,7 +1152,7 @@ namespace = "raiko2-test"
 backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let err = Config::load(&cli).expect_err("unknown config field must fail");
         assert!(
@@ -1169,7 +1192,7 @@ namespace = "raiko2-test"
 backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let err = Config::load(&cli).expect_err("legacy queue retry config must fail");
         assert!(
@@ -1194,7 +1217,7 @@ pairs = [
 ]
 
 [prover.routes]
-risc0 = "local"
+native = "local"
 
 [queue]
 workers = 1
@@ -1209,7 +1232,7 @@ backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
         let config = Config::load(&cli).expect("config load");
         let pair = config
             .rpc
@@ -1234,7 +1257,7 @@ pairs = [
 ]
 
 [prover.routes]
-risc0 = "local"
+native = "local"
 
 [queue]
 workers = 1
@@ -1249,7 +1272,7 @@ backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
         let config = Config::load(&cli).expect("config load");
         let pair = config
             .rpc
@@ -1287,7 +1310,7 @@ namespace = "raiko2-test"
 backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
@@ -1329,7 +1352,7 @@ namespace = "raiko2-test"
 backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path);
 
         let err = Config::load(&cli).expect_err("ambiguous network verify rpc must fail");
         let err_text = format!("{err:#}");

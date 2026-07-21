@@ -1,146 +1,150 @@
-# Explicit Prover Route Registration Design
+# Self-Contained Prover Configuration Design
 
 ## Problem
 
-The server currently treats `prover.guest_system` and `prover.runner` as one global route. That
-single route also controls which pipelines are registered. This creates implicit behavior that is
-not represented by configuration. In particular, a production host configured as
-`risc0/network` also registers SP1, while a host configured as `sgx/remote` registers SGX lanes and
-returns before registering any ZK pipeline.
+The server must independently enable RISC0, SP1, native execution, SGX, and SGXGETH. The first
+version of this change introduced a separate `[prover.routes]` table, but that left an operator to
+discover hidden relationships such as `sgx = "remote"` requiring `[prover.remote_sgx]`, or
+`risc0 = "network"` requiring `[prover.boundless]`.
 
-The HTTP API already selects a concrete `proof_type` per request. Server capabilities should follow
-the same model: each concrete proof type must be enabled explicitly, and no enabled proof type
-should imply another one.
+Enablement, execution selection, and backend parameters should be colocated. A proof type must not
+be enabled by an unrelated section, and there must be no second file-level route table to keep in
+sync.
 
-## Configuration
+## Configuration Model
 
-Replace the global `guest_system` and `runner` fields with an explicit route table:
+Each concrete proof type owns one self-contained table with an explicit `enabled` field. The table
+also contains the setting that selects its supported execution implementation:
 
-```toml
-[prover.routes]
-risc0 = "network"
-sp1 = "network"
-sgx = "remote"
-sgxgeth = "remote"
-```
+- RISC0 uses `runner = "local" | "network"`.
+- SP1 uses its existing `prover = "local" | "mock" | "network"`; local and mock map to the local
+  runner, while network maps to the network runner.
+- Native execution has no runner setting because its only supported runner is local.
+- SGX and SGXGETH have no runner setting because their only supported runner is remote.
 
-Supported entries are:
-
-| Proof type | Allowed runner |
-| --- | --- |
-| `risc0` | `local`, `network` |
-| `sp1` | `local`, `network` |
-| `native` | `local` |
-| `sgx` | `remote` |
-| `sgxgeth` | `remote` |
-
-An omitted entry is disabled. At least one route must be enabled. Backend parameter sections such
-as `[prover.risc0]`, `[prover.sp1]`, `[prover.boundless]`, and `[prover.remote_sgx]` do not enable a
-route by themselves.
-
-This is an intentional breaking configuration change. The old `prover.guest_system`,
-`prover.runner`, `--prover`, and `RAIKO2_PROVER` inputs are removed rather than retained as a second
-source of truth. A full route-table override is available through `--prover-routes` or
-`RAIKO2_PROVER_ROUTES` using a comma-separated value:
-
-```text
-risc0/network,sp1/network,sgx/remote,sgxgeth/remote
-```
-
-The override replaces the configured route table as one atomic value.
-
-## Validation
-
-Configuration validation fails at startup when:
-
-- no route is enabled,
-- a proof type uses an unsupported runner,
-- `risc0/network` is enabled without valid Boundless configuration,
-- `sgx/remote` is enabled without `prover.remote_sgx.base_url`,
-- `sgxgeth/remote` is enabled without `prover.remote_sgx.sgxgeth_base_url`,
-- either SGX lane is enabled with a zero remote timeout,
-- a `zk_any` target names a ZK backend that is not enabled, or
-- a route requires a prover implementation excluded from the compiled binary.
-
-Backend-specific validation should only require credentials and endpoints for enabled routes. A
-disabled backend's unused settings must not prevent startup.
-
-## Pipeline Registration And Request Routing
-
-Pipeline registration iterates over the explicit route table. Each enabled concrete proof type
-registers exactly one matching pipeline:
-
-- `risc0/local` -> local RISC0,
-- `risc0/network` -> Boundless,
-- `sp1/local|network` -> SP1 with the selected prover mode,
-- `native/local` -> native execution,
-- `sgx/remote` -> the raiko2 SGX remote,
-- `sgxgeth/remote` -> the gaiko2 remote.
-
-The production `host` feature can therefore register network ZK and remote SGX pipelines in the
-same process without compiling local prover implementations. The `local-provers` feature can
-register local routes when explicitly requested, but no longer registers every local pipeline by
-default.
-
-V4 proposal and aggregation requests continue carrying one concrete `proof_type`. Route selection
-looks up that proof type in the configured table. A missing entry returns
-`unsupported_proof_type`. There is no change to request schemas, proof artifacts, guest inputs,
-guest ELF files, or public inputs.
-
-`zk_any` remains an admission policy rather than a backend. It may select only enabled `sp1` or
-`risc0` routes.
-
-## Readiness And Observability
-
-Readiness checks only the capabilities represented by enabled routes. Startup logs expose the full
-sanitized route set instead of one default route, and include remote URLs only for enabled SGX
-lanes. Existing per-request route and proof-type metrics remain unchanged.
-
-## Migration Sample
-
-A host serving both hosted ZK systems and both SGX lanes uses:
+This intentional asymmetry avoids redundant pairs such as `runner = "network"` plus
+`prover = "local"`, and avoids configurable values that can only have one valid value.
 
 ```toml
-[prover.routes]
-risc0 = "network"
-sp1 = "network"
-sgx = "remote"
-sgxgeth = "remote"
+[prover.risc0]
+enabled = true
+runner = "network"
+bonsai = true
+snark = true
+mock = false
+execution_po2 = 20
 
 [prover.sp1]
-mode = "prove"
+enabled = true
 prover = "network"
+mode = "prove"
 recursion = "plonk"
 verify = true
-network_mode = "reserved"
-fulfillment_strategy = "reserved"
-skip_simulation = true
-cycle_limit = 1000000000000
-timeout_secs = 7200
 
-[prover.remote_sgx]
+[prover.native]
+enabled = false
+
+[prover.sgx]
+enabled = true
 base_url = "http://sgx-prover:8080"
-sgxgeth_base_url = "http://sgxgeth-prover:8080"
+timeout_ms = 300000
+
+[prover.sgxgeth]
+enabled = true
+base_url = "http://sgxgeth-prover:8080"
 timeout_ms = 300000
 ```
 
-The Boundless settings remain under `[prover.boundless]`. Production credentials must continue to
-come from deployment configuration or secrets rather than checked-in examples.
+At least one proof type must be enabled. Disabled sections are not validated for credentials or
+connectivity. `ProverConfig` remains the sole code-level owner of route resolution through
+`runner(proof_type)`, `is_enabled(proof_type)`, and stable enabled-route iteration helpers.
+
+## Boundless
+
+Boundless is the network implementation of RISC0, so its entire global configuration is nested
+under `[prover.risc0.boundless]` rather than represented as a peer prover:
+
+```toml
+[prover.risc0.boundless]
+offchain = false
+rpc_url = "https://base-rpc.example.com"
+signer_key = "configured-by-secret-store"
+poll_interval_ms = 10000
+timeout_ms = 3600000
+rebid_timeout_ms = 300000
+rebid_price_step_bps = 5000
+rebid_max_attempts = 4
+
+[prover.risc0.boundless.deployment]
+deployment_type = "base"
+
+[prover.risc0.boundless.deployment.overrides]
+order_stream_url = "https://base-mainnet.boundless.network"
+
+[prover.risc0.boundless.batch_quote]
+strategy = "raiko_agent"
+
+[prover.risc0.boundless.aggregation_quote]
+strategy = "raiko_agent"
+
+[prover.risc0.boundless.offer_params.batch]
+pricing_mode = "market"
+
+[prover.risc0.boundless.offer_params.batch.timeouts]
+lock_timeout = 120
+
+[prover.risc0.boundless.offer_params.aggregation]
+pricing_mode = "market"
+
+[prover.risc0.boundless.offer_params.aggregation.timeouts]
+lock_timeout = 120
+```
+
+Every existing Boundless field and nested table keeps the same semantics. Only its global TOML path
+changes. Pair-specific overrides remain under each `[[rpc.pairs]]` entry as `boundless = {...}` or
+the equivalent nested pair table because they belong to network-pair selection. The effective
+configuration remains: global `prover.risc0.boundless` defaults, then the selected pair override.
+
+Boundless credentials and offer validation run only when `prover.risc0.enabled = true` and
+`prover.risc0.runner = "network"`. Local or disabled RISC0 must not require them.
+
+## Overrides
+
+`--prover-routes` and `RAIKO2_PROVER_ROUTES` remain optional operational overrides. They atomically
+replace enabled proof types and update the execution selector inside the corresponding self-contained
+table; they are not a second file-level configuration section. Omitted proof types are disabled.
+Backend parameters remain in their proof-type table or existing lane-specific CLI/environment
+overrides.
+
+The legacy file sections `[prover.routes]`, `[prover.boundless]`, and `[prover.remote_sgx]` are
+rejected. The pre-PR global `prover.guest_system`, `prover.runner`, `--prover`, and `RAIKO2_PROVER`
+inputs also remain rejected.
+
+## Runtime Behavior
+
+Request routing, pipeline registration, readiness, resource preparation, and startup summaries all
+consume `ProverConfig` route helpers. A disabled proof type returns `unsupported_proof_type`. No
+backend table implicitly enables another proof type.
+
+SGX and SGXGETH keep distinct public route identities (`sgx/remote` and `sgxgeth/remote`). Legacy
+persisted SGXGETH records using `sgx/remote` retain the compatibility and fail-closed startup
+migration already defined by this branch.
 
 ## Verification
 
 Tests must cover:
 
-- strict parsing and validation of every allowed and rejected route,
-- rejection of old global route fields,
-- atomic CLI/environment route-table replacement,
-- independent registration of RISC0 and SP1,
-- simultaneous network ZK and remote SGX registration in a host-only build,
-- disabled proof types returning `unsupported_proof_type`,
-- `zk_any` rejecting disabled targets,
-- readiness checking only enabled capabilities,
-- startup summary output for multiple routes, and
-- proposal and aggregation routing for each enabled proof type.
+- parsing a combined self-contained production configuration,
+- rejection of the superseded standalone route/backend tables,
+- every proof type's enablement and runner derivation,
+- atomic CLI/environment route overrides,
+- disabled backend validation skipping,
+- the complete Boundless global configuration and every nested child table at its new path,
+- pair-specific Boundless overrides applied after the nested global configuration,
+- RISC0 local mode ignoring unused Boundless credentials,
+- independent request routing and pipeline registration,
+- readiness and startup summaries for enabled lanes only, and
+- Docker/sample/API/operations documentation using only the self-contained model.
 
-Documentation and checked-in Docker examples must use the new route table. No generated guest ELF
-artifact is rebuilt because the change is host-only.
+This is host-only. Guest inputs, proof formats, guest ELF files, image IDs, public inputs, and
+on-chain verification do not change.

@@ -12,8 +12,13 @@ See also:
 
 ## Local Workflow
 
+The example config enables a combined production route set. Before running locally, edit the copy
+to keep only the desired `[prover.routes]` entries and fill every setting, credential, and endpoint
+required by those enabled routes.
+
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
 cargo run -r -p raiko2 -- --config config.toml
 ```
 

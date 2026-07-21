@@ -12,10 +12,15 @@ See also:
 
 ## Run the Server
 
-Run the server with an explicit config file:
+`config.example.toml` is a combined production sample. Before running, edit the copy to keep only
+the desired `[prover.routes]` entries and fill every setting, credential, and endpoint required by
+those enabled routes.
+
+Run the server with the edited config file:
 
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
 ./target/release/raiko2 --config config.toml
 ```
 
@@ -71,10 +76,11 @@ production-oriented example instead:
 
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
 ```
 
-Before starting the host, replace placeholder credentials, configure production RPC and runtime
-storage, and verify that each enabled backend section matches its route. In particular,
+In that edit, replace placeholder credentials, configure production RPC and runtime storage, and
+verify that each enabled backend section matches its route. In particular,
 `[prover.sp1]` must select the network prover, `[prover.boundless]` must contain real deployment
 credentials, and `[prover.remote_sgx]` must point to the production SGX services. The full-table
 override may then be passed to that completed config:

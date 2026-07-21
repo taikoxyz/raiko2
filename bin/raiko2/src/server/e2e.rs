@@ -1517,7 +1517,7 @@ async fn e2e_shasta_proposal_and_external_aggregate_use_same_enabled_route() {
         let (status, task) = get_json(&app, &format!("/v3/tasks/{task_id}")).await;
         assert_eq!(status, StatusCode::OK, "{task}");
         assert_eq!(task["data"]["route"], "sgx/remote", "{task}");
-        assert_eq!(task["data"]["proof_type"], "sgx", "{task}");
+        assert_eq!(task["proof_type"], "sgx", "{task}");
     }
 }
 
@@ -2382,6 +2382,7 @@ async fn e2e_zk_any_still_validates_request_when_not_drawn() {
 #[tokio::test]
 async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
     let mut config = base_config();
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.zk_any.sp1 = Some(crate::config::ZkAnyTargetConfig {
         probability: 1.0,
         per_day: 0,
@@ -2499,6 +2500,7 @@ async fn e2e_admin_ballot_authenticates_before_body_parse() {
 #[tokio::test]
 async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     let mut config = base_config();
+    set_prover_routes(&mut config, "sp1/local");
     config.server.acl.keys = vec![
         acl_key(
             "root-admin",

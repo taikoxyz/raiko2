@@ -29,7 +29,6 @@ This intentional asymmetry avoids redundant pairs such as `runner = "network"` p
 [prover.risc0]
 enabled = true
 runner = "network"
-bonsai = true
 snark = true
 mock = false
 execution_po2 = 20
@@ -112,6 +111,13 @@ configuration remains: global `prover.risc0.boundless` defaults, then the select
 Boundless credentials and offer validation run only when `prover.risc0.enabled = true` and
 `prover.risc0.runner = "network"`. Local or disabled RISC0 must not require them.
 
+The former `bonsai` switch is removed. It represented an obsolete second network-prover selector
+inside the local RISC0 implementation and conflicted with the authoritative `runner` value.
+`runner = "local"` always uses the local RISC0 prover server, while `runner = "network"` always
+uses Boundless. The `snark` receipt-format option and `mock` development mode remain local RISC0
+settings. RISC0 SDK dependency features are unchanged; this cleanup removes raiko2's Bonsai API and
+runtime branch, not SDK internals that may still be used transitively.
+
 ## Overrides
 
 `--prover-routes` and `RAIKO2_PROVER_ROUTES` remain optional operational overrides. They atomically
@@ -146,6 +152,8 @@ Tests must cover:
 - the complete Boundless global configuration and every nested child table at its new path,
 - pair-specific Boundless overrides applied after the nested global configuration,
 - RISC0 local mode ignoring unused Boundless credentials,
+- rejection of the removed `bonsai` configuration key,
+- RISC0 local execution having no network-prover branch,
 - independent request routing and pipeline registration,
 - readiness and startup summaries for enabled lanes only, and
 - Docker/sample/API/operations documentation using only the self-contained model.

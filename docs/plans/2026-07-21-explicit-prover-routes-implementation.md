@@ -142,6 +142,14 @@ Run config example tests plus repository searches for superseded paths. Commit w
 **Files:**
 - Review all modified files.
 
+Before full verification, remove the obsolete raiko2-level Bonsai selector:
+
+- delete `bonsai` from host and prover RISC0 configuration,
+- make local RISC0 proving always use the local prover server,
+- reject stale `bonsai` keys through the existing strict TOML schema,
+- retain `snark`, `mock`, and the current RISC0 SDK dependency features, and
+- update samples and documentation so Boundless is the only RISC0 network runner.
+
 **Step 1: Run formatting and static checks**
 
 Run `cargo fmt --all -- --check`, `git diff --check origin/main...HEAD`, and

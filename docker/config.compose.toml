@@ -44,7 +44,7 @@ timeout_secs = 7200
 network_request_max_attempts = 3
 
 [prover.native]
-enabled = false
+enabled = true
 
 [prover.sgx]
 enabled = true

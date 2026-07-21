@@ -1152,7 +1152,8 @@ All API errors use the Hoodi-style envelope:
 Each proof type owns a self-contained table and an explicit `enabled` value. RISC0 selects
 `runner = "local" | "network"`; SP1 derives local/network from `prover = "local" | "mock" |
 "network"`; native is always local; SGX and SGXGETH are always remote and each owns its endpoint
-and timeout. One host may enable any supported combination, with at least one proof type required.
+and timeout. Native is enabled by default and can be disabled explicitly. One host may enable any
+supported combination, with at least one proof type required.
 Boundless is nested under `[prover.risc0.boundless]` because it is the RISC0 network backend.
 
 `--prover-routes` and `RAIKO2_PROVER_ROUTES` accept a comma-separated list such as

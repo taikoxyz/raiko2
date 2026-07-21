@@ -41,7 +41,7 @@ recursion = "plonk"
 verify = true
 
 [prover.native]
-enabled = false
+enabled = true
 
 [prover.sgx]
 enabled = true

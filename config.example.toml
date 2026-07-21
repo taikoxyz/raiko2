@@ -93,7 +93,7 @@ network_request_max_attempts = 3
 # rpc_url = "https://rpc.production.succinct.xyz"
 
 [prover.native]
-enabled = false
+enabled = true
 
 [prover.sgx]
 enabled = true

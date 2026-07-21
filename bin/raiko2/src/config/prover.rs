@@ -413,10 +413,16 @@ impl DerefMut for Sp1ProverConfig {
 }
 
 /// Native execution configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NativeProverConfig {
     pub enabled: bool,
+}
+
+impl Default for NativeProverConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// One remote prover lane.
@@ -898,15 +904,23 @@ runner = "remote"
     }
 
     #[test]
-    fn prover_routes_default_disables_every_proof_type() {
+    fn prover_config_defaults_to_native_local() {
         let default = ProverConfig::default();
-        assert!(default.iter_routes().next().is_none());
-        assert!(toml::from_str::<ProverConfig>("").is_ok());
+        assert_eq!(
+            default.iter_routes().collect::<Vec<_>>(),
+            vec![(ProofType::Native, RunnerKind::Local)]
+        );
+        default.validate().expect("default native route is valid");
 
-        let err = default
-            .validate()
-            .expect_err("at least one prover must be enabled");
-        assert!(err.to_string().contains("at least one prover"));
+        let parsed = toml::from_str::<ProverConfig>("").expect("empty prover table uses defaults");
+        assert!(parsed.native.enabled);
+
+        let overridden = config_with_routes("risc0/local");
+        assert!(!overridden.native.enabled);
+        assert_eq!(
+            overridden.iter_routes().collect::<Vec<_>>(),
+            vec![(ProofType::Risc0, RunnerKind::Local)]
+        );
     }
 
     #[test]

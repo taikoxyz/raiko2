@@ -712,11 +712,14 @@ backend = "memory"
     }
 
     #[test]
-    fn test_config_default_requires_enabled_prover() {
-        let err = Config::default()
-            .validate()
-            .expect_err("default config must not enable a prover implicitly");
-        assert!(err.to_string().contains("Prover configuration error"));
+    fn test_config_default_enables_native_prover() {
+        let config = Config::default();
+        assert_eq!(
+            config.prover.runner(ProofType::Native),
+            Some(RunnerKind::Local)
+        );
+        assert_eq!(config.prover.iter_routes().count(), 1);
+        config.validate().expect("default config is valid");
     }
 
     #[test]

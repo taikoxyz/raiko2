@@ -112,7 +112,6 @@ impl Config {
         if let Some(interval_ms) = cli.queue_maintenance_interval_ms {
             config.queue.maintenance_interval_ms = interval_ms;
         }
-        config.normalize();
 
         // Validate configuration
         config.validate()?;
@@ -167,9 +166,6 @@ impl Config {
             .context("Preflight configuration error")?;
         Ok(())
     }
-
-    /// Applies cross-field defaults that cannot be represented by Serde defaults alone.
-    pub const fn normalize(&mut self) {}
 }
 
 fn override_single_rpc_pair(
@@ -291,16 +287,14 @@ backend = "memory"
     #[test]
     fn test_config_example_validates() {
         let path = workspace_config("config.example.toml");
-        let mut config = Config::from_file(&path).expect("parse config.example.toml");
-        config.normalize();
+        let config = Config::from_file(&path).expect("parse config.example.toml");
         config.validate().expect("validate config.example.toml");
     }
 
     #[test]
     fn test_docker_compose_config_validates() {
         let path = workspace_config("docker/config.compose.toml");
-        let mut config = Config::from_file(&path).expect("parse docker config");
-        config.normalize();
+        let config = Config::from_file(&path).expect("parse docker config");
         config.validate().expect("validate docker config");
     }
 
@@ -450,7 +444,7 @@ backend = "memory"
     #[test]
     fn test_rpc_config_default() {
         let config = RpcConfig::default();
-        assert!(config.validate().is_ok());
+        assert!(config.validate_base().is_ok());
     }
 
     #[test]
@@ -470,7 +464,7 @@ backend = "memory"
             }],
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        assert!(config.validate_base().is_ok());
     }
 
     #[test]
@@ -490,7 +484,7 @@ backend = "memory"
             }],
             ..Default::default()
         };
-        let result = config.validate();
+        let result = config.validate_base();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("l1_rpc"));
     }
@@ -513,7 +507,10 @@ backend = "memory"
             ..Default::default()
         };
 
-        let result = config.validate();
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        let result = rpc::validate_sp1_verifier_pairs(&pairs);
         assert!(result.is_err());
         assert!(
             result
@@ -543,7 +540,10 @@ backend = "memory"
             ..Default::default()
         };
 
-        assert!(config.validate().is_ok());
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        assert!(rpc::validate_sp1_verifier_pairs(&pairs).is_ok());
     }
 
     #[test]
@@ -566,7 +566,10 @@ backend = "memory"
             ..Default::default()
         };
 
-        let result = config.validate();
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        let result = rpc::validate_sp1_verifier_pairs(&pairs);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains(
@@ -581,7 +584,7 @@ backend = "memory"
             pairs: Vec::new(),
             ..Default::default()
         };
-        assert!(config.validate().is_err());
+        assert!(config.validate_base().is_err());
     }
 
     #[test]

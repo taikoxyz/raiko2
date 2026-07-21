@@ -88,10 +88,8 @@ impl ProverConfig {
                 "prover.remote_sgx.sgxgeth_base_url must not be empty when prover.routes.sgxgeth=remote"
             );
         }
-        if sgx_enabled || sgxgeth_enabled {
-            if self.remote_sgx.timeout_ms == 0 {
-                bail!("prover.remote_sgx.timeout_ms must be greater than zero");
-            }
+        if (sgx_enabled || sgxgeth_enabled) && self.remote_sgx.timeout_ms == 0 {
+            bail!("prover.remote_sgx.timeout_ms must be greater than zero");
         }
 
         self.zk_any.validate()?;

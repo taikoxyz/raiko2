@@ -190,17 +190,23 @@ async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
     }
 }
 
-impl AppState {
-    /// Create new application state.
-    pub async fn new(mut config: Config) -> Result<Self> {
-        config.normalize();
-        config.validate()?;
-        let pipeline_registrations = enabled_pipeline_registrations(&config)?;
-        let runtime = Arc::new(build_runtime(&config).await?);
-        let scheduler_config = setup::scheduler_config(&config);
-        let resolved_pairs = config.rpc.resolved_pairs()?;
+struct PipelineResources {
+    #[cfg(feature = "local-provers")]
+    shasta_backends: Option<ShastaBackends>,
+    #[cfg(all(feature = "host", not(feature = "local-provers")))]
+    boundless_backend: Option<Risc0ShastaBackend>,
+    #[cfg(all(feature = "host", not(feature = "local-provers")))]
+    sp1_backend: Option<Sp1ShastaBackend>,
+    #[cfg(feature = "host")]
+    sp1_prover: Option<Sp1Prover>,
+    #[cfg(feature = "host")]
+    boundless_balance_gate: Option<BoundlessBalanceGate>,
+}
+
+impl PipelineResources {
+    fn prepare(config: &Config, pipelines: &[PipelineRegistration]) -> Result<Self> {
         #[cfg(feature = "local-provers")]
-        let shasta_backends = if pipeline_registrations.iter().any(|registration| {
+        let shasta_backends = if pipelines.iter().any(|registration| {
             matches!(
                 registration.pipeline_key,
                 PipelineKey::ShastaRisc0 | PipelineKey::ShastaRisc0Network | PipelineKey::ShastaSp1
@@ -211,7 +217,7 @@ impl AppState {
             None
         };
         #[cfg(all(feature = "host", not(feature = "local-provers")))]
-        let boundless_backend = if pipeline_registrations
+        let boundless_backend = if pipelines
             .iter()
             .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network)
         {
@@ -220,7 +226,7 @@ impl AppState {
             None
         };
         #[cfg(all(feature = "host", not(feature = "local-provers")))]
-        let sp1_backend = if pipeline_registrations
+        let sp1_backend = if pipelines
             .iter()
             .any(|registration| registration.pipeline_key == PipelineKey::ShastaSp1)
         {
@@ -229,11 +235,11 @@ impl AppState {
             None
         };
         #[cfg(feature = "host")]
-        let sp1_prover = if pipeline_registrations
+        let sp1_prover = if pipelines
             .iter()
             .any(|registration| registration.pipeline_key == PipelineKey::ShastaSp1)
         {
-            let sp1_config = setup::sp1_prover_config(&config);
+            let sp1_config = setup::sp1_prover_config(config);
             #[cfg(feature = "local-provers")]
             {
                 Some(
@@ -263,44 +269,83 @@ impl AppState {
             None
         };
 
-        // One balance gate shared by every pair's Boundless prover: all pairs fund the same market
-        // account (one global signer/rpc/deployment), so concurrent submissions across pairs must
-        // deposit against a single combined reserved total, not one per pair.
+        // Every pair uses the same market account, so reservations share one balance gate.
         #[cfg(feature = "host")]
-        let boundless_balance_gate = pipeline_registrations
+        let boundless_balance_gate = pipelines
             .iter()
             .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network)
             .then(BoundlessBalanceGate::new);
 
-        async {
-            runtime.initialize().await?;
-            let mut factory = StaticPipelineFactory::default();
-            for pair in &resolved_pairs {
-                let registration = PairPipelineRegistration {
-                    config: &config,
-                    pair,
-                    pipelines: &pipeline_registrations,
-                    runtime: Arc::clone(&runtime),
-                    #[cfg(feature = "host")]
-                    boundless_balance_gate: boundless_balance_gate.clone(),
-                    #[cfg(feature = "local-provers")]
-                    shasta_backends: shasta_backends.as_ref(),
-                    #[cfg(all(feature = "host", not(feature = "local-provers")))]
-                    boundless_backend: boundless_backend.as_ref(),
-                    #[cfg(all(feature = "host", not(feature = "local-provers")))]
-                    sp1_backend: sp1_backend.as_ref(),
-                    #[cfg(feature = "host")]
-                    sp1_prover: sp1_prover.clone(),
-                    scheduler_config: scheduler_config.clone(),
-                };
-                register_pair_pipelines(&mut factory, &registration)?;
-            }
-            let config = Arc::new(config);
-            let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-            let state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
-            state.finish_initialization().await
-        }
-        .await
+        Ok(Self {
+            #[cfg(feature = "local-provers")]
+            shasta_backends,
+            #[cfg(all(feature = "host", not(feature = "local-provers")))]
+            boundless_backend,
+            #[cfg(all(feature = "host", not(feature = "local-provers")))]
+            sp1_backend,
+            #[cfg(feature = "host")]
+            sp1_prover,
+            #[cfg(feature = "host")]
+            boundless_balance_gate,
+        })
+    }
+}
+
+fn build_pipeline_factory(
+    config: &Config,
+    pairs: &[ResolvedNetworkPair],
+    pipelines: &[PipelineRegistration],
+    runtime: &Arc<RuntimeManager>,
+    scheduler_config: &SchedulerConfig,
+    resources: &PipelineResources,
+) -> Result<StaticPipelineFactory> {
+    let mut factory = StaticPipelineFactory::default();
+    for pair in pairs {
+        let registration = PairPipelineRegistration {
+            config,
+            pair,
+            pipelines,
+            runtime: Arc::clone(runtime),
+            #[cfg(feature = "host")]
+            boundless_balance_gate: resources.boundless_balance_gate.clone(),
+            #[cfg(feature = "local-provers")]
+            shasta_backends: resources.shasta_backends.as_ref(),
+            #[cfg(all(feature = "host", not(feature = "local-provers")))]
+            boundless_backend: resources.boundless_backend.as_ref(),
+            #[cfg(all(feature = "host", not(feature = "local-provers")))]
+            sp1_backend: resources.sp1_backend.as_ref(),
+            #[cfg(feature = "host")]
+            sp1_prover: resources.sp1_prover.clone(),
+            scheduler_config: scheduler_config.clone(),
+        };
+        register_pair_pipelines(&mut factory, &registration)?;
+    }
+    Ok(factory)
+}
+
+impl AppState {
+    /// Create new application state.
+    pub async fn new(config: Config) -> Result<Self> {
+        config.validate()?;
+        let pipeline_registrations = enabled_pipeline_registrations(&config)?;
+        let runtime = Arc::new(build_runtime(&config).await?);
+        let scheduler_config = setup::scheduler_config(&config);
+        let resolved_pairs = config.rpc.resolved_pairs()?;
+        let resources = PipelineResources::prepare(&config, &pipeline_registrations)?;
+
+        runtime.initialize().await?;
+        let factory = build_pipeline_factory(
+            &config,
+            &resolved_pairs,
+            &pipeline_registrations,
+            &runtime,
+            &scheduler_config,
+            &resources,
+        )?;
+        let config = Arc::new(config);
+        let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
+        let state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
+        state.finish_initialization().await
     }
 
     async fn finish_initialization(self) -> Result<Self> {
@@ -405,7 +450,7 @@ struct PairPipelineRegistration<'a> {
     pair: &'a ResolvedNetworkPair,
     pipelines: &'a [PipelineRegistration],
     runtime: Arc<RuntimeManager>,
-    /// Balance gate shared across all pairs (see the construction site in `AppState::new`).
+    /// Balance gate shared across all pairs by `PipelineResources`.
     #[cfg(feature = "host")]
     boundless_balance_gate: Option<BoundlessBalanceGate>,
     #[cfg(feature = "local-provers")]

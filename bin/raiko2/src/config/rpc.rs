@@ -248,14 +248,6 @@ impl Default for RpcRetryConfig {
 }
 
 impl RpcConfig {
-    /// Validate RPC configuration.
-    pub fn validate(&self) -> Result<()> {
-        let pairs = self.validate_base()?;
-        validate_boundless_pairs(&pairs)?;
-        validate_sp1_verifier_pairs(&pairs)?;
-        Ok(())
-    }
-
     pub(super) fn validate_base(&self) -> Result<Vec<ResolvedNetworkPair>> {
         if self.client.timeout_ms == 0 {
             bail!("rpc client timeout_ms must be > 0");
@@ -576,7 +568,7 @@ mod tests {
         };
 
         let err = config
-            .validate()
+            .validate_base()
             .expect_err("invalid beacon rpc should fail");
 
         assert!(err.to_string().contains("beacon_rpc"));
@@ -590,8 +582,10 @@ mod tests {
         config.pairs[0].sp1_verifier_address =
             Some("0x0000000000000000000000000000000000000001".to_string());
 
-        let err = config
-            .validate()
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        let err = validate_sp1_verifier_pairs(&pairs)
             .expect_err("unsupported SP1 verifier URL scheme must fail");
         let message = err.to_string();
 

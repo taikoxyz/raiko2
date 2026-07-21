@@ -460,7 +460,6 @@ impl RemoteProverConfig {
 pub struct Risc0Config {
     pub enabled: bool,
     pub runner: Risc0Runner,
-    pub bonsai: bool,
     pub snark: bool,
     #[serde(default)]
     pub mock: bool,
@@ -474,7 +473,6 @@ impl Default for Risc0Config {
         Self {
             enabled: false,
             runner: Risc0Runner::Local,
-            bonsai: true,
             snark: true,
             mock: false,
             execution_po2: default_risc0_execution_po2(),
@@ -678,7 +676,6 @@ mod tests {
 [risc0]
 enabled = true
 runner = "local"
-bonsai = true
 snark = true
 mock = false
 execution_po2 = 20
@@ -733,13 +730,27 @@ timeout_ms = 300001
     }
 
     #[test]
+    fn rejects_removed_risc0_bonsai_setting() {
+        let err = toml::from_str::<ProverConfig>(
+            r#"
+[risc0]
+enabled = true
+runner = "local"
+bonsai = true
+"#,
+        )
+        .expect_err("the obsolete Bonsai selector must be rejected");
+
+        assert!(err.to_string().contains("unknown field `bonsai`"), "{err}");
+    }
+
+    #[test]
     fn risc0_boundless_nested_config_preserves_every_setting_group() {
         let config: ProverConfig = toml::from_str(
             r#"
 [risc0]
 enabled = true
 runner = "network"
-bonsai = false
 snark = false
 mock = true
 execution_po2 = 24

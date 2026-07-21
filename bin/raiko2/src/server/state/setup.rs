@@ -126,7 +126,6 @@ fn task_lease_duration(config: &Config) -> Duration {
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
-        bonsai: config.prover.risc0.bonsai,
         snark: config.prover.risc0.snark,
         mock: config.prover.risc0.mock,
         profile: false,

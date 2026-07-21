@@ -70,7 +70,6 @@ prefix = "raiko2/runtime/v1"
 # RISC0 owns its route selection. Boundless settings below are used only for runner = "network".
 enabled = true
 runner = "network"
-bonsai = true
 snark = true
 mock = false
 execution_po2 = 20

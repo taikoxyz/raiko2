@@ -26,7 +26,6 @@ backend = "memory"
 [prover.risc0]
 enabled = false
 runner = "local"
-bonsai = true
 snark = true
 mock = false
 execution_po2 = 20

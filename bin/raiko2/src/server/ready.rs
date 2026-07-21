@@ -355,13 +355,20 @@ mod tests {
     #[test]
     fn combined_sgx_and_sp1_still_checks_sp1() {
         let mut config = Config::default();
-        set_routes(&mut config, "sp1/local,sgx/remote");
+        set_routes(&mut config, "sp1/network,sgx/remote");
         config.prover.remote_sgx.base_url = "http://127.0.0.1:9090".to_string();
-        config.prover.sp1.prover = Sp1ProverMode::Local;
-        config.prover.sp1.cycle_limit = 0;
 
-        let err = check_prover(&config).expect_err("invalid enabled SP1 must fail readiness");
-        assert!(format_error_chain(&err).contains("sp1"));
+        config
+            .prover
+            .validate()
+            .expect("base prover validation must pass");
+
+        let err = check_prover(&config)
+            .expect_err("missing SP1 network verification must fail readiness");
+        assert!(
+            format_error_chain(&err)
+                .contains("sp1 network verification is not enabled for network pair")
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use crate::cli::Cli;
 use anyhow::{Context, Result};
+use raiko2_primitives::ProofType;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -130,7 +131,10 @@ impl Config {
         self.server
             .validate()
             .context("Server configuration error")?;
-        self.rpc.validate().context("RPC configuration error")?;
+        let resolved_pairs = self
+            .rpc
+            .validate_base()
+            .context("RPC configuration error")?;
         self.prover
             .validate()
             .context("Prover configuration error")?;
@@ -138,21 +142,27 @@ impl Config {
             .validate()
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
-        let resolved_pairs = self
-            .rpc
-            .resolved_pairs()
-            .context("RPC configuration error")?;
+
+        if self.prover.routes.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
+            rpc::validate_boundless_pairs(&resolved_pairs)
+                .context("Boundless RPC pair configuration error")?;
+            for pair in &resolved_pairs {
+                self.prover
+                    .boundless
+                    .apply_pair_override(&pair.boundless)
+                    .with_context(|| {
+                        format!("Boundless configuration error for rpc pair {}", pair.key)
+                    })?;
+            }
+        }
+        if self.prover.routes.is_enabled(ProofType::Sp1) {
+            rpc::validate_sp1_verifier_pairs(&resolved_pairs)
+                .context("SP1 verifier RPC pair configuration error")?;
+        }
+
         self.preflight
             .validate(&resolved_pairs)
             .context("Preflight configuration error")?;
-        for pair in resolved_pairs {
-            self.prover
-                .boundless
-                .apply_pair_override(&pair.boundless)
-                .with_context(|| {
-                    format!("Boundless configuration error for rpc pair {}", pair.key)
-                })?;
-        }
         Ok(())
     }
 
@@ -568,8 +578,70 @@ backend = "memory"
     }
 
     #[test]
+    fn config_validate_skips_pair_boundless_when_network_route_disabled() {
+        let mut config = Config::default();
+        config.prover.routes = "risc0/local".parse().expect("valid route");
+        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
+
+        config
+            .validate()
+            .expect("disabled Boundless settings must not reject startup");
+    }
+
+    #[test]
+    fn config_validate_rejects_pair_boundless_when_network_route_enabled() {
+        let mut config = Config::default();
+        config.prover.routes = "risc0/network".parse().expect("valid route");
+        config.prover.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
+
+        let err = config
+            .validate()
+            .expect_err("enabled Boundless settings must be validated");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("rebid_timeout_ms"))
+        );
+    }
+
+    #[test]
+    fn config_validate_skips_pair_sp1_when_route_disabled() {
+        let mut config = Config::default();
+        config.prover.routes = "native/local".parse().expect("valid route");
+        config.rpc.pairs[0].sp1_verifier_rpc_url = Some("not a URL".to_string());
+        config.rpc.pairs[0].sp1_verifier_address =
+            Some("0x0000000000000000000000000000000000000001".to_string());
+
+        config
+            .validate()
+            .expect("disabled SP1 settings must not reject startup");
+    }
+
+    #[test]
+    fn config_validate_rejects_pair_sp1_when_route_enabled() {
+        let mut config = Config::default();
+        config.prover.routes = "sp1/local".parse().expect("valid route");
+        config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
+        config.rpc.pairs[0].sp1_verifier_rpc_url = Some("not a URL".to_string());
+        config.rpc.pairs[0].sp1_verifier_address =
+            Some("0x0000000000000000000000000000000000000001".to_string());
+
+        let err = config
+            .validate()
+            .expect_err("enabled SP1 settings must be validated");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("sp1_verifier_rpc_url"))
+        );
+    }
+
+    #[test]
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
+        config.prover.routes = "risc0/network".parse().expect("valid route");
+        config.prover.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.boundless.signer_key = "configured-by-secret-store".to_string();
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless_config::BoundlessOfferParams {
                 timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {

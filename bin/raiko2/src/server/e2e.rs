@@ -41,7 +41,7 @@ use super::task_metadata::{
     ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_proof_artifact_refs,
     proposal_task_ref, publication_proof_artifact_refs, root_proof_artifact_refs,
 };
-use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
+use crate::config::{Config, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::test_support::{MemoryProofArtifactStore, RuntimeStore};
 use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
 
@@ -334,13 +334,16 @@ fn deterministic_test_private_key(label: &str) -> String {
     hex::encode_prefixed(keccak256(label.as_bytes()).as_slice())
 }
 
+fn set_prover_routes(config: &mut Config, routes: &str) {
+    config.prover.routes = routes.parse().expect("valid prover routes");
+}
+
 fn sp1_fixture_app() -> (
     Router,
     raiko2_engine::Engine<super::fixture::Sp1FixtureSpec>,
 ) {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     app_with_observed_sp1_fixture_engine(config)
@@ -351,8 +354,7 @@ fn risc0_boundless_fixture_app() -> (
     raiko2_engine::Engine<super::fixture::Risc0FixtureSpec>,
 ) {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Network;
+    set_prover_routes(&mut config, "risc0/network");
 
     app_with_observed_risc0_boundless_fixture_engine(config)
 }
@@ -516,8 +518,7 @@ fn v4_sp1_acl_state_app_with_clear_rate_limit(
     clear_rate_limit_per_minute: Option<u32>,
 ) -> (Router, Sp1FixtureEngine, AppState) {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.server.acl.keys = vec![
         acl_key(
@@ -1233,8 +1234,7 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Network;
+    set_prover_routes(&mut config, "risc0/network");
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key = "not-a-private-key".to_string();
     let state = AppState::from_parts(
@@ -1328,8 +1328,7 @@ async fn e2e_ready_fails_when_sp1_verification_is_disabled() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
     let state = AppState::from_parts(
@@ -1372,8 +1371,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Network;
+    set_prover_routes(&mut config, "risc0/network,sp1/local");
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key =
         deterministic_test_private_key("raiko2:e2e-ready-boundless");
@@ -1443,6 +1441,82 @@ async fn e2e_proposal_proof_risc0_completes_from_fixture() {
         res["data"].get("error").is_none(),
         "unexpected error: {res}"
     );
+}
+
+#[tokio::test]
+async fn e2e_shasta_disabled_route_wins_over_registered_fixture_pipeline() {
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sp1/local");
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error", "{body}");
+    assert_eq!(body["error"], "unsupported_proof_type", "{body}");
+    assert_eq!(body["message"], "proof_type=risc0 is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_shasta_proposal_and_external_aggregate_use_same_enabled_route() {
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sgx/remote");
+    let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let app = app::build_router_with_legacy_v3_for_tests(state);
+
+    let (status, proposal) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "sgx",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{proposal}");
+    assert_eq!(proposal["data"]["status"], "registered", "{proposal}");
+    let proposal_task_id = single_report_task_id(&app).await;
+
+    let (status, aggregate) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                fixture_external_aggregate_proof(),
+                fixture_external_aggregate_proof()
+            ],
+            "proof_type": "sgx",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{aggregate}");
+    assert_eq!(aggregate["data"]["status"], "registered", "{aggregate}");
+
+    let task_ids = report_task_ids(&app).await;
+    let aggregate_task_id = task_ids
+        .into_iter()
+        .find(|task_id| task_id != &proposal_task_id)
+        .expect("aggregate task id");
+    for task_id in [proposal_task_id, aggregate_task_id] {
+        let (status, task) = get_json(&app, &format!("/v3/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{task}");
+        assert_eq!(task["data"]["route"], "sgx/remote", "{task}");
+        assert_eq!(task["data"]["proof_type"], "sgx", "{task}");
+    }
 }
 
 #[tokio::test]
@@ -1580,7 +1654,8 @@ async fn e2e_shasta_request_rejects_unknown_fields() {
 
 #[tokio::test]
 async fn e2e_shasta_reports_unregistered_sgxgeth_pipeline() {
-    let config = base_config();
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sgxgeth/remote");
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
@@ -1611,8 +1686,7 @@ async fn e2e_shasta_reports_unregistered_sgxgeth_pipeline() {
 #[tokio::test]
 async fn e2e_proposal_proof_native_rejects_non_native_local_server_route() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Network;
+    set_prover_routes(&mut config, "risc0/network");
     let (app, _engine) = app_with_observed_native_fixture_engine(config);
 
     let (status, res) = post_json(
@@ -1636,18 +1710,14 @@ async fn e2e_proposal_proof_native_rejects_non_native_local_server_route() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "error");
     assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(
-        res["message"],
-        "proof_type=native is only supported when the server prover route is native/local"
-    );
+    assert_eq!(res["message"], "proof_type=native is not supported");
     assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
 async fn e2e_proposal_proof_native_registers_when_server_route_is_native_local() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Native;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "native/local");
     let (app, _engine) = app_with_observed_native_fixture_engine(config);
 
     let (status, res) = post_json(
@@ -2087,8 +2157,7 @@ async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission
 #[tokio::test]
 async fn e2e_duplicate_aggregate_shasta_post_recovers_failed_root_before_remote_submission() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let engine = sp1_fixture_engine(json!({}));
@@ -2631,8 +2700,7 @@ async fn e2e_v3_clear_rate_limits_acl_key() {
 #[tokio::test]
 async fn e2e_sp1_execute_returns_execution_metadata() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let (state, _engine) = state_with_observed_sp1_fixture_engine(config);
@@ -2752,8 +2820,7 @@ async fn e2e_batch_single_proof_aggregate_sp1_completes_from_fixture() {
 #[tokio::test]
 async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let (state, engine) = state_with_observed_sp1_fixture_engine(config);
@@ -2874,8 +2941,7 @@ async fn e2e_batch_aggregate_zk_any_rejection_does_not_consume_ballot() {
         probability: 1.0,
         per_day: 1,
     });
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let engine = sp1_fixture_engine(json!({}));
@@ -3031,7 +3097,7 @@ async fn e2e_duplicate_aggregate_post_reuses_same_root_task() {
 #[tokio::test]
 async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_progress() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
+    set_prover_routes(&mut config, "sp1/network");
     config.prover.sp1.prover = Sp1ProverMode::Network;
     config.prover.sp1.verify = true;
     config.rpc.pairs[0].sp1_verifier_rpc_url = Some("https://verifier.example.com".to_string());
@@ -3248,7 +3314,11 @@ async fn e2e_aggregate_rejects_zk_any() {
 
 #[tokio::test]
 async fn e2e_aggregate_reports_unregistered_sgxgeth_pipeline() {
-    let (app, _engine) = sp1_fixture_app();
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sgxgeth/remote");
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
         &app,
@@ -3470,7 +3540,8 @@ async fn e2e_prune_rate_limits_admin_key() {
 
 #[tokio::test]
 async fn e2e_sp1_execute_rejects_aggregate_requests() {
-    let config = base_config();
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sp1/local");
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
@@ -3507,8 +3578,7 @@ async fn e2e_sp1_execute_rejects_aggregate_requests() {
 #[tokio::test]
 async fn e2e_sp1_hosted_api_rejects_unverified_prove_requests() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
 
@@ -3546,8 +3616,7 @@ async fn e2e_sp1_hosted_api_rejects_unverified_prove_requests() {
 #[tokio::test]
 async fn e2e_sp1_hosted_api_rejects_network_verify_when_pair_not_enabled() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/network");
     config.prover.sp1.prover = Sp1ProverMode::Network;
     config.prover.sp1.verify = true;
 
@@ -3585,8 +3654,7 @@ async fn e2e_sp1_hosted_api_rejects_network_verify_when_pair_not_enabled() {
 #[tokio::test]
 async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Sp1;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "sp1/network");
     config.prover.sp1.prover = Sp1ProverMode::Network;
     config.prover.sp1.verify = true;
     config.rpc.pairs[0].sp1_verifier_rpc_url = Some("https://verifier.example.com".to_string());
@@ -3629,7 +3697,8 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
 
 #[tokio::test]
 async fn e2e_sgx_batch_accepts_aggregate_requests() {
-    let config = base_config();
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sgx/remote");
     let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
     let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
@@ -3666,7 +3735,8 @@ async fn e2e_sgx_batch_accepts_aggregate_requests() {
 
 #[tokio::test]
 async fn e2e_sgx_accepts_aggregate_proof_requests() {
-    let config = base_config();
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sgx/remote");
     let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
     let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
@@ -3692,7 +3762,8 @@ async fn e2e_sgx_accepts_aggregate_proof_requests() {
 
 #[tokio::test]
 async fn e2e_sp1_network_settings_require_network_prover() {
-    let config = base_config();
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sp1/local");
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
@@ -4152,8 +4223,7 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
 #[tokio::test]
 async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
     let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Local;
+    set_prover_routes(&mut config, "risc0/local");
 
     let engine = risc0_fixture_engine(json!({
         "shasta_data_sources": [{

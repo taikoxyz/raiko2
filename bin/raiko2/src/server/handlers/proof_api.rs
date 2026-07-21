@@ -35,7 +35,7 @@ use super::super::auth::{
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
-    public_task_id_from_fingerprint, route_for_proof_type, validate_hosted_proof_type,
+    public_task_id_from_fingerprint, route_for_proof_type, unsupported_proof_type,
 };
 #[path = "proof_api/v3.rs"]
 pub(crate) mod v3;
@@ -215,7 +215,6 @@ fn build_canonical_batch_submission(
     req: BatchShastaRequest,
 ) -> Result<Option<CanonicalBatchSubmission>, ApiError> {
     validate_request_shape(&req)?;
-    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let requested_prover_config = augment_system_prover_config(
         &pair,
@@ -531,13 +530,6 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
     Ok(())
 }
 
-fn unsupported_proof_type(proof_type: BatchProofType) -> ApiError {
-    ApiError::bad_request(format!(
-        "proof_type={} is not supported",
-        proof_type.as_str()
-    ))
-}
-
 fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiError> {
     if proposal_id > SHASTA_PROPOSAL_ID_MAX {
         return Err(ApiError::bad_request(format!(
@@ -552,7 +544,6 @@ async fn build_external_aggregate_submission(
     req: AggregateProofRequest,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
-    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let prover_config = augment_system_prover_config(
         &pair,

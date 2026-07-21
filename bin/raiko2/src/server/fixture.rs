@@ -46,7 +46,7 @@ use super::app;
 use super::net;
 use super::state::{RuntimeObserver, StaticPipelineFactory};
 use crate::cli::FixtureServerArgs;
-use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
+use crate::config::{Config, NetworkPairConfig};
 
 pub(crate) type NativeFixtureSpec = FixtureSpec<NativeProver, NativeBackend>;
 pub(crate) type NativeFixtureEngine = Engine<NativeFixtureSpec>;
@@ -507,8 +507,7 @@ impl Provider for FixtureProvider {
 #[must_use]
 pub(crate) fn base_config() -> Config {
     let mut config = Config::default();
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Local;
+    config.prover.routes = "risc0/local".parse().expect("valid fixture routes");
     config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
     config.rpc.pairs = vec![NetworkPairConfig {
         network: "taiko_dev".to_string(),
@@ -945,6 +944,9 @@ pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {
     let (l2_rpc, chain_id_handle) = spawn_chain_id_rpc(167_001).await?;
 
     let mut config = base_config();
+    config.prover.routes = "risc0/local,sp1/local,native/local"
+        .parse()
+        .expect("valid fixture server routes");
     config.server.host = args.host.clone();
     config.server.port = args.port;
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);

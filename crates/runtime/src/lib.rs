@@ -1490,6 +1490,7 @@ impl RuntimeManager {
         &self,
         registration: ProofArtifactRegistration,
     ) -> Result<ProofArtifactLifecycle> {
+        ensure_canonical_artifact_registration(&registration)?;
         let network_pair = registration.network_pair.clone();
         let pipeline_key = registration.pipeline_key;
         let route = registration.route;
@@ -1562,6 +1563,7 @@ impl RuntimeManager {
         &self,
         registration: ProofArtifactRegistration,
     ) -> Result<()> {
+        ensure_canonical_artifact_registration(&registration)?;
         let (key, record) =
             self.proof_artifact_record(registration, ProofArtifactLifecycle::Invalidated);
         self.mutate(move |state| {
@@ -1587,6 +1589,7 @@ impl RuntimeManager {
         registration: ProofArtifactRegistration,
         lifecycle: ProofArtifactLifecycle,
     ) -> Result<()> {
+        ensure_canonical_artifact_registration(&registration)?;
         let (key, record) = self.proof_artifact_record(registration, lifecycle);
         self.mutate(move |state| {
             if let Some(existing) = state.artifacts.get(&key) {
@@ -2982,6 +2985,14 @@ fn artifact_record_key(
     key
 }
 
+fn ensure_canonical_artifact_registration(registration: &ProofArtifactRegistration) -> Result<()> {
+    anyhow::ensure!(
+        registration.pipeline_key.supports_route(registration.route),
+        "proof artifact pipeline does not support its route"
+    );
+    Ok(())
+}
+
 fn validate_runtime_state(state: &RuntimeState, environment: &str) -> Result<()> {
     let mut incarnations = HashSet::new();
     let mut request_fingerprints = HashSet::new();
@@ -3022,7 +3033,10 @@ fn validate_runtime_task_record<'a>(
         "runtime task incarnation is duplicated"
     );
     anyhow::ensure!(
-        record.pipeline_key.supports_route(record.route),
+        record
+            .pipeline_key
+            .canonicalize_persisted_route(record.route)
+            .is_some(),
         "runtime task pipeline does not support its route"
     );
     anyhow::ensure!(!record.task_kind.is_empty(), "runtime task kind is empty");
@@ -3071,7 +3085,10 @@ fn validate_proof_artifact_record(
         "runtime artifact environment does not match the store"
     );
     anyhow::ensure!(
-        record.pipeline_key.supports_route(record.route),
+        record
+            .pipeline_key
+            .canonicalize_persisted_route(record.route)
+            .is_some(),
         "runtime artifact pipeline does not support its route"
     );
     anyhow::ensure!(
@@ -3104,7 +3121,10 @@ fn validate_pending_publication_record(
         "pending publication key does not match record"
     );
     anyhow::ensure!(
-        record.pipeline_key.supports_route(record.route),
+        record
+            .pipeline_key
+            .canonicalize_persisted_route(record.route)
+            .is_some(),
         "pending publication pipeline does not support its route"
     );
     anyhow::ensure!(
@@ -3632,6 +3652,200 @@ mod tests {
         assert_eq!(current.runner_status, RunnerStatus::Running);
         assert_eq!(current.image_ref.as_deref(), Some("submitted-image"));
         assert_eq!(current.error, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_sgxgeth_state_loads_without_rekeying_artifacts() -> Result<()> {
+        let network_pair = "taiko_dev/taiko_dev_l1";
+        let proof_ref = "legacy-sgxgeth-proof";
+        let pipeline_key = PipelineKey::ShastaSgxGeth;
+        let legacy_route = "sgx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse legacy SGXGETH route");
+        let canonical_route = pipeline_key.route();
+        let incarnation_id = uuid::Uuid::new_v4();
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "legacy-sgxgeth-route".into(),
+        )?);
+
+        let artifact_key =
+            RuntimeManager::artifact_key(network_pair, pipeline_key, legacy_route, proof_ref);
+        let artifact = store
+            .put_if_absent(&artifact_key, b"legacy-proof")
+            .await?
+            .try_object()
+            .context("legacy artifact publication")?
+            .clone();
+        let pending_key = RuntimeManager::pending_artifact_key(
+            network_pair,
+            pipeline_key,
+            legacy_route,
+            proof_ref,
+        );
+        let pending = store
+            .put_if_absent(&pending_key, b"legacy-pending-proof")
+            .await?
+            .try_object()
+            .context("legacy pending publication")?
+            .clone();
+        let task = RuntimeTaskRecord {
+            task_id: "legacy-sgxgeth-root".into(),
+            incarnation_id,
+            pipeline_key,
+            route: legacy_route,
+            task_kind: "proposal".into(),
+            network_pair: network_pair.into(),
+            artifact_refs: vec![proof_ref.into()],
+            runner_status: RunnerStatus::Running,
+            image_ref: None,
+            proof_uri: None,
+            error: None,
+            metadata: serde_json::json!({}),
+            request_fingerprint: "legacy-sgxgeth-request".into(),
+            updated_at: 1,
+        };
+        let state_key = artifact_record_key(network_pair, pipeline_key, legacy_route, proof_ref);
+        let state = RuntimeState {
+            tasks: HashMap::from([(task.task_id.clone(), task)]),
+            artifacts: HashMap::from([(
+                state_key.clone(),
+                ProofArtifactRecord {
+                    environment: "test".into(),
+                    network_pair: network_pair.into(),
+                    proof_ref: proof_ref.into(),
+                    pipeline_key,
+                    route: legacy_route,
+                    proof_uri: artifact.proof_uri,
+                    content_hash: artifact.content_hash,
+                    generation: artifact.generation,
+                    lifecycle: ProofArtifactLifecycle::Active,
+                    invalidated_at: None,
+                    updated_at: 1,
+                },
+            )]),
+            pending_publications: HashMap::from([(
+                state_key,
+                PendingProofPublicationRecord {
+                    network_pair: network_pair.into(),
+                    pipeline_key,
+                    route: legacy_route,
+                    proof_ref: proof_ref.into(),
+                    content_hash: pending.content_hash,
+                    owner_incarnations: vec![incarnation_id],
+                },
+            )]),
+        };
+        assert!(matches!(
+            store
+                .store_runtime_state(&serde_json::to_vec(&state)?, None)
+                .await?,
+            RuntimeStateWriteResult::Stored { .. }
+        ));
+
+        let runtime = RuntimeManager::with_store(store);
+        runtime.initialize().await?;
+
+        let stored = runtime
+            .get_task("legacy-sgxgeth-root")
+            .await?
+            .context("legacy task")?;
+        assert_eq!(stored.route, legacy_route);
+        assert_eq!(
+            runtime
+                .read_proof_artifact_bytes(network_pair, pipeline_key, legacy_route, proof_ref)
+                .await?
+                .context("legacy artifact")?
+                .bytes,
+            b"legacy-proof"
+        );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(network_pair, pipeline_key, canonical_route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .get_recoverable_pending_proof_publication(
+                    network_pair,
+                    pipeline_key,
+                    legacy_route,
+                    proof_ref,
+                )
+                .await?
+                .context("legacy pending publication")?
+                .bytes,
+            b"legacy-pending-proof"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn new_sgxgeth_registrations_reject_legacy_route() -> Result<()> {
+        let pipeline_key = PipelineKey::ShastaSgxGeth;
+        let legacy_route = "sgx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse legacy SGXGETH route");
+        let task_error = build_task_record(&TaskRegistration {
+            task_id: "new-sgxgeth-root".into(),
+            pipeline_key,
+            route: legacy_route,
+            task_kind: "proposal".into(),
+            network_pair: "taiko_dev/taiko_dev_l1".into(),
+            artifact_refs: vec!["new-sgxgeth-proof".into()],
+            metadata: serde_json::json!({}),
+            request_fingerprint: "new-sgxgeth-request".into(),
+        })
+        .expect_err("new task registration must require the canonical route");
+        assert!(task_error.to_string().contains("does not match route"));
+
+        let runtime =
+            RuntimeManager::new_memory("test".into(), "new-sgxgeth-registration-strict".into())?;
+        let artifact_error = runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/taiko_dev_l1".into(),
+                proof_ref: "new-sgxgeth-proof".into(),
+                pipeline_key,
+                route: legacy_route,
+                proof_uri: "memory://new-sgxgeth-proof".into(),
+                content_hash: "new-sgxgeth-hash".into(),
+                generation: None,
+            })
+            .await
+            .expect_err("new artifact registration must require the canonical route");
+        assert!(
+            artifact_error
+                .to_string()
+                .contains("does not support its route")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_route_compatibility_rejects_other_mismatches() -> Result<()> {
+        let mut task = build_task_record(&TaskRegistration {
+            task_id: "mismatched-sgxgeth-root".into(),
+            pipeline_key: PipelineKey::ShastaSgxGeth,
+            route: PipelineKey::ShastaSgxGeth.route(),
+            task_kind: "proposal".into(),
+            network_pair: "taiko_dev/taiko_dev_l1".into(),
+            artifact_refs: Vec::new(),
+            metadata: serde_json::json!({}),
+            request_fingerprint: "mismatched-sgxgeth-request".into(),
+        })?;
+        task.route = "risc0/local"
+            .parse::<PipelineRoute>()
+            .expect("parse mismatched route");
+        let state = RuntimeState {
+            tasks: HashMap::from([(task.task_id.clone(), task)]),
+            ..RuntimeState::default()
+        };
+
+        let error = validate_runtime_state(&state, "test")
+            .expect_err("nonhistorical persisted route mismatch must fail closed");
+        assert!(error.to_string().contains("does not support its route"));
         Ok(())
     }
 

@@ -132,6 +132,24 @@ impl PipelineKey {
             )
         )
     }
+
+    /// Canonicalizes route identity read from persisted state.
+    #[must_use]
+    pub const fn canonicalize_persisted_route(self, route: PipelineRoute) -> Option<PipelineRoute> {
+        if self.supports_route(route) {
+            return Some(route);
+        }
+        match (self, route) {
+            (
+                Self::ShastaSgxGeth,
+                PipelineRoute {
+                    guest_system: GuestSystem::Sgx,
+                    runner: RunnerKind::Remote,
+                },
+            ) => Some(self.route()),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for PipelineKey {
@@ -380,6 +398,37 @@ mod route_tests {
         assert_eq!(PipelineKey::ShastaSgx.proof_type(), ProofType::Sgx);
         assert_eq!(PipelineKey::ShastaSgxGeth.proof_type(), ProofType::SgxGeth);
         assert!(!PipelineKey::ShastaNative.supports_route(sp1_network));
+    }
+
+    #[test]
+    fn persisted_route_compatibility_is_limited_to_legacy_sgxgeth() {
+        let legacy_sgxgeth = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
+        let canonical_sgxgeth = PipelineKey::ShastaSgxGeth.route();
+        let sp1_network = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
+
+        assert_eq!(
+            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(canonical_sgxgeth),
+            Some(canonical_sgxgeth)
+        );
+        assert_eq!(
+            PipelineKey::ShastaSp1.canonicalize_persisted_route(sp1_network),
+            Some(sp1_network)
+        );
+        assert_eq!(
+            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(legacy_sgxgeth),
+            Some(canonical_sgxgeth)
+        );
+        assert_eq!(
+            PipelineKey::ShastaSgx.canonicalize_persisted_route(canonical_sgxgeth),
+            None
+        );
+        assert_eq!(
+            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(PipelineRoute::new(
+                GuestSystem::Risc0,
+                RunnerKind::Local,
+            )),
+            None
+        );
     }
 }
 

@@ -1079,7 +1079,7 @@ async fn handle_existing_batch_task(
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
     if existing.pipeline_key != submission.route.pipeline_key()
-        || existing.route != submission.route.route
+        || canonical_persisted_route(&existing)? != submission.route.route
     {
         return replace_existing_batch_task(
             state,
@@ -1790,7 +1790,7 @@ async fn load_task_data_from_lookup(
     };
     Ok(TaskData {
         task_id: id.to_string(),
-        route: lookup.record.route.to_string(),
+        route: canonical_persisted_route(&lookup.record)?.to_string(),
         prover_type: lookup.metadata.prover_type_str(),
         execution_mode: lookup.metadata.execution_mode_str(),
         status: root_state.status.clone(),
@@ -2136,6 +2136,20 @@ fn parse_task_metadata(
             record.task_id
         ))
     })
+}
+
+fn canonical_persisted_route(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<PipelineRoute, ApiError> {
+    record
+        .pipeline_key
+        .canonicalize_persisted_route(record.route)
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "runtime task route {} does not match pipeline {}",
+                record.route, record.pipeline_key
+            ))
+        })
 }
 
 const fn is_terminal_runtime_status(status: RuntimeRunnerStatus) -> bool {
@@ -4736,6 +4750,65 @@ mod tests {
                 .expect("sgxgeth submissions")
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_sgxgeth_record_matches_request_and_projects_canonical_route() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "legacy-sgxgeth-request",
+        ))?);
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSgxGeth,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let submission = canonical_submission(sgxgeth_remote_route(), false);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &request_fingerprint)
+            .map_err(|err| anyhow!(err.message))?;
+        let mut metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: false,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaSgxGeth,
+            PipelineKey::ShastaSgxGeth.route(),
+        );
+        record.route = "sgx/remote".parse().expect("legacy SGXGETH route");
+        record.request_fingerprint = request_fingerprint;
+        runtime.upsert_task(&record).await?;
+
+        handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("legacy runtime task");
+        assert_eq!(stored.incarnation_id, record.incarnation_id);
+        assert_eq!(stored.route, record.route);
+        let task = load_task_data(&state, &record.task_id)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        assert_eq!(task.route, "sgxgeth/remote");
         Ok(())
     }
 

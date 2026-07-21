@@ -137,18 +137,47 @@ override. Update Docker examples to use only the new config model.
 Run config example tests plus repository searches for superseded paths. Commit with
 `docs(config): document self-contained prover setup`.
 
-### Task 5: Full Verification And Review
+### Task 5: Remove The Obsolete Bonsai Selector
+
+**Files:**
+- Modify: `bin/raiko2/src/config/prover.rs`
+- Modify: `bin/raiko2/src/server/state/setup.rs`
+- Modify: `crates/prover/src/risc0/types.rs`
+- Modify: `crates/prover/src/risc0/mod.rs`
+- Modify: `crates/prover/examples/risc0_real_prove.rs`
+- Modify: `config.example.toml`
+- Modify: `docker/config.compose.toml`
+
+**Step 1: Write the failing configuration test**
+
+Add a strict TOML parsing test that includes `bonsai = true` under `[prover.risc0]` and expects an
+unknown-field error. Keep the existing local RISC0 fixture free of that key.
+
+**Step 2: Run the test to verify it fails**
+
+Run `cargo test -p raiko2 config::prover::tests::rejects_removed_risc0_bonsai_setting` and confirm
+the configuration still accepts the key.
+
+**Step 3: Remove the selector and runtime branch**
+
+Delete `bonsai` from both RISC0 configuration structs and their defaults. Remove the
+`default_prover()` import and branch so `Risc0Prover` always uses `get_prover_server()` for real
+local proofs. Keep `snark`, `mock`, and the workspace `risc0-zkvm` dependency features unchanged.
+
+**Step 4: Update examples and documentation**
+
+Delete `bonsai` from the canonical config, Docker config, prover example, and all current design or
+operator examples. Historical references unrelated to live configuration need not be rewritten.
+
+**Step 5: Run focused verification and commit**
+
+Run `cargo test -p raiko2 config::`, `cargo test -p raiko2-prover risc0`, and
+`cargo fmt --all -- --check`. Commit with `refactor(risc0): remove obsolete bonsai selector`.
+
+### Task 6: Full Verification And Review
 
 **Files:**
 - Review all modified files.
-
-Before full verification, remove the obsolete raiko2-level Bonsai selector:
-
-- delete `bonsai` from host and prover RISC0 configuration,
-- make local RISC0 proving always use the local prover server,
-- reject stale `bonsai` keys through the existing strict TOML schema,
-- retain `snark`, `mock`, and the current RISC0 SDK dependency features, and
-- update samples and documentation so Boundless is the only RISC0 network runner.
 
 **Step 1: Run formatting and static checks**
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+use raiko2_pipeline::RunnerKind;
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
@@ -8,7 +8,7 @@ use raiko2_prover::{
         OfferParamsConfig, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
-    sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
+    sp1_config::{ExecutionMode as Sp1ExecutionMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,15 +37,6 @@ pub struct ProverConfig {
 }
 
 impl ProverConfig {
-    #[must_use]
-    pub const fn sp1_route(&self) -> PipelineRoute {
-        let runner = match self.sp1.prover {
-            Sp1ProverMode::Network => RunnerKind::Network,
-            Sp1ProverMode::Mock | Sp1ProverMode::Local => RunnerKind::Local,
-        };
-        PipelineRoute::new(GuestSystem::Sp1, runner)
-    }
-
     /// # Errors
     ///
     /// Returns an error if a configured route or prover setting is invalid.

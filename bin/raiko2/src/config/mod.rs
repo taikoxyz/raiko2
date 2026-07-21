@@ -46,6 +46,11 @@ impl Config {
         let mut config = if let Some(config_path) = &cli.config {
             Self::from_file(config_path)?
         } else {
+            if cli.prover_routes.is_none() {
+                anyhow::bail!(
+                    "--prover-routes or RAIKO2_PROVER_ROUTES is required when no config file is provided"
+                );
+            }
             Self::default()
         };
 
@@ -233,6 +238,14 @@ backend = "memory"
             let previous = std::env::var(key).ok();
             // SAFETY: tests serialize environment mutation through ENV_LOCK.
             unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        #[allow(unsafe_code)]
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: tests serialize environment mutation through ENV_LOCK.
+            unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
     }
@@ -614,6 +627,39 @@ backend = "memory"
     fn test_config_default_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn configless_load_requires_explicit_prover_routes() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
+        let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let cli = Cli::parse_from(["raiko2"]);
+
+        let err = Config::load(&cli).expect_err("configless load must require explicit routes");
+        assert!(
+            err.to_string().contains("--prover-routes")
+                && err.to_string().contains("RAIKO2_PROVER_ROUTES"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn configless_load_accepts_explicit_prover_routes() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
+        let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "native/local"]);
+
+        let config = Config::load(&cli).expect("explicit configless route should load");
+        assert_eq!(
+            config
+                .prover
+                .routes
+                .runner(raiko2_primitives::ProofType::Native),
+            Some(RunnerKind::Local)
+        );
+        assert_eq!(config.prover.routes.iter().count(), 1);
     }
 
     #[test]

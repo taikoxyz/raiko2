@@ -8,7 +8,9 @@ use raiko2_prover::{
         OfferParamsConfig, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
-    sp1_config::{ExecutionMode as Sp1ExecutionMode, Sp1Config},
+    sp1_config::{
+        ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config, Sp1ConfigError,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,38 +45,82 @@ impl ProverConfig {
     pub fn validate(&self) -> Result<()> {
         self.routes.validate()?;
 
-        if self.routes.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
-            if self.boundless.rpc_url.trim().is_empty() {
-                bail!("prover.boundless.rpc_url must not be empty");
+        match self.routes.runner(ProofType::Risc0) {
+            Some(RunnerKind::Network) => {
+                if self.boundless.rpc_url.trim().is_empty() {
+                    bail!("prover.boundless.rpc_url must not be empty");
+                }
+                if self.boundless.signer_key.trim().is_empty() {
+                    bail!("prover.boundless.signer_key must not be empty");
+                }
+                self.boundless.validate()?;
+                self.validate_risc0()?;
             }
-            if self.boundless.signer_key.trim().is_empty() {
-                bail!("prover.boundless.signer_key must not be empty");
+            Some(RunnerKind::Local) => self.validate_risc0()?,
+            None => {}
+            Some(RunnerKind::Remote) => unreachable!("routes.validate rejects risc0/remote"),
+        }
+
+        if let Some(runner) = self.routes.runner(ProofType::Sp1) {
+            match runner {
+                RunnerKind::Network if self.sp1.prover != Sp1ProverMode::Network => {
+                    bail!("prover.routes.sp1=network requires prover.sp1.prover=network");
+                }
+                RunnerKind::Local if self.sp1.prover == Sp1ProverMode::Network => {
+                    bail!("prover.routes.sp1=local requires prover.sp1.prover=local or mock");
+                }
+                RunnerKind::Local | RunnerKind::Network => {}
+                RunnerKind::Remote => unreachable!("routes.validate rejects sp1/remote"),
+            }
+            validate_sp1_config(&self.sp1)?;
+            if matches!(self.sp1.mode, Sp1ExecutionMode::Prove) && !self.sp1.verify {
+                bail!("prover.sp1.verify must be true when prover.sp1.mode=prove");
             }
         }
-        self.boundless.validate()?;
-        if self.risc0.execution_po2 == 0 {
-            bail!("prover.risc0.execution_po2 must be greater than zero");
+
+        let sgx_enabled = self.routes.is_enabled(ProofType::Sgx);
+        let sgxgeth_enabled = self.routes.is_enabled(ProofType::SgxGeth);
+        if sgx_enabled && self.remote_sgx.base_url.trim().is_empty() {
+            bail!("prover.remote_sgx.base_url must not be empty when prover.routes.sgx=remote");
         }
-        if self.routes.is_enabled(ProofType::Sgx) || self.routes.is_enabled(ProofType::SgxGeth) {
-            if self.remote_sgx.base_url.trim().is_empty()
-                && self.remote_sgx.sgxgeth_base_url.trim().is_empty()
-            {
-                bail!(
-                    "either prover.remote_sgx.base_url or prover.remote_sgx.sgxgeth_base_url must not be empty"
-                );
-            }
+        if sgxgeth_enabled && self.remote_sgx.sgxgeth_base_url.trim().is_empty() {
+            bail!(
+                "prover.remote_sgx.sgxgeth_base_url must not be empty when prover.routes.sgxgeth=remote"
+            );
+        }
+        if sgx_enabled || sgxgeth_enabled {
             if self.remote_sgx.timeout_ms == 0 {
                 bail!("prover.remote_sgx.timeout_ms must be greater than zero");
             }
         }
-        self.sp1.validate().map_err(anyhow::Error::msg)?;
-        if matches!(self.sp1.mode, Sp1ExecutionMode::Prove) && !self.sp1.verify {
-            bail!("prover.sp1.verify must be true when prover.sp1.mode=prove");
-        }
+
         self.zk_any.validate()?;
+        if self.zk_any.sp1.is_some() && !self.routes.is_enabled(ProofType::Sp1) {
+            bail!("prover.zk_any.sp1 requires enabled prover.routes.sp1");
+        }
+        if self.zk_any.risc0.is_some() && !self.routes.is_enabled(ProofType::Risc0) {
+            bail!("prover.zk_any.risc0 requires enabled prover.routes.risc0");
+        }
 
         Ok(())
     }
+
+    fn validate_risc0(&self) -> Result<()> {
+        if self.risc0.execution_po2 == 0 {
+            bail!("prover.risc0.execution_po2 must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+fn validate_sp1_config(config: &Sp1Config) -> Result<()> {
+    config.validate().map_err(|error| match error {
+        Sp1ConfigError::RpcUrlInvalid(_) => anyhow::anyhow!("prover.sp1.rpc_url is invalid"),
+        Sp1ConfigError::RemoteVerifyRpcUrlInvalid(_) => {
+            anyhow::anyhow!("prover.sp1.remote_verify.rpc_url is invalid")
+        }
+        error => anyhow::Error::msg(error),
+    })
 }
 
 /// Explicit runner selection for each concrete proof type.
@@ -481,6 +527,20 @@ mod tests {
     };
     use raiko2_pipeline::RunnerKind;
     use raiko2_primitives::ProofType;
+    use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
+
+    fn routes(value: &str) -> ProverRoutesConfig {
+        value.parse().expect("valid prover routes")
+    }
+
+    fn boundless_network_config() -> ProverConfig {
+        let mut config = ProverConfig {
+            routes: routes("risc0/network"),
+            ..Default::default()
+        };
+        config.boundless.signer_key = "configured-by-secret-store".to_string();
+        config
+    }
 
     #[test]
     fn prover_routes_parse_explicit_table_and_iterate_in_stable_order() {
@@ -653,7 +713,8 @@ sgx = "remote"
 
     #[test]
     fn prover_config_accepts_valid_zk_any_policy() {
-        let config = ProverConfig {
+        let mut config = ProverConfig {
+            routes: routes("risc0/local,sp1/local"),
             zk_any: ZkAnyConfig {
                 sp1: Some(ZkAnyTargetConfig {
                     probability: 0.3,
@@ -666,13 +727,254 @@ sgx = "remote"
             },
             ..Default::default()
         };
+        config.sp1.prover = Sp1ProverMode::Local;
 
         config.validate().expect("valid zk_any policy");
     }
 
     #[test]
-    fn prover_config_rejects_zero_aggregation_quote() {
+    fn zk_any_rejects_disabled_sp1_target() {
+        let config = ProverConfig {
+            routes: routes("risc0/local"),
+            zk_any: ZkAnyConfig {
+                sp1: Some(ZkAnyTargetConfig {
+                    probability: 0.5,
+                    per_day: 0,
+                }),
+                risc0: None,
+            },
+            ..Default::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("zk_any must not target a disabled SP1 route");
+        assert!(
+            err.to_string()
+                .contains("prover.zk_any.sp1 requires enabled prover.routes.sp1")
+        );
+    }
+
+    #[test]
+    fn zk_any_rejects_disabled_risc0_target() {
+        let mut config = ProverConfig {
+            routes: routes("sp1/local"),
+            zk_any: ZkAnyConfig {
+                sp1: None,
+                risc0: Some(ZkAnyTargetConfig {
+                    probability: 0.5,
+                    per_day: 0,
+                }),
+            },
+            ..Default::default()
+        };
+        config.sp1.prover = Sp1ProverMode::Local;
+
+        let err = config
+            .validate()
+            .expect_err("zk_any must not target a disabled RISC0 route");
+        assert!(
+            err.to_string()
+                .contains("prover.zk_any.risc0 requires enabled prover.routes.risc0")
+        );
+    }
+
+    #[test]
+    fn risc0_network_requires_boundless_network_credentials() {
+        let mut config = boundless_network_config();
+        config.boundless.rpc_url.clear();
+
+        let err = config
+            .validate()
+            .expect_err("risc0/network must require a Boundless RPC URL");
+        assert!(err.to_string().contains("prover.boundless.rpc_url"));
+
+        config.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.boundless.signer_key.clear();
+        let err = config
+            .validate()
+            .expect_err("risc0/network must require a Boundless signer");
+        assert!(err.to_string().contains("prover.boundless.signer_key"));
+    }
+
+    #[test]
+    fn risc0_local_skips_boundless_network_credentials() {
         let mut config = ProverConfig::default();
+        config.boundless.rpc_url.clear();
+        config.boundless.signer_key.clear();
+
+        config
+            .validate()
+            .expect("risc0/local must not require Boundless credentials");
+    }
+
+    #[test]
+    fn disabled_risc0_skips_boundless_backend_validation() {
+        let mut config = ProverConfig {
+            routes: routes("native/local"),
+            ..Default::default()
+        };
+        config.risc0.execution_po2 = 0;
+        config.boundless.rebid_timeout_ms = 0;
+
+        config
+            .validate()
+            .expect("disabled RISC0 must not validate Boundless or RISC0 settings");
+    }
+
+    #[test]
+    fn sgx_route_requires_lane_specific_base_url() {
+        let mut config = ProverConfig {
+            routes: routes("sgx/remote"),
+            ..Default::default()
+        };
+        config.remote_sgx.base_url.clear();
+        config.remote_sgx.sgxgeth_base_url = "https://sgxgeth.example.com".to_string();
+
+        let err = config
+            .validate()
+            .expect_err("sgx/remote must require its own base URL");
+        assert!(err.to_string().contains("prover.remote_sgx.base_url"));
+    }
+
+    #[test]
+    fn sgxgeth_route_requires_lane_specific_base_url() {
+        let mut config = ProverConfig {
+            routes: routes("sgxgeth/remote"),
+            ..Default::default()
+        };
+        config.remote_sgx.base_url = "https://sgx.example.com".to_string();
+        config.remote_sgx.sgxgeth_base_url.clear();
+
+        let err = config
+            .validate()
+            .expect_err("sgxgeth/remote must require its own base URL");
+        assert!(
+            err.to_string()
+                .contains("prover.remote_sgx.sgxgeth_base_url")
+        );
+    }
+
+    #[test]
+    fn configured_sgx_urls_without_routes_do_not_enable_lanes() {
+        let mut config = ProverConfig {
+            routes: routes("native/local"),
+            ..Default::default()
+        };
+        config.remote_sgx.base_url = "https://sgx.example.com".to_string();
+        config.remote_sgx.sgxgeth_base_url = "https://sgxgeth.example.com".to_string();
+        config.remote_sgx.timeout_ms = 0;
+
+        config
+            .validate()
+            .expect("configured SGX URLs must not enable absent routes");
+    }
+
+    #[test]
+    fn each_enabled_sgx_lane_requires_positive_timeout() {
+        for route in ["sgx/remote", "sgxgeth/remote"] {
+            let mut config = ProverConfig {
+                routes: routes(route),
+                ..Default::default()
+            };
+            config.remote_sgx.base_url = "https://sgx.example.com".to_string();
+            config.remote_sgx.sgxgeth_base_url = "https://sgxgeth.example.com".to_string();
+            config.remote_sgx.timeout_ms = 0;
+
+            let err = config
+                .validate()
+                .expect_err("enabled SGX lanes must require a positive timeout");
+            assert!(
+                err.to_string()
+                    .contains("prover.remote_sgx.timeout_ms must be greater than zero"),
+                "unexpected error for {route}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn sp1_local_allows_local_or_mock_prover() {
+        for prover in [Sp1ProverMode::Local, Sp1ProverMode::Mock] {
+            let mut config = ProverConfig {
+                routes: routes("sp1/local"),
+                ..Default::default()
+            };
+            config.sp1.prover = prover;
+
+            config
+                .validate()
+                .unwrap_or_else(|err| panic!("sp1/local should allow {prover:?}: {err}"));
+        }
+    }
+
+    #[test]
+    fn sp1_local_rejects_network_prover() {
+        let config = ProverConfig {
+            routes: routes("sp1/local"),
+            ..Default::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("sp1/local must reject the network prover");
+        assert!(
+            err.to_string()
+                .contains("prover.routes.sp1=local requires prover.sp1.prover=local or mock")
+        );
+    }
+
+    #[test]
+    fn sp1_network_requires_network_prover() {
+        let mut config = ProverConfig {
+            routes: routes("sp1/network"),
+            ..Default::default()
+        };
+        config.sp1.prover = Sp1ProverMode::Local;
+
+        let err = config
+            .validate()
+            .expect_err("sp1/network must require the network prover");
+        assert!(
+            err.to_string()
+                .contains("prover.routes.sp1=network requires prover.sp1.prover=network")
+        );
+    }
+
+    #[test]
+    fn disabled_sp1_skips_sp1_backend_validation() {
+        let mut config = ProverConfig {
+            routes: routes("native/local"),
+            ..Default::default()
+        };
+        config.sp1.cycle_limit = 0;
+
+        config
+            .validate()
+            .expect("disabled SP1 must not validate SP1 settings");
+    }
+
+    #[test]
+    fn sp1_validation_error_omits_credential_bearing_url() {
+        let mut config = ProverConfig {
+            routes: routes("sp1/local"),
+            ..Default::default()
+        };
+        config.sp1.prover = Sp1ProverMode::Local;
+        let sensitive_url = "https://sample_user:sample_secret@[invalid";
+        config.sp1.rpc_url = Some(sensitive_url.to_string());
+
+        let err = config
+            .validate()
+            .expect_err("invalid SP1 URL must fail validation");
+        let message = err.to_string();
+
+        assert!(!message.contains(sensitive_url));
+        assert!(!message.contains("sample_secret"));
+    }
+
+    #[test]
+    fn prover_config_rejects_zero_aggregation_quote() {
+        let mut config = boundless_network_config();
         config.boundless.aggregation_quote =
             raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 0 };
 
@@ -687,7 +989,7 @@ sgx = "remote"
 
     #[test]
     fn prover_config_accepts_zero_boundless_rebid_price_step_bps() {
-        let mut config = ProverConfig::default();
+        let mut config = boundless_network_config();
         config.boundless.rebid_price_step_bps = 0;
 
         // 0 bps is a valid flat (no-escalation) ladder.
@@ -699,7 +1001,7 @@ sgx = "remote"
     #[test]
     fn prover_config_rejects_sub_floor_boundless_rebid_price_step_bps() {
         // A value in 1..100 bps is almost always a bps/multiplier confusion (e.g. `2` meaning ×2).
-        let mut config = ProverConfig::default();
+        let mut config = boundless_network_config();
         config.boundless.rebid_price_step_bps = 2;
 
         assert!(
@@ -713,7 +1015,7 @@ sgx = "remote"
 
     #[test]
     fn prover_config_accepts_floor_boundless_rebid_price_step_bps() {
-        let mut config = ProverConfig::default();
+        let mut config = boundless_network_config();
         config.boundless.rebid_price_step_bps = MIN_MEANINGFUL_REBID_PRICE_STEP_BPS;
 
         config
@@ -723,7 +1025,7 @@ sgx = "remote"
 
     #[test]
     fn prover_config_rejects_excessive_boundless_rebid_max_attempts() {
-        let mut config = ProverConfig::default();
+        let mut config = boundless_network_config();
         config.boundless.rebid_max_attempts = REBID_MAX_ATTEMPTS_LIMIT + 1;
 
         assert!(
@@ -737,7 +1039,7 @@ sgx = "remote"
 
     #[test]
     fn prover_config_rejects_zero_boundless_rebid_timeout() {
-        let mut config = ProverConfig::default();
+        let mut config = boundless_network_config();
         config.boundless.rebid_timeout_ms = 0;
 
         assert!(
@@ -751,7 +1053,7 @@ sgx = "remote"
 
     #[test]
     fn prover_config_rejects_subsecond_boundless_rebid_timeout() {
-        let mut config = ProverConfig::default();
+        let mut config = boundless_network_config();
         config.boundless.rebid_timeout_ms = 999;
 
         assert!(
@@ -765,7 +1067,11 @@ sgx = "remote"
 
     #[test]
     fn prover_config_rejects_sp1_prove_without_verification() {
-        let mut config = ProverConfig::default();
+        let mut config = ProverConfig {
+            routes: routes("sp1/local"),
+            ..Default::default()
+        };
+        config.sp1.prover = Sp1ProverMode::Local;
         config.sp1.mode = Sp1ExecutionMode::Prove;
         config.sp1.verify = false;
 

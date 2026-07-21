@@ -86,7 +86,7 @@ pub(super) fn route_for_proof_type(
         }
         (BatchProofType::Sgx, RunnerKind::Remote) => (GuestSystem::Sgx, PipelineKey::ShastaSgx),
         (BatchProofType::SgxGeth, RunnerKind::Remote) => {
-            (GuestSystem::Sgx, PipelineKey::ShastaSgxGeth)
+            (GuestSystem::SgxGeth, PipelineKey::ShastaSgxGeth)
         }
         _ => {
             return Err(ApiError::internal(format!(
@@ -276,6 +276,28 @@ mod tests {
     }
 
     #[test]
+    fn sgxgeth_request_uses_distinct_public_route() {
+        let state = test_state_with_config(config_with_routes("sgxgeth/remote"));
+
+        let selection = route_for_proof_type(
+            &state,
+            BatchProofType::SgxGeth,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect("configured SGXGETH route");
+
+        assert_eq!(selection.route.to_string(), "sgxgeth/remote");
+        assert_ne!(
+            selection.route,
+            "sgx/remote"
+                .parse::<PipelineRoute>()
+                .expect("parse sgx route")
+        );
+        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaSgxGeth);
+    }
+
+    #[test]
     fn all_production_routes_resolve_independently_on_one_host() {
         let mut config =
             config_with_routes("risc0/network,sp1/network,native/local,sgx/remote,sgxgeth/remote");
@@ -305,7 +327,7 @@ mod tests {
             ),
             (
                 BatchProofType::SgxGeth,
-                PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
+                PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
                 PipelineKey::ShastaSgxGeth,
             ),
         ] {

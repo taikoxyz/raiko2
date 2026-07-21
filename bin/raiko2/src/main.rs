@@ -16,6 +16,7 @@
 //! # Or with environment variables
 //! RAIKO2_L1_RPC=http://localhost:8545 \
 //! RAIKO2_L2_RPC=http://localhost:9545 \
+//! RAIKO2_PROVER_ROUTES=native/local \
 //! raiko2
 //! ```
 

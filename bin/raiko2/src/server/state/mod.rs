@@ -109,7 +109,8 @@ impl PipelineRegistration {
             ProofType::Risc0 => GuestSystem::Risc0,
             ProofType::Sp1 => GuestSystem::Sp1,
             ProofType::Native => GuestSystem::Native,
-            ProofType::Sgx | ProofType::SgxGeth => GuestSystem::Sgx,
+            ProofType::Sgx => GuestSystem::Sgx,
+            ProofType::SgxGeth => GuestSystem::SgxGeth,
         };
         PipelineRoute::new(guest_system, self.runner)
     }
@@ -904,6 +905,10 @@ mod tests {
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0].pipeline_key, PipelineKey::ShastaSgx);
         assert_eq!(
+            registrations[0].route(),
+            "sgx/remote".parse().expect("parse SGX route")
+        );
+        assert_eq!(
             registrations[0].remote_url.as_deref(),
             Some("http://sgx.example")
         );
@@ -920,6 +925,10 @@ mod tests {
 
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0].pipeline_key, PipelineKey::ShastaSgxGeth);
+        assert_eq!(
+            registrations[0].route(),
+            "sgxgeth/remote".parse().expect("parse SGXGETH route")
+        );
         assert_eq!(
             registrations[0].remote_url.as_deref(),
             Some("http://sgxgeth.example")

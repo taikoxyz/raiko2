@@ -3609,7 +3609,7 @@ mod tests {
 
     fn sgxgeth_remote_route() -> CanonicalProofRoute {
         CanonicalProofRoute::new(
-            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
         )
     }
@@ -4682,7 +4682,7 @@ mod tests {
             ],
         );
         let route = CanonicalProofRoute::new(
-            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
         );
         let submission = canonical_submission(route, false);

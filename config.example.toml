@@ -66,15 +66,20 @@ prefix = "raiko2/runtime/v1"
 # [preflight.verify_checkpoint_l2_rpcs]
 # taiko_hoodi = "https://hoodi-l2-rpc.example.com"
 
-[prover]
-# Server default route.
-# Supported routes:
-# Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
-# Internal regression environments may use proof_type = "native" with route native/local.
-# Routes supported by server config:
-#   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
-guest_system = "risc0"
-runner = "local"
+[prover.routes]
+# This table is the only route enablement source. A missing entry is disabled, and backend
+# settings below do not enable routes. One host may enable any supported combination:
+#   risc0 = "local" | "network"
+#   sp1 = "local" | "network"
+#   native = "local"
+#   sgx = "remote"
+#   sgxgeth = "remote"
+# RAIKO2_PROVER_ROUTES and --prover-routes accept comma-separated <proof_type>/<runner> values
+# and replace this whole table; they do not append to it.
+risc0 = "network"
+sp1 = "network"
+sgx = "remote"
+sgxgeth = "remote"
 
 [prover.risc0]
 bonsai = true

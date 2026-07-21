@@ -151,7 +151,7 @@ flowchart LR
   `kzg_versioned_hash` manifests are rejected.
 - Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
-  regression when the server route is `native/local`.
+  regression when `native/local` is enabled in `prover.routes`.
 - Hosted SP1 proposal proving emits Compressed proposal artifacts and SP1 aggregation emits Plonk
   final proofs. A standalone SP1 proposal may therefore complete with `proof = null` while its
   readable artifact carries `quote`, `input`, `uuid`, and `extra_data`; aggregate completion always

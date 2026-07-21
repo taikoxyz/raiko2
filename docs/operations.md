@@ -51,15 +51,27 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
 ```
 
 The default compose stack runs a single `raiko2` container on port `8080` with the in-process
-memory queue. Default binaries include RISC Zero local/network proving and SP1 proving.
+memory queue. Default binaries include RISC Zero local/network proving and SP1 proving. The
+operator env sample selects `risc0/local` for this one-container quickstart.
 
-To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
+To select proving routes, set `RAIKO2_PROVER_ROUTES` in `docker/.env` to a comma-separated list.
+It replaces the complete `[prover.routes]` table from the mounted config; it does not append to it.
+For a single local route:
 
-- `native/local`
-- `risc0/local`
-- `risc0/network`
-- `sp1/local`
-- `sp1/network`
+```dotenv
+RAIKO2_PROVER_ROUTES=risc0/local
+```
+
+For a production host serving both network ZK systems and both SGX lanes:
+
+```dotenv
+RAIKO2_PROVER_ROUTES=risc0/network,sp1/network,sgx/remote,sgxgeth/remote
+```
+
+Supported pairs are `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `native/local`,
+`sgx/remote`, and `sgxgeth/remote`. A missing entry is disabled. Backend sections such as
+`[prover.sp1]`, `[prover.boundless]`, and `[prover.remote_sgx]` contain settings only and do not
+enable routes. One host may explicitly enable any supported combination.
 
 The queue is always in-process. Durable task state and remote-provider checkpoints use the
 configured namespaced GCS runtime store; Boundless does not need an extra feature flag.
@@ -286,7 +298,7 @@ For a local `raiko2` CLI against the compose-managed SGX servers:
 
 ```bash
 RAIKO2_CONFIG=docker/config.compose.toml \
-RAIKO2_PROVER=sgx/remote \
+RAIKO2_PROVER_ROUTES=sgx/remote,sgxgeth/remote \
 RAIKO2_L1_RPC=http://127.0.0.1:8545 \
 RAIKO2_L2_RPC=http://127.0.0.1:9545 \
 RAIKO2_REMOTE_SGX_BASE_URL=http://127.0.0.1:9090 \
@@ -793,9 +805,8 @@ Those steps remain part of later operator workflows.
 To use the network-backed RISC0 route, configure:
 
 ```toml
-[prover]
-guest_system = "risc0"
-runner = "network"
+[prover.routes]
+risc0 = "network"
 
 [prover.boundless]
 offchain = false

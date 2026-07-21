@@ -23,9 +23,9 @@ namespace = "raiko2-compose"
 [runtime.store]
 backend = "memory"
 
-[prover]
-guest_system = "sgx"
-runner = "remote"
+[prover.routes]
+sgx = "remote"
+sgxgeth = "remote"
 
 [prover.risc0]
 bonsai = true

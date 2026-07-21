@@ -31,15 +31,18 @@ l2_rpc = "<hoodi-l2-reth-rpc>"
 l2_witness_rpc = "<hoodi-l2-reth-witness-rpc>"
 l2_provider = "reth"
 
-[prover]
-guest_system = "sgx"
-runner = "remote"
+[prover.routes]
+sgx = "remote"
+sgxgeth = "remote"
 
 [prover.remote_sgx]
 base_url = "<raiko2-sgx-http>"
 sgxgeth_base_url = "<gaiko2-sgxgeth-http>"
 timeout_ms = 300000
 ```
+
+Both route entries are required to serve the two rollout lanes. A missing entry disables that
+proof type; the `[prover.remote_sgx]` settings alone do not enable either route.
 
 Do not route `l2_witness_rpc` to a node that only supports canonical `debug_executionWitness`.
 The Shasta source-manifest path must use `debug_executionWitnessForTxList`.

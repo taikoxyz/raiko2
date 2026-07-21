@@ -180,7 +180,7 @@ Common proof-type validation:
 - Missing `proof_type` returns `missing_proof_type`.
 - `proof_type=zk_any` returns `invalid_proof_type`.
 - Unknown proof type strings return `invalid_proof_type`.
-- Any valid concrete `proof_type` that the configured server route cannot serve returns
+- Any valid concrete `proof_type` that is not enabled in the configured route table returns
   `unsupported_proof_type`.
 
 Proof submission validation:
@@ -701,15 +701,15 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
-  - `native -> native/local` only when the server route is `native/local`; otherwise rejected
-  - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
-  - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
+  - `native -> native/local` when that route is enabled; otherwise rejected
+  - `sp1 -> sp1/local | sp1/network` from `prover.routes.sp1`
+  - `risc0 -> risc0/local | risc0/network` from `prover.routes.risc0`, with
+    `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
   - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
-  - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
+  - `sgxgeth -> sgxgeth/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`
-- When the server prover route is `sgx/remote`, the hosted public API only accepts
-  `proof_type=sgx` and `proof_type=sgxgeth`.
+- Each concrete proof type is accepted only when its matching route is enabled.
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
   proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the
@@ -1147,6 +1147,16 @@ All API errors use the Hoodi-style envelope:
 ```
 
 ## Configuration Notes
+
+`[prover.routes]` is the sole owner of enabled proving capabilities. Supported pairs are
+`risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `native/local`, `sgx/remote`, and
+`sgxgeth/remote`. A missing entry disables that proof type; backend settings such as
+`[prover.risc0]`, `[prover.sp1]`, `[prover.boundless]`, and `[prover.remote_sgx]` do not enable it.
+One host may explicitly enable any supported combination, with at least one route required.
+
+`--prover-routes` and `RAIKO2_PROVER_ROUTES` accept a comma-separated list such as
+`risc0/network,sp1/network,sgx/remote,sgxgeth/remote`. The override replaces the complete
+`[prover.routes]` table; it never appends to the file configuration.
 
 - `runtime.environment` is the business/deployment boundary. `runtime.namespace` is the immutable
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may

@@ -1,5 +1,6 @@
 use super::net;
 use crate::config::{Config, NetworkPairConfig};
+use raiko2_primitives::ProofType;
 use serde::Serialize;
 use tracing::info;
 use url::Url;
@@ -7,7 +8,7 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StartupSummary {
     listen: String,
-    route: String,
+    routes: Vec<String>,
     pairs: Vec<String>,
     environment: String,
     namespace: String,
@@ -21,21 +22,21 @@ pub(crate) struct StartupSummary {
 }
 
 pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> StartupSummary {
-    let (remote_sgx_base_url, remote_sgx_sgxgeth_base_url) = if config.prover.is_remote_sgx_route()
-    {
-        (
-            (!config.prover.remote_sgx.base_url.trim().is_empty())
-                .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url)),
-            (!config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
-                .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url)),
-        )
-    } else {
-        (None, None)
-    };
+    let remote_sgx_base_url = (config.prover.routes.is_enabled(ProofType::Sgx)
+        && !config.prover.remote_sgx.base_url.trim().is_empty())
+    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url));
+    let remote_sgx_sgxgeth_base_url = (config.prover.routes.is_enabled(ProofType::SgxGeth)
+        && !config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
+    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url));
 
     StartupSummary {
         listen: net::bind_addr(config),
-        route: config.prover.route().to_string(),
+        routes: config
+            .prover
+            .routes
+            .iter()
+            .map(|(proof_type, runner)| format!("{proof_type}/{runner}"))
+            .collect(),
         pairs: config
             .rpc
             .pairs
@@ -77,7 +78,7 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
     ) {
         (Some(base_url), Some(sgxgeth_base_url)) => info!(
             listen = %summary.listen,
-            route = %summary.route,
+            routes = ?summary.routes,
             pairs = ?summary.pairs,
             environment = %summary.environment,
             namespace = %summary.namespace,
@@ -91,7 +92,7 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
         ),
         (Some(base_url), None) => info!(
             listen = %summary.listen,
-            route = %summary.route,
+            routes = ?summary.routes,
             pairs = ?summary.pairs,
             environment = %summary.environment,
             namespace = %summary.namespace,
@@ -104,7 +105,7 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
         ),
         (None, Some(sgxgeth_base_url)) => info!(
             listen = %summary.listen,
-            route = %summary.route,
+            routes = ?summary.routes,
             pairs = ?summary.pairs,
             environment = %summary.environment,
             namespace = %summary.namespace,
@@ -117,7 +118,7 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
         ),
         (None, None) => info!(
             listen = %summary.listen,
-            route = %summary.route,
+            routes = ?summary.routes,
             pairs = ?summary.pairs,
             environment = %summary.environment,
             namespace = %summary.namespace,
@@ -152,7 +153,7 @@ fn sanitize_url_for_log(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::build_startup_summary;
-    use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
+    use crate::config::{Config, ServerAclFeature, ServerAclKey};
     use serde_json::Value;
 
     fn summary_json(config: &Config, json_logs: bool) -> Value {
@@ -172,8 +173,11 @@ mod tests {
             ],
             rate_limit_per_minute: None,
         }];
-        config.prover.guest_system = GuestSystem::Native;
-        config.prover.runner = RunnerKind::Local;
+        config.prover.routes = "sgxgeth/remote,sgx/remote,native/local,sp1/network,risc0/network"
+            .parse()
+            .expect("parse routes");
+        config.prover.remote_sgx.base_url.clear();
+        config.prover.remote_sgx.sgxgeth_base_url.clear();
         config.runtime.environment = "test".to_string();
         config.runtime.namespace = "raiko2-test".to_string();
         config.queue.workers = 9;
@@ -187,7 +191,17 @@ mod tests {
         let summary = summary_json(&sample_config(), false);
 
         assert_eq!(summary["listen"], "127.0.0.1:8088");
-        assert_eq!(summary["route"], "native/local");
+        assert_eq!(
+            summary["routes"],
+            serde_json::json!([
+                "risc0/network",
+                "sp1/network",
+                "native/local",
+                "sgx/remote",
+                "sgxgeth/remote"
+            ])
+        );
+        assert!(summary.get("route").is_none());
         assert_eq!(summary["pairs"], serde_json::json!(["taiko_hoodi/hoodi"]));
         assert_eq!(summary["environment"], "test");
         assert_eq!(summary["namespace"], "raiko2-test");
@@ -199,22 +213,35 @@ mod tests {
     }
 
     #[test]
-    fn startup_summary_includes_remote_sgx_urls_for_remote_sgx_route() {
+    fn startup_summary_includes_only_remote_sgx_url_when_sgx_is_enabled() {
         let mut config = sample_config();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
+        config.prover.routes = "sgx/remote".parse().expect("parse routes");
         config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
         config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
 
         let summary = summary_json(&config, true);
 
-        assert_eq!(summary["route"], "sgx/remote");
+        assert_eq!(summary["routes"], serde_json::json!(["sgx/remote"]));
         assert_eq!(summary["remote_sgx_base_url"], "http://example.com:9090");
+        assert!(summary.get("remote_sgx_sgxgeth_base_url").is_none());
+        assert_eq!(summary["json_logs"], true);
+    }
+
+    #[test]
+    fn startup_summary_includes_only_sgxgeth_url_when_sgxgeth_is_enabled() {
+        let mut config = sample_config();
+        config.prover.routes = "sgxgeth/remote".parse().expect("parse routes");
+        config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
+        config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
+
+        let summary = summary_json(&config, false);
+
+        assert_eq!(summary["routes"], serde_json::json!(["sgxgeth/remote"]));
+        assert!(summary.get("remote_sgx_base_url").is_none());
         assert_eq!(
             summary["remote_sgx_sgxgeth_base_url"],
             "http://example.com:8090"
         );
-        assert_eq!(summary["json_logs"], true);
     }
 
     #[test]
@@ -229,10 +256,11 @@ mod tests {
     #[test]
     fn startup_summary_sanitizes_remote_urls_before_logging() {
         let mut config = sample_config();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
+        config.prover.routes = "sgx/remote,sgxgeth/remote".parse().expect("parse routes");
         config.prover.remote_sgx.base_url =
             "https://user:secret@example.com:9090/prove?token=abc#frag".to_string();
+        config.prover.remote_sgx.sgxgeth_base_url =
+            "https://other:credential@example.net:8090/prove?key=value#section".to_string();
 
         let summary = summary_json(&config, false);
 
@@ -240,5 +268,14 @@ mod tests {
             summary["remote_sgx_base_url"],
             "https://example.com:9090/prove"
         );
+        assert_eq!(
+            summary["remote_sgx_sgxgeth_base_url"],
+            "https://example.net:8090/prove"
+        );
+        let serialized = summary.to_string();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("token"));
+        assert!(!serialized.contains("key=value"));
     }
 }

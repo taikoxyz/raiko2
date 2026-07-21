@@ -91,13 +91,17 @@ strategy = "raiko_agent"
 pricing_mode = "market"
 
 [prover.risc0.boundless.offer_params.batch.timeouts]
-lock_timeout = 120
+mode = "per_mcycle"
+lock_timeout_ms_per_mcycle = 300
+timeout_ms_per_mcycle = 900
 
 [prover.risc0.boundless.offer_params.aggregation]
 pricing_mode = "market"
 
 [prover.risc0.boundless.offer_params.aggregation.timeouts]
-lock_timeout = 120
+mode = "per_mcycle"
+lock_timeout_ms_per_mcycle = 3000
+timeout_ms_per_mcycle = 6000
 ```
 
 Every existing Boundless field and nested table keeps the same semantics. Only its global TOML path

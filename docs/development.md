@@ -13,8 +13,8 @@ See also:
 ## Local Workflow
 
 The example config enables a combined production route set. Before running locally, edit the copy
-to keep only the desired `[prover.routes]` entries and fill every setting, credential, and endpoint
-required by those enabled routes.
+to set `enabled = true` only for the desired proof-type tables and fill every setting, credential,
+and endpoint required by those enabled backends.
 
 ```bash
 cp config.example.toml config.toml

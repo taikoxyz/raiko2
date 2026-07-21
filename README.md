@@ -43,9 +43,10 @@ cargo run -r -p raiko2 -- --config config.toml
 ```
 
 `config.example.toml` is a combined production sample. Before running, keep only the desired
-`[prover.routes]` entries and fill every setting, credential, and endpoint required by those
-enabled routes. For example, SP1 network proving requires `NETWORK_PRIVATE_KEY`, while
-`risc0/network` requires real Boundless credentials.
+per-proof-type tables enabled and fill every setting, credential, and endpoint they require. For
+example, SP1 network proving requires `prover.sp1.enabled = true`, `prover.sp1.prover = "network"`,
+and `NETWORK_PRIVATE_KEY`, while RISC0 network proving requires `prover.risc0.enabled = true`,
+`prover.risc0.runner = "network"`, and real nested Boundless credentials.
 
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
 override values from the file. The real server checks configured RPC endpoints and hosted prover
@@ -155,7 +156,7 @@ flowchart LR
   `kzg_versioned_hash` manifests are rejected.
 - Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
-  regression when `native/local` is enabled in `prover.routes`.
+  regression when `prover.native.enabled = true`.
 - Hosted SP1 proposal proving emits Compressed proposal artifacts and SP1 aggregation emits Plonk
   final proofs. A standalone SP1 proposal may therefore complete with `proof = null` while its
   readable artifact carries `quote`, `input`, `uuid`, and `extra_data`; aggregate completion always

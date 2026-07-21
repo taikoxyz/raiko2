@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
+use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
@@ -18,10 +18,7 @@ use super::BoundlessPairConfig;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProverConfig {
-    #[serde(default)]
-    pub guest_system: GuestSystem,
-    #[serde(default)]
-    pub runner: RunnerKind,
+    pub routes: ProverRoutesConfig,
     /// RISC0 specific configuration.
     #[serde(default)]
     pub risc0: Risc0Config,
@@ -41,11 +38,6 @@ pub struct ProverConfig {
 
 impl ProverConfig {
     #[must_use]
-    pub const fn route(&self) -> PipelineRoute {
-        PipelineRoute::new(self.guest_system, self.runner)
-    }
-
-    #[must_use]
     pub const fn sp1_route(&self) -> PipelineRoute {
         let runner = match self.sp1.prover {
             Sp1ProverMode::Network => RunnerKind::Network,
@@ -54,55 +46,13 @@ impl ProverConfig {
         PipelineRoute::new(GuestSystem::Sp1, runner)
     }
 
-    #[must_use]
-    pub const fn is_remote_sgx_route(&self) -> bool {
-        matches!(
-            self.route(),
-            PipelineRoute {
-                guest_system: GuestSystem::Sgx,
-                runner: RunnerKind::Remote
-            }
-        )
-    }
-
-    /// Applies the canonical server route to backend-specific prover defaults.
-    pub fn normalize_route(&mut self) {
-        match self.route() {
-            PipelineRoute {
-                guest_system: GuestSystem::Sp1,
-                runner: RunnerKind::Network,
-            } => {
-                self.sp1.prover = Sp1ProverMode::Network;
-            }
-            PipelineRoute {
-                guest_system: GuestSystem::Sp1,
-                runner: RunnerKind::Local,
-            } if self.sp1.prover == Sp1ProverMode::Network => {
-                self.sp1.prover = Sp1ProverMode::Local;
-            }
-            _ => {}
-        }
-    }
-
     /// # Errors
     ///
-    /// Returns an error if the configured guest system and runner are incompatible.
+    /// Returns an error if a configured route or prover setting is invalid.
     pub fn validate(&self) -> Result<()> {
-        let route = self.route();
-        if !PipelineKey::ALL
-            .into_iter()
-            .any(|pipeline| pipeline.supports_route(route))
-        {
-            bail!("unsupported prover route: {route}");
-        }
+        self.routes.validate()?;
 
-        if matches!(
-            route,
-            PipelineRoute {
-                guest_system: GuestSystem::Risc0,
-                runner: RunnerKind::Network,
-            }
-        ) {
+        if self.routes.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
             if self.boundless.rpc_url.trim().is_empty() {
                 bail!("prover.boundless.rpc_url must not be empty");
             }
@@ -114,13 +64,7 @@ impl ProverConfig {
         if self.risc0.execution_po2 == 0 {
             bail!("prover.risc0.execution_po2 must be greater than zero");
         }
-        if matches!(
-            route,
-            PipelineRoute {
-                guest_system: GuestSystem::Sgx,
-                runner: RunnerKind::Remote
-            }
-        ) {
+        if self.routes.is_enabled(ProofType::Sgx) || self.routes.is_enabled(ProofType::SgxGeth) {
             if self.remote_sgx.base_url.trim().is_empty()
                 && self.remote_sgx.sgxgeth_base_url.trim().is_empty()
             {
@@ -139,6 +83,143 @@ impl ProverConfig {
         self.zk_any.validate()?;
 
         Ok(())
+    }
+}
+
+/// Explicit runner selection for each concrete proof type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProverRoutesConfig {
+    pub risc0: Option<RunnerKind>,
+    pub sp1: Option<RunnerKind>,
+    pub native: Option<RunnerKind>,
+    pub sgx: Option<RunnerKind>,
+    pub sgxgeth: Option<RunnerKind>,
+}
+
+impl Default for ProverRoutesConfig {
+    fn default() -> Self {
+        Self {
+            risc0: Some(RunnerKind::Local),
+            sp1: None,
+            native: None,
+            sgx: None,
+            sgxgeth: None,
+        }
+    }
+}
+
+impl ProverRoutesConfig {
+    const STABLE_ORDER: [ProofType; 5] = [
+        ProofType::Risc0,
+        ProofType::Sp1,
+        ProofType::Native,
+        ProofType::Sgx,
+        ProofType::SgxGeth,
+    ];
+
+    const fn empty() -> Self {
+        Self {
+            risc0: None,
+            sp1: None,
+            native: None,
+            sgx: None,
+            sgxgeth: None,
+        }
+    }
+
+    /// Returns the configured runner for a concrete proof type.
+    #[must_use]
+    pub const fn runner(&self, proof_type: ProofType) -> Option<RunnerKind> {
+        match proof_type {
+            ProofType::Risc0 => self.risc0,
+            ProofType::Sp1 => self.sp1,
+            ProofType::Native => self.native,
+            ProofType::Sgx => self.sgx,
+            ProofType::SgxGeth => self.sgxgeth,
+        }
+    }
+
+    /// Returns whether a concrete proof type has an enabled route.
+    #[must_use]
+    pub const fn is_enabled(&self, proof_type: ProofType) -> bool {
+        self.runner(proof_type).is_some()
+    }
+
+    /// Iterates enabled routes in stable proof-type order.
+    pub fn iter(&self) -> impl Iterator<Item = (ProofType, RunnerKind)> + '_ {
+        Self::STABLE_ORDER
+            .into_iter()
+            .filter_map(|proof_type| self.runner(proof_type).map(|runner| (proof_type, runner)))
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if no route is enabled or a runner is unsupported for its proof type.
+    pub fn validate(&self) -> Result<()> {
+        let mut routes = self.iter().peekable();
+        if routes.peek().is_none() {
+            bail!("at least one prover route must be enabled");
+        }
+        for (proof_type, runner) in routes {
+            validate_route(proof_type, runner).map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        proof_type: ProofType,
+        runner: RunnerKind,
+    ) -> std::result::Result<(), String> {
+        let entry = match proof_type {
+            ProofType::Risc0 => &mut self.risc0,
+            ProofType::Sp1 => &mut self.sp1,
+            ProofType::Native => &mut self.native,
+            ProofType::Sgx => &mut self.sgx,
+            ProofType::SgxGeth => &mut self.sgxgeth,
+        };
+        if entry.is_some() {
+            return Err(format!("duplicate prover route for {proof_type}"));
+        }
+        *entry = Some(runner);
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for ProverRoutesConfig {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.trim().is_empty() {
+            return Err("prover routes override must not be empty".to_string());
+        }
+
+        let mut routes = Self::empty();
+        for raw_route in value.split(',') {
+            let route = raw_route.trim();
+            let (proof_type, runner) = route.split_once('/').ok_or_else(|| {
+                format!("invalid prover route '{route}', expected <proof_type>/<runner>")
+            })?;
+            routes.insert(proof_type.trim().parse()?, runner.trim().parse()?)?;
+        }
+        routes.validate().map_err(|error| error.to_string())?;
+        Ok(routes)
+    }
+}
+
+fn validate_route(proof_type: ProofType, runner: RunnerKind) -> std::result::Result<(), String> {
+    if matches!(
+        (proof_type, runner),
+        (
+            ProofType::Risc0 | ProofType::Sp1,
+            RunnerKind::Local | RunnerKind::Network
+        ) | (ProofType::Native, RunnerKind::Local)
+            | (ProofType::Sgx | ProofType::SgxGeth, RunnerKind::Remote)
+    ) {
+        Ok(())
+    } else {
+        Err(format!("unsupported prover route: {proof_type}/{runner}"))
     }
 }
 
@@ -404,9 +485,139 @@ const fn default_boundless_rebid_max_attempts() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, REBID_MAX_ATTEMPTS_LIMIT,
-        Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
+        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, ProverRoutesConfig,
+        REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
+    use raiko2_pipeline::RunnerKind;
+    use raiko2_primitives::ProofType;
+
+    #[test]
+    fn prover_routes_parse_explicit_table_and_iterate_in_stable_order() {
+        let config: ProverConfig = toml::from_str(
+            r#"
+[routes]
+sgxgeth = "remote"
+native = "local"
+sp1 = "network"
+risc0 = "local"
+sgx = "remote"
+"#,
+        )
+        .expect("explicit routes should parse");
+
+        assert_eq!(
+            config.routes.iter().collect::<Vec<_>>(),
+            vec![
+                (ProofType::Risc0, RunnerKind::Local),
+                (ProofType::Sp1, RunnerKind::Network),
+                (ProofType::Native, RunnerKind::Local),
+                (ProofType::Sgx, RunnerKind::Remote),
+                (ProofType::SgxGeth, RunnerKind::Remote),
+            ]
+        );
+        assert_eq!(
+            config.routes.runner(ProofType::Sp1),
+            Some(RunnerKind::Network)
+        );
+        assert!(config.routes.is_enabled(ProofType::SgxGeth));
+    }
+
+    #[test]
+    fn prover_routes_default_is_programmatic_only() {
+        // Rust defaults keep existing fixture construction ergonomic. Because `routes` has no
+        // serde default on `ProverConfig`, deserialization still requires an explicit table.
+        let default = ProverConfig::default();
+        assert_eq!(
+            default.routes.iter().collect::<Vec<_>>(),
+            vec![(ProofType::Risc0, RunnerKind::Local)]
+        );
+
+        let err = toml::from_str::<ProverConfig>("")
+            .expect_err("deserialization must require an explicit routes table");
+        assert!(err.to_string().contains("missing field `routes`"));
+    }
+
+    #[test]
+    fn prover_routes_reject_empty_table() {
+        let config: ProverConfig =
+            toml::from_str("[routes]").expect("an empty table should deserialize");
+
+        let err = config
+            .validate()
+            .expect_err("at least one route must be enabled");
+        assert!(err.to_string().contains("at least one prover route"));
+    }
+
+    #[test]
+    fn prover_routes_accept_only_supported_runner_combinations() {
+        for routes in [
+            "risc0/local",
+            "risc0/network",
+            "sp1/local",
+            "sp1/network",
+            "native/local",
+            "sgx/remote",
+            "sgxgeth/remote",
+        ] {
+            routes
+                .parse::<ProverRoutesConfig>()
+                .unwrap_or_else(|err| panic!("{routes} should parse: {err}"))
+                .validate()
+                .unwrap_or_else(|err| panic!("{routes} should validate: {err}"));
+        }
+
+        for routes in [
+            "risc0/remote",
+            "sp1/remote",
+            "native/network",
+            "native/remote",
+            "sgx/local",
+            "sgx/network",
+            "sgxgeth/local",
+            "sgxgeth/network",
+        ] {
+            let err = routes
+                .parse::<ProverRoutesConfig>()
+                .expect_err("unsupported runner combination must fail");
+            assert!(err.contains("unsupported prover route"), "{routes}: {err}");
+        }
+    }
+
+    #[test]
+    fn prover_routes_override_parser_rejects_invalid_input() {
+        let duplicate = "risc0/local,risc0/network"
+            .parse::<ProverRoutesConfig>()
+            .expect_err("duplicate proof type must fail");
+        assert!(duplicate.contains("duplicate prover route"));
+
+        let unknown = "unknown/local"
+            .parse::<ProverRoutesConfig>()
+            .expect_err("unknown proof type must fail");
+        assert!(unknown.contains("Unknown proof type"));
+
+        let invalid_runner = "risc0/invalid"
+            .parse::<ProverRoutesConfig>()
+            .expect_err("unknown runner must fail");
+        assert!(invalid_runner.contains("Unknown runner"));
+
+        let empty = ""
+            .parse::<ProverRoutesConfig>()
+            .expect_err("empty override must fail");
+        assert!(empty.contains("must not be empty"));
+    }
+
+    #[test]
+    fn prover_config_rejects_removed_global_route_fields() {
+        for legacy_field in ["guest_system = \"risc0\"", "runner = \"local\""] {
+            let input = format!("{legacy_field}\n[routes]\nrisc0 = \"local\"\n");
+            let err = toml::from_str::<ProverConfig>(&input)
+                .expect_err("legacy global route field must fail");
+            assert!(
+                err.to_string().contains("unknown field"),
+                "unexpected error for {legacy_field}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn zk_any_config_rejects_probability_above_one() {

@@ -34,9 +34,9 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_PORT")]
     pub port: Option<u16>,
 
-    /// Canonical proving route (`<guest_system>/<runner>`)
-    #[arg(long, env = "RAIKO2_PROVER")]
-    pub prover: Option<String>,
+    /// Complete prover route table (`<proof_type>/<runner>,...`)
+    #[arg(long, env = "RAIKO2_PROVER_ROUTES")]
+    pub prover_routes: Option<String>,
 
     /// Remote SGX prover base URL used by the `sgx/remote` route
     #[arg(long = "remote-sgx-base-url", env = "RAIKO2_REMOTE_SGX_BASE_URL")]
@@ -117,6 +117,28 @@ pub struct FixtureServerArgs {
 mod tests {
     use super::Cli;
     use clap::Parser;
+
+    #[test]
+    fn prover_routes_flag_parses_complete_override() {
+        let cli = Cli::try_parse_from([
+            "raiko2",
+            "--prover-routes",
+            "risc0/network,sp1/network,sgx/remote,sgxgeth/remote",
+        ])
+        .expect("prover routes override should parse");
+
+        assert_eq!(
+            cli.prover_routes.as_deref(),
+            Some("risc0/network,sp1/network,sgx/remote,sgxgeth/remote")
+        );
+    }
+
+    #[test]
+    fn removed_prover_flag_is_rejected() {
+        let result = Cli::try_parse_from(["raiko2", "--prover", "risc0/local"]);
+
+        assert!(result.is_err(), "--prover must no longer be accepted");
+    }
 
     #[cfg(not(feature = "fixture-server"))]
     #[test]

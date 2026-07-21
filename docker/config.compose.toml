@@ -23,17 +23,16 @@ namespace = "raiko2-compose"
 [runtime.store]
 backend = "memory"
 
-[prover.routes]
-sgx = "remote"
-sgxgeth = "remote"
-
 [prover.risc0]
+enabled = false
+runner = "local"
 bonsai = true
 snark = true
 mock = false
 execution_po2 = 20
 
 [prover.sp1]
+enabled = false
 mode = "prove"
 prover = "local"
 recursion = "plonk"
@@ -45,20 +44,33 @@ cycle_limit = 1000000000000
 timeout_secs = 7200
 network_request_max_attempts = 3
 
-[prover.boundless]
+[prover.native]
+enabled = false
+
+[prover.sgx]
+enabled = true
+base_url = "http://raiko2-sgx:8080"
+timeout_ms = 300000
+
+[prover.sgxgeth]
+enabled = true
+base_url = "http://gaiko2-sgxgeth:8080"
+timeout_ms = 300000
+
+[prover.risc0.boundless]
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 
-[prover.boundless.deployment]
+[prover.risc0.boundless.deployment]
 deployment_type = "base"
 
-[prover.boundless.deployment.overrides]
+[prover.risc0.boundless.deployment.overrides]
 order_stream_url = "https://base-mainnet.boundless.network"
 
-[prover.boundless.offer_params.batch]
+[prover.risc0.boundless.offer_params.batch]
 pricing_mode = "manual"
 ramp_up_start_sec = 20
 # Ramp-up duration in seconds (auction price climbs from min to max over this window).
@@ -67,12 +79,12 @@ max_price_per_mcycle = "0.0000006"
 min_price_per_mcycle = "0.000000010"
 lock_collateral = "20"
 
-[prover.boundless.offer_params.batch.timeouts]
+[prover.risc0.boundless.offer_params.batch.timeouts]
 mode = "per_mcycle"
 lock_timeout_ms_per_mcycle = 300
 timeout_ms_per_mcycle = 900
 
-[prover.boundless.offer_params.aggregation]
+[prover.risc0.boundless.offer_params.aggregation]
 pricing_mode = "manual"
 ramp_up_start_sec = 20
 # Ramp-up duration in seconds (auction price climbs from min to max over this window).
@@ -81,15 +93,10 @@ max_price_per_mcycle = "0.0000008"
 min_price_per_mcycle = "0.000000006"
 lock_collateral = "20"
 
-[prover.boundless.offer_params.aggregation.timeouts]
+[prover.risc0.boundless.offer_params.aggregation.timeouts]
 mode = "per_mcycle"
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
-
-[prover.remote_sgx]
-base_url = "http://raiko2-sgx:8080"
-sgxgeth_base_url = "http://gaiko2-sgxgeth:8080"
-timeout_ms = 300000
 
 [queue]
 workers = 6

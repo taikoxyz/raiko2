@@ -507,7 +507,9 @@ impl Provider for FixtureProvider {
 #[must_use]
 pub(crate) fn base_config() -> Config {
     let mut config = Config::default();
-    config.prover.routes = "risc0/local".parse().expect("valid fixture routes");
+    config
+        .prover
+        .apply_routes_override(&"risc0/local".parse().expect("valid fixture routes"));
     config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
     config.rpc.pairs = vec![NetworkPairConfig {
         network: "taiko_dev".to_string(),
@@ -944,9 +946,11 @@ pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {
     let (l2_rpc, chain_id_handle) = spawn_chain_id_rpc(167_001).await?;
 
     let mut config = base_config();
-    config.prover.routes = "risc0/local,sp1/local,native/local"
-        .parse()
-        .expect("valid fixture server routes");
+    config.prover.apply_routes_override(
+        &"risc0/local,sp1/local,native/local"
+            .parse()
+            .expect("valid fixture server routes"),
+    );
     config.server.host = args.host.clone();
     config.server.port = args.port;
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);

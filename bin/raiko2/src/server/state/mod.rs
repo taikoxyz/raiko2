@@ -120,8 +120,7 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
     #[cfg(not(feature = "local-provers"))]
     if let Some((proof_type, _)) = config
         .prover
-        .routes
-        .iter()
+        .iter_routes()
         .find(|(_, runner)| *runner == RunnerKind::Local)
     {
         anyhow::bail!(
@@ -132,8 +131,7 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
     #[cfg(not(feature = "host"))]
     if let Some((proof_type, _)) = config
         .prover
-        .routes
-        .iter()
+        .iter_routes()
         .find(|(_, runner)| *runner == RunnerKind::Network)
     {
         anyhow::bail!("prover route {proof_type}/network requires building raiko2 with `host`");
@@ -141,8 +139,7 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
 
     config
         .prover
-        .routes
-        .iter()
+        .iter_routes()
         .map(|(proof_type, runner)| {
             let pipeline_key = match (proof_type, runner) {
                 (ProofType::Risc0, RunnerKind::Local) => PipelineKey::ShastaRisc0,
@@ -154,8 +151,8 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
                 _ => unreachable!("prover routes are validated before pipeline registration"),
             };
             let remote_url = match proof_type {
-                ProofType::Sgx => Some(config.prover.remote_sgx.base_url.clone()),
-                ProofType::SgxGeth => Some(config.prover.remote_sgx.sgxgeth_base_url.clone()),
+                ProofType::Sgx => Some(config.prover.sgx.base_url.clone()),
+                ProofType::SgxGeth => Some(config.prover.sgxgeth.base_url.clone()),
                 ProofType::Risc0 | ProofType::Sp1 | ProofType::Native => None,
             };
             Ok(PipelineRegistration {
@@ -736,8 +733,14 @@ fn build_remote_sgx_engine(
     proof_type: ProofType,
     base_url: String,
 ) -> Result<Engine<Gaiko2Spec>> {
-    let gaiko2_config =
-        setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
+    let timeout_ms = match proof_type {
+        ProofType::Sgx => config.prover.sgx.timeout_ms,
+        ProofType::SgxGeth => config.prover.sgxgeth.timeout_ms,
+        ProofType::Risc0 | ProofType::Sp1 | ProofType::Native => {
+            unreachable!("remote SGX engine requires an SGX proof type")
+        }
+    };
+    let gaiko2_config = setup::remote_sgx_prover_config(base_url, timeout_ms);
     let gaiko2_prover = Gaiko2Prover::new_for_proof_type(&gaiko2_config, proof_type)?;
 
     let provider = setup::build_provider(config, pair)?;
@@ -841,7 +844,9 @@ mod tests {
 
     fn config_with_routes(routes: &str) -> Config {
         let mut config = Config::default();
-        config.prover.routes = routes.parse().expect("valid prover routes");
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
         config
     }
 
@@ -897,8 +902,8 @@ mod tests {
     #[test]
     fn sgx_route_does_not_select_sgxgeth_or_use_its_url() -> Result<()> {
         let mut config = config_with_routes("sgx/remote");
-        config.prover.remote_sgx.base_url = "http://sgx.example".to_string();
-        config.prover.remote_sgx.sgxgeth_base_url = "http://unused-sgxgeth.example".to_string();
+        config.prover.sgx.base_url = "http://sgx.example".to_string();
+        config.prover.sgxgeth.base_url = "http://unused-sgxgeth.example".to_string();
 
         let registrations = enabled_pipeline_registrations(&config)?;
 
@@ -918,8 +923,8 @@ mod tests {
     #[test]
     fn sgxgeth_route_does_not_select_sgx_or_use_its_url() -> Result<()> {
         let mut config = config_with_routes("sgxgeth/remote");
-        config.prover.remote_sgx.base_url = "http://unused-sgx.example".to_string();
-        config.prover.remote_sgx.sgxgeth_base_url = "http://sgxgeth.example".to_string();
+        config.prover.sgx.base_url = "http://unused-sgx.example".to_string();
+        config.prover.sgxgeth.base_url = "http://sgxgeth.example".to_string();
 
         let registrations = enabled_pipeline_registrations(&config)?;
 

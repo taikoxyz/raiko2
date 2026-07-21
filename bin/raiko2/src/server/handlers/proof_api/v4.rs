@@ -1904,8 +1904,12 @@ mod tests {
             RuntimeManager::new(test_runtime_root("existing-submit-lifecycle"))
                 .expect("runtime manager"),
         );
+        let mut config = Config::default();
+        config
+            .prover
+            .apply_routes_override(&"risc0/local".parse().expect("valid RISC0 route"));
         let state = AppState::from_parts(
-            Arc::new(Config::default()),
+            Arc::new(config),
             Arc::new(StaticPipelineFactory::default()),
             Arc::clone(&runtime),
         );
@@ -3337,7 +3341,9 @@ mod tests {
         let runtime =
             Arc::new(RuntimeManager::new(test_runtime_root(label)).expect("runtime manager"));
         let mut config = Config::default();
-        config.prover.routes = "sp1/local".parse().expect("valid SP1 route");
+        config
+            .prover
+            .apply_routes_override(&"sp1/local".parse().expect("valid SP1 route"));
         config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
         let mut factory = StaticPipelineFactory::default();
         factory.insert(

@@ -63,7 +63,6 @@ pub(super) fn route_for_proof_type(
     let runner = state
         .config
         .prover
-        .routes
         .runner(concrete_proof_type)
         .ok_or_else(|| unsupported_proof_type(proof_type))?;
 
@@ -209,7 +208,9 @@ mod tests {
 
     fn config_with_routes(routes: &str) -> Config {
         let mut config = Config::default();
-        config.prover.routes = routes.parse().expect("valid prover routes");
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
         config
     }
 

@@ -22,19 +22,18 @@ pub(crate) struct StartupSummary {
 }
 
 pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> StartupSummary {
-    let remote_sgx_base_url = (config.prover.routes.is_enabled(ProofType::Sgx)
-        && !config.prover.remote_sgx.base_url.trim().is_empty())
-    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url));
-    let remote_sgx_sgxgeth_base_url = (config.prover.routes.is_enabled(ProofType::SgxGeth)
-        && !config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
-    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url));
+    let remote_sgx_base_url = (config.prover.is_enabled(ProofType::Sgx)
+        && !config.prover.sgx.base_url.trim().is_empty())
+    .then(|| sanitize_url_for_log(&config.prover.sgx.base_url));
+    let remote_sgx_sgxgeth_base_url = (config.prover.is_enabled(ProofType::SgxGeth)
+        && !config.prover.sgxgeth.base_url.trim().is_empty())
+    .then(|| sanitize_url_for_log(&config.prover.sgxgeth.base_url));
 
     StartupSummary {
         listen: net::bind_addr(config),
         routes: config
             .prover
-            .routes
-            .iter()
+            .iter_routes()
             .map(|(proof_type, runner)| format!("{proof_type}/{runner}"))
             .collect(),
         pairs: config
@@ -160,6 +159,12 @@ mod tests {
         serde_json::to_value(build_startup_summary(config, json_logs)).expect("serialize summary")
     }
 
+    fn set_routes(config: &mut Config, routes: &str) {
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("parse routes"));
+    }
+
     fn sample_config() -> Config {
         let mut config = Config::default();
         config.server.host = "127.0.0.1".to_string();
@@ -173,11 +178,12 @@ mod tests {
             ],
             rate_limit_per_minute: None,
         }];
-        config.prover.routes = "sgxgeth/remote,sgx/remote,native/local,sp1/network,risc0/network"
-            .parse()
-            .expect("parse routes");
-        config.prover.remote_sgx.base_url.clear();
-        config.prover.remote_sgx.sgxgeth_base_url.clear();
+        set_routes(
+            &mut config,
+            "sgxgeth/remote,sgx/remote,native/local,sp1/network,risc0/network",
+        );
+        config.prover.sgx.base_url.clear();
+        config.prover.sgxgeth.base_url.clear();
         config.runtime.environment = "test".to_string();
         config.runtime.namespace = "raiko2-test".to_string();
         config.queue.workers = 9;
@@ -215,9 +221,9 @@ mod tests {
     #[test]
     fn startup_summary_includes_only_remote_sgx_url_when_sgx_is_enabled() {
         let mut config = sample_config();
-        config.prover.routes = "sgx/remote".parse().expect("parse routes");
-        config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
-        config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
+        set_routes(&mut config, "sgx/remote");
+        config.prover.sgx.base_url = "http://example.com:9090".to_string();
+        config.prover.sgxgeth.base_url = "http://example.com:8090".to_string();
 
         let summary = summary_json(&config, true);
 
@@ -230,9 +236,9 @@ mod tests {
     #[test]
     fn startup_summary_includes_only_sgxgeth_url_when_sgxgeth_is_enabled() {
         let mut config = sample_config();
-        config.prover.routes = "sgxgeth/remote".parse().expect("parse routes");
-        config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
-        config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
+        set_routes(&mut config, "sgxgeth/remote");
+        config.prover.sgx.base_url = "http://example.com:9090".to_string();
+        config.prover.sgxgeth.base_url = "http://example.com:8090".to_string();
 
         let summary = summary_json(&config, false);
 
@@ -256,10 +262,10 @@ mod tests {
     #[test]
     fn startup_summary_sanitizes_remote_urls_before_logging() {
         let mut config = sample_config();
-        config.prover.routes = "sgx/remote,sgxgeth/remote".parse().expect("parse routes");
-        config.prover.remote_sgx.base_url =
+        set_routes(&mut config, "sgx/remote,sgxgeth/remote");
+        config.prover.sgx.base_url =
             "https://user:secret@example.com:9090/prove?token=abc#frag".to_string();
-        config.prover.remote_sgx.sgxgeth_base_url =
+        config.prover.sgxgeth.base_url =
             "https://other:credential@example.net:8090/prove?key=value#section".to_string();
 
         let summary = summary_json(&config, false);

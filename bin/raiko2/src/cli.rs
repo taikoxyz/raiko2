@@ -34,7 +34,7 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_PORT")]
     pub port: Option<u16>,
 
-    /// Complete prover route table (`<proof_type>/<runner>,...`)
+    /// Atomic prover enablement override (`<proof_type>/<runner>,...`)
     #[arg(long, env = "RAIKO2_PROVER_ROUTES")]
     pub prover_routes: Option<String>,
 
@@ -49,7 +49,7 @@ pub struct Cli {
     )]
     pub remote_sgx_sgxgeth_base_url: Option<String>,
 
-    /// Remote SGX prover timeout in milliseconds used by the `sgx/remote` route
+    /// Shared timeout override in milliseconds for both remote SGX lanes
     #[arg(long = "remote-sgx-timeout-ms", env = "RAIKO2_REMOTE_SGX_TIMEOUT_MS")]
     pub remote_sgx_timeout_ms: Option<u64>,
 

@@ -335,7 +335,9 @@ fn deterministic_test_private_key(label: &str) -> String {
 }
 
 fn set_prover_routes(config: &mut Config, routes: &str) {
-    config.prover.routes = routes.parse().expect("valid prover routes");
+    config
+        .prover
+        .apply_routes_override(&routes.parse().expect("valid prover routes"));
 }
 
 fn sp1_fixture_app() -> (
@@ -1235,8 +1237,8 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     set_prover_routes(&mut config, "risc0/network");
-    config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
-    config.prover.boundless.signer_key = "not-a-private-key".to_string();
+    config.prover.risc0.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
+    config.prover.risc0.boundless.signer_key = "not-a-private-key".to_string();
     let state = AppState::from_parts(
         Arc::new(config),
         Arc::new(StaticPipelineFactory::default()),
@@ -1372,8 +1374,8 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     set_prover_routes(&mut config, "risc0/network,sp1/local");
-    config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
-    config.prover.boundless.signer_key =
+    config.prover.risc0.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
+    config.prover.risc0.boundless.signer_key =
         deterministic_test_private_key("raiko2:e2e-ready-boundless");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;

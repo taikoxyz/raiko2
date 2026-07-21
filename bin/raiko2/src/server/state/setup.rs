@@ -138,7 +138,7 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
 #[cfg(feature = "host")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
-    config.prover.sp1.clone()
+    config.prover.sp1.config.clone()
 }
 
 #[cfg(feature = "host")]
@@ -148,6 +148,7 @@ pub(crate) fn boundless_prover_config(
 ) -> raiko2_prover::boundless::BoundlessConfig {
     let boundless = config
         .prover
+        .risc0
         .boundless
         .apply_pair_override(&pair.boundless)
         .expect("validated boundless config must merge cleanly");
@@ -316,9 +317,12 @@ mod tests {
     #[test]
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();
-        config.prover.boundless.rebid_timeout_ms = 900_000;
-        config.prover.boundless.rebid_price_step_bps = 3000;
-        config.prover.boundless.rebid_max_attempts = 5;
+        config.prover.risc0.boundless.offchain = true;
+        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.prover.risc0.boundless.rebid_timeout_ms = 900_000;
+        config.prover.risc0.boundless.rebid_price_step_bps = 3000;
+        config.prover.risc0.boundless.rebid_max_attempts = 5;
         config.rpc.pairs[0].boundless.batch_quote =
             Some(raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 });
         config.rpc.pairs[0].boundless.aggregation_quote =
@@ -335,7 +339,7 @@ mod tests {
                     timeout_ms_per_mcycle: 500,
                     dynamic_pricing_timeout_modifier: None,
                 },
-                ..config.prover.boundless.offer_params.batch.clone()
+                ..config.prover.risc0.boundless.offer_params.batch.clone()
             });
         config.rpc.pairs[0].boundless.offer_params.aggregation =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
@@ -344,7 +348,13 @@ mod tests {
                     timeout_ms_per_mcycle: 7_000,
                     dynamic_pricing_timeout_modifier: None,
                 },
-                ..config.prover.boundless.offer_params.aggregation.clone()
+                ..config
+                    .prover
+                    .risc0
+                    .boundless
+                    .offer_params
+                    .aggregation
+                    .clone()
             });
         let pair = config
             .rpc
@@ -355,6 +365,10 @@ mod tests {
 
         let boundless = boundless_prover_config(&config, &pair);
 
+        assert!(boundless.offchain);
+        assert_eq!(boundless.rpc_url, "https://boundless.example.com");
+        assert_eq!(boundless.signer_key, "configured-by-secret-store");
+        assert!(boundless.deployment.is_some());
         assert_eq!(
             boundless.batch_quote,
             raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 }

@@ -90,20 +90,18 @@ impl Config {
         }
 
         if let Some(routes) = &cli.prover_routes {
-            config.prover.routes = routes.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let routes = routes.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            config.prover.apply_routes_override(&routes);
         }
         if let Some(base_url) = &cli.remote_sgx_base_url {
-            config.prover.remote_sgx.base_url.clone_from(base_url);
+            config.prover.sgx.base_url.clone_from(base_url);
         }
         if let Some(base_url) = &cli.remote_sgx_sgxgeth_base_url {
-            config
-                .prover
-                .remote_sgx
-                .sgxgeth_base_url
-                .clone_from(base_url);
+            config.prover.sgxgeth.base_url.clone_from(base_url);
         }
         if let Some(timeout_ms) = cli.remote_sgx_timeout_ms {
-            config.prover.remote_sgx.timeout_ms = timeout_ms;
+            config.prover.sgx.timeout_ms = timeout_ms;
+            config.prover.sgxgeth.timeout_ms = timeout_ms;
         }
 
         if let Some(queue_workers) = cli.queue_workers {
@@ -144,11 +142,12 @@ impl Config {
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
 
-        if self.prover.routes.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
+        if self.prover.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
             rpc::validate_boundless_pairs(&resolved_pairs)
                 .context("Boundless RPC pair configuration error")?;
             for pair in &resolved_pairs {
                 self.prover
+                    .risc0
                     .boundless
                     .apply_pair_override(&pair.boundless)
                     .with_context(|| {
@@ -156,7 +155,7 @@ impl Config {
                     })?;
             }
         }
-        if self.prover.routes.is_enabled(ProofType::Sp1) {
+        if self.prover.is_enabled(ProofType::Sp1) {
             rpc::validate_sp1_verifier_pairs(&resolved_pairs)
                 .context("SP1 verifier RPC pair configuration error")?;
         }
@@ -209,6 +208,12 @@ mod tests {
             .join(path)
     }
 
+    fn set_routes(config: &mut Config, routes: &str) {
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
+    }
+
     fn route_override_config() -> &'static str {
         r#"
 [server]
@@ -220,11 +225,15 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover.routes]
-risc0 = "local"
-sp1 = "local"
+[prover.risc0]
+enabled = true
+runner = "local"
 
-[prover.remote_sgx]
+[prover.sp1]
+enabled = true
+prover = "local"
+
+[prover.sgx]
 base_url = "http://localhost:8080"
 timeout_ms = 300000
 
@@ -587,7 +596,7 @@ backend = "memory"
     #[test]
     fn config_validate_skips_pair_boundless_when_network_route_disabled() {
         let mut config = Config::default();
-        config.prover.routes = "risc0/local".parse().expect("valid route");
+        set_routes(&mut config, "risc0/local");
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
 
         config
@@ -598,9 +607,9 @@ backend = "memory"
     #[test]
     fn config_validate_rejects_pair_boundless_when_network_route_enabled() {
         let mut config = Config::default();
-        config.prover.routes = "risc0/network".parse().expect("valid route");
-        config.prover.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.prover.boundless.signer_key = "configured-by-secret-store".to_string();
+        set_routes(&mut config, "risc0/network");
+        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
 
         let err = config
@@ -615,7 +624,7 @@ backend = "memory"
     #[test]
     fn config_validate_skips_pair_sp1_when_route_disabled() {
         let mut config = Config::default();
-        config.prover.routes = "native/local".parse().expect("valid route");
+        set_routes(&mut config, "native/local");
         config.rpc.pairs[0].sp1_verifier_rpc_url = Some("not a URL".to_string());
         config.rpc.pairs[0].sp1_verifier_address =
             Some("0x0000000000000000000000000000000000000001".to_string());
@@ -628,7 +637,7 @@ backend = "memory"
     #[test]
     fn config_validate_rejects_pair_sp1_when_route_enabled() {
         let mut config = Config::default();
-        config.prover.routes = "sp1/local".parse().expect("valid route");
+        set_routes(&mut config, "sp1/local");
         config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
         config.rpc.pairs[0].sp1_verifier_rpc_url = Some("not a URL".to_string());
         config.rpc.pairs[0].sp1_verifier_address =
@@ -646,9 +655,9 @@ backend = "memory"
     #[test]
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
-        config.prover.routes = "risc0/network".parse().expect("valid route");
-        config.prover.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.prover.boundless.signer_key = "configured-by-secret-store".to_string();
+        set_routes(&mut config, "risc0/network");
+        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless_config::BoundlessOfferParams {
                 timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
@@ -656,7 +665,7 @@ backend = "memory"
                     timeout_ms_per_mcycle: 100,
                     dynamic_pricing_timeout_modifier: None,
                 },
-                ..config.prover.boundless.offer_params.batch.clone()
+                ..config.prover.risc0.boundless.offer_params.batch.clone()
             });
 
         let err = config.validate().expect_err("invalid pair offer config");
@@ -703,9 +712,11 @@ backend = "memory"
     }
 
     #[test]
-    fn test_config_default_validates() {
-        let config = Config::default();
-        assert!(config.validate().is_ok());
+    fn test_config_default_requires_enabled_prover() {
+        let err = Config::default()
+            .validate()
+            .expect_err("default config must not enable a prover implicitly");
+        assert!(err.to_string().contains("Prover configuration error"));
     }
 
     #[test]
@@ -732,17 +743,14 @@ backend = "memory"
 
         let config = Config::load(&cli).expect("explicit configless route should load");
         assert_eq!(
-            config
-                .prover
-                .routes
-                .runner(raiko2_primitives::ProofType::Native),
+            config.prover.runner(raiko2_primitives::ProofType::Native),
             Some(RunnerKind::Local)
         );
-        assert_eq!(config.prover.routes.iter().count(), 1);
+        assert_eq!(config.prover.iter_routes().count(), 1);
     }
 
     #[test]
-    fn prover_routes_cli_override_replaces_complete_file_table() {
+    fn prover_routes_cli_override_replaces_file_enablement() {
         let _env_lock = lock_test_cli_environment();
         let path = write_temp_config(route_override_config());
         let cli = Cli::parse_from([
@@ -755,7 +763,7 @@ backend = "memory"
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
-            config.prover.routes.iter().collect::<Vec<_>>(),
+            config.prover.iter_routes().collect::<Vec<_>>(),
             vec![(raiko2_primitives::ProofType::Native, RunnerKind::Local)]
         );
 
@@ -763,7 +771,7 @@ backend = "memory"
     }
 
     #[test]
-    fn prover_routes_env_override_replaces_complete_file_table() {
+    fn prover_routes_env_override_replaces_file_enablement() {
         let _env_lock = lock_test_cli_environment();
         let path = write_temp_config(route_override_config());
         let _routes_guard = EnvVarGuard::set("RAIKO2_PROVER_ROUTES", "sgx/remote");
@@ -771,7 +779,7 @@ backend = "memory"
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
-            config.prover.routes.iter().collect::<Vec<_>>(),
+            config.prover.iter_routes().collect::<Vec<_>>(),
             vec![(raiko2_primitives::ProofType::Sgx, RunnerKind::Remote)]
         );
 
@@ -804,8 +812,8 @@ backend = "memory"
     #[test]
     fn test_boundless_route_requires_signer_key() {
         let mut config = Config::default();
-        config.prover.routes = "risc0/network".parse().expect("valid route");
-        config.prover.boundless.signer_key.clear();
+        set_routes(&mut config, "risc0/network");
+        config.prover.risc0.boundless.signer_key.clear();
 
         let err = config.prover.validate().expect_err("missing signer key");
         assert!(err.to_string().contains("signer_key"));
@@ -814,9 +822,9 @@ backend = "memory"
     #[test]
     fn test_boundless_route_requires_rpc_url() {
         let mut config = Config::default();
-        config.prover.routes = "risc0/network".parse().expect("valid route");
-        config.prover.boundless.rpc_url.clear();
-        config.prover.boundless.signer_key = "dummy-test-signer-key".to_string();
+        set_routes(&mut config, "risc0/network");
+        config.prover.risc0.boundless.rpc_url.clear();
+        config.prover.risc0.boundless.signer_key = "dummy-test-signer-key".to_string();
 
         let err = config.prover.validate().expect_err("missing rpc url");
         assert!(err.to_string().contains("rpc_url"));
@@ -825,36 +833,33 @@ backend = "memory"
     #[test]
     fn test_sgx_remote_route_requires_sgx_base_url() {
         let mut config = Config::default();
-        config.prover.routes = "sgx/remote".parse().expect("valid route");
+        set_routes(&mut config, "sgx/remote");
 
         let err = config
             .prover
             .validate()
             .expect_err("missing remote sgx url");
-        assert!(err.to_string().contains("prover.remote_sgx.base_url"));
+        assert!(err.to_string().contains("prover.sgx.base_url"));
     }
 
     #[test]
     fn test_sgxgeth_remote_route_requires_sgxgeth_base_url() {
         let mut config = Config::default();
-        config.prover.routes = "sgxgeth/remote".parse().expect("valid route");
+        set_routes(&mut config, "sgxgeth/remote");
 
         let err = config
             .prover
             .validate()
             .expect_err("missing remote sgxgeth url");
-        assert!(
-            err.to_string()
-                .contains("prover.remote_sgx.sgxgeth_base_url")
-        );
+        assert!(err.to_string().contains("prover.sgxgeth.base_url"));
     }
 
     #[test]
     fn test_sgx_remote_route_accepts_configured_remote_sgx() {
         let mut config = Config::default();
-        config.prover.routes = "sgx/remote".parse().expect("valid route");
-        config.prover.remote_sgx.base_url = "http://127.0.0.1:8080".to_string();
-        config.prover.remote_sgx.timeout_ms = 30_000;
+        set_routes(&mut config, "sgx/remote");
+        config.prover.sgx.base_url = "http://127.0.0.1:8080".to_string();
+        config.prover.sgx.timeout_ms = 30_000;
 
         assert!(config.prover.validate().is_ok());
     }
@@ -862,9 +867,9 @@ backend = "memory"
     #[test]
     fn test_sgx_remote_route_accepts_sgxgeth_only_config() {
         let mut config = Config::default();
-        config.prover.routes = "sgxgeth/remote".parse().expect("valid route");
-        config.prover.remote_sgx.sgxgeth_base_url = "http://127.0.0.1:8090".to_string();
-        config.prover.remote_sgx.timeout_ms = 30_000;
+        set_routes(&mut config, "sgxgeth/remote");
+        config.prover.sgxgeth.base_url = "http://127.0.0.1:8090".to_string();
+        config.prover.sgxgeth.timeout_ms = 30_000;
 
         assert!(config.prover.validate().is_ok());
     }
@@ -882,14 +887,15 @@ pairs = [
   { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover.routes]
-sgx = "remote"
-sgxgeth = "remote"
-
-[prover.remote_sgx]
+[prover.sgx]
+enabled = true
 base_url = "http://127.0.0.1:8080"
-sgxgeth_base_url = "http://127.0.0.1:8090"
 timeout_ms = 300000
+
+[prover.sgxgeth]
+enabled = true
+base_url = "http://127.0.0.1:8090"
+timeout_ms = 300001
 
 [queue]
 workers = 1
@@ -914,12 +920,10 @@ backend = "memory"
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
 
         let config = Config::load(&cli).expect("config load");
-        assert_eq!(config.prover.remote_sgx.base_url, "http://127.0.0.1:19090");
-        assert_eq!(
-            config.prover.remote_sgx.sgxgeth_base_url,
-            "http://127.0.0.1:19091"
-        );
-        assert_eq!(config.prover.remote_sgx.timeout_ms, 12_345);
+        assert_eq!(config.prover.sgx.base_url, "http://127.0.0.1:19090");
+        assert_eq!(config.prover.sgxgeth.base_url, "http://127.0.0.1:19091");
+        assert_eq!(config.prover.sgx.timeout_ms, 12_345);
+        assert_eq!(config.prover.sgxgeth.timeout_ms, 12_345);
 
         let _ = std::fs::remove_file(path);
     }
@@ -927,6 +931,7 @@ backend = "memory"
     #[test]
     fn test_risc0_execution_po2_must_be_non_zero() {
         let mut config = Config::default();
+        set_routes(&mut config, "risc0/local");
         config.prover.risc0.execution_po2 = 0;
 
         let err = config.prover.validate().expect_err("zero po2 should fail");
@@ -945,10 +950,9 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover.routes]
-risc0 = "local"
-
 [prover.risc0]
+enabled = true
+runner = "local"
 execution_po2 = 24
 
 [queue]
@@ -984,8 +988,8 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi.example.test", l2_rpc = "http://taiko-hoodi.example.test:8545" },
 ]
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [queue]
 workers = 1
@@ -1012,10 +1016,7 @@ backend = "memory"
         assert_eq!(pair.l1_chain_id(), 560_048);
         assert_eq!(pair.l2_chain_id(), 167_013);
         assert_eq!(
-            config
-                .prover
-                .routes
-                .runner(raiko2_primitives::ProofType::Native),
+            config.prover.runner(raiko2_primitives::ProofType::Native),
             Some(RunnerKind::Local)
         );
 
@@ -1023,20 +1024,19 @@ backend = "memory"
     }
 
     #[test]
-    fn test_cli_sp1_network_route_does_not_mutate_sp1_backend_config() {
+    fn test_cli_sp1_network_route_updates_sp1_execution_selector() {
         let _env_lock = lock_test_cli_environment();
-        let default_sp1_prover = Config::default().prover.sp1.prover;
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "sp1/network"]);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
-            config
-                .prover
-                .routes
-                .runner(raiko2_primitives::ProofType::Sp1),
+            config.prover.runner(raiko2_primitives::ProofType::Sp1),
             Some(RunnerKind::Network)
         );
-        assert_eq!(config.prover.sp1.prover, default_sp1_prover);
+        assert_eq!(
+            config.prover.sp1.prover,
+            raiko2_prover::sp1_config::ProverMode::Network
+        );
     }
 
     #[test]
@@ -1054,8 +1054,8 @@ pairs = [
 [rpc.client]
 concurrency_limit = 24
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [queue]
 workers = 1
@@ -1100,8 +1100,8 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545", l2_witness_rpc = "http://localhost:9547" },
 ]
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [runtime]
 environment = "test"
@@ -1144,8 +1144,8 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [runtime]
 environment = "test"
@@ -1179,8 +1179,8 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [queue]
 
@@ -1219,8 +1219,8 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", l2_rpc = "http://taiko-hoodi.example.test:8545", l2_provider = "geth" },
 ]
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [queue]
 workers = 1
@@ -1259,8 +1259,8 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth_local_witness" },
 ]
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [queue]
 workers = 1
@@ -1302,8 +1302,8 @@ pairs = [
 [preflight.verify_checkpoint_l2_rpcs]
 taiko_hoodi = "https://verify.hoodi.example"
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [runtime]
 environment = "test"
@@ -1344,8 +1344,8 @@ pairs = [
 [preflight.verify_checkpoint_l2_rpcs]
 taiko_dev = "https://verify.dev.example"
 
-[prover.routes]
-native = "local"
+[prover.native]
+enabled = true
 
 [runtime]
 environment = "test"

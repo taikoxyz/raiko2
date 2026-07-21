@@ -186,10 +186,10 @@ fn check_prover(config: &Config) -> Result<()> {
         .validate()
         .context("configured proving capabilities are invalid")?;
 
-    if config.prover.routes.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
+    if config.prover.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
         check_boundless_prover(config).context("risc0 capability is invalid")?;
     }
-    if config.prover.routes.is_enabled(ProofType::Sp1) {
+    if config.prover.is_enabled(ProofType::Sp1) {
         check_sp1_capability(config).context("sp1 capability is invalid")?;
     }
 
@@ -198,7 +198,7 @@ fn check_prover(config: &Config) -> Result<()> {
 
 const fn sp1_network_credentials_required(config: &Config) -> bool {
     matches!(
-        config.prover.routes.runner(ProofType::Sp1),
+        config.prover.runner(ProofType::Sp1),
         Some(RunnerKind::Network)
     )
 }
@@ -208,7 +208,7 @@ fn check_sp1_capability(config: &Config) -> Result<()> {
 }
 
 fn check_boundless_prover(config: &Config) -> Result<()> {
-    let boundless = &config.prover.boundless;
+    let boundless = &config.prover.risc0.boundless;
     Url::parse(&boundless.rpc_url).context("boundless rpc_url is not a valid URL")?;
     let _: PrivateKeySigner = boundless
         .signer_key
@@ -289,7 +289,9 @@ mod tests {
     use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
 
     fn set_routes(config: &mut Config, routes: &str) {
-        config.prover.routes = routes.parse().expect("valid prover routes");
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
     }
 
     #[test]
@@ -346,8 +348,8 @@ mod tests {
     fn disabled_risc0_skips_boundless_readiness() {
         let mut config = Config::default();
         set_routes(&mut config, "native/local");
-        config.prover.boundless.rpc_url = "not a URL".to_string();
-        config.prover.boundless.signer_key = "not a signer".to_string();
+        config.prover.risc0.boundless.rpc_url = "not a URL".to_string();
+        config.prover.risc0.boundless.signer_key = "not a signer".to_string();
 
         check_prover(&config).expect("disabled RISC0 must skip Boundless readiness");
     }
@@ -356,7 +358,7 @@ mod tests {
     fn combined_sgx_and_sp1_still_checks_sp1() {
         let mut config = Config::default();
         set_routes(&mut config, "sp1/network,sgx/remote");
-        config.prover.remote_sgx.base_url = "http://127.0.0.1:9090".to_string();
+        config.prover.sgx.base_url = "http://127.0.0.1:9090".to_string();
 
         config
             .prover
@@ -382,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn sp1_network_uses_route_runner() {
+    fn sp1_network_credentials_follow_sp1_prover_mode() {
         let mut config = Config::default();
         set_routes(&mut config, "native/local");
         config.prover.sp1.prover = Sp1ProverMode::Network;
@@ -392,7 +394,6 @@ mod tests {
         assert!(!sp1_network_credentials_required(&config));
 
         set_routes(&mut config, "sp1/network");
-        config.prover.sp1.prover = Sp1ProverMode::Local;
         assert!(sp1_network_credentials_required(&config));
     }
 
@@ -401,8 +402,8 @@ mod tests {
         let mut config = Config::default();
         set_routes(&mut config, "risc0/network");
         let sensitive_url = "https://sample_user:sample_secret@[invalid";
-        config.prover.boundless.rpc_url = sensitive_url.to_string();
-        config.prover.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.prover.risc0.boundless.rpc_url = sensitive_url.to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
 
         let err = check_prover(&config).expect_err("invalid Boundless URL must fail readiness");
         let message = format_error_chain(&err);

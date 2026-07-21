@@ -7,97 +7,147 @@ use raiko2_prover::{
         DeploymentConfig, MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, MIN_REBID_TIMEOUT_MS,
         OfferParamsConfig, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
-    gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{
         ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config, Sp1ConfigError,
     },
 };
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 
 use super::BoundlessPairConfig;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProverConfig {
-    pub routes: ProverRoutesConfig,
     /// RISC0 specific configuration.
-    #[serde(default)]
     pub risc0: Risc0Config,
     /// SP1 specific configuration.
-    #[serde(default)]
-    pub sp1: Sp1Config,
-    /// Boundless runner configuration.
-    #[serde(default)]
-    pub boundless: BoundlessConfig,
-    /// Request sampling policy for `proof_type=zk_any`.
-    #[serde(default)]
-    pub zk_any: ZkAnyConfig,
+    pub sp1: Sp1ProverConfig,
+    /// Native execution configuration.
+    pub native: NativeProverConfig,
     /// Remote SGX prover configuration.
-    #[serde(default)]
-    pub remote_sgx: RemoteSgxConfig,
+    pub sgx: RemoteProverConfig,
+    /// Remote SGXGETH prover configuration.
+    pub sgxgeth: RemoteProverConfig,
+    /// Request sampling policy for `proof_type=zk_any`.
+    pub zk_any: ZkAnyConfig,
 }
 
 impl ProverConfig {
+    const STABLE_ORDER: [ProofType; 5] = [
+        ProofType::Risc0,
+        ProofType::Sp1,
+        ProofType::Native,
+        ProofType::Sgx,
+        ProofType::SgxGeth,
+    ];
+
+    /// Returns the configured runner when the proof type is enabled.
+    #[must_use]
+    pub const fn runner(&self, proof_type: ProofType) -> Option<RunnerKind> {
+        match proof_type {
+            ProofType::Risc0 if self.risc0.enabled => Some(self.risc0.runner.runner_kind()),
+            ProofType::Sp1 if self.sp1.enabled => match self.sp1.config.prover {
+                Sp1ProverMode::Network => Some(RunnerKind::Network),
+                Sp1ProverMode::Mock | Sp1ProverMode::Local => Some(RunnerKind::Local),
+            },
+            ProofType::Native if self.native.enabled => Some(RunnerKind::Local),
+            ProofType::Sgx if self.sgx.enabled => Some(RunnerKind::Remote),
+            ProofType::SgxGeth if self.sgxgeth.enabled => Some(RunnerKind::Remote),
+            _ => None,
+        }
+    }
+
+    /// Returns whether a concrete proof type is enabled.
+    #[must_use]
+    pub const fn is_enabled(&self, proof_type: ProofType) -> bool {
+        self.runner(proof_type).is_some()
+    }
+
+    /// Iterates enabled routes in stable proof-type order.
+    pub fn iter_routes(&self) -> impl Iterator<Item = (ProofType, RunnerKind)> + '_ {
+        Self::STABLE_ORDER
+            .into_iter()
+            .filter_map(|proof_type| self.runner(proof_type).map(|runner| (proof_type, runner)))
+    }
+
+    /// Atomically replace enabled proof types using the operational route override.
+    pub(crate) fn apply_routes_override(&mut self, routes: &ProverRoutesOverride) {
+        self.risc0.enabled = false;
+        self.sp1.enabled = false;
+        self.native.enabled = false;
+        self.sgx.enabled = false;
+        self.sgxgeth.enabled = false;
+
+        for (proof_type, runner) in routes.iter() {
+            match proof_type {
+                ProofType::Risc0 => {
+                    self.risc0.enabled = true;
+                    self.risc0.runner = match runner {
+                        RunnerKind::Local => Risc0Runner::Local,
+                        RunnerKind::Network => Risc0Runner::Network,
+                        RunnerKind::Remote => unreachable!("route override is validated"),
+                    };
+                }
+                ProofType::Sp1 => {
+                    self.sp1.enabled = true;
+                    self.sp1.config.prover = match runner {
+                        RunnerKind::Network => Sp1ProverMode::Network,
+                        RunnerKind::Local if self.sp1.config.prover == Sp1ProverMode::Mock => {
+                            Sp1ProverMode::Mock
+                        }
+                        RunnerKind::Local => Sp1ProverMode::Local,
+                        RunnerKind::Remote => unreachable!("route override is validated"),
+                    };
+                }
+                ProofType::Native => self.native.enabled = true,
+                ProofType::Sgx => self.sgx.enabled = true,
+                ProofType::SgxGeth => self.sgxgeth.enabled = true,
+            }
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if a configured route or prover setting is invalid.
     pub fn validate(&self) -> Result<()> {
-        self.routes.validate()?;
+        if self.iter_routes().next().is_none() {
+            bail!("at least one prover must be enabled");
+        }
 
-        match self.routes.runner(ProofType::Risc0) {
+        match self.runner(ProofType::Risc0) {
             Some(RunnerKind::Network) => {
-                if self.boundless.rpc_url.trim().is_empty() {
-                    bail!("prover.boundless.rpc_url must not be empty");
+                if self.risc0.boundless.rpc_url.trim().is_empty() {
+                    bail!("prover.risc0.boundless.rpc_url must not be empty");
                 }
-                if self.boundless.signer_key.trim().is_empty() {
-                    bail!("prover.boundless.signer_key must not be empty");
+                if self.risc0.boundless.signer_key.trim().is_empty() {
+                    bail!("prover.risc0.boundless.signer_key must not be empty");
                 }
-                self.boundless.validate()?;
+                self.risc0.boundless.validate()?;
                 self.validate_risc0()?;
             }
             Some(RunnerKind::Local) => self.validate_risc0()?,
             None => {}
-            Some(RunnerKind::Remote) => unreachable!("routes.validate rejects risc0/remote"),
+            Some(RunnerKind::Remote) => unreachable!("RISC0 runner is restricted by its type"),
         }
 
-        if let Some(runner) = self.routes.runner(ProofType::Sp1) {
-            match runner {
-                RunnerKind::Network if self.sp1.prover != Sp1ProverMode::Network => {
-                    bail!("prover.routes.sp1=network requires prover.sp1.prover=network");
-                }
-                RunnerKind::Local if self.sp1.prover == Sp1ProverMode::Network => {
-                    bail!("prover.routes.sp1=local requires prover.sp1.prover=local or mock");
-                }
-                RunnerKind::Local | RunnerKind::Network => {}
-                RunnerKind::Remote => unreachable!("routes.validate rejects sp1/remote"),
-            }
+        if self.sp1.enabled {
             validate_sp1_config(&self.sp1)?;
             if matches!(self.sp1.mode, Sp1ExecutionMode::Prove) && !self.sp1.verify {
                 bail!("prover.sp1.verify must be true when prover.sp1.mode=prove");
             }
         }
 
-        let sgx_enabled = self.routes.is_enabled(ProofType::Sgx);
-        let sgxgeth_enabled = self.routes.is_enabled(ProofType::SgxGeth);
-        if sgx_enabled && self.remote_sgx.base_url.trim().is_empty() {
-            bail!("prover.remote_sgx.base_url must not be empty when prover.routes.sgx=remote");
-        }
-        if sgxgeth_enabled && self.remote_sgx.sgxgeth_base_url.trim().is_empty() {
-            bail!(
-                "prover.remote_sgx.sgxgeth_base_url must not be empty when prover.routes.sgxgeth=remote"
-            );
-        }
-        if (sgx_enabled || sgxgeth_enabled) && self.remote_sgx.timeout_ms == 0 {
-            bail!("prover.remote_sgx.timeout_ms must be greater than zero");
-        }
+        self.sgx.validate("prover.sgx")?;
+        self.sgxgeth.validate("prover.sgxgeth")?;
 
         self.zk_any.validate()?;
-        if self.zk_any.sp1.is_some() && !self.routes.is_enabled(ProofType::Sp1) {
-            bail!("prover.zk_any.sp1 requires enabled prover.routes.sp1");
+        if self.zk_any.sp1.is_some() && !self.is_enabled(ProofType::Sp1) {
+            bail!("prover.zk_any.sp1 requires prover.sp1.enabled=true");
         }
-        if self.zk_any.risc0.is_some() && !self.routes.is_enabled(ProofType::Risc0) {
-            bail!("prover.zk_any.risc0 requires enabled prover.routes.risc0");
+        if self.zk_any.risc0.is_some() && !self.is_enabled(ProofType::Risc0) {
+            bail!("prover.zk_any.risc0 requires prover.risc0.enabled=true");
         }
 
         Ok(())
@@ -121,30 +171,17 @@ fn validate_sp1_config(config: &Sp1Config) -> Result<()> {
     })
 }
 
-/// Explicit runner selection for each concrete proof type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProverRoutesConfig {
-    pub risc0: Option<RunnerKind>,
-    pub sp1: Option<RunnerKind>,
-    pub native: Option<RunnerKind>,
-    pub sgx: Option<RunnerKind>,
-    pub sgxgeth: Option<RunnerKind>,
+/// Atomic operational override for proof-type enablement and runner selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProverRoutesOverride {
+    risc0: Option<RunnerKind>,
+    sp1: Option<RunnerKind>,
+    native: Option<RunnerKind>,
+    sgx: Option<RunnerKind>,
+    sgxgeth: Option<RunnerKind>,
 }
 
-impl Default for ProverRoutesConfig {
-    fn default() -> Self {
-        Self {
-            risc0: Some(RunnerKind::Local),
-            sp1: None,
-            native: None,
-            sgx: None,
-            sgxgeth: None,
-        }
-    }
-}
-
-impl ProverRoutesConfig {
+impl ProverRoutesOverride {
     const STABLE_ORDER: [ProofType; 5] = [
         ProofType::Risc0,
         ProofType::Sp1,
@@ -173,12 +210,6 @@ impl ProverRoutesConfig {
             ProofType::Sgx => self.sgx,
             ProofType::SgxGeth => self.sgxgeth,
         }
-    }
-
-    /// Returns whether a concrete proof type has an enabled route.
-    #[must_use]
-    pub const fn is_enabled(&self, proof_type: ProofType) -> bool {
-        self.runner(proof_type).is_some()
     }
 
     /// Iterates enabled routes in stable proof-type order.
@@ -222,7 +253,7 @@ impl ProverRoutesConfig {
     }
 }
 
-impl std::str::FromStr for ProverRoutesConfig {
+impl std::str::FromStr for ProverRoutesOverride {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
@@ -328,49 +359,144 @@ impl Default for ZkAnyTargetConfig {
     }
 }
 
-/// Remote SGX prover configuration.
+/// SP1 configuration plus host-level enablement.
+#[derive(Debug, Clone, Default)]
+pub struct Sp1ProverConfig {
+    pub enabled: bool,
+    pub config: Sp1Config,
+}
+
+impl Serialize for Sp1ProverConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::to_value(&self.config).map_err(serde::ser::Error::custom)?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| serde::ser::Error::custom("SP1 config must serialize as an object"))?;
+        fields.insert("enabled".to_string(), serde_json::Value::Bool(self.enabled));
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sp1ProverConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let enabled = fields
+            .remove("enabled")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or(false);
+        let config = serde_json::from_value(serde_json::Value::Object(fields))
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self { enabled, config })
+    }
+}
+
+impl Deref for Sp1ProverConfig {
+    type Target = Sp1Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+impl DerefMut for Sp1ProverConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.config
+    }
+}
+
+/// Native execution configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct NativeProverConfig {
+    pub enabled: bool,
+}
+
+/// One remote prover lane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct RemoteSgxConfig {
+pub struct RemoteProverConfig {
+    pub enabled: bool,
     pub base_url: String,
-    pub sgxgeth_base_url: String,
     pub timeout_ms: u64,
 }
 
-impl Default for RemoteSgxConfig {
+impl Default for RemoteProverConfig {
     fn default() -> Self {
-        let defaults = Gaiko2ProverConfig::default();
         Self {
-            base_url: defaults.base_url,
-            sgxgeth_base_url: String::new(),
-            timeout_ms: if defaults.timeout_ms == 0 {
-                300_000
-            } else {
-                defaults.timeout_ms
-            },
+            enabled: false,
+            base_url: String::new(),
+            timeout_ms: 300_000,
         }
+    }
+}
+
+impl RemoteProverConfig {
+    fn validate(&self, field: &str) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.base_url.trim().is_empty() {
+            bail!("{field}.base_url must not be empty when enabled");
+        }
+        if self.timeout_ms == 0 {
+            bail!("{field}.timeout_ms must be greater than zero");
+        }
+        Ok(())
     }
 }
 
 /// RISC0 configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Risc0Config {
+    pub enabled: bool,
+    pub runner: Risc0Runner,
     pub bonsai: bool,
     pub snark: bool,
     #[serde(default)]
     pub mock: bool,
     #[serde(default = "default_risc0_execution_po2")]
     pub execution_po2: u32,
+    pub boundless: BoundlessConfig,
 }
 
 impl Default for Risc0Config {
     fn default() -> Self {
         Self {
+            enabled: false,
+            runner: Risc0Runner::Local,
             bonsai: true,
             snark: true,
             mock: false,
             execution_po2: default_risc0_execution_po2(),
+            boundless: BoundlessConfig::default(),
+        }
+    }
+}
+
+/// Supported RISC0 execution backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Risc0Runner {
+    #[default]
+    Local,
+    Network,
+}
+
+impl Risc0Runner {
+    const fn runner_kind(self) -> RunnerKind {
+        match self {
+            Self::Local => RunnerKind::Local,
+            Self::Network => RunnerKind::Network,
         }
     }
 }
@@ -430,20 +556,22 @@ impl BoundlessConfig {
     /// Validate the effective Boundless config.
     pub fn validate(&self) -> Result<()> {
         self.batch_quote
-            .validate("prover.boundless.batch_quote")
+            .validate("prover.risc0.boundless.batch_quote")
             .map_err(anyhow::Error::msg)?;
         self.aggregation_quote
-            .validate("prover.boundless.aggregation_quote")
+            .validate("prover.risc0.boundless.aggregation_quote")
             .map_err(anyhow::Error::msg)?;
         if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
-            bail!("prover.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
+            bail!("prover.risc0.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
         }
         if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
-            bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
+            bail!(
+                "prover.risc0.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}"
+            );
         }
         if (1..MIN_MEANINGFUL_REBID_PRICE_STEP_BPS).contains(&self.rebid_price_step_bps) {
             bail!(
-                "prover.boundless.rebid_price_step_bps = {} is below the {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} bps (1%) floor; \
+                "prover.risc0.boundless.rebid_price_step_bps = {} is below the {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} bps (1%) floor; \
                  values in 1..{MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} are almost always a basis-points/multiplier confusion \
                  (e.g. `2` meaning ×2). Use 0 for an explicit flat ladder or >= {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} to escalate.",
                 self.rebid_price_step_bps
@@ -451,10 +579,10 @@ impl BoundlessConfig {
         }
         validate_offer_spec(&self.offer_params.batch)
             .map_err(anyhow::Error::msg)
-            .context("prover.boundless.offer_params.batch")?;
+            .context("prover.risc0.boundless.offer_params.batch")?;
         validate_offer_spec(&self.offer_params.aggregation)
             .map_err(anyhow::Error::msg)
-            .context("prover.boundless.offer_params.aggregation")?;
+            .context("prover.risc0.boundless.offer_params.aggregation")?;
         Ok(())
     }
 
@@ -520,42 +648,63 @@ const fn default_boundless_rebid_max_attempts() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, ProverRoutesConfig,
+        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, ProverRoutesOverride,
         REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
     use raiko2_pipeline::RunnerKind;
     use raiko2_primitives::ProofType;
     use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
 
-    fn routes(value: &str) -> ProverRoutesConfig {
+    fn routes(value: &str) -> ProverRoutesOverride {
         value.parse().expect("valid prover routes")
     }
 
+    fn config_with_routes(value: &str) -> ProverConfig {
+        let mut config = ProverConfig::default();
+        config.apply_routes_override(&routes(value));
+        config
+    }
+
     fn boundless_network_config() -> ProverConfig {
-        let mut config = ProverConfig {
-            routes: routes("risc0/network"),
-            ..Default::default()
-        };
-        config.boundless.signer_key = "configured-by-secret-store".to_string();
+        let mut config = config_with_routes("risc0/network");
+        config.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
         config
     }
 
     #[test]
-    fn prover_routes_parse_explicit_table_and_iterate_in_stable_order() {
+    fn self_contained_prover_tables_derive_routes() {
         let config: ProverConfig = toml::from_str(
             r#"
-[routes]
-sgxgeth = "remote"
-native = "local"
-sp1 = "network"
-risc0 = "local"
-sgx = "remote"
+[risc0]
+enabled = true
+runner = "local"
+bonsai = true
+snark = true
+mock = false
+execution_po2 = 20
+
+[sp1]
+enabled = true
+prover = "network"
+
+[native]
+enabled = true
+
+[sgx]
+enabled = true
+base_url = "http://sgx-prover:8080"
+timeout_ms = 300000
+
+[sgxgeth]
+enabled = true
+base_url = "http://sgxgeth-prover:8080"
+timeout_ms = 300001
 "#,
         )
-        .expect("explicit routes should parse");
+        .expect("self-contained prover tables should parse");
 
         assert_eq!(
-            config.routes.iter().collect::<Vec<_>>(),
+            config.iter_routes().collect::<Vec<_>>(),
             vec![
                 (ProofType::Risc0, RunnerKind::Local),
                 (ProofType::Sp1, RunnerKind::Network),
@@ -564,37 +713,200 @@ sgx = "remote"
                 (ProofType::SgxGeth, RunnerKind::Remote),
             ]
         );
-        assert_eq!(
-            config.routes.runner(ProofType::Sp1),
-            Some(RunnerKind::Network)
-        );
-        assert!(config.routes.is_enabled(ProofType::SgxGeth));
+        assert_eq!(config.runner(ProofType::Sp1), Some(RunnerKind::Network));
+        assert!(config.is_enabled(ProofType::SgxGeth));
+        assert_eq!(config.sgx.base_url, "http://sgx-prover:8080");
+        assert_eq!(config.sgxgeth.timeout_ms, 300_001);
     }
 
     #[test]
-    fn prover_routes_default_is_programmatic_only() {
-        // Rust defaults keep existing fixture construction ergonomic. Because `routes` has no
-        // serde default on `ProverConfig`, deserialization still requires an explicit table.
-        let default = ProverConfig::default();
-        assert_eq!(
-            default.routes.iter().collect::<Vec<_>>(),
-            vec![(ProofType::Risc0, RunnerKind::Local)]
-        );
-
-        let err = toml::from_str::<ProverConfig>("")
-            .expect_err("deserialization must require an explicit routes table");
-        assert!(err.to_string().contains("missing field `routes`"));
+    fn self_contained_prover_config_rejects_superseded_sections() {
+        for input in [
+            "[routes]\nrisc0 = \"local\"\n",
+            "[boundless]\nrpc_url = \"https://boundless.example.com\"\n",
+            "[remote_sgx]\nbase_url = \"http://sgx-prover:8080\"\n",
+        ] {
+            let err = toml::from_str::<ProverConfig>(input)
+                .expect_err("superseded prover section must be rejected");
+            assert!(err.to_string().contains("unknown field"), "{err}");
+        }
     }
 
     #[test]
-    fn prover_routes_reject_empty_table() {
-        let config: ProverConfig =
-            toml::from_str("[routes]").expect("an empty table should deserialize");
+    fn risc0_boundless_nested_config_preserves_every_setting_group() {
+        let config: ProverConfig = toml::from_str(
+            r#"
+[risc0]
+enabled = true
+runner = "network"
+bonsai = false
+snark = false
+mock = true
+execution_po2 = 24
 
-        let err = config
+[risc0.boundless]
+offchain = true
+rpc_url = "https://boundless.example.com"
+signer_key = "configured-by-secret-store"
+poll_interval_ms = 11000
+timeout_ms = 3700000
+rebid_timeout_ms = 310000
+rebid_price_step_bps = 4200
+rebid_max_attempts = 6
+
+[risc0.boundless.deployment]
+deployment_type = "taiko"
+
+[risc0.boundless.deployment.overrides]
+order_stream_url = "https://orders.example.com"
+market_address = "0x0000000000000000000000000000000000000001"
+
+[risc0.boundless.batch_quote]
+strategy = "fixed"
+mcycles = 4321
+
+[risc0.boundless.aggregation_quote]
+strategy = "evaluated"
+
+[risc0.boundless.offer_params.batch]
+pricing_mode = "market"
+absolute_max_price_per_mcycle = "0.000000600"
+ramp_up_start_sec = 21
+ramp_up_period_sec = 121
+lock_collateral = "20"
+
+[risc0.boundless.offer_params.batch.timeouts]
+mode = "fixed"
+lock_timeout_secs = 601
+timeout_secs = 3601
+
+[risc0.boundless.offer_params.aggregation]
+pricing_mode = "manual"
+max_price_per_mcycle = "0.000000800"
+min_price_per_mcycle = "0.000000006"
+absolute_max_price_per_mcycle = "0.000003200"
+ramp_up_start_sec = 22
+ramp_up_period_sec = 122
+lock_collateral = "21"
+
+[risc0.boundless.offer_params.aggregation.timeouts]
+mode = "per_mcycle"
+lock_timeout_ms_per_mcycle = 3000
+timeout_ms_per_mcycle = 6000
+"#,
+        )
+        .expect("complete nested Boundless config should parse");
+
+        config
             .validate()
-            .expect_err("at least one route must be enabled");
-        assert!(err.to_string().contains("at least one prover route"));
+            .expect("nested Boundless config should validate");
+        let risc0 = &config.risc0;
+        let boundless = &risc0.boundless;
+        assert_eq!(risc0.execution_po2, 24);
+        assert!(boundless.offchain);
+        assert_eq!(boundless.poll_interval_ms, 11_000);
+        assert_eq!(boundless.timeout_ms, 3_700_000);
+        assert_eq!(boundless.rebid_timeout_ms, 310_000);
+        assert_eq!(boundless.rebid_price_step_bps, 4_200);
+        assert_eq!(boundless.rebid_max_attempts, 6);
+        let deployment = boundless.deployment.as_ref().expect("deployment");
+        assert_eq!(
+            deployment.deployment_type,
+            Some(raiko2_prover::boundless_config::DeploymentType::Taiko)
+        );
+        assert_eq!(
+            deployment
+                .overrides
+                .as_ref()
+                .and_then(|value| value.get("order_stream_url"))
+                .and_then(serde_json::Value::as_str),
+            Some("https://orders.example.com")
+        );
+        assert_eq!(
+            boundless.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 4_321 }
+        );
+        assert_eq!(
+            boundless.aggregation_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
+        assert_eq!(boundless.offer_params.batch.ramp_up_start_sec, 21);
+        assert_eq!(
+            boundless.offer_params.batch.timeouts,
+            raiko2_prover::boundless_config::TimeoutPolicy::Fixed {
+                lock_timeout_secs: 601,
+                timeout_secs: 3_601,
+            }
+        );
+        assert_eq!(
+            boundless
+                .offer_params
+                .aggregation
+                .max_price_per_mcycle
+                .as_deref(),
+            Some("0.000000800")
+        );
+        assert_eq!(boundless.offer_params.aggregation.lock_collateral, "21");
+        assert_eq!(
+            boundless.offer_params.aggregation.timeouts,
+            raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
+                lock_timeout_ms_per_mcycle: 3_000,
+                timeout_ms_per_mcycle: 6_000,
+                dynamic_pricing_timeout_modifier: None,
+            }
+        );
+    }
+
+    #[test]
+    fn sp1_table_rejects_unknown_backend_fields() {
+        let err = toml::from_str::<ProverConfig>(
+            r#"
+[sp1]
+enabled = true
+prover = "local"
+unexpected = true
+"#,
+        )
+        .expect_err("unknown SP1 backend field must fail closed");
+
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn risc0_table_rejects_remote_runner_during_parsing() {
+        let err = toml::from_str::<ProverConfig>(
+            r#"
+[risc0]
+enabled = true
+runner = "remote"
+"#,
+        )
+        .expect_err("RISC0 supports only local and network runners");
+
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    #[test]
+    fn prover_routes_default_disables_every_proof_type() {
+        let default = ProverConfig::default();
+        assert!(default.iter_routes().next().is_none());
+        assert!(toml::from_str::<ProverConfig>("").is_ok());
+
+        let err = default
+            .validate()
+            .expect_err("at least one prover must be enabled");
+        assert!(err.to_string().contains("at least one prover"));
+    }
+
+    #[test]
+    fn route_override_replaces_all_enablement() {
+        let mut config = config_with_routes("risc0/local,sgx/remote");
+        config.apply_routes_override(&routes("native/local"));
+
+        assert_eq!(
+            config.iter_routes().collect::<Vec<_>>(),
+            vec![(ProofType::Native, RunnerKind::Local)]
+        );
     }
 
     #[test]
@@ -609,7 +921,7 @@ sgx = "remote"
             "sgxgeth/remote",
         ] {
             routes
-                .parse::<ProverRoutesConfig>()
+                .parse::<ProverRoutesOverride>()
                 .unwrap_or_else(|err| panic!("{routes} should parse: {err}"))
                 .validate()
                 .unwrap_or_else(|err| panic!("{routes} should validate: {err}"));
@@ -626,7 +938,7 @@ sgx = "remote"
             "sgxgeth/network",
         ] {
             let err = routes
-                .parse::<ProverRoutesConfig>()
+                .parse::<ProverRoutesOverride>()
                 .expect_err("unsupported runner combination must fail");
             assert!(err.contains("unsupported prover route"), "{routes}: {err}");
         }
@@ -635,22 +947,22 @@ sgx = "remote"
     #[test]
     fn prover_routes_override_parser_rejects_invalid_input() {
         let duplicate = "risc0/local,risc0/network"
-            .parse::<ProverRoutesConfig>()
+            .parse::<ProverRoutesOverride>()
             .expect_err("duplicate proof type must fail");
         assert!(duplicate.contains("duplicate prover route"));
 
         let unknown = "unknown/local"
-            .parse::<ProverRoutesConfig>()
+            .parse::<ProverRoutesOverride>()
             .expect_err("unknown proof type must fail");
         assert!(unknown.contains("Unknown proof type"));
 
         let invalid_runner = "risc0/invalid"
-            .parse::<ProverRoutesConfig>()
+            .parse::<ProverRoutesOverride>()
             .expect_err("unknown runner must fail");
         assert!(invalid_runner.contains("Unknown runner"));
 
         let empty = ""
-            .parse::<ProverRoutesConfig>()
+            .parse::<ProverRoutesOverride>()
             .expect_err("empty override must fail");
         assert!(empty.contains("must not be empty"));
     }
@@ -658,7 +970,7 @@ sgx = "remote"
     #[test]
     fn prover_config_rejects_removed_global_route_fields() {
         for legacy_field in ["guest_system = \"risc0\"", "runner = \"local\""] {
-            let input = format!("{legacy_field}\n[routes]\nrisc0 = \"local\"\n");
+            let input = format!("{legacy_field}\n[native]\nenabled = true\n");
             let err = toml::from_str::<ProverConfig>(&input)
                 .expect_err("legacy global route field must fail");
             assert!(
@@ -711,19 +1023,16 @@ sgx = "remote"
 
     #[test]
     fn prover_config_accepts_valid_zk_any_policy() {
-        let mut config = ProverConfig {
-            routes: routes("risc0/local,sp1/local"),
-            zk_any: ZkAnyConfig {
-                sp1: Some(ZkAnyTargetConfig {
-                    probability: 0.3,
-                    per_day: 100,
-                }),
-                risc0: Some(ZkAnyTargetConfig {
-                    probability: 0.4,
-                    per_day: 0,
-                }),
-            },
-            ..Default::default()
+        let mut config = config_with_routes("risc0/local,sp1/local");
+        config.zk_any = ZkAnyConfig {
+            sp1: Some(ZkAnyTargetConfig {
+                probability: 0.3,
+                per_day: 100,
+            }),
+            risc0: Some(ZkAnyTargetConfig {
+                probability: 0.4,
+                per_day: 0,
+            }),
         };
         config.sp1.prover = Sp1ProverMode::Local;
 
@@ -732,16 +1041,13 @@ sgx = "remote"
 
     #[test]
     fn zk_any_rejects_disabled_sp1_target() {
-        let config = ProverConfig {
-            routes: routes("risc0/local"),
-            zk_any: ZkAnyConfig {
-                sp1: Some(ZkAnyTargetConfig {
-                    probability: 0.5,
-                    per_day: 0,
-                }),
-                risc0: None,
-            },
-            ..Default::default()
+        let mut config = config_with_routes("risc0/local");
+        config.zk_any = ZkAnyConfig {
+            sp1: Some(ZkAnyTargetConfig {
+                probability: 0.5,
+                per_day: 0,
+            }),
+            risc0: None,
         };
 
         let err = config
@@ -749,22 +1055,19 @@ sgx = "remote"
             .expect_err("zk_any must not target a disabled SP1 route");
         assert!(
             err.to_string()
-                .contains("prover.zk_any.sp1 requires enabled prover.routes.sp1")
+                .contains("prover.zk_any.sp1 requires prover.sp1.enabled=true")
         );
     }
 
     #[test]
     fn zk_any_rejects_disabled_risc0_target() {
-        let mut config = ProverConfig {
-            routes: routes("sp1/local"),
-            zk_any: ZkAnyConfig {
-                sp1: None,
-                risc0: Some(ZkAnyTargetConfig {
-                    probability: 0.5,
-                    per_day: 0,
-                }),
-            },
-            ..Default::default()
+        let mut config = config_with_routes("sp1/local");
+        config.zk_any = ZkAnyConfig {
+            sp1: None,
+            risc0: Some(ZkAnyTargetConfig {
+                probability: 0.5,
+                per_day: 0,
+            }),
         };
         config.sp1.prover = Sp1ProverMode::Local;
 
@@ -773,33 +1076,36 @@ sgx = "remote"
             .expect_err("zk_any must not target a disabled RISC0 route");
         assert!(
             err.to_string()
-                .contains("prover.zk_any.risc0 requires enabled prover.routes.risc0")
+                .contains("prover.zk_any.risc0 requires prover.risc0.enabled=true")
         );
     }
 
     #[test]
     fn risc0_network_requires_boundless_network_credentials() {
         let mut config = boundless_network_config();
-        config.boundless.rpc_url.clear();
+        config.risc0.boundless.rpc_url.clear();
 
         let err = config
             .validate()
             .expect_err("risc0/network must require a Boundless RPC URL");
-        assert!(err.to_string().contains("prover.boundless.rpc_url"));
+        assert!(err.to_string().contains("prover.risc0.boundless.rpc_url"));
 
-        config.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.boundless.signer_key.clear();
+        config.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.risc0.boundless.signer_key.clear();
         let err = config
             .validate()
             .expect_err("risc0/network must require a Boundless signer");
-        assert!(err.to_string().contains("prover.boundless.signer_key"));
+        assert!(
+            err.to_string()
+                .contains("prover.risc0.boundless.signer_key")
+        );
     }
 
     #[test]
     fn risc0_local_skips_boundless_network_credentials() {
-        let mut config = ProverConfig::default();
-        config.boundless.rpc_url.clear();
-        config.boundless.signer_key.clear();
+        let mut config = config_with_routes("risc0/local");
+        config.risc0.boundless.rpc_url.clear();
+        config.risc0.boundless.signer_key.clear();
 
         config
             .validate()
@@ -808,12 +1114,9 @@ sgx = "remote"
 
     #[test]
     fn disabled_risc0_skips_boundless_backend_validation() {
-        let mut config = ProverConfig {
-            routes: routes("native/local"),
-            ..Default::default()
-        };
+        let mut config = config_with_routes("native/local");
         config.risc0.execution_po2 = 0;
-        config.boundless.rebid_timeout_ms = 0;
+        config.risc0.boundless.rebid_timeout_ms = 0;
 
         config
             .validate()
@@ -822,46 +1125,35 @@ sgx = "remote"
 
     #[test]
     fn sgx_route_requires_lane_specific_base_url() {
-        let mut config = ProverConfig {
-            routes: routes("sgx/remote"),
-            ..Default::default()
-        };
-        config.remote_sgx.base_url.clear();
-        config.remote_sgx.sgxgeth_base_url = "https://sgxgeth.example.com".to_string();
+        let mut config = config_with_routes("sgx/remote");
+        config.sgx.base_url.clear();
+        config.sgxgeth.base_url = "https://sgxgeth.example.com".to_string();
 
         let err = config
             .validate()
             .expect_err("sgx/remote must require its own base URL");
-        assert!(err.to_string().contains("prover.remote_sgx.base_url"));
+        assert!(err.to_string().contains("prover.sgx.base_url"));
     }
 
     #[test]
     fn sgxgeth_route_requires_lane_specific_base_url() {
-        let mut config = ProverConfig {
-            routes: routes("sgxgeth/remote"),
-            ..Default::default()
-        };
-        config.remote_sgx.base_url = "https://sgx.example.com".to_string();
-        config.remote_sgx.sgxgeth_base_url.clear();
+        let mut config = config_with_routes("sgxgeth/remote");
+        config.sgx.base_url = "https://sgx.example.com".to_string();
+        config.sgxgeth.base_url.clear();
 
         let err = config
             .validate()
             .expect_err("sgxgeth/remote must require its own base URL");
-        assert!(
-            err.to_string()
-                .contains("prover.remote_sgx.sgxgeth_base_url")
-        );
+        assert!(err.to_string().contains("prover.sgxgeth.base_url"));
     }
 
     #[test]
     fn configured_sgx_urls_without_routes_do_not_enable_lanes() {
-        let mut config = ProverConfig {
-            routes: routes("native/local"),
-            ..Default::default()
-        };
-        config.remote_sgx.base_url = "https://sgx.example.com".to_string();
-        config.remote_sgx.sgxgeth_base_url = "https://sgxgeth.example.com".to_string();
-        config.remote_sgx.timeout_ms = 0;
+        let mut config = config_with_routes("native/local");
+        config.sgx.base_url = "https://sgx.example.com".to_string();
+        config.sgxgeth.base_url = "https://sgxgeth.example.com".to_string();
+        config.sgx.timeout_ms = 0;
+        config.sgxgeth.timeout_ms = 0;
 
         config
             .validate()
@@ -871,21 +1163,18 @@ sgx = "remote"
     #[test]
     fn each_enabled_sgx_lane_requires_positive_timeout() {
         for route in ["sgx/remote", "sgxgeth/remote"] {
-            let mut config = ProverConfig {
-                routes: routes(route),
-                ..Default::default()
-            };
-            config.remote_sgx.base_url = "https://sgx.example.com".to_string();
-            config.remote_sgx.sgxgeth_base_url = "https://sgxgeth.example.com".to_string();
-            config.remote_sgx.timeout_ms = 0;
+            let mut config = config_with_routes(route);
+            config.sgx.base_url = "https://sgx.example.com".to_string();
+            config.sgxgeth.base_url = "https://sgxgeth.example.com".to_string();
+            config.sgx.timeout_ms = 0;
+            config.sgxgeth.timeout_ms = 0;
 
             let err = config
                 .validate()
                 .expect_err("enabled SGX lanes must require a positive timeout");
             assert!(
                 err.to_string()
-                    .contains("prover.remote_sgx.timeout_ms must be greater than zero"),
-                "unexpected error for {route}: {err}"
+                    .contains("timeout_ms must be greater than zero")
             );
         }
     }
@@ -893,10 +1182,7 @@ sgx = "remote"
     #[test]
     fn sp1_local_allows_local_or_mock_prover() {
         for prover in [Sp1ProverMode::Local, Sp1ProverMode::Mock] {
-            let mut config = ProverConfig {
-                routes: routes("sp1/local"),
-                ..Default::default()
-            };
+            let mut config = config_with_routes("sp1/local");
             config.sp1.prover = prover;
 
             config
@@ -906,44 +1192,20 @@ sgx = "remote"
     }
 
     #[test]
-    fn sp1_local_rejects_network_prover() {
-        let config = ProverConfig {
-            routes: routes("sp1/local"),
-            ..Default::default()
-        };
+    fn sp1_prover_mode_is_the_runner_source_of_truth() {
+        let mut config = config_with_routes("sp1/network");
+        assert_eq!(config.runner(ProofType::Sp1), Some(RunnerKind::Network));
 
-        let err = config
-            .validate()
-            .expect_err("sp1/local must reject the network prover");
-        assert!(
-            err.to_string()
-                .contains("prover.routes.sp1=local requires prover.sp1.prover=local or mock")
-        );
-    }
-
-    #[test]
-    fn sp1_network_requires_network_prover() {
-        let mut config = ProverConfig {
-            routes: routes("sp1/network"),
-            ..Default::default()
-        };
         config.sp1.prover = Sp1ProverMode::Local;
+        assert_eq!(config.runner(ProofType::Sp1), Some(RunnerKind::Local));
 
-        let err = config
-            .validate()
-            .expect_err("sp1/network must require the network prover");
-        assert!(
-            err.to_string()
-                .contains("prover.routes.sp1=network requires prover.sp1.prover=network")
-        );
+        config.sp1.prover = Sp1ProverMode::Mock;
+        assert_eq!(config.runner(ProofType::Sp1), Some(RunnerKind::Local));
     }
 
     #[test]
     fn disabled_sp1_skips_sp1_backend_validation() {
-        let mut config = ProverConfig {
-            routes: routes("native/local"),
-            ..Default::default()
-        };
+        let mut config = config_with_routes("native/local");
         config.sp1.cycle_limit = 0;
 
         config
@@ -953,10 +1215,7 @@ sgx = "remote"
 
     #[test]
     fn sp1_validation_error_omits_credential_bearing_url() {
-        let mut config = ProverConfig {
-            routes: routes("sp1/local"),
-            ..Default::default()
-        };
+        let mut config = config_with_routes("sp1/local");
         config.sp1.prover = Sp1ProverMode::Local;
         let sensitive_url = "https://sample_user:sample_secret@[invalid";
         config.sp1.rpc_url = Some(sensitive_url.to_string());
@@ -973,7 +1232,7 @@ sgx = "remote"
     #[test]
     fn prover_config_rejects_zero_aggregation_quote() {
         let mut config = boundless_network_config();
-        config.boundless.aggregation_quote =
+        config.risc0.boundless.aggregation_quote =
             raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 0 };
 
         assert!(
@@ -981,14 +1240,14 @@ sgx = "remote"
                 .validate()
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
-                .contains("prover.boundless.aggregation_quote")
+                .contains("prover.risc0.boundless.aggregation_quote")
         );
     }
 
     #[test]
     fn prover_config_accepts_zero_boundless_rebid_price_step_bps() {
         let mut config = boundless_network_config();
-        config.boundless.rebid_price_step_bps = 0;
+        config.risc0.boundless.rebid_price_step_bps = 0;
 
         // 0 bps is a valid flat (no-escalation) ladder.
         config
@@ -1000,7 +1259,7 @@ sgx = "remote"
     fn prover_config_rejects_sub_floor_boundless_rebid_price_step_bps() {
         // A value in 1..100 bps is almost always a bps/multiplier confusion (e.g. `2` meaning ×2).
         let mut config = boundless_network_config();
-        config.boundless.rebid_price_step_bps = 2;
+        config.risc0.boundless.rebid_price_step_bps = 2;
 
         assert!(
             config
@@ -1014,7 +1273,7 @@ sgx = "remote"
     #[test]
     fn prover_config_accepts_floor_boundless_rebid_price_step_bps() {
         let mut config = boundless_network_config();
-        config.boundless.rebid_price_step_bps = MIN_MEANINGFUL_REBID_PRICE_STEP_BPS;
+        config.risc0.boundless.rebid_price_step_bps = MIN_MEANINGFUL_REBID_PRICE_STEP_BPS;
 
         config
             .validate()
@@ -1024,7 +1283,7 @@ sgx = "remote"
     #[test]
     fn prover_config_rejects_excessive_boundless_rebid_max_attempts() {
         let mut config = boundless_network_config();
-        config.boundless.rebid_max_attempts = REBID_MAX_ATTEMPTS_LIMIT + 1;
+        config.risc0.boundless.rebid_max_attempts = REBID_MAX_ATTEMPTS_LIMIT + 1;
 
         assert!(
             config
@@ -1038,37 +1297,34 @@ sgx = "remote"
     #[test]
     fn prover_config_rejects_zero_boundless_rebid_timeout() {
         let mut config = boundless_network_config();
-        config.boundless.rebid_timeout_ms = 0;
+        config.risc0.boundless.rebid_timeout_ms = 0;
 
         assert!(
             config
                 .validate()
                 .expect_err("zero rebid timeout should fail")
                 .to_string()
-                .contains("prover.boundless.rebid_timeout_ms")
+                .contains("prover.risc0.boundless.rebid_timeout_ms")
         );
     }
 
     #[test]
     fn prover_config_rejects_subsecond_boundless_rebid_timeout() {
         let mut config = boundless_network_config();
-        config.boundless.rebid_timeout_ms = 999;
+        config.risc0.boundless.rebid_timeout_ms = 999;
 
         assert!(
             config
                 .validate()
                 .expect_err("subsecond rebid timeout should fail")
                 .to_string()
-                .contains("prover.boundless.rebid_timeout_ms")
+                .contains("prover.risc0.boundless.rebid_timeout_ms")
         );
     }
 
     #[test]
     fn prover_config_rejects_sp1_prove_without_verification() {
-        let mut config = ProverConfig {
-            routes: routes("sp1/local"),
-            ..Default::default()
-        };
+        let mut config = config_with_routes("sp1/local");
         config.sp1.prover = Sp1ProverMode::Local;
         config.sp1.mode = Sp1ExecutionMode::Prove;
         config.sp1.verify = false;

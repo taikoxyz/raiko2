@@ -62,10 +62,26 @@ For a single local route:
 RAIKO2_PROVER_ROUTES=risc0/local
 ```
 
-For a production host serving both network ZK systems and both SGX lanes:
+Do not apply the four-route production value to `docker/config.compose.toml` as-is. That file is
+the SGX compose shape: its SP1 settings select the local prover, and its Boundless signer is only a
+placeholder.
 
-```dotenv
-RAIKO2_PROVER_ROUTES=risc0/network,sp1/network,sgx/remote,sgxgeth/remote
+For a production host serving both network ZK systems and both SGX lanes, start from the complete
+production-oriented example instead:
+
+```bash
+cp config.example.toml config.toml
+```
+
+Before starting the host, replace placeholder credentials, configure production RPC and runtime
+storage, and verify that each enabled backend section matches its route. In particular,
+`[prover.sp1]` must select the network prover, `[prover.boundless]` must contain real deployment
+credentials, and `[prover.remote_sgx]` must point to the production SGX services. The full-table
+override may then be passed to that completed config:
+
+```bash
+RAIKO2_PROVER_ROUTES=risc0/network,sp1/network,sgx/remote,sgxgeth/remote \
+  ./target/release/raiko2 --config ./config.toml
 ```
 
 Supported pairs are `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `native/local`,

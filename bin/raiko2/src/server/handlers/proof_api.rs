@@ -1502,6 +1502,17 @@ pub(crate) async fn validate_persisted_runtime_task_metadata(
 
 const LEGACY_SGXGETH_MIGRATION_MESSAGE: &str = "legacy SGXGETH task cancelled during route migration; resubmit to create a canonical sgxgeth/remote task";
 
+fn validate_legacy_sgxgeth_cancellation(
+    task_id: &str,
+    outcome: RuntimeMutationOutcome,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        outcome == RuntimeMutationOutcome::Applied,
+        "legacy SGXGETH task {task_id} migration cancellation was not confirmed: {outcome:?}"
+    );
+    Ok(())
+}
+
 pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::Result<usize> {
     let records = state.runtime.list_tasks().await?;
     let mut recovered = 0;
@@ -1519,32 +1530,27 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
                 record.runner_status,
                 RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
             ) {
-                match state
+                let outcome = state
                     .runtime
                     .cancel_task_if_unchanged(
                         &record,
                         Some(LEGACY_SGXGETH_MIGRATION_MESSAGE.to_string()),
                     )
                     .await
-                {
-                    Ok(RuntimeMutationOutcome::Applied) => warn!(
-                        task_id = record.task_id,
-                        pipeline = %record.pipeline_key,
-                        stored_route = %record.route,
-                        canonical_route = %record.pipeline_key.route(),
-                        "cancelled legacy SGXGETH task during startup route migration"
-                    ),
-                    Ok(outcome) => warn!(
-                        task_id = record.task_id,
-                        outcome = ?outcome,
-                        "legacy SGXGETH task changed before migration cancellation; skipping startup recovery"
-                    ),
-                    Err(error) => warn!(
-                        task_id = record.task_id,
-                        error = %error,
-                        "failed to cancel legacy SGXGETH task during route migration; skipping startup recovery"
-                    ),
-                }
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to cancel legacy SGXGETH task {} during route migration: {error}",
+                            record.task_id
+                        )
+                    })?;
+                validate_legacy_sgxgeth_cancellation(&record.task_id, outcome)?;
+                warn!(
+                    task_id = record.task_id,
+                    pipeline = %record.pipeline_key,
+                    stored_route = %record.route,
+                    canonical_route = %record.pipeline_key.route(),
+                    "cancelled legacy SGXGETH task during startup route migration"
+                );
             }
             continue;
         }
@@ -3208,6 +3214,22 @@ mod tests {
     fn operation_status_reports_partial_failures() {
         assert_eq!(operation_status(0), "ok");
         assert_eq!(operation_status(1), "partial_failure");
+    }
+
+    #[test]
+    fn legacy_sgxgeth_migration_rejects_unconfirmed_cancellation() {
+        for outcome in [
+            RuntimeMutationOutcome::AlreadyApplied,
+            RuntimeMutationOutcome::Stale,
+            RuntimeMutationOutcome::Blocked,
+            RuntimeMutationOutcome::Missing,
+            RuntimeMutationOutcome::Conflict,
+        ] {
+            let error = validate_legacy_sgxgeth_cancellation("task-test", outcome)
+                .expect_err("startup must fail when migration cancellation is not confirmed");
+            assert!(error.to_string().contains("task-test"));
+            assert!(error.to_string().contains("not confirmed"));
+        }
     }
 
     #[test]

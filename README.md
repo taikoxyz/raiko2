@@ -19,7 +19,7 @@ asynchronous proposal-side proof requests.
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
 - Exactly one live instance per isolated runtime namespace; replacements never overlap
-- GCS for durable operation or local-only memory mode, with no cross-namespace data sharing
+- GCS for durable operation or explicitly opted-in ephemeral memory mode, with no cross-namespace data sharing
 - In-process queue projected from the namespaced runtime store
 
 ## Quickstart
@@ -84,8 +84,8 @@ The runtime is governed by these invariants:
 7. Remote proving resumes a request identifier only after its submission checkpoint is durable.
    Request-level retry settings may lower, but never raise, operator-owned limits.
 8. Durable deployments use separate state and proof-object repository semantics over one configured
-   GCS namespace; memory mode is explicitly ephemeral. The service does not dual-write or
-   automatically fail over between backends.
+   GCS namespace; memory mode is explicitly ephemeral and requires an opt-in outside local
+   environments. The service does not dual-write or automatically fail over between backends.
 9. A replacement starts only after the old process has stopped admissions, completed its bounded
    fence drain, stopped and joined workers, and exited. The drain does not wait for all proof tasks;
    deployment configuration must enforce the non-overlapping replacement sequence.

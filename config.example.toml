@@ -56,8 +56,10 @@ environment = "development"
 namespace = "raiko2-development"
 
 [runtime.store]
-# Memory is accepted only for development, local, and test environments. Use GCS everywhere else.
+# Memory is process-local and disposable. Use GCS for durable deployments.
 backend = "memory"
+# Set to true when intentionally using memory outside development, local, or test environments.
+# allow_ephemeral = true
 prefix = "raiko2/runtime/v1"
 # bucket = "my-raiko2-runtime"
 

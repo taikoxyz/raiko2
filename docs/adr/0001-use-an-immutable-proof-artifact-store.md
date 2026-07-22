@@ -5,8 +5,8 @@ date: 2026-07-15
 
 # Use an immutable proof artifact store
 
-Published proofs use an environment-and-namespace-scoped `ProofObjectRepository`: production uses
-GCS, while local development and tests may explicitly select the ephemeral memory implementation.
+Published proofs use an environment-and-namespace-scoped `ProofObjectRepository`: durable
+deployments use GCS, while any deployment may explicitly select the ephemeral memory implementation.
 The repository contains the complete normalized Raiko `Proof`; provider request IDs belong to the
 separate authoritative `RuntimeStateRepository`. Artifact identity includes the explicit environment
 and namespace, concrete proof type, execution route, and normalized request identity. Publication is

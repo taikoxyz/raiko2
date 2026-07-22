@@ -69,10 +69,12 @@ where
     ///    (e.g., using witness data and verifying against a parent block's state root).
     /// 2. The `bytecode` map contains all bytecode corresponding to code hashes present in the
     ///    account data within the `trie`.
-    /// 3. The `ancestor_hashes` map contains the block hashes for the relevant ancestor blocks (up
-    ///    to 256 including the current block number). It assumes these hashes correspond to a
-    ///    contiguous chain of blocks. The caller is responsible for verifying the contiguity and
-    ///    the block limit.
+    /// 3. The `ancestor_hashes` map contains hashes for a contiguous sequence of completed
+    ///    ancestor blocks ending at `current_block - 1`; the current block is never part of the
+    ///    set, and revm only ever observes the most recent 256 entries (see
+    ///    [`Database::block_hash`] on this type for the exact window contract). The caller is
+    ///    responsible for verifying contiguity; no 256-entry limit is enforced here, and any
+    ///    older entries are simply never queried.
     pub(super) const fn new(
         trie: &'a T,
         bytecode: B256Map<Bytecode>,

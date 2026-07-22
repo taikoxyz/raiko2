@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{NativeBackend, PipelineKey, PipelineRoute, forks::shasta::ShastaSpec};
 use raiko2_primitives::ProofType;
-use raiko2_prover::gaiko2::Gaiko2Prover;
+use raiko2_prover::{gaiko2::Gaiko2Prover, native::NativeProver};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::RuntimeManager;
@@ -35,19 +35,18 @@ use raiko2_pipeline::forks::shasta::{
 };
 #[cfg(feature = "host")]
 use raiko2_pipeline::{Risc0ShastaBackend, Sp1ShastaBackend};
+#[cfg(feature = "local-provers")]
+use raiko2_prover::risc0::Risc0Prover;
 #[cfg(feature = "host")]
 use raiko2_prover::{
     boundless::{BoundlessBalanceGate, BoundlessProver},
     sp1::Sp1Prover,
 };
-#[cfg(feature = "local-provers")]
-use raiko2_prover::{native::NativeProver, risc0::Risc0Prover};
 
 #[cfg(feature = "local-provers")]
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 #[cfg(feature = "host")]
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
-#[cfg(feature = "local-provers")]
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
 #[cfg(feature = "host")]
@@ -118,23 +117,15 @@ impl PipelineRegistration {
 
 fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistration>> {
     #[cfg(not(feature = "local-provers"))]
-    if let Some((proof_type, _)) = config
-        .prover
-        .iter_routes()
-        .find(|(_, runner)| *runner == RunnerKind::Local)
-    {
-        anyhow::bail!(
-            "prover route {proof_type}/local requires building raiko2 with `local-provers`"
-        );
+    if config.prover.runner(ProofType::Risc0) == Some(RunnerKind::Local) {
+        anyhow::bail!("prover route risc0/local requires building raiko2 with `local-provers`");
     }
 
     #[cfg(not(feature = "host"))]
-    if let Some((proof_type, _)) = config
-        .prover
-        .iter_routes()
-        .find(|(_, runner)| *runner == RunnerKind::Network)
-    {
-        anyhow::bail!("prover route {proof_type}/network requires building raiko2 with `host`");
+    if let Some((proof_type, runner)) = config.prover.iter_routes().find(|(proof_type, runner)| {
+        *proof_type == ProofType::Sp1 || *runner == RunnerKind::Network
+    }) {
+        anyhow::bail!("prover route {proof_type}/{runner} requires building raiko2 with `host`");
     }
 
     config
@@ -574,22 +565,17 @@ fn register_pair_pipelines(
                 unreachable!("SP1 routes are rejected before pipeline construction");
             }
             (ProofType::Native, RunnerKind::Local) => {
-                #[cfg(feature = "local-provers")]
-                {
-                    let engine = build_native_engine(
-                        registration.config,
-                        registration.pair,
-                        registration.scheduler_config.clone(),
-                        observer,
-                    )?;
-                    factory.insert(
-                        registration.pair.key.clone(),
-                        pipeline.pipeline_key,
-                        Arc::new(engine),
-                    );
-                }
-                #[cfg(not(feature = "local-provers"))]
-                unreachable!("local routes are rejected before pipeline construction");
+                let engine = build_native_engine(
+                    registration.config,
+                    registration.pair,
+                    registration.scheduler_config.clone(),
+                    observer,
+                )?;
+                factory.insert(
+                    registration.pair.key.clone(),
+                    pipeline.pipeline_key,
+                    Arc::new(engine),
+                );
             }
             (ProofType::Sgx | ProofType::SgxGeth, RunnerKind::Remote) => {
                 let engine = build_remote_sgx_engine(
@@ -668,7 +654,6 @@ fn build_sp1_engine(
     Ok(engine)
 }
 
-#[cfg(feature = "local-provers")]
 fn build_native_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
@@ -943,20 +928,44 @@ mod tests {
 
     #[cfg(not(feature = "local-provers"))]
     #[test]
-    fn local_route_fails_before_pipeline_construction_without_local_provers() {
-        for route in ["risc0/local", "sp1/local", "native/local"] {
-            let config = config_with_routes(route);
+    fn risc0_local_requires_local_provers() {
+        let config = config_with_routes("risc0/local");
+        let error = enabled_pipeline_registrations(&config)
+            .expect_err("RISC0 local route must require local-provers");
 
-            let error = enabled_pipeline_registrations(&config)
-                .expect_err("local route must require local-provers");
+        assert!(
+            error
+                .to_string()
+                .contains("risc0/local requires building raiko2 with `local-provers`"),
+            "unexpected error: {error}"
+        );
+    }
 
-            assert!(
-                error.to_string().contains(&format!(
-                    "{route} requires building raiko2 with `local-provers`"
-                )),
-                "unexpected error for {route}: {error}"
-            );
-        }
+    #[cfg(not(feature = "host"))]
+    #[test]
+    fn sp1_local_requires_host_feature() {
+        let config = config_with_routes("sp1/local");
+        let error = enabled_pipeline_registrations(&config)
+            .expect_err("SP1 local route must require host support");
+
+        assert!(
+            error
+                .to_string()
+                .contains("sp1/local requires building raiko2 with `host`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(not(feature = "local-provers"))]
+    #[test]
+    fn native_local_is_available_without_local_provers() -> Result<()> {
+        let config = config_with_routes("native/local");
+        let registrations = enabled_pipeline_registrations(&config)?;
+
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].pipeline_key, PipelineKey::ShastaNative);
+        assert_eq!(registrations[0].runner, RunnerKind::Local);
+        Ok(())
     }
 
     #[cfg(feature = "local-provers")]

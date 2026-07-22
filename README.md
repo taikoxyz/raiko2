@@ -39,7 +39,7 @@ Run the real server with an explicit config file:
 ```bash
 cp config.example.toml config.toml
 $EDITOR config.toml
-export RAIKO2_BOUNDLESS_SIGNER_KEY=<boundless-signer-key>
+export RAIKO2_BOUNDLESS_SIGNER_KEY="replace-with-boundless-signer-key"
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
@@ -72,7 +72,8 @@ allow = ["prover.submit"]
 Raiko2 resolves only a singleton `{ env = "NAME" }` table before schema validation. Missing,
 non-Unicode, or empty variables fail startup without printing their values; Raiko2 does not perform
 shell expansion or partial-string interpolation. This lets Kubernetes keep the public TOML in a
-ConfigMap and inject only keys through a Secret-backed environment variable.
+ConfigMap and inject only keys through a Secret-backed environment variable. If a file with an
+environment reference has a schema error, Raiko2 also redacts the decoder details.
 
 ## Architecture And Operator Contract
 

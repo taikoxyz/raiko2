@@ -62,7 +62,9 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
             rpc_last.number()
         )));
     }
-    let rpc_last_hash = rpc_last.hash;
+    // Recompute the hash from the returned header content instead of trusting the RPC-reported
+    // `hash` field, so a spoofed field cannot force a spurious pass.
+    let rpc_last_hash = rpc_last.inner.hash_slow();
     if rpc_last_hash != expected_checkpoint.blockHash {
         return Err(RaikoError::Preflight(format!(
             "external L2 RPC checkpoint block hash mismatch at block {expected_block_number}: rpc={rpc_last_hash:#x}, preflight={:#x}",
@@ -215,12 +217,29 @@ mod tests {
         let parent_hash = B256::from([0xAA; 32]);
         let input = sample_guest_input(parent_hash);
         let mut mismatched_last = block_from_witness(&input.witnesses[1]);
-        mismatched_last.hash = B256::from([0x99; 32]);
+        // Forge the header CONTENT (keeping the block number correct) so the recomputed hash
+        // diverges from the preflight checkpoint hash.
+        mismatched_last.inner.state_root = B256::from([0x99; 32]);
         let blocks = vec![block_from_witness(&input.witnesses[0]), mismatched_last];
 
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect_err("hash mismatch");
         assert!(err.to_string().contains("checkpoint block hash mismatch"));
+    }
+
+    #[test]
+    fn compare_ignores_forged_reported_hash_field() {
+        let parent_hash = B256::from([0xAA; 32]);
+        let input = sample_guest_input(parent_hash);
+        let mut forged_last = block_from_witness(&input.witnesses[1]);
+        // Only the RPC-reported `hash` field is forged; the header content stays correct. The
+        // comparison must still pass because the hash is recomputed from the content, i.e. the
+        // reported field is not load-bearing.
+        forged_last.hash = B256::from([0x99; 32]);
+        let blocks = vec![block_from_witness(&input.witnesses[0]), forged_last];
+
+        compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
+            .expect("forged reported hash field must not affect the content-derived comparison");
     }
 
     #[test]

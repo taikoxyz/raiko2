@@ -1059,6 +1059,12 @@ where
         "proof_carry_data_vec must not be empty"
     );
 
+    // Bounds-validate every carry (uint48 fields, linkage, prover consistency) before hashing:
+    // hash_shasta_subproof_input aborts on out-of-range uint48 values, and malformed input must
+    // surface as a validation error — not a panic — when this path runs host-side (native prover).
+    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&input.proof_carry_data_vec)
+        .context("invalid proof_carry_data_vec")?;
+
     for (i, block_input) in input.block_inputs.iter().enumerate() {
         verify_proof(i, block_input)
             .with_context(|| format!("proof verification failed at index {i}"))?;
@@ -1070,8 +1076,6 @@ where
         );
     }
 
-    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&input.proof_carry_data_vec)
-        .context("invalid proof_carry_data_vec")?;
     let first = input.proof_carry_data_vec.first().expect("checked");
     let aggregation_hash = shasta_aggregation_output(
         &commitment,
@@ -2030,6 +2034,24 @@ mod tests {
 
         let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
             .expect_err("invalid proof carry sequence should fail");
+        assert!(err.to_string().contains("invalid proof_carry_data_vec"));
+    }
+
+    #[test]
+    fn aggregate_rejects_oversized_uint48_timestamp_without_panicking() {
+        let mut proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        // Above uint48: hashing this carry would abort, so the bounds validation must reject the
+        // input first. block_inputs stays a dummy value because hashing it here would panic too.
+        proof_carry_data.transition_input.transition.timestamp = 1_u64 << 48;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![B256::ZERO],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::ZERO,
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("oversized uint48 timestamp must fail validation, not panic");
         assert!(err.to_string().contains("invalid proof_carry_data_vec"));
     }
 

@@ -28,7 +28,7 @@ fn proposal_request_adapter_outputs_v1_guest_input_packet() {
             .proof_carry_data
             .transition_input
             .proposal_id,
-        2_222
+        23_077
     );
 }
 

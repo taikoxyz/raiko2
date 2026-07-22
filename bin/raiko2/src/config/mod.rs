@@ -1,7 +1,7 @@
 //! Configuration management for Raiko V2.
 
 use crate::cli::Cli;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use raiko2_primitives::ProofType;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -123,11 +123,23 @@ impl Config {
     }
 
     /// Load configuration from a TOML file.
+    ///
+    /// Singleton TOML tables shaped as `{ env = "NAME" }` are resolved from
+    /// the process environment before the configuration is deserialized.
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {}", path.display()))
+        let mut value: toml::Value = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        resolve_environment_references(&mut value).with_context(|| {
+            format!(
+                "Failed to resolve environment references in config file: {}",
+                path.display()
+            )
+        })?;
+        value
+            .try_into()
+            .with_context(|| format!("Failed to decode config file: {}", path.display()))
     }
 
     /// Validate the entire configuration.
@@ -170,6 +182,56 @@ impl Config {
             .context("Preflight configuration error")?;
         Ok(())
     }
+}
+
+/// Resolve explicit environment references in a TOML value tree.
+///
+/// Only a singleton table shaped as `{ env = "NAME" }` is a reference. This
+/// keeps ordinary strings literal, avoids shell-style interpolation, and
+/// resolves values before typed configuration deserialization.
+fn resolve_environment_references(value: &mut toml::Value) -> Result<()> {
+    let environment = match value {
+        toml::Value::Table(table) if table.len() == 1 && table.contains_key("env") => {
+            match table.get("env") {
+                Some(toml::Value::String(name)) if !name.trim().is_empty() => Some(name.clone()),
+                Some(toml::Value::String(_)) => {
+                    bail!("config environment reference name must not be empty");
+                }
+                Some(_) => {
+                    bail!("config environment reference `env` value must be a string");
+                }
+                None => unreachable!("environment reference table contains env"),
+            }
+        }
+        _ => None,
+    };
+
+    if let Some(environment) = environment {
+        let resolved = std::env::var(&environment).with_context(|| {
+            format!("config environment variable `{environment}` is not available")
+        })?;
+        if resolved.is_empty() {
+            bail!("config environment variable `{environment}` must not be empty");
+        }
+        *value = toml::Value::String(resolved);
+        return Ok(());
+    }
+
+    match value {
+        toml::Value::Array(values) => {
+            for value in values {
+                resolve_environment_references(value)?;
+            }
+        }
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                resolve_environment_references(value)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn override_single_rpc_pair(
@@ -297,9 +359,130 @@ backend = "memory"
 
     #[test]
     fn test_config_example_validates() {
+        let _env_lock = lock_test_cli_environment();
+        let _signer_key_guard =
+            EnvVarGuard::set("RAIKO2_BOUNDLESS_SIGNER_KEY", "configured-by-secret-store");
         let path = workspace_config("config.example.toml");
         let config = Config::from_file(&path).expect("parse config.example.toml");
         config.validate().expect("validate config.example.toml");
+    }
+
+    #[test]
+    fn config_file_resolves_environment_references() {
+        let _env_lock = lock_test_cli_environment();
+        let _l1_rpc_guard = EnvVarGuard::set("RAIKO2_TEST_L1_RPC", "http://l1.example.test:8545");
+        let _l2_rpc_guard = EnvVarGuard::set("RAIKO2_TEST_L2_RPC", "http://l2.example.test:8545");
+        let _sgx_url_guard =
+            EnvVarGuard::set("RAIKO2_TEST_SGX_URL", "http://sgx.example.test:8080");
+        let _acl_key_guard = EnvVarGuard::set("RAIKO2_TEST_ACL_KEY", "test-only-acl-key");
+        let path = write_temp_config(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[server.acl]
+keys = [
+  { id = "submit", key = { env = "RAIKO2_TEST_ACL_KEY" }, allow = ["prover.submit"] },
+]
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = { env = "RAIKO2_TEST_L1_RPC" }, l2_rpc = { env = "RAIKO2_TEST_L2_RPC" } },
+]
+
+[prover.native]
+enabled = true
+
+[prover.sgx]
+enabled = true
+base_url = { env = "RAIKO2_TEST_SGX_URL" }
+timeout_ms = 300000
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
+"#,
+        );
+
+        let config = Config::from_file(&path).expect("parse environment references");
+        config.validate().expect("validate environment references");
+        assert_eq!(
+            config.rpc.pairs[0].l1_rpc.as_deref(),
+            Some("http://l1.example.test:8545")
+        );
+        assert_eq!(
+            config.rpc.pairs[0].l2_rpc.as_deref(),
+            Some("http://l2.example.test:8545")
+        );
+        assert_eq!(config.prover.sgx.base_url, "http://sgx.example.test:8080");
+        assert_eq!(config.server.acl.keys[0].key, "test-only-acl-key");
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_rejects_missing_environment_reference() {
+        let _env_lock = lock_test_cli_environment();
+        let _missing_guard = EnvVarGuard::remove("RAIKO2_TEST_MISSING_ENV");
+        let config = config_with_l1_rpc("{ env = \"RAIKO2_TEST_MISSING_ENV\" }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("missing environment variable must fail");
+        assert!(format!("{error:#}").contains("RAIKO2_TEST_MISSING_ENV"));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_rejects_empty_environment_reference() {
+        let _env_lock = lock_test_cli_environment();
+        let _empty_guard = EnvVarGuard::set("RAIKO2_TEST_EMPTY_ENV", "");
+        let config = config_with_l1_rpc("{ env = \"RAIKO2_TEST_EMPTY_ENV\" }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("empty environment variable must fail");
+        let error = format!("{error:#}");
+        assert!(error.contains("RAIKO2_TEST_EMPTY_ENV"));
+        assert!(error.contains("must not be empty"));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_rejects_invalid_environment_reference_shape() {
+        let config = config_with_l1_rpc("{ env = 42 }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("non-string environment name must fail");
+        assert!(format!("{error:#}").contains("env` value must be a string"));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    fn config_with_l1_rpc(l1_rpc: &str) -> String {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[[rpc.pairs]]
+network = "taiko_hoodi"
+l1_network = "hoodi"
+l1_rpc = {l1_rpc}
+l2_rpc = "http://l2.example.test:8545"
+
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
+"#
+        )
     }
 
     #[test]

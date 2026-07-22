@@ -6,6 +6,11 @@
 #   RAIKO2_CONFIG=./config.toml raiko2
 #
 # CLI flags and explicitly supported environment variables override values from this file.
+#
+# String settings can reference a process environment variable with a singleton
+# inline table, for example `{ env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }`. The
+# reference is resolved before schema validation; it does not support shell
+# expansion or partial string interpolation.
 
 [server]
 host = "0.0.0.0"
@@ -15,9 +20,9 @@ port = 8080
 # ACL key id and key values must be unique.
 # [server.acl]
 # keys = [
-#   { id = "admin", key = "change-me", allow = ["admin"] },
+#   { id = "admin", key = { env = "RAIKO2_ADMIN_API_KEY" }, allow = ["admin"] },
 #   # rate_limit_per_minute defaults to 200 when omitted.
-#   { id = "submit", key = "submit-key", allow = ["prover.submit"], rate_limit_per_minute = 600 },
+#   { id = "submit", key = { env = "RAIKO2_SUBMIT_API_KEY" }, allow = ["prover.submit"], rate_limit_per_minute = 600 },
 # ]
 
 [rpc]
@@ -114,7 +119,7 @@ timeout_ms = 300000
 # and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
-signer_key = "0xYOUR_PRIVATE_KEY"
+signer_key = { env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }
 poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.

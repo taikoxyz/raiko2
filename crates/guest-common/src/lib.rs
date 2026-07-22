@@ -6,12 +6,11 @@ use alethia_reth_chainspec::{
     spec::TaikoChainSpec,
 };
 use alethia_reth_consensus::validation::{validate_anchor_transaction, AnchorValidationContext};
-use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{
     transaction::{SignerRecoverable, Transaction as _},
     BlockHeader as _, Header,
 };
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{bail, ensure, Context, Result};
 use raiko2_primitives::{
@@ -515,22 +514,8 @@ fn validate_anchor_transaction_binding(
     expected_block: &BlockManifest,
 ) -> Result<()> {
     let block = &stateless_input.block;
-    let anchor_tx = block
-        .body
-        .transactions()
-        .next()
-        .context("missing anchor transaction")?;
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
-    let pre_state_account = stateless_input
-        .accounts
-        .get(&anchor_signer)
-        .context("missing anchor signer account in pre-state callers")?;
-    ensure!(
-        anchor_tx.nonce() == pre_state_account.nonce,
-        "anchor transaction nonce mismatch: expected {}, got {}",
-        pre_state_account.nonce,
-        anchor_tx.nonce()
-    );
+    // The anchor signer nonce is enforced by execution against the Merkle-verified pre-state;
+    // a host-supplied account snapshot proves nothing.
 
     let checkpoint = decode_anchor_checkpoint(block)?;
     ensure!(
@@ -828,7 +813,8 @@ where
         proposal_event_id,
         guest_input.taiko.proposal_id
     );
-    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48 without silent truncation.
+    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48; the hash primitive aborts
+    // on wider values, so pre-validate here to surface a clean validation error instead.
     ensure!(
         fits_shasta_uint48(proof_carry_data.transition_input.transition.timestamp),
         "proof_carry_data.transition.timestamp does not fit in uint48: {}",
@@ -1019,7 +1005,6 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
                 &stateless_input.witness,
                 ancestor_headers,
                 guest_input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
                 &runtime.chain_spec,
                 &runtime.evm_config,
             )

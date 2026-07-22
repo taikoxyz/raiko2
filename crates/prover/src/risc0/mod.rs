@@ -13,7 +13,7 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::{
     Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
-    default_executor, default_prover, get_prover_server,
+    default_executor, get_prover_server,
 };
 use tracing::info;
 
@@ -108,16 +108,6 @@ impl Risc0Prover {
         opts: &ProverOpts,
         stage: &str,
     ) -> RaikoResult<Receipt> {
-        if self.config.bonsai {
-            return default_prover()
-                .prove_with_opts(env, elf, opts)
-                .map(|info| info.receipt)
-                .map_err(|e| {
-                    tracing::error!("Failed to generate RISC0 {} proof: {:?}", stage, e);
-                    RaikoError::Guest(format!("RISC0 {stage} proof generation failed: {e}"))
-                });
-        }
-
         let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
         get_prover_server(opts)
             .map_err(|e| {
@@ -448,7 +438,6 @@ mod tests {
     #[tokio::test]
     async fn risc0_mock_proposal_surfaces_guest_validation_errors_after_framed_input() {
         let prover = Risc0Prover::new(Risc0Config {
-            bonsai: false,
             snark: false,
             mock: true,
             profile: false,

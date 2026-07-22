@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Risc0Config {
-    /// Whether to use Bonsai proving service.
-    pub bonsai: bool,
     /// Whether to generate SNARK proof.
     pub snark: bool,
     /// Whether to use dev mode and return a fake receipt instead of a real proof.
@@ -30,7 +28,6 @@ const fn default_true() -> bool {
 impl Default for Risc0Config {
     fn default() -> Self {
         Self {
-            bonsai: true,
             snark: true,
             mock: false,
             profile: false,

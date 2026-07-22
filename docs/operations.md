@@ -12,10 +12,15 @@ See also:
 
 ## Run the Server
 
-Run the server with an explicit config file:
+`config.example.toml` is a combined production sample. Before running, edit the copy to keep only
+the desired per-proof-type tables enabled and fill every setting, credential, and endpoint required
+by those backends.
+
+Run the server with the edited config file:
 
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
 ./target/release/raiko2 --config config.toml
 ```
 
@@ -51,15 +56,44 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
 ```
 
 The default compose stack runs a single `raiko2` container on port `8080` with the in-process
-memory queue. Default binaries include RISC Zero local/network proving and SP1 proving.
+memory queue. Default binaries include RISC Zero local/network proving and SP1 proving. The
+operator env sample selects `risc0/local` for this one-container quickstart.
 
-To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
+To select proving routes, set `RAIKO2_PROVER_ROUTES` in `docker/.env` to a comma-separated list.
+It atomically replaces all proof-type enablement and updates the selected RISC0/SP1 execution
+selectors; it does not append to the mounted config.
+For a single local route:
 
-- `native/local`
-- `risc0/local`
-- `risc0/network`
-- `sp1/local`
-- `sp1/network`
+```dotenv
+RAIKO2_PROVER_ROUTES=risc0/local
+```
+
+Do not apply the four-route production value to `docker/config.compose.toml` as-is. That file is
+the SGX compose shape: its SP1 settings select the local prover, and its Boundless signer is only a
+placeholder.
+
+For a production host serving both network ZK systems and both SGX lanes, start from the complete
+production-oriented example instead:
+
+```bash
+cp config.example.toml config.toml
+$EDITOR config.toml
+```
+
+In that edit, replace placeholder credentials, configure production RPC and runtime storage, and
+verify that each enabled backend section matches its route. In particular,
+`[prover.sp1]` must select the network prover, `[prover.risc0.boundless]` must contain real
+deployment credentials, and `[prover.sgx]` / `[prover.sgxgeth]` must point to their production
+services. The atomic override may then be passed to that completed config:
+
+```bash
+RAIKO2_PROVER_ROUTES=risc0/network,sp1/network,sgx/remote,sgxgeth/remote \
+  ./target/release/raiko2 --config ./config.toml
+```
+
+Supported pairs are `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `native/local`,
+`sgx/remote`, and `sgxgeth/remote`. Without an override, each proof-type table owns its own
+`enabled` state and execution selector. One host may explicitly enable any supported combination.
 
 The queue is always in-process. Durable task state and remote-provider checkpoints use the
 configured namespaced GCS runtime store; Boundless does not need an extra feature flag.
@@ -286,7 +320,7 @@ For a local `raiko2` CLI against the compose-managed SGX servers:
 
 ```bash
 RAIKO2_CONFIG=docker/config.compose.toml \
-RAIKO2_PROVER=sgx/remote \
+RAIKO2_PROVER_ROUTES=sgx/remote,sgxgeth/remote \
 RAIKO2_L1_RPC=http://127.0.0.1:8545 \
 RAIKO2_L2_RPC=http://127.0.0.1:9545 \
 RAIKO2_REMOTE_SGX_BASE_URL=http://127.0.0.1:9090 \
@@ -793,11 +827,11 @@ Those steps remain part of later operator workflows.
 To use the network-backed RISC0 route, configure:
 
 ```toml
-[prover]
-guest_system = "risc0"
+[prover.risc0]
+enabled = true
 runner = "network"
 
-[prover.boundless]
+[prover.risc0.boundless]
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
@@ -807,7 +841,7 @@ rebid_timeout_ms = 300000
 rebid_price_step_bps = 5000
 rebid_max_attempts = 4
 
-[prover.boundless.deployment]
+[prover.risc0.boundless.deployment]
 deployment_type = "base"
 ```
 
@@ -885,36 +919,37 @@ Operator notes:
   proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must
   remain available until every manifest that references it is gone. Generation-scoped invalidation
   markers and unreferenced content use a minimum 30-day retention window.
-- Proposal requests are sized by `prover.boundless.batch_quote`. The default
+- Proposal requests are sized by `prover.risc0.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`
   value.
-- Aggregation requests are sized by `prover.boundless.aggregation_quote` (same strategies).
-- `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
+- Aggregation requests are sized by `prover.risc0.boundless.aggregation_quote` (same strategies).
+- `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.
-- `prover.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
+- `prover.risc0.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
   points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
   flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
-- `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
+- `prover.risc0.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
   no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
   maximum is `31`, and the default allows a final max price of about `5x` the base at the default
   step, unless `absolute_max_price_per_mcycle` clamps it sooner.
-- `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
-- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
   absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
   `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
   `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
   accepted, but setting both is rejected).
 - When a Boundless request expires unfulfilled, `raiko2` resubmits it. Each resubmission escalates
-  the offer's max price by `prover.boundless.rebid_price_step_bps` (compounded) up to
-  `prover.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is set;
-  the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider and
-  then escalated by the same step.
-- `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
-  values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
+  the offer's max price by `prover.risc0.boundless.rebid_price_step_bps` (compounded) up to
+  `prover.risc0.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is
+  set; the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider
+  and then escalated by the same step.
+- `prover.risc0.boundless.deployment.deployment_type` selects the Boundless market deployment.
+  Supported values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market
+  submissions.
 - `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid
   fields (including `rebid_price_step_bps`), and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.

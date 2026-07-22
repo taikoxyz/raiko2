@@ -35,7 +35,7 @@ use super::super::auth::{
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
-    public_task_id_from_fingerprint, route_for_proof_type, validate_hosted_proof_type,
+    public_task_id_from_fingerprint, route_for_proof_type, unsupported_proof_type,
 };
 #[path = "proof_api/v3.rs"]
 pub(crate) mod v3;
@@ -215,7 +215,6 @@ fn build_canonical_batch_submission(
     req: BatchShastaRequest,
 ) -> Result<Option<CanonicalBatchSubmission>, ApiError> {
     validate_request_shape(&req)?;
-    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let requested_prover_config = augment_system_prover_config(
         &pair,
@@ -531,13 +530,6 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
     Ok(())
 }
 
-fn unsupported_proof_type(proof_type: BatchProofType) -> ApiError {
-    ApiError::bad_request(format!(
-        "proof_type={} is not supported",
-        proof_type.as_str()
-    ))
-}
-
 fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiError> {
     if proposal_id > SHASTA_PROPOSAL_ID_MAX {
         return Err(ApiError::bad_request(format!(
@@ -552,7 +544,6 @@ async fn build_external_aggregate_submission(
     req: AggregateProofRequest,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
-    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let prover_config = augment_system_prover_config(
         &pair,
@@ -1088,7 +1079,7 @@ async fn handle_existing_batch_task(
         duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
     );
     if existing.pipeline_key != submission.route.pipeline_key()
-        || existing.route != submission.route.route
+        || canonical_persisted_route(&existing)? != submission.route.route
     {
         return replace_existing_batch_task(
             state,
@@ -1509,6 +1500,19 @@ pub(crate) async fn validate_persisted_runtime_task_metadata(
     Ok(())
 }
 
+const LEGACY_SGXGETH_MIGRATION_MESSAGE: &str = "legacy SGXGETH task cancelled during route migration; resubmit to create a canonical sgxgeth/remote task";
+
+fn validate_legacy_sgxgeth_cancellation(
+    task_id: &str,
+    outcome: RuntimeMutationOutcome,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        outcome == RuntimeMutationOutcome::Applied,
+        "legacy SGXGETH task {task_id} migration cancellation was not confirmed: {outcome:?}"
+    );
+    Ok(())
+}
+
 pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::Result<usize> {
     let records = state.runtime.list_tasks().await?;
     let mut recovered = 0;
@@ -1519,6 +1523,37 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
                 record.task_id
             )
         })?;
+        if canonical_persisted_route(&record).map_err(|error| anyhow::anyhow!(error.message))?
+            != record.route
+        {
+            if matches!(
+                record.runner_status,
+                RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+            ) {
+                let outcome = state
+                    .runtime
+                    .cancel_task_if_unchanged(
+                        &record,
+                        Some(LEGACY_SGXGETH_MIGRATION_MESSAGE.to_string()),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to cancel legacy SGXGETH task {} during route migration: {error}",
+                            record.task_id
+                        )
+                    })?;
+                validate_legacy_sgxgeth_cancellation(&record.task_id, outcome)?;
+                warn!(
+                    task_id = record.task_id,
+                    pipeline = %record.pipeline_key,
+                    stored_route = %record.route,
+                    canonical_route = %record.pipeline_key.route(),
+                    "cancelled legacy SGXGETH task during startup route migration"
+                );
+            }
+            continue;
+        }
         if matches!(
             record.runner_status,
             RuntimeRunnerStatus::Completed | RuntimeRunnerStatus::Cancelled
@@ -1799,7 +1834,7 @@ async fn load_task_data_from_lookup(
     };
     Ok(TaskData {
         task_id: id.to_string(),
-        route: lookup.record.route.to_string(),
+        route: canonical_persisted_route(&lookup.record)?.to_string(),
         prover_type: lookup.metadata.prover_type_str(),
         execution_mode: lookup.metadata.execution_mode_str(),
         status: root_state.status.clone(),
@@ -2145,6 +2180,20 @@ fn parse_task_metadata(
             record.task_id
         ))
     })
+}
+
+fn canonical_persisted_route(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<PipelineRoute, ApiError> {
+    record
+        .pipeline_key
+        .canonicalize_persisted_route(record.route)
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "runtime task route {} does not match pipeline {}",
+                record.route, record.pipeline_key
+            ))
+        })
 }
 
 const fn is_terminal_runtime_status(status: RuntimeRunnerStatus) -> bool {
@@ -3168,6 +3217,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_sgxgeth_migration_rejects_unconfirmed_cancellation() {
+        for outcome in [
+            RuntimeMutationOutcome::AlreadyApplied,
+            RuntimeMutationOutcome::Stale,
+            RuntimeMutationOutcome::Blocked,
+            RuntimeMutationOutcome::Missing,
+            RuntimeMutationOutcome::Conflict,
+        ] {
+            let error = validate_legacy_sgxgeth_cancellation("task-test", outcome)
+                .expect_err("startup must fail when migration cancellation is not confirmed");
+            assert!(error.to_string().contains("task-test"));
+            assert!(error.to_string().contains("not confirmed"));
+        }
+    }
+
+    #[test]
     fn aggregate_ids_must_match_proof_count_when_present() {
         let request = AggregateProofRequest {
             aggregation_ids: vec![1, 2],
@@ -3618,9 +3683,49 @@ mod tests {
 
     fn sgxgeth_remote_route() -> CanonicalProofRoute {
         CanonicalProofRoute::new(
-            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
         )
+    }
+
+    fn legacy_sgxgeth_record(
+        submission: &CanonicalBatchSubmission,
+        runner_status: RuntimeRunnerStatus,
+    ) -> Result<(TaskMetadata, RuntimeTaskRecord)> {
+        let mut historical_submission = submission.clone();
+        historical_submission.route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgxGeth,
+        );
+        historical_submission.requested_proof_type = BatchProofType::SgxGeth;
+        let request_fingerprint = batch_request_fingerprint_for_test(&historical_submission)?;
+        let plan = build_submission_plan(&historical_submission, &request_fingerprint)
+            .map_err(|err| anyhow!(err.message))?;
+        let mut metadata = build_task_metadata(
+            &historical_submission.pair,
+            BuildTaskMetadataParams {
+                network: &historical_submission.pair.network,
+                l1_network: &historical_submission.pair.l1_network,
+                proof_type: historical_submission.route.proof_type(),
+                requested_proof_type: Some(historical_submission.requested_proof_type.as_str()),
+                prover_type: historical_submission.prover_type,
+                execution_mode: historical_submission.execution_mode,
+                aggregate_requested: historical_submission.aggregate_requested,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        let mut record = runtime_record(runner_status, &metadata);
+        record.task_id = public_task_id_from_fingerprint(&request_fingerprint);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaSgxGeth,
+            PipelineKey::ShastaSgxGeth.route(),
+        );
+        record.route = "sgx/remote".parse().expect("legacy SGXGETH route");
+        record.request_fingerprint = request_fingerprint;
+        Ok((metadata, record))
     }
 
     fn valid_native_proof() -> Proof {
@@ -4691,7 +4796,7 @@ mod tests {
             ],
         );
         let route = CanonicalProofRoute::new(
-            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
         );
         let submission = canonical_submission(route, false);
@@ -4746,6 +4851,214 @@ mod tests {
                 .is_empty()
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_sgxgeth_record_projects_canonical_route() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "legacy-sgxgeth-request",
+        ))?);
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaSgxGeth,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let submission = canonical_submission(sgxgeth_remote_route(), false);
+        let (_metadata, record) =
+            legacy_sgxgeth_record(&submission, RuntimeRunnerStatus::Completed)?;
+        runtime.upsert_task(&record).await?;
+
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("legacy runtime task");
+        assert_eq!(stored.incarnation_id, record.incarnation_id);
+        assert_eq!(stored.route, record.route);
+        let task = load_task_data(&state, &record.task_id)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        assert_eq!(task.route, "sgxgeth/remote");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_cancels_legacy_nonterminal_sgxgeth_record() -> Result<()> {
+        for (label, status) in [
+            ("allocated", RuntimeRunnerStatus::Allocated),
+            ("running", RuntimeRunnerStatus::Running),
+        ] {
+            let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(&format!(
+                "startup-legacy-sgxgeth-{label}"
+            )))?);
+            let submission = canonical_submission(sgxgeth_remote_route(), false);
+            let (_metadata, record) = legacy_sgxgeth_record(&submission, status)?;
+            runtime.upsert_task(&record).await?;
+            let recorder = Arc::new(RecordingEngine::new());
+            let state = test_state_with_engines(
+                Arc::clone(&runtime),
+                [(
+                    PipelineKey::ShastaSgxGeth,
+                    recorder.clone() as Arc<dyn EngineHandle>,
+                )],
+            );
+
+            assert_eq!(recover_pending_runtime_tasks(&state).await?, 0);
+            assert!(
+                recorder
+                    .proposals
+                    .lock()
+                    .expect("proposal submissions")
+                    .is_empty()
+            );
+            let stored = runtime
+                .get_task(&record.task_id)
+                .await?
+                .expect("legacy runtime task");
+            assert_eq!(stored.incarnation_id, record.incarnation_id);
+            assert_eq!(stored.route, record.route);
+            assert_eq!(stored.runner_status, RuntimeRunnerStatus::Cancelled);
+            assert_eq!(
+                stored.error.as_deref(),
+                Some(LEGACY_SGXGETH_MIGRATION_MESSAGE)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_skips_legacy_terminal_sgxgeth_records() -> Result<()> {
+        for (label, status) in [
+            ("failed", RuntimeRunnerStatus::Failed),
+            ("completed", RuntimeRunnerStatus::Completed),
+            ("cancelled", RuntimeRunnerStatus::Cancelled),
+        ] {
+            let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(&format!(
+                "startup-legacy-sgxgeth-{label}"
+            )))?);
+            let submission = canonical_submission(sgxgeth_remote_route(), false);
+            let (_metadata, mut record) = legacy_sgxgeth_record(&submission, status)?;
+            if status == RuntimeRunnerStatus::Failed {
+                record.error = Some("historical failure".to_string());
+            }
+            runtime.upsert_task(&record).await?;
+            let recorder = Arc::new(RecordingEngine::new());
+            let state = test_state_with_engines(
+                Arc::clone(&runtime),
+                [(
+                    PipelineKey::ShastaSgxGeth,
+                    recorder.clone() as Arc<dyn EngineHandle>,
+                )],
+            );
+
+            assert_eq!(recover_pending_runtime_tasks(&state).await?, 0);
+            assert!(
+                recorder
+                    .proposals
+                    .lock()
+                    .expect("proposal submissions")
+                    .is_empty()
+            );
+            assert_eq!(
+                runtime
+                    .get_task(&record.task_id)
+                    .await?
+                    .expect("legacy terminal runtime task"),
+                record
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_and_canonical_sgxgeth_batch_identities_are_distinct() -> Result<()> {
+        let mut canonical = canonical_submission(sgxgeth_remote_route(), false);
+        canonical.requested_proof_type = BatchProofType::SgxGeth;
+        let canonical_fingerprint = batch_request_fingerprint_for_test(&canonical)?;
+        canonical.public_task_id = public_task_id_from_fingerprint(&canonical_fingerprint);
+        let (_metadata, legacy) = legacy_sgxgeth_record(&canonical, RuntimeRunnerStatus::Running)?;
+
+        assert_ne!(legacy.request_fingerprint, canonical_fingerprint);
+        assert_ne!(legacy.task_id, canonical.public_task_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_and_canonical_sgxgeth_tasks_register_without_conflict() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "legacy-canonical-sgxgeth-coexist",
+        ))?);
+        let mut canonical = canonical_submission(sgxgeth_remote_route(), false);
+        canonical.requested_proof_type = BatchProofType::SgxGeth;
+        let canonical_fingerprint = batch_request_fingerprint_for_test(&canonical)?;
+        canonical.public_task_id = public_task_id_from_fingerprint(&canonical_fingerprint);
+        let (_metadata, legacy) =
+            legacy_sgxgeth_record(&canonical, RuntimeRunnerStatus::Cancelled)?;
+        runtime.upsert_task(&legacy).await?;
+        let plan = build_submission_plan(&canonical, &canonical_fingerprint)
+            .map_err(|err| anyhow!(err.message))?;
+
+        let registration = build_batch_task_registration(&canonical, &plan, &canonical_fingerprint)
+            .map_err(|err| anyhow!(err.message))?;
+        let canonical_record = runtime.register_task(registration).await?;
+
+        assert_ne!(legacy.task_id, canonical_record.task_id);
+        assert_ne!(
+            legacy.request_fingerprint,
+            canonical_record.request_fingerprint
+        );
+        assert_eq!(runtime.list_tasks().await?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_and_canonical_sgxgeth_aggregate_fingerprints_are_distinct() {
+        let request = AggregateProofRequest {
+            aggregation_ids: vec![1],
+            proofs: vec![valid_native_proof()],
+            proof_type: BatchProofType::SgxGeth,
+            network: None,
+            l1_network: None,
+            graffiti: None,
+            prover: None,
+            blob_proof_type: None,
+            prover_args: PublicProverArgs::default(),
+        };
+        let pair = resolved_pair();
+        let canonical = sgxgeth_remote_route();
+        let legacy = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgxGeth,
+        );
+        let prover_config = ProverTaskConfig::default();
+
+        let legacy_fingerprint = external_aggregate_request_fingerprint(
+            "test",
+            "raiko2-test",
+            &pair,
+            legacy,
+            None,
+            &request,
+            &prover_config,
+        )
+        .expect("legacy fingerprint");
+        let canonical_fingerprint = external_aggregate_request_fingerprint(
+            "test",
+            "raiko2-test",
+            &pair,
+            canonical,
+            None,
+            &request,
+            &prover_config,
+        )
+        .expect("canonical fingerprint");
+
+        assert_ne!(legacy_fingerprint, canonical_fingerprint);
+        assert_ne!(
+            public_task_id_from_fingerprint(&legacy_fingerprint),
+            public_task_id_from_fingerprint(&canonical_fingerprint)
+        );
     }
 
     #[tokio::test]

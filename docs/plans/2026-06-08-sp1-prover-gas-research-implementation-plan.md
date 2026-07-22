@@ -161,8 +161,8 @@ Add a test for this JSON shape:
 {
   "cases": [
     {
-      "name": "mainnet-proposal-2222",
-      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
+      "name": "mainnet-proposal-23077",
+      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
       "proof_type": "sp1"
     }
   ]

@@ -194,10 +194,10 @@ impl TaskMetadata {
     pub(crate) fn decode_for_record(record: &RuntimeTaskRecord) -> Result<Self> {
         let metadata: Self = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata")?;
-        anyhow::ensure!(
-            record.pipeline_key.supports_route(record.route),
-            "runtime task route does not match the canonical pipeline"
-        );
+        let canonical_route = record
+            .pipeline_key
+            .canonicalize_persisted_route(record.route)
+            .context("runtime task route does not match the canonical pipeline")?;
         anyhow::ensure!(
             metadata.network_pair == format!("{}/{}", metadata.network, metadata.l1_network),
             "runtime task metadata network fields are inconsistent"
@@ -211,7 +211,7 @@ impl TaskMetadata {
             "runtime task metadata proof_type does not match the canonical pipeline"
         );
         metadata.validate_execution_identity(record)?;
-        metadata.validate_runtime_progress(record.route)?;
+        metadata.validate_runtime_progress(canonical_route)?;
         anyhow::ensure!(
             publication_proof_artifact_refs(&metadata, record.pipeline_key) == record.artifact_refs,
             "runtime task metadata artifact references do not match the canonical record"
@@ -1235,6 +1235,29 @@ mod tests {
         let mut wrong_artifacts = valid;
         wrong_artifacts.artifact_refs = vec!["different-input".to_string()];
         assert!(TaskMetadata::decode_for_record(&wrong_artifacts).is_err());
+    }
+
+    #[test]
+    fn decode_for_record_accepts_only_legacy_sgxgeth_route_alias() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.proof_type = ProofType::SgxGeth;
+        metadata.aggregate_task_id = Some(aggregate_task_ref(
+            PipelineKey::ShastaSgxGeth,
+            metadata
+                .aggregate_request
+                .as_ref()
+                .expect("aggregate request"),
+        ));
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSgxGeth);
+        let mut legacy = runtime_record(&metadata, artifact_refs);
+        legacy.pipeline_key = PipelineKey::ShastaSgxGeth;
+        legacy.route = "sgx/remote".parse().expect("legacy SGXGETH route");
+
+        assert!(TaskMetadata::decode_for_record(&legacy).is_ok());
+
+        let mut wrong_route = legacy;
+        wrong_route.route = "risc0/local".parse().expect("mismatched route");
+        assert!(TaskMetadata::decode_for_record(&wrong_route).is_err());
     }
 
     #[test]

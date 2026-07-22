@@ -72,9 +72,8 @@ impl PipelineKey {
             Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-            Self::ShastaSgx | Self::ShastaSgxGeth => {
-                PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
-            }
+            Self::ShastaSgx => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
+            Self::ShastaSgxGeth => PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }
@@ -119,13 +118,37 @@ impl PipelineKey {
                     runner: RunnerKind::Local,
                 }
             ) | (
-                Self::ShastaSgx | Self::ShastaSgxGeth,
+                Self::ShastaSgx,
                 PipelineRoute {
                     guest_system: GuestSystem::Sgx,
                     runner: RunnerKind::Remote,
                 }
+            ) | (
+                Self::ShastaSgxGeth,
+                PipelineRoute {
+                    guest_system: GuestSystem::SgxGeth,
+                    runner: RunnerKind::Remote,
+                }
             )
         )
+    }
+
+    /// Canonicalizes route identity read from persisted state.
+    #[must_use]
+    pub const fn canonicalize_persisted_route(self, route: PipelineRoute) -> Option<PipelineRoute> {
+        if self.supports_route(route) {
+            return Some(route);
+        }
+        match (self, route) {
+            (
+                Self::ShastaSgxGeth,
+                PipelineRoute {
+                    guest_system: GuestSystem::Sgx,
+                    runner: RunnerKind::Remote,
+                },
+            ) => Some(self.route()),
+            _ => None,
+        }
     }
 }
 
@@ -160,6 +183,7 @@ pub enum GuestSystem {
     Sp1,
     Native,
     Sgx,
+    SgxGeth,
 }
 
 impl GuestSystem {
@@ -170,6 +194,7 @@ impl GuestSystem {
             Self::Sp1 => "sp1",
             Self::Native => "native",
             Self::Sgx => "sgx",
+            Self::SgxGeth => "sgxgeth",
         }
     }
 }
@@ -189,6 +214,7 @@ impl FromStr for GuestSystem {
             "sp1" => Ok(Self::Sp1),
             "native" => Ok(Self::Native),
             "sgx" => Ok(Self::Sgx),
+            "sgxgeth" => Ok(Self::SgxGeth),
             _ => Err(format!("Unknown guest_system: {s}")),
         }
     }
@@ -311,10 +337,10 @@ mod route_tests {
     }
 
     #[test]
-    fn sgx_remote_route_uses_sgx_pipeline() {
+    fn sgx_remote_route_uses_only_sgx_pipeline() {
         let route = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
         assert!(PipelineKey::ShastaSgx.supports_route(route));
-        assert!(PipelineKey::ShastaSgxGeth.supports_route(route));
+        assert!(!PipelineKey::ShastaSgxGeth.supports_route(route));
         assert_eq!(
             "shasta-sgx-remote"
                 .parse::<PipelineKey>()
@@ -327,6 +353,20 @@ mod route_tests {
                 .expect("parse sgx route"),
             route
         );
+    }
+
+    #[test]
+    fn sgxgeth_remote_route_is_distinct_from_sgx() {
+        let sgx = "sgx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse sgx route");
+        let sgxgeth = "sgxgeth/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse sgxgeth route");
+
+        assert_ne!(sgxgeth, sgx);
+        assert_eq!(sgxgeth.to_string(), "sgxgeth/remote");
+        assert_eq!(PipelineKey::ShastaSgxGeth.route(), sgxgeth);
     }
 
     #[test]
@@ -351,10 +391,44 @@ mod route_tests {
 
         let sgx_remote = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
         assert!(PipelineKey::ShastaSgx.supports_route(sgx_remote));
-        assert!(PipelineKey::ShastaSgxGeth.supports_route(sgx_remote));
+        assert!(!PipelineKey::ShastaSgxGeth.supports_route(sgx_remote));
+        let sgxgeth_remote = PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote);
+        assert!(PipelineKey::ShastaSgxGeth.supports_route(sgxgeth_remote));
+        assert!(!PipelineKey::ShastaSgx.supports_route(sgxgeth_remote));
         assert_eq!(PipelineKey::ShastaSgx.proof_type(), ProofType::Sgx);
         assert_eq!(PipelineKey::ShastaSgxGeth.proof_type(), ProofType::SgxGeth);
         assert!(!PipelineKey::ShastaNative.supports_route(sp1_network));
+    }
+
+    #[test]
+    fn persisted_route_compatibility_is_limited_to_legacy_sgxgeth() {
+        let legacy_sgxgeth = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
+        let canonical_sgxgeth = PipelineKey::ShastaSgxGeth.route();
+        let sp1_network = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
+
+        assert_eq!(
+            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(canonical_sgxgeth),
+            Some(canonical_sgxgeth)
+        );
+        assert_eq!(
+            PipelineKey::ShastaSp1.canonicalize_persisted_route(sp1_network),
+            Some(sp1_network)
+        );
+        assert_eq!(
+            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(legacy_sgxgeth),
+            Some(canonical_sgxgeth)
+        );
+        assert_eq!(
+            PipelineKey::ShastaSgx.canonicalize_persisted_route(canonical_sgxgeth),
+            None
+        );
+        assert_eq!(
+            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(PipelineRoute::new(
+                GuestSystem::Risc0,
+                RunnerKind::Local,
+            )),
+            None
+        );
     }
 }
 

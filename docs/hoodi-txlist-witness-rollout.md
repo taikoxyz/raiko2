@@ -31,15 +31,19 @@ l2_rpc = "<hoodi-l2-reth-rpc>"
 l2_witness_rpc = "<hoodi-l2-reth-witness-rpc>"
 l2_provider = "reth"
 
-[prover]
-guest_system = "sgx"
-runner = "remote"
-
-[prover.remote_sgx]
+[prover.sgx]
+enabled = true
 base_url = "<raiko2-sgx-http>"
-sgxgeth_base_url = "<gaiko2-sgxgeth-http>"
+timeout_ms = 300000
+
+[prover.sgxgeth]
+enabled = true
+base_url = "<gaiko2-sgxgeth-http>"
 timeout_ms = 300000
 ```
+
+Each lane is enabled independently. Its endpoint and timeout live in the same table, so enabling
+one lane never selects or configures the other.
 
 Do not route `l2_witness_rpc` to a node that only supports canonical `debug_executionWitness`.
 The Shasta source-manifest path must use `debug_executionWitnessForTxList`.

@@ -248,8 +248,7 @@ impl Default for RpcRetryConfig {
 }
 
 impl RpcConfig {
-    /// Validate RPC configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub(super) fn validate_base(&self) -> Result<Vec<ResolvedNetworkPair>> {
         if self.client.timeout_ms == 0 {
             bail!("rpc client timeout_ms must be > 0");
         }
@@ -266,11 +265,11 @@ impl RpcConfig {
         }
 
         let mut seen = HashSet::new();
-        for pair in self.resolved_pairs()? {
+        let pairs = self.resolved_pairs()?;
+        for pair in &pairs {
             if !seen.insert(pair.key.clone()) {
                 bail!("duplicate rpc pair configuration: {}", pair.key);
             }
-            pair.boundless.validate(&pair.key)?;
             if !is_valid_url(&pair.l1_rpc) {
                 bail!(
                     "{}: l1_rpc = '{}'",
@@ -304,44 +303,11 @@ impl RpcConfig {
                     pair.l2_witness_rpc
                 );
             }
-            match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
-                (Some(rpc_url), Some(address)) => {
-                    if !is_valid_url(rpc_url) {
-                        bail!(
-                            "{}: sp1_verifier_rpc_url = '{}'",
-                            validation::INVALID_RPC_URL,
-                            rpc_url
-                        );
-                    }
-                    let verifier_address = Address::from_str(address).map_err(|_| {
-                        anyhow::anyhow!("{}: invalid sp1_verifier_address = '{address}'", pair.key)
-                    })?;
-                    if verifier_address == Address::ZERO {
-                        bail!(
-                            "{}: sp1_verifier_address must not be the zero address",
-                            pair.key
-                        );
-                    }
-                }
-                (None, None) => {}
-                (Some(_), None) => {
-                    bail!(
-                        "{}: sp1_verifier_address must be set when sp1_verifier_rpc_url is set",
-                        pair.key
-                    );
-                }
-                (None, Some(_)) => {
-                    bail!(
-                        "{}: sp1_verifier_rpc_url must be set when sp1_verifier_address is set",
-                        pair.key
-                    );
-                }
-            }
             if !pair.l2_spec.is_taiko() {
                 bail!("rpc pair {} must target a Taiko L2 network", pair.key);
             }
         }
-        Ok(())
+        Ok(pairs)
     }
 
     /// Resolve the configured RPC matrix into explicit network pairs.
@@ -383,6 +349,52 @@ impl RpcConfig {
             },
         }
     }
+}
+
+pub(super) fn validate_boundless_pairs(pairs: &[ResolvedNetworkPair]) -> Result<()> {
+    for pair in pairs {
+        pair.boundless.validate(&pair.key)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_sp1_verifier_pairs(pairs: &[ResolvedNetworkPair]) -> Result<()> {
+    for pair in pairs {
+        match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
+            (Some(rpc_url), Some(address)) => {
+                if !is_valid_url(rpc_url) {
+                    bail!(
+                        "{}: sp1_verifier_rpc_url for {}",
+                        validation::INVALID_RPC_URL,
+                        pair.key
+                    );
+                }
+                let verifier_address = Address::from_str(address).map_err(|_| {
+                    anyhow::anyhow!("{}: invalid sp1_verifier_address = '{address}'", pair.key)
+                })?;
+                if verifier_address == Address::ZERO {
+                    bail!(
+                        "{}: sp1_verifier_address must not be the zero address",
+                        pair.key
+                    );
+                }
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                bail!(
+                    "{}: sp1_verifier_address must be set when sp1_verifier_rpc_url is set",
+                    pair.key
+                );
+            }
+            (None, Some(_)) => {
+                bail!(
+                    "{}: sp1_verifier_rpc_url must be set when sp1_verifier_address is set",
+                    pair.key
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_pair(
@@ -556,9 +568,31 @@ mod tests {
         };
 
         let err = config
-            .validate()
+            .validate_base()
             .expect_err("invalid beacon rpc should fail");
 
         assert!(err.to_string().contains("beacon_rpc"));
+    }
+
+    #[test]
+    fn sp1_verifier_url_error_omits_credentials_query_and_fragment() {
+        let sensitive_url = "ftp://sample_user:sample_password@verifier.example.com?api_key=query_secret#fragment_secret";
+        let mut config = RpcConfig::default();
+        config.pairs[0].sp1_verifier_rpc_url = Some(sensitive_url.to_string());
+        config.pairs[0].sp1_verifier_address =
+            Some("0x0000000000000000000000000000000000000001".to_string());
+
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        let err = validate_sp1_verifier_pairs(&pairs)
+            .expect_err("unsupported SP1 verifier URL scheme must fail");
+        let message = err.to_string();
+
+        assert!(message.contains("sp1_verifier_rpc_url"));
+        assert!(!message.contains(sensitive_url));
+        assert!(!message.contains("sample_password"));
+        assert!(!message.contains("query_secret"));
+        assert!(!message.contains("fragment_secret"));
     }
 }

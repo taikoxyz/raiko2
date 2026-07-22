@@ -149,3 +149,29 @@ fn aggregate_proof_from_proof_rejects_input_hash_mismatch() {
         .expect_err("mismatch should fail");
     assert!(err.to_string().contains("input hash"));
 }
+
+#[test]
+fn aggregate_proof_from_proof_rejects_oversized_timestamp_without_panicking() {
+    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData::default();
+    proof_carry_data.transition_input.transition.timestamp = 1_u64 << 48;
+
+    let proof = raiko2_primitives::Proof {
+        proof: Some("0xproof".to_string()),
+        extra_data: Some(serde_json::json!({
+            "shasta": {
+                "proof_carry_data": proof_carry_data
+            }
+        })),
+        ..Default::default()
+    };
+
+    let result = std::panic::catch_unwind(|| {
+        raiko2_prover::remote_prover::protocol::Raiko2AggregateProof::from_proof(&proof)
+    });
+
+    assert!(result.is_ok(), "invalid carry data must not panic");
+    let err = result
+        .expect("checked above")
+        .expect_err("oversized timestamp must be rejected");
+    assert!(err.to_string().contains("invalid shasta proof carry data"));
+}

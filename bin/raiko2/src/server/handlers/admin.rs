@@ -10,9 +10,9 @@ use tracing::info;
 use super::auth::authorize_acl_feature_with_rate_limit;
 use super::errors::ApiError;
 use crate::config::ServerAclFeature;
-use raiko2_primitives::ProofType;
 use crate::server::sampling::{BallotConfig, ZkAnySampler};
 use crate::server::state::AppState;
+use raiko2_primitives::ProofType;
 
 pub(crate) struct AdminBallotReadAuth;
 pub(crate) struct AdminBallotWriteAuth;

@@ -17,7 +17,10 @@ fn shared_shasta_fixture_adapts_into_stable_remote_prover_v1_packet() {
     assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(payload.proof_carry_data.chain_id, 167_000);
     assert_eq!(payload.witnesses.len(), 192);
-    assert_eq!(payload.proof_carry_data.transition_input.proposal_id, 23_077);
+    assert_eq!(
+        payload.proof_carry_data.transition_input.proposal_id,
+        23_077
+    );
     assert_eq!(payload.witnesses[0].block.header.number, 9_051_439);
     assert_eq!(payload.witnesses[191].block.header.number, 9_051_630);
     assert_eq!(payload.witnesses[0].witness.headers.len(), 256);

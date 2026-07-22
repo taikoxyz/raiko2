@@ -2473,7 +2473,7 @@ async fn e2e_admin_ballot_authenticates_before_body_parse() {
 #[tokio::test]
 async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     let mut config = base_config();
-    set_prover_routes(&mut config, "sp1/local");
+    set_prover_routes(&mut config, "risc0/local,sp1/local");
     config.server.acl.keys = vec![
         acl_key(
             "root-admin",

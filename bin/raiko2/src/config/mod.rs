@@ -197,8 +197,23 @@ mod tests {
         path
     }
 
-    fn parse_config_cli(path: &Path) -> Cli {
-        let _env_lock = lock_test_cli_environment();
+    struct ConfigTestEnvironment {
+        _legacy_prover_guard: EnvVarGuard,
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ConfigTestEnvironment {
+        fn new() -> Self {
+            let env_lock = lock_test_cli_environment();
+            let legacy_prover_guard = EnvVarGuard::remove("RAIKO2_PROVER");
+            Self {
+                _legacy_prover_guard: legacy_prover_guard,
+                _env_lock: env_lock,
+            }
+        }
+    }
+
+    fn parse_config_cli(path: &Path, _environment: &ConfigTestEnvironment) -> Cli {
         Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")])
     }
 
@@ -724,10 +739,9 @@ backend = "memory"
 
     #[test]
     fn configless_load_uses_default_native_route() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
         let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
-        let _legacy_guard = EnvVarGuard::remove("RAIKO2_PROVER");
         let cli = Cli::parse_from(["raiko2"]);
 
         let config = Config::load(&cli).expect("configless load should use default routes");
@@ -755,7 +769,7 @@ backend = "memory"
 
     #[test]
     fn configless_load_accepts_explicit_prover_routes() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
         let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "native/local"]);
@@ -770,7 +784,7 @@ backend = "memory"
 
     #[test]
     fn prover_routes_cli_override_replaces_file_enablement() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(route_override_config());
         let cli = Cli::parse_from([
             "raiko2",
@@ -791,7 +805,7 @@ backend = "memory"
 
     #[test]
     fn prover_routes_env_override_replaces_file_enablement() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(route_override_config());
         let _routes_guard = EnvVarGuard::set("RAIKO2_PROVER_ROUTES", "sgx/remote");
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -807,7 +821,7 @@ backend = "memory"
 
     #[test]
     fn prover_routes_cli_override_rejects_duplicate_entries() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "risc0/local,risc0/network"]);
 
         let err = Config::load(&cli).expect_err("duplicate route override must fail");
@@ -895,7 +909,7 @@ backend = "memory"
 
     #[test]
     fn test_sgx_remote_route_env_overrides_remote_sgx_config() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let config_toml = r#"
 [server]
 host = "0.0.0.0"
@@ -985,9 +999,10 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.prover.risc0.execution_po2, 24);
@@ -1021,9 +1036,10 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.server.host, "127.0.0.1");
@@ -1044,7 +1060,7 @@ backend = "memory"
 
     #[test]
     fn test_cli_sp1_network_route_updates_sp1_execution_selector() {
-        let _env_lock = lock_test_cli_environment();
+        let _environment = ConfigTestEnvironment::new();
         let cli = Cli::parse_from(["raiko2", "--prover-routes", "sp1/network"]);
 
         let config = Config::load(&cli).expect("config load");
@@ -1087,9 +1103,10 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         let pair = config
@@ -1129,8 +1146,8 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let _env_lock = lock_test_cli_environment();
         let cli = Cli::parse_from([
             "raiko2",
             "--config",
@@ -1173,8 +1190,9 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let err = Config::load(&cli).expect_err("unknown config field must fail");
         assert!(
@@ -1213,8 +1231,9 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let err = Config::load(&cli).expect_err("legacy queue retry config must fail");
         assert!(
@@ -1252,9 +1271,10 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
         let config = Config::load(&cli).expect("config load");
         let pair = config
             .rpc
@@ -1292,9 +1312,10 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
         let config = Config::load(&cli).expect("config load");
         let pair = config
             .rpc
@@ -1331,8 +1352,9 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
@@ -1373,8 +1395,9 @@ namespace = "raiko2-test"
 [runtime.store]
 backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = parse_config_cli(&path);
+        let cli = parse_config_cli(&path, &_environment);
 
         let err = Config::load(&cli).expect_err("ambiguous network verify rpc must fail");
         let err_text = format!("{err:#}");

@@ -102,7 +102,6 @@ impl Risc0Prover {
     }
 
     fn execute_real_proof(
-        &self,
         env: ExecutorEnv<'_>,
         elf: &[u8],
         opts: &ProverOpts,
@@ -172,8 +171,7 @@ impl Risc0Prover {
         if self.config.mock {
             Self::execute_mock_proof(env, elf, image_id, stage, input_hash)
         } else {
-            self.execute_real_proof(env, elf, opts, stage)
-                .map(|receipt| (receipt, None))
+            Self::execute_real_proof(env, elf, opts, stage).map(|receipt| (receipt, None))
         }
     }
 

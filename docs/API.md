@@ -1176,10 +1176,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
 - `runtime.store.backend` selects the backend used by both the authoritative state repository and
-  proof-object repository. Use `gcs` with a non-empty `bucket` outside `development`, `local`, or
-  `test`. `memory` is rejected for other environments; switching backends is a drain-and-cutover
-  operator action and there is no automatic failover, merge, writeback, SQLite import, or
-  compatibility migration.
+  proof-object repository. Use `gcs` with a non-empty `bucket` for durable deployments. `memory`
+  is process-local and disposable; it is accepted outside `development`, `local`, or `test` only
+  when `runtime.store.allow_ephemeral = true`. Switching backends is a drain-and-cutover operator
+  action and there is no automatic failover, merge, writeback, SQLite import, or compatibility
+  migration.
 - GCS object names start with `<prefix>/<environment>/<namespace>/`. The service intentionally has no
   distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
   and replacement processes never overlap for one namespace.

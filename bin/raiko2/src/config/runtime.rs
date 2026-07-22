@@ -17,6 +17,8 @@ pub struct RuntimeStoreConfig {
     pub bucket: Option<String>,
     #[serde(default = "default_prefix")]
     pub prefix: String,
+    #[serde(default)]
+    pub allow_ephemeral: bool,
 }
 
 impl Default for RuntimeStoreConfig {
@@ -25,6 +27,7 @@ impl Default for RuntimeStoreConfig {
             backend: RuntimeStoreBackend::Memory,
             bucket: None,
             prefix: default_prefix(),
+            allow_ephemeral: false,
         }
     }
 }
@@ -56,13 +59,18 @@ impl RuntimeConfig {
                 if self.store.bucket.is_some() {
                     bail!("runtime.store.bucket is only valid for backend=gcs");
                 }
-                if !matches!(self.environment.as_str(), "development" | "local" | "test") {
+                if !self.store.allow_ephemeral
+                    && !matches!(self.environment.as_str(), "development" | "local" | "test")
+                {
                     bail!(
-                        "runtime.store.backend=memory is only supported for development, local, or test environments"
+                        "runtime.store.backend=memory requires runtime.store.allow_ephemeral=true outside development, local, or test environments"
                     );
                 }
             }
             RuntimeStoreBackend::Gcs => {
+                if self.store.allow_ephemeral {
+                    bail!("runtime.store.allow_ephemeral is only valid for backend=memory");
+                }
                 if self
                     .store
                     .bucket
@@ -109,6 +117,27 @@ mod tests {
     }
 
     #[test]
+    fn gcs_rejects_ephemeral_opt_in() {
+        let config = RuntimeConfig {
+            store: RuntimeStoreConfig {
+                backend: RuntimeStoreBackend::Gcs,
+                bucket: Some("runtime-state".into()),
+                allow_ephemeral: true,
+                ..RuntimeStoreConfig::default()
+            },
+            ..RuntimeConfig::default()
+        };
+
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("only valid for backend=memory")
+        );
+    }
+
+    #[test]
     fn environment_and_namespace_are_distinct_required_scopes() {
         let config = RuntimeConfig {
             environment: "devnet".into(),
@@ -137,5 +166,21 @@ mod tests {
                 .to_string()
                 .contains("backend=memory")
         );
+    }
+
+    #[test]
+    fn memory_store_is_allowed_for_deployed_environments_with_explicit_opt_in() {
+        let config = RuntimeConfig {
+            environment: "hoodi".into(),
+            namespace: "raiko2-hoodi-ephemeral".into(),
+            store: RuntimeStoreConfig {
+                allow_ephemeral: true,
+                ..RuntimeStoreConfig::default()
+            },
+        };
+
+        config
+            .validate()
+            .expect("explicit ephemeral storage opt-in");
     }
 }

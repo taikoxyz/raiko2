@@ -2,7 +2,7 @@
   "schema_version": 1,
   "backend": "sp1",
   "bench": false,
-  "source_fingerprint": "544282bb3c7e9a1cfd7e35c7ad805516e3b2e2f90fe32a6f392781af91d78f2f",
+  "source_fingerprint": "77720672b66e06625ec6ba1d959d9b3d448910ef5c90c8edaee993dc8c9b5ec0",
   "artifacts": {
     "crates/guests/elf/sp1_opcode_lab.elf": "a7a658eb611dbbdbd84f44f41d88c057b9e268e33979398b0117735ec7ee057c",
     "crates/guests/elf/sp1_opcode_lab.vk.bin": "087e073b27066ff28e88ce77cf3d1eecfdd8a17e66bd084c8ac55f6867bab77f",
@@ -10,8 +10,8 @@
     "crates/guests/elf/sp1_precompile_lab.vk.bin": "90c09722d33b285e03e5358dad89dce410370d93b2f63b8bb895724e0e39a5f7",
     "crates/guests/elf/sp1_revm_opcode_lab.elf": "dc3b9c58f84a284858e199515560b9eed22be7b3621091fae23f2ccfc26f5bea",
     "crates/guests/elf/sp1_revm_opcode_lab.vk.bin": "7663f148e97087871e7d9db307ca3468e4593b92e6c9f2166ec02649d2b5c437",
-    "crates/guests/elf/sp1_shasta_aggregation.elf": "a5973d6feb621c0ebd92e579003947cad842ddf9368138b444a0c1805fd611e4",
-    "crates/guests/elf/sp1_shasta_aggregation.vk.bin": "f51ef8df941e5a90e8ab5f116ed2addf3887fb9a4c86405e0e65776e30fd0857",
+    "crates/guests/elf/sp1_shasta_aggregation.elf": "ede16ecef19debb95944964f4a53fd2e649cf069c4758cf543fa108016702df8",
+    "crates/guests/elf/sp1_shasta_aggregation.vk.bin": "8c62aa8d1247a512b65394a23c50f095cb63c3212c39b963d154777b51d8d965",
     "crates/guests/elf/sp1_shasta_proposal.elf": "05e3abfbbd4a31e540ed4fbe40e92435a65f3983fedf220d860ade2fcb186675",
     "crates/guests/elf/sp1_shasta_proposal.vk.bin": "eadae67541ced854b866b9491ca160f90a5203f76cbeb91dc2404493b2613f5a"
   }

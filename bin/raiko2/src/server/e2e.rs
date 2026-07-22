@@ -970,6 +970,43 @@ async fn e2e_v4_submit_rate_limits_acl_key() {
 }
 
 #[tokio::test]
+async fn e2e_v4_native_proposal_and_aggregate_complete_from_fixture() {
+    let mut config = base_config();
+    set_prover_routes(&mut config, "native/local");
+    let (app, engine) = app_with_observed_native_fixture_engine(config);
+    let payload = json!({
+        "proof_type": "native",
+        "aggregate": true,
+        "proposals": [{
+            "proposal_id": 23077,
+            "l1_inclusion_block_number": 25585003,
+            "l2_block_number_start": 9051439,
+            "l2_block_number_end": 9051630,
+            "last_anchor_block_number": 25584933
+        }]
+    });
+
+    let (status, first) = post_json(&app, "/v4/proof/proposal", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["proof_type"], "native");
+    assert_eq!(first["data"]["status"], "registered");
+    let task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, completed) = post_json(&app, "/v4/proof/proposal", payload).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["data"]["task_id"], task_id);
+    assert_eq!(completed["data"]["status"], "completed", "{completed}");
+    assert!(completed["data"]["proof"].as_str().is_some(), "{completed}");
+
+    let (status, task) = get_json(&app, &format!("/v4/tasks/{task_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["data"]["route"], "native/local");
+    assert_eq!(task["data"]["status"], "completed");
+}
+
+#[tokio::test]
 async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
     let (app, engine) = v4_sp1_acl_app();
     complete_v4_sp1_proposal(&app, &engine, 3).await;
@@ -1683,70 +1720,6 @@ async fn e2e_shasta_reports_unregistered_sgxgeth_pipeline() {
     assert_eq!(res["status"], "error");
     assert_eq!(res["error"], "not_found");
     assert!(report_task_ids(&app).await.is_empty());
-}
-
-#[tokio::test]
-async fn e2e_proposal_proof_native_rejects_non_native_local_server_route() {
-    let mut config = base_config();
-    set_prover_routes(&mut config, "risc0/network");
-    let (app, _engine) = app_with_observed_native_fixture_engine(config);
-
-    let (status, res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 3,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [3],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "native",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["status"], "error");
-    assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(res["message"], "proof_type=native is not supported");
-    assert!(report_task_ids(&app).await.is_empty());
-}
-
-#[tokio::test]
-async fn e2e_proposal_proof_native_registers_when_server_route_is_native_local() {
-    let mut config = base_config();
-    set_prover_routes(&mut config, "native/local");
-    let (app, _engine) = app_with_observed_native_fixture_engine(config);
-
-    let (status, res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 3,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [3],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "native",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered", "{res}");
-    assert!(res["data"].get("task_id").is_none(), "{res}");
-    let id = single_report_task_id(&app).await;
-
-    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
-    assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["route"], "native/local");
 }
 
 #[tokio::test]

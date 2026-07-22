@@ -80,7 +80,7 @@ impl FixtureProvider {
     #[must_use]
     pub(crate) fn from_repo_shared_fixture() -> Self {
         let raw = include_str!(
-            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json"
         );
         let mut input: GuestInput =
             serde_json::from_str(raw).expect("parse shared fixture json as GuestInput");

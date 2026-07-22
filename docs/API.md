@@ -141,7 +141,7 @@ V4 error envelope:
 {
   "status": "error",
   "error": "invalid_proof_type",
-  "message": "proof_type must be one of: risc0, sp1, sgx, sgxgeth"
+  "message": "proof_type must be one of: native, risc0, sp1, sgx, sgxgeth"
 }
 ```
 
@@ -173,7 +173,7 @@ Common proof submission fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | Concrete proof backend. One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | Concrete proof backend. One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Common proof-type validation:
 
@@ -182,6 +182,8 @@ Common proof-type validation:
 - Unknown proof type strings return `invalid_proof_type`.
 - Any valid concrete `proof_type` whose self-contained prover table is disabled returns
   `unsupported_proof_type`.
+- `proof_type=native` always uses `native/local`. It is intended for smoke tests and regression,
+  and returns local execution output rather than a zk or TEE proof.
 
 Proof submission validation:
 
@@ -235,7 +237,7 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 | `aggregate` | boolean | no | Defaults to `false`. When `false`, `proposals` must contain exactly one item. When `true`, the root task includes an aggregation stage for the submitted proposal batch. |
 | `proposals` | array | yes | For `aggregate=false`, exactly one proposal. For `aggregate=true`, one or more contiguous proposals, up to 1,024 items. |
 | `proposals[].proposal_id` | number | yes | Taiko proposal ID. Proposal IDs must be strictly increasing and contiguous. |
@@ -420,7 +422,7 @@ Query fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 
@@ -495,7 +497,7 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 
@@ -573,7 +575,7 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 | `proof_prefix` | string | no | Optional `0x`-prefixed hex prefix matched against cached proof payloads. Maximum length is 130 characters, including `0x`. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
 | `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
 | `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |

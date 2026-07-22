@@ -798,6 +798,7 @@ fn invalidate_proposal_range(req: &wire::InvalidateArtifactsRequest) -> Option<(
 
 fn pipeline_keys_for_invalidate(proof_type: wire::ProofType) -> Vec<PipelineKey> {
     match proof_type {
+        wire::ProofType::Native => vec![PipelineKey::ShastaNative],
         wire::ProofType::Risc0 => vec![PipelineKey::ShastaRisc0, PipelineKey::ShastaRisc0Network],
         wire::ProofType::Sp1 => vec![PipelineKey::ShastaSp1],
         wire::ProofType::Sgx => vec![PipelineKey::ShastaSgx],
@@ -1265,6 +1266,7 @@ impl IntoResponse for ProofRequestError {
 
 const fn batch_proof_type(proof_type: wire::ProofType) -> BatchProofType {
     match proof_type {
+        wire::ProofType::Native => BatchProofType::Native,
         wire::ProofType::Risc0 => BatchProofType::Risc0,
         wire::ProofType::Sp1 => BatchProofType::Sp1,
         wire::ProofType::Sgx => BatchProofType::Sgx,
@@ -1896,6 +1898,42 @@ mod tests {
         assert_eq!(context.proposal_ids, "31..32");
         assert_eq!(context.proposal_count, 2);
         assert!(context.aggregate);
+    }
+
+    #[test]
+    fn native_request_uses_local_native_pipeline() {
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("native-v4-submission"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(StaticPipelineFactory::default()),
+            runtime,
+        );
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Native,
+            aggregate: true,
+            prover: None,
+            proposals: vec![wire::ProposalRequest {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_number_start: 7,
+                l2_block_number_end: 7,
+                last_anchor_block_number: 6,
+            }],
+        };
+
+        let submission = proposal_submission(&state, &req).expect("canonical submission");
+
+        assert!(matches!(
+            submission.requested_proof_type,
+            BatchProofType::Native
+        ));
+        assert_eq!(submission.route.pipeline_key(), PipelineKey::ShastaNative);
+        assert_eq!(submission.route.route.to_string(), "native/local");
+        assert!(submission.aggregate_requested);
     }
 
     #[tokio::test]

@@ -46,6 +46,11 @@ pub struct Config {
 impl Config {
     /// Load configuration from CLI arguments and optional config file.
     pub fn load(cli: &Cli) -> Result<Self> {
+        if cli.config.is_some() && std::env::var_os("RAIKO2_PROVER").is_some() {
+            anyhow::bail!(
+                "RAIKO2_PROVER is no longer supported; use prover routes in the config file or RAIKO2_PROVER_ROUTES"
+            );
+        }
         let mut config = if let Some(config_path) = &cli.config {
             Self::from_file(config_path)?
         } else {

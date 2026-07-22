@@ -39,6 +39,7 @@ Run the real server with an explicit config file:
 ```bash
 cp config.example.toml config.toml
 $EDITOR config.toml
+export RAIKO2_BOUNDLESS_SIGNER_KEY="replace-with-boundless-signer-key"
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
@@ -54,6 +55,25 @@ capabilities before it starts. The prover loads guest ELF files from `RAIKO2_GUE
 otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally with
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
+
+A config file can keep a sensitive string outside version control by using an explicit
+environment reference:
+
+```toml
+[prover.risc0.boundless]
+signer_key = { env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }
+
+[[server.acl.keys]]
+id = "submit"
+key = { env = "RAIKO2_SUBMIT_API_KEY" }
+allow = ["prover.submit"]
+```
+
+Raiko2 resolves only a singleton `{ env = "NAME" }` table before schema validation. Missing,
+non-Unicode, or empty variables fail startup without printing their values; Raiko2 does not perform
+shell expansion or partial-string interpolation. This lets Kubernetes keep the public TOML in a
+ConfigMap and inject only keys through a Secret-backed environment variable. If a file with an
+environment reference has a schema error, Raiko2 also redacts the decoder details.
 
 ## Architecture And Operator Contract
 

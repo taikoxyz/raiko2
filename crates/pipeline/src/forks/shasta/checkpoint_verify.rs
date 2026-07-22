@@ -46,6 +46,16 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
     })?;
 
     let carry = &input.proof_carry_data.transition_input;
+    if first_block_number == 0
+        && (rpc_first.parent_hash() != alloy_primitives::B256::ZERO
+            || carry.parent_block_hash != alloy_primitives::B256::ZERO)
+    {
+        return Err(RaikoError::Preflight(format!(
+            "external L2 RPC genesis parent block hash must be zero: rpc={:#x}, preflight={:#x}",
+            rpc_first.parent_hash(),
+            carry.parent_block_hash
+        )));
+    }
     if rpc_first.parent_hash() != carry.parent_block_hash {
         return Err(RaikoError::Preflight(format!(
             "external L2 RPC parent block hash mismatch at block {first_block_number}: rpc={:#x}, preflight={:#x}",
@@ -55,8 +65,8 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
     }
     // The check above compares an RPC-controlled field against the carry value, which an RPC can
     // simply echo. Bind the start boundary to a header preimage as well: recompute the parent
-    // block's hash from its returned header content and require it to equal the carry value. A
-    // block 0 start has no parent block to fetch, so only the field comparison applies there.
+    // block's hash from its returned header content and require it to equal the carry value. For a
+    // block 0 start, the canonical zero parent hash is enforced above instead.
     if let Some(parent_block_number) = first_block_number.checked_sub(1) {
         let rpc_parent = blocks_by_number.get(&parent_block_number).ok_or_else(|| {
             RaikoError::Preflight(format!(
@@ -334,8 +344,8 @@ mod tests {
 
     #[test]
     fn compare_accepts_genesis_start_without_parent_block() {
-        // A proposal starting at block 0 has no parent block to fetch; only the field comparison
-        // applies and the preimage binding is skipped rather than underflowing the block number.
+        // A proposal starting at block 0 has no parent block to fetch; its canonical zero parent
+        // hash is accepted without underflowing the block number.
         let mut input = sample_guest_input(B256::ZERO);
         input.witnesses[0].block.header.number = 0;
         let blocks = vec![
@@ -345,5 +355,20 @@ mod tests {
 
         compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect("genesis start must not require a parent block");
+    }
+
+    #[test]
+    fn compare_rejects_forged_genesis_parent_hash() {
+        let forged_parent_hash = B256::from([0xAA; 32]);
+        let mut input = sample_guest_input(forged_parent_hash);
+        input.witnesses[0].block.header.number = 0;
+        let blocks = vec![
+            block_from_witness(&input.witnesses[0]),
+            block_from_witness(&input.witnesses[1]),
+        ];
+
+        let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
+            .expect_err("genesis parent hash must be canonical");
+        assert!(err.to_string().contains("genesis parent block hash"));
     }
 }

@@ -167,9 +167,9 @@ emitted. Any future contract path that accepts a commitment without an exact rin
 would silently remove the only anchor and must add a second anchor in the guest (kimi-k3 audit
 L-3 / assumption A4).
 
-### Image-ID Trust Root
-The `isImageTrusted` registrations on the verifier contracts are the root of trust binding on-chain
-proof acceptance to this exact guest code. Registering an image ID for an unverified build
-invalidates every in-guest check. Stale or deprecated image IDs must be unregistered promptly,
-because proofs produced by old guest programs remain acceptable for as long as their IDs stay
-listed (audit assumption A1 and the L-7 image-lifecycle note).
+### Proof-Verifier Trust Roots
+RISC0 binds proof acceptance to block and aggregation image IDs through `isImageTrusted`; SP1 uses
+`isProgramTrusted` for the corresponding program verification keys. SGX instead trusts registered
+instances under the current enclave policy. Stale or deprecated image IDs, program keys, instances,
+or enclave policies must be revoked promptly, because their proofs remain acceptable while that
+authorization stays active (audit assumption A1 and the L-7 image-lifecycle note).

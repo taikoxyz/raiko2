@@ -1167,6 +1167,10 @@ it never appends to the file configuration.
 set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 `prover.sgxgeth.timeout_ms` file values when the lanes need different timeouts.
 
+- A string setting may use the explicit TOML reference `{ env = "NAME" }`. Raiko2 resolves only
+  that singleton table before schema validation; missing, non-Unicode, or empty variables fail
+  startup without printing their values. Shell expansion and partial-string interpolation are not
+  supported. Schema error details are redacted when a file contains an environment reference.
 - `runtime.environment` is the business/deployment boundary. `runtime.namespace` is the immutable
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,

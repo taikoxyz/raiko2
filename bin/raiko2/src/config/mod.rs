@@ -46,7 +46,7 @@ pub struct Config {
 impl Config {
     /// Load configuration from CLI arguments and optional config file.
     pub fn load(cli: &Cli) -> Result<Self> {
-        if cli.config.is_some() && std::env::var_os("RAIKO2_PROVER").is_some() {
+        if std::env::var_os("RAIKO2_PROVER").is_some() {
             anyhow::bail!(
                 "RAIKO2_PROVER is no longer supported; use prover routes in the config file or RAIKO2_PROVER_ROUTES"
             );
@@ -54,11 +54,6 @@ impl Config {
         let mut config = if let Some(config_path) = &cli.config {
             Self::from_file(config_path)?
         } else {
-            if cli.prover_routes.is_none() {
-                anyhow::bail!(
-                    "--prover-routes or RAIKO2_PROVER_ROUTES is required when no config file is provided"
-                );
-            }
             Self::default()
         };
 
@@ -728,16 +723,32 @@ backend = "memory"
     }
 
     #[test]
-    fn configless_load_requires_explicit_prover_routes() {
+    fn configless_load_uses_default_native_route() {
         let _env_lock = lock_test_cli_environment();
         let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
         let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let _legacy_guard = EnvVarGuard::remove("RAIKO2_PROVER");
         let cli = Cli::parse_from(["raiko2"]);
 
-        let err = Config::load(&cli).expect_err("configless load must require explicit routes");
+        let config = Config::load(&cli).expect("configless load should use default routes");
+        assert_eq!(
+            config.prover.iter_routes().collect::<Vec<_>>(),
+            vec![(ProofType::Native, RunnerKind::Local)]
+        );
+    }
+
+    #[test]
+    fn configless_load_rejects_legacy_prover_env_with_routes_override() {
+        let _env_lock = lock_test_cli_environment();
+        let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
+        let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let _legacy_guard = EnvVarGuard::set("RAIKO2_PROVER", "sgx/remote");
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "native/local"]);
+
+        let err = Config::load(&cli).expect_err("legacy prover env must be rejected");
         assert!(
-            err.to_string().contains("--prover-routes")
-                && err.to_string().contains("RAIKO2_PROVER_ROUTES"),
+            err.to_string()
+                .contains("RAIKO2_PROVER is no longer supported"),
             "unexpected error: {err}"
         );
     }

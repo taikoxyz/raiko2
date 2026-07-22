@@ -1074,6 +1074,15 @@ where
         "proof_carry_data_vec must not be empty"
     );
 
+    // On-chain ZK verifiers recompute the public input with the SGX-instance slot pinned to
+    // address(0) (LibPublicInput: for ZK it "must have value address(0)"), so enforce the
+    // requirement in-circuit instead of relying on host convention.
+    ensure!(
+        input.prover_address == Address::ZERO,
+        "ZK aggregation prover_address must be address(0), got {}",
+        input.prover_address
+    );
+
     for (i, block_input) in input.block_inputs.iter().enumerate() {
         verify_proof(i, block_input)
             .with_context(|| format!("proof verification failed at index {i}"))?;
@@ -1998,7 +2007,7 @@ mod tests {
             image_id: [1u32; 8],
             block_inputs: vec![expected_block_input],
             proof_carry_data_vec: vec![proof_carry_data.clone()],
-            prover_address: Address::from([0x44; 20]),
+            prover_address: Address::ZERO,
         };
 
         let image_id_b256 = B256::from([0xAA; 32]);
@@ -2025,6 +2034,25 @@ mod tests {
         let expected = shasta_zk_aggregation_output(image_id_b256, aggregation_hash);
 
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn aggregate_shasta_zk_rejects_nonzero_prover_address() {
+        let proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![hash_shasta_subproof_input(&proof_carry_data)],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::from([0x11; 20]),
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("nonzero prover_address must be rejected (L-1 regression)");
+        assert!(
+            err.to_string()
+                .contains("prover_address must be address(0)"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

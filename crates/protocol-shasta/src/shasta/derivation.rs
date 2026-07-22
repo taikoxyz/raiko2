@@ -101,7 +101,7 @@ pub enum ValidationError {
 /// Errors that can occur while preparing a source manifest from host-provided data.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SourceDerivationError {
-    /// The host supplied payload bytes for a source without on-chain blob hashes.
+    /// The host supplied payload data for a source without on-chain blob hashes.
     #[error("inline manifest payloads are not bound to on-chain data")]
     InlinePayloadUnsupported,
     /// The host omitted raw blob bytes for a blob-backed source.
@@ -244,8 +244,8 @@ pub fn prepare_source_manifest_with_max_blocks(
 ) -> Result<DerivationSourceManifest, SourceDerivationError> {
     let mut manifest = if source.blobSlice.blobHashes.is_empty() {
         // A source without on-chain blob hashes has no payload bound to the proposal: inline
-        // calldata or loose blob bytes would let the host derive from unanchored data, so the
-        // only accepted shape is an empty source, which derives the default manifest.
+        // calldata, loose blob bytes, or orphan KZG metadata would describe unanchored data, so
+        // the only accepted shape is an empty source, which derives the default manifest.
         ensure_no_inline_payload(data_source)?;
         DerivationSourceManifest::default()
     } else if !is_source_offset_valid(source) {
@@ -324,7 +324,11 @@ const fn ensure_no_inline_payload(
     let Some(data_source) = data_source else {
         return Ok(());
     };
-    if data_source.tx_data_from_calldata.is_empty() && data_source.tx_data_from_blob.is_empty() {
+    if data_source.tx_data_from_calldata.is_empty()
+        && data_source.tx_data_from_blob.is_empty()
+        && data_source.blob_commitments.is_empty()
+        && data_source.blob_proofs.is_empty()
+    {
         return Ok(());
     }
     Err(SourceDerivationError::InlinePayloadUnsupported)
@@ -735,6 +739,46 @@ mod tests {
             0,
         )
         .expect_err("loose blob payload must be rejected");
+        assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
+    }
+
+    #[test]
+    fn prepare_source_manifest_rejects_commitments_without_blob_hashes() {
+        let source = DerivationSource::default();
+        let data_source = InputDataSource {
+            blob_commitments: vec![vec![0xCC; 48]],
+            ..Default::default()
+        };
+
+        let err = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect_err("blob commitment without an on-chain hash must be rejected");
+
+        assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
+    }
+
+    #[test]
+    fn prepare_source_manifest_rejects_proofs_without_blob_hashes() {
+        let source = DerivationSource::default();
+        let data_source = InputDataSource {
+            blob_proofs: vec![vec![0xDD; 48]],
+            ..Default::default()
+        };
+
+        let err = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect_err("blob proof without an on-chain hash must be rejected");
+
         assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
     }
 

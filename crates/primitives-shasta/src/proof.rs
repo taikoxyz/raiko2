@@ -64,14 +64,26 @@ pub fn proof_carry_from_proof(proof: &Proof) -> RaikoResult<Option<ProofCarryDat
     decode_proof_carry_data_opt(proof.extra_data.as_ref())
 }
 
-/// Build the canonical `ProofCarryData` for a Shasta proposal guest input.
+/// Build `ProofCarryData` for a Shasta proposal guest input, resolving the verifier address
+/// from the witness-embedded chain spec.
+///
+/// # Trust
+///
+/// The verifier address placed in the journal-bound carry data is resolved from
+/// `GuestInput.witnesses[0].chain_spec`, which is untrusted request data. This is only
+/// appropriate on host-local construction paths (preflight, dev tooling) where the host itself
+/// just resolved that spec. Admission validation MUST NOT trust carry data built this way and
+/// MUST rebuild it via [`build_proof_carry_data_with_chain_spec`] with a host-resolved spec,
+/// as `raiko2-pipeline` does (covered by a regression test there). On-chain verifier contracts
+/// substitute `address(this)` when recomputing the public input, so a forged verifier address
+/// makes verification fail (a liveness issue) rather than breaking soundness.
 ///
 /// # Errors
 ///
 /// Returns an error if the input is missing witnesses, if the verifier address cannot be resolved,
 /// if the witness block number does not fit the protocol checkpoint type, or if the embedded prover
 /// checkpoint does not match the canonical witness checkpoint.
-pub fn build_proof_carry_data(
+pub fn build_proof_carry_data_from_witness_spec(
     input: &GuestInput,
     proof_type: ProofType,
 ) -> RaikoResult<ProofCarryData> {
@@ -181,7 +193,7 @@ pub fn build_proof_carry_data_with_chain_spec(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_proof_carry_data, build_proof_carry_data_with_chain_spec};
+    use super::{build_proof_carry_data_from_witness_spec, build_proof_carry_data_with_chain_spec};
     use crate::GuestInput;
     use alloy_primitives::{Address, B256};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
@@ -209,7 +221,8 @@ mod tests {
         witness.block.header.state_root = B256::from([0x55; 32]);
         input.witnesses.push(witness.clone());
 
-        let carry = build_proof_carry_data(&input, ProofType::Native).expect("build carry data");
+        let carry = build_proof_carry_data_from_witness_spec(&input, ProofType::Native)
+            .expect("build carry data");
 
         assert_eq!(carry.chain_id, 167_000);
         assert_eq!(carry.transition_input.proposal_id, 7);
@@ -259,7 +272,7 @@ mod tests {
         witness.block.header.timestamp = u64::MAX / 2;
         input.witnesses.push(witness);
 
-        let err = build_proof_carry_data(&input, ProofType::Native)
+        let err = build_proof_carry_data_from_witness_spec(&input, ProofType::Native)
             .expect_err("proposal id mismatch should fail");
         assert!(err.to_string().contains("proposal_id mismatch"));
     }
@@ -289,7 +302,8 @@ mod tests {
         input.witnesses.push(witness);
 
         let carry_from_witness =
-            build_proof_carry_data(&input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&input, ProofType::Native)
+                .expect("build carry data");
         let carry_from_trusted =
             build_proof_carry_data_with_chain_spec(&input, ProofType::Native, &trusted_spec)
                 .expect("build carry data from trusted spec");

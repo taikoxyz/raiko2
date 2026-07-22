@@ -337,7 +337,7 @@ mod tests {
     use alloy_sol_types::{SolCall, sol};
     use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
     use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
-    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_protocol_shasta::TaikoManifest;
     sol! {
         #[derive(Debug)]
@@ -428,8 +428,8 @@ mod tests {
         input.taiko.proposal_event.proposal.originBlockNumber =
             l1_header.number.try_into().expect("fits in uint48");
         input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
-        input.proof_carry_data =
-            build_proof_carry_data(&input, ProofType::Risc0).expect("build carry data");
+        input.proof_carry_data = build_proof_carry_data_from_witness_spec(&input, ProofType::Risc0)
+            .expect("build carry data");
         input
     }
 

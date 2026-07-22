@@ -53,6 +53,24 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
             carry.parent_block_hash
         )));
     }
+    // The check above compares an RPC-controlled field against the carry value, which an RPC can
+    // simply echo. Bind the start boundary to a header preimage as well: recompute the parent
+    // block's hash from its returned header content and require it to equal the carry value. A
+    // block 0 start has no parent block to fetch, so only the field comparison applies there.
+    if let Some(parent_block_number) = first_block_number.checked_sub(1) {
+        let rpc_parent = blocks_by_number.get(&parent_block_number).ok_or_else(|| {
+            RaikoError::Preflight(format!(
+                "external L2 RPC did not return proposal parent block {parent_block_number}"
+            ))
+        })?;
+        let rpc_parent_hash = rpc_parent.inner.hash_slow();
+        if rpc_parent_hash != carry.parent_block_hash {
+            return Err(RaikoError::Preflight(format!(
+                "external L2 RPC parent block hash preimage mismatch at block {parent_block_number}: rpc={rpc_parent_hash:#x}, preflight={:#x}",
+                carry.parent_block_hash
+            )));
+        }
+    }
 
     let expected_checkpoint = &carry.checkpoint;
     let expected_block_number = expected_checkpoint.blockNumber.to::<u64>();
@@ -108,12 +126,14 @@ pub async fn verify_guest_input_checkpoint_against_l2_rpc(
         .header
         .number;
 
-    let blocks = fetch_l2_headers(
-        l2_rpc_url,
-        &[first_block_number, last_block_number],
-        rpc_config,
-    )
-    .await
+    let mut boundary_block_numbers = Vec::with_capacity(3);
+    if let Some(parent_block_number) = first_block_number.checked_sub(1) {
+        boundary_block_numbers.push(parent_block_number);
+    }
+    boundary_block_numbers.push(first_block_number);
+    boundary_block_numbers.push(last_block_number);
+    let blocks = fetch_l2_headers(l2_rpc_url, &boundary_block_numbers, rpc_config)
+        .await
     .map_err(|err| {
         RaikoError::Preflight(format!(
             "failed to fetch proposal boundary blocks from external L2 RPC endpoint {l2_rpc_endpoint}: {err}"
@@ -148,6 +168,16 @@ mod tests {
     use raiko2_primitives::{ChainSpec, ExecutionWitness, StatelessInput};
     use raiko2_protocol_shasta::TaikoManifest;
     use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData, TransitionInputData};
+
+    /// Header whose recomputed hash the happy-path fixtures use as the carry parent hash, so the
+    /// start-boundary preimage check can pass against it.
+    fn sample_parent_header() -> Header {
+        Header {
+            number: 9,
+            state_root: B256::from([0x33; 32]),
+            ..Default::default()
+        }
+    }
 
     fn sample_guest_input(first_parent_hash: B256) -> GuestInput {
         let first = StatelessInput {
@@ -202,9 +232,10 @@ mod tests {
 
     #[test]
     fn compare_accepts_matching_boundary_blocks() {
-        let parent_hash = B256::from([0xAA; 32]);
-        let input = sample_guest_input(parent_hash);
+        let parent = sample_parent_header();
+        let input = sample_guest_input(parent.hash_slow());
         let blocks = vec![
+            AlloyHeader::new(parent),
             block_from_witness(&input.witnesses[0]),
             block_from_witness(&input.witnesses[1]),
         ];
@@ -214,13 +245,17 @@ mod tests {
 
     #[test]
     fn compare_rejects_checkpoint_hash_mismatch() {
-        let parent_hash = B256::from([0xAA; 32]);
-        let input = sample_guest_input(parent_hash);
+        let parent = sample_parent_header();
+        let input = sample_guest_input(parent.hash_slow());
         let mut mismatched_last = block_from_witness(&input.witnesses[1]);
         // Forge the header CONTENT (keeping the block number correct) so the recomputed hash
         // diverges from the preflight checkpoint hash.
         mismatched_last.inner.state_root = B256::from([0x99; 32]);
-        let blocks = vec![block_from_witness(&input.witnesses[0]), mismatched_last];
+        let blocks = vec![
+            AlloyHeader::new(parent),
+            block_from_witness(&input.witnesses[0]),
+            mismatched_last,
+        ];
 
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect_err("hash mismatch");
@@ -229,14 +264,18 @@ mod tests {
 
     #[test]
     fn compare_ignores_forged_reported_hash_field() {
-        let parent_hash = B256::from([0xAA; 32]);
-        let input = sample_guest_input(parent_hash);
+        let parent = sample_parent_header();
+        let input = sample_guest_input(parent.hash_slow());
         let mut forged_last = block_from_witness(&input.witnesses[1]);
         // Only the RPC-reported `hash` field is forged; the header content stays correct. The
         // comparison must still pass because the hash is recomputed from the content, i.e. the
         // reported field is not load-bearing.
         forged_last.hash = B256::from([0x99; 32]);
-        let blocks = vec![block_from_witness(&input.witnesses[0]), forged_last];
+        let blocks = vec![
+            AlloyHeader::new(parent),
+            block_from_witness(&input.witnesses[0]),
+            forged_last,
+        ];
 
         compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect("forged reported hash field must not affect the content-derived comparison");
@@ -253,5 +292,58 @@ mod tests {
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect_err("parent mismatch");
         assert!(err.to_string().contains("parent block hash mismatch"));
+    }
+
+    #[test]
+    fn compare_rejects_forged_parent_preimage() {
+        // The carry parent hash has no known preimage; a malicious RPC echoes it in the first
+        // header's parentHash field (which the fixture already does) and returns a synthetic
+        // parent block, but cannot make that parent's content hash to the carry value.
+        let input = sample_guest_input(B256::from([0xAA; 32]));
+        let synthetic_parent = AlloyHeader::new(sample_parent_header());
+        let blocks = vec![
+            synthetic_parent,
+            block_from_witness(&input.witnesses[0]),
+            block_from_witness(&input.witnesses[1]),
+        ];
+
+        let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
+            .expect_err("forged parent preimage");
+        assert!(
+            err.to_string()
+                .contains("parent block hash preimage mismatch")
+        );
+    }
+
+    #[test]
+    fn compare_rejects_missing_parent_block() {
+        let parent = sample_parent_header();
+        let input = sample_guest_input(parent.hash_slow());
+        let blocks = vec![
+            block_from_witness(&input.witnesses[0]),
+            block_from_witness(&input.witnesses[1]),
+        ];
+
+        let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
+            .expect_err("missing parent");
+        assert!(
+            err.to_string()
+                .contains("did not return proposal parent block 9")
+        );
+    }
+
+    #[test]
+    fn compare_accepts_genesis_start_without_parent_block() {
+        // A proposal starting at block 0 has no parent block to fetch; only the field comparison
+        // applies and the preimage binding is skipped rather than underflowing the block number.
+        let mut input = sample_guest_input(B256::ZERO);
+        input.witnesses[0].block.header.number = 0;
+        let blocks = vec![
+            block_from_witness(&input.witnesses[0]),
+            block_from_witness(&input.witnesses[1]),
+        ];
+
+        compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
+            .expect("genesis start must not require a parent block");
     }
 }

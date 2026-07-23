@@ -8397,6 +8397,7 @@ dependencies = [
  "alloy 2.0.1",
  "alloy-consensus 2.0.4",
  "alloy-primitives",
+ "alloy-provider 1.8.3",
  "alloy-signer-local 1.8.3",
  "alloy-sol-types",
  "anyhow",

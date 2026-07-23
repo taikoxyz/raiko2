@@ -155,3 +155,21 @@ never completed, the root may recompute the proof without leaving an untracked o
 ### Proof URI
 The backend-neutral location of a published proof artifact exposed as `proof_uri`. GCS stores use
 `gs://`; memory mode uses `memory://`. `proof_path` is not part of the API.
+
+## Proving Trust Anchors
+
+### Single-Anchor Invariant
+The sole authenticity anchor for a proposal is the on-chain ring-buffer check: `Inbox.prove`
+requires `commitment.lastProposalHash == getProposalHash(id)`, and `hashProposal` covers
+`originBlockHash` and `originBlockNumber`. The guest deliberately performs no receipt or log proof
+of the `Proposed` event; it proves consistency with the supplied event, not that the event was
+emitted. Any future contract path that accepts a commitment without an exact ring-buffer match
+would silently remove the only anchor and must add a second anchor in the guest (kimi-k3 audit
+L-3 / assumption A4).
+
+### Proof-Verifier Trust Roots
+RISC0 binds proof acceptance to block and aggregation image IDs through `isImageTrusted`; SP1 uses
+`isProgramTrusted` for the corresponding program verification keys. SGX instead trusts registered
+instances under the current enclave policy. Stale or deprecated image IDs, program keys, instances,
+or enclave policies must be revoked promptly, because their proofs remain acceptable while that
+authorization stays active (audit assumption A1 and the L-7 image-lifecycle note).

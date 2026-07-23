@@ -10,7 +10,7 @@ use alloy_consensus::{
     transaction::{SignerRecoverable, Transaction as _},
     BlockHeader as _, Header,
 };
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{bail, ensure, Context, Result};
 use raiko2_primitives::{
@@ -129,6 +129,12 @@ fn decode_anchor_checkpoint(
     })
 }
 
+// Proposal authenticity is anchored exclusively by the on-chain ring-buffer check (`Inbox.prove`
+// requires `commitment.lastProposalHash == getProposalHash(id)`, and `hashProposal` covers
+// `originBlockHash`/`originBlockNumber`). The guest deliberately performs no receipt/log proof of
+// the `Proposed` event; it proves consistency with the supplied event, not that the event was
+// emitted. If the contract ever accepts a commitment without an exact ring-buffer match, that
+// change must add a second anchor here.
 fn validate_l1_anchor_linkage(
     guest_input: &GuestInput,
     anchor_checkpoints: &[DecodedAnchorCheckpoint],
@@ -157,6 +163,17 @@ fn validate_l1_anchor_linkage(
     ensure!(
         guest_input.taiko.l1_header.hash_slow() == origin_block_hash,
         "taiko.l1_header hash mismatch"
+    );
+    // The origin block is the parent of the L1 block that carried the proposal, and L1 headers
+    // have strictly increasing timestamps, so an authentic proposal timestamp is always strictly
+    // after the anchored origin timestamp. Bounding it here keeps the fork-rule-driving timestamp
+    // from being falsifiable at or below the anchored origin if the anchor binding is ever
+    // strengthened independently of `hashProposal`.
+    ensure!(
+        proposal.timestamp.to::<u64>() > guest_input.taiko.l1_header.timestamp,
+        "proposal.timestamp {} must be strictly after anchored L1 origin timestamp {}",
+        proposal.timestamp.to::<u64>(),
+        guest_input.taiko.l1_header.timestamp
     );
 
     if bypass_stalled_anchor_linkage {
@@ -1059,6 +1076,15 @@ where
         "proof_carry_data_vec must not be empty"
     );
 
+    // On-chain ZK verifiers recompute the public input with the SGX-instance slot pinned to
+    // address(0) (LibPublicInput: for ZK it "must have value address(0)"), so enforce the
+    // requirement in-circuit instead of relying on host convention.
+    ensure!(
+        input.prover_address == Address::ZERO,
+        "ZK aggregation prover_address must be address(0), got {}",
+        input.prover_address
+    );
+
     // Bounds-validate every carry (uint48 fields, linkage, prover consistency) before hashing:
     // hash_shasta_subproof_input aborts on out-of-range uint48 values, and malformed input must
     // surface as a validation error — not a panic — when this path runs host-side (native prover).
@@ -1669,6 +1695,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_stalled_anchor_when_proposal_timestamp_equals_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        let proposal_timestamp = guest_input
+            .taiko
+            .proposal_event
+            .proposal
+            .timestamp
+            .to::<u64>();
+        let mut origin_header = sample_l1_header(600, B256::from([0x77; 32]));
+        origin_header.timestamp = proposal_timestamp;
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+
+        assert_guest_rejects(
+            guest_input,
+            "must be strictly after anchored L1 origin timestamp",
+        );
+    }
+
+    #[test]
     fn rejects_stalled_anchor_with_mismatched_origin_header() {
         let mut guest_input = guest_input_with_single_block();
         let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
@@ -1987,7 +2037,7 @@ mod tests {
             image_id: [1u32; 8],
             block_inputs: vec![expected_block_input],
             proof_carry_data_vec: vec![proof_carry_data.clone()],
-            prover_address: Address::from([0x44; 20]),
+            prover_address: Address::ZERO,
         };
 
         let image_id_b256 = B256::from([0xAA; 32]);
@@ -2014,6 +2064,25 @@ mod tests {
         let expected = shasta_zk_aggregation_output(image_id_b256, aggregation_hash);
 
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn aggregate_shasta_zk_rejects_nonzero_prover_address() {
+        let proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![hash_shasta_subproof_input(&proof_carry_data)],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::from([0x11; 20]),
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("nonzero prover_address must be rejected (L-1 regression)");
+        assert!(
+            err.to_string()
+                .contains("prover_address must be address(0)"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2407,6 +2476,80 @@ mod tests {
         let last = guest_input.taiko.l1_ancestor_headers.len() - 1;
         guest_input.taiko.l1_ancestor_headers[last].state_root = B256::from([0xCD; 32]);
         assert_guest_rejects(guest_input, "last hash mismatch");
+    }
+
+    // ── Audit L-3: proposal.timestamp bounded by anchored L1 origin ──────────
+
+    /// Re-pin every fixture binding that depends on the origin header after changing its
+    /// timestamp: `taiko.l1_header`, the ancestor-header chain, `originBlockHash`, and the
+    /// anchor-transaction checkpoint embedded in the witness block.
+    fn set_origin_header_timestamp(guest_input: &mut GuestInput, timestamp: u64) {
+        let mut l1_header = guest_input.taiko.l1_header.clone();
+        l1_header.timestamp = timestamp;
+        guest_input.taiko.l1_header = l1_header.clone();
+        guest_input.taiko.l1_ancestor_headers = vec![l1_header.clone()];
+        guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
+            blockNumber: l1_header.number.try_into().expect("fits in uint48"),
+            blockHash: l1_header.hash_slow(),
+            stateRoot: l1_header.state_root,
+        })];
+    }
+
+    #[test]
+    fn linkage_rejects_proposal_timestamp_equal_to_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        assert_eq!(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>(),
+            123
+        );
+        set_origin_header_timestamp(&mut guest_input, 123);
+        assert_guest_rejects(
+            guest_input,
+            "must be strictly after anchored L1 origin timestamp",
+        );
+    }
+
+    #[test]
+    fn linkage_accepts_proposal_timestamp_above_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        assert_eq!(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>(),
+            123
+        );
+        set_origin_header_timestamp(&mut guest_input, 122);
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        prove_identity(&guest_input).expect("proposal timestamp above origin timestamp proves");
+    }
+
+    #[test]
+    fn linkage_rejects_proposal_timestamp_below_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        assert_eq!(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>(),
+            123
+        );
+        set_origin_header_timestamp(&mut guest_input, 124);
+        assert_guest_rejects(
+            guest_input,
+            "must be strictly after anchored L1 origin timestamp",
+        );
     }
 
     // ── Task 7: derivation guards + empty-sources parity ─────────────────────

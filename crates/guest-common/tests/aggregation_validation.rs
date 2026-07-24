@@ -6,7 +6,9 @@ use alloy_primitives::{Signature, TxKind, U256};
 use alloy_sol_types::{sol, SolCall};
 use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs};
-use raiko2_primitives_shasta::{build_proof_carry_data, GuestInput, ShastaZkAggregationGuestInput};
+use raiko2_primitives_shasta::{
+    build_proof_carry_data_from_witness_spec, GuestInput, ShastaZkAggregationGuestInput,
+};
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::TaikoManifest;
 
@@ -101,7 +103,8 @@ fn sample_proof_carry_data() -> raiko2_protocol_shasta::shasta::ProofCarryData {
         l1_header.number.try_into().expect("fits in uint48");
     guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
 
-    build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data")
+    build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+        .expect("build carry data")
 }
 
 #[test]

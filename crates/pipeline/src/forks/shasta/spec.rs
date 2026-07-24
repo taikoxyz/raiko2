@@ -381,7 +381,8 @@ fn build_preflight_guest_input(
         proposal_state_nodes: Vec::new(),
     };
     input.compact_proposal_witness_data();
-    input.proof_carry_data = raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
+    input.proof_carry_data =
+        raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec(&input, proof_type)?;
     Ok(input)
 }
 
@@ -2667,8 +2668,11 @@ mod tests {
         }
         input.witnesses[0].chain_spec = tampered_spec;
         input.proof_carry_data =
-            raiko2_primitives_shasta::build_proof_carry_data(&input, ProofType::Native)
-                .expect("build tampered carry data");
+            raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec(
+                &input,
+                ProofType::Native,
+            )
+            .expect("build tampered carry data");
 
         let err = super::validate_shasta_proof_carry_data_with_chain_spec(
             &input,

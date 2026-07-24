@@ -1127,7 +1127,7 @@ mod tests {
     use raiko2_primitives::{
         ChainSpec, ExecutionWitness, StatelessInput, SupportedChainSpecs, WitnessStateNode,
     };
-    use raiko2_primitives_shasta::build_proof_carry_data;
+    use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::TaikoManifest;
     use risc0_ethereum_trie::Trie;
@@ -1446,7 +1446,8 @@ mod tests {
             l1_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         guest_input
     }
 
@@ -1560,7 +1561,8 @@ mod tests {
         second.block.body.transactions = first.block.body.transactions.clone();
         guest_input.witnesses = vec![first, second];
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1588,7 +1590,8 @@ mod tests {
         second.block.header.parent_hash = guest_input.witnesses[0].block.header.hash_slow();
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1613,7 +1616,8 @@ mod tests {
         second.chain_spec.chain_id = 167_001;
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1651,7 +1655,8 @@ mod tests {
         let mut guest_input = guest_input_with_single_block();
         guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1678,7 +1683,8 @@ mod tests {
             origin_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1729,7 +1735,8 @@ mod tests {
             origin_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1761,7 +1768,8 @@ mod tests {
             },
         );
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1799,7 +1807,8 @@ mod tests {
             stateRoot: B256::from([0xFE; 32]),
         })];
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1849,7 +1858,8 @@ mod tests {
             stateRoot: B256::from([0x99; 32]),
         })];
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1925,7 +1935,8 @@ mod tests {
         })];
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1961,7 +1972,8 @@ mod tests {
         second.block.body.transactions = vec![anchor_tx(&checkpoint)];
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -2172,7 +2184,8 @@ mod tests {
     /// Rebuild carry data after a mutation, then assert the prove path rejects with `expected`.
     fn assert_guest_rejects(mut guest_input: GuestInput, expected: &str) {
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         let err = prove_identity(&guest_input).expect_err("expected guest rejection");
         assert!(
             error_chain_contains(&err, expected),
@@ -2227,7 +2240,8 @@ mod tests {
     fn linkage_guest_control_stalled_chain_proves() {
         let mut guest_input = linked_chain_input();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         prove_identity(&guest_input).expect("known-good stalled chain proves");
     }
 
@@ -2529,7 +2543,8 @@ mod tests {
         );
         set_origin_header_timestamp(&mut guest_input, 122);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         prove_identity(&guest_input).expect("proposal timestamp above origin timestamp proves");
     }
 
@@ -2567,8 +2582,8 @@ mod tests {
         let guest_input = guest_input_with_single_block(); // sources are empty by construction
         assert!(guest_input.taiko.proposal_event.proposal.sources.is_empty());
         let mut gi = guest_input;
-        gi.proof_carry_data =
-            build_proof_carry_data(&gi, ProofType::Native).expect("build carry data");
+        gi.proof_carry_data = build_proof_carry_data_from_witness_spec(&gi, ProofType::Native)
+            .expect("build carry data");
         prove_identity(&gi).expect("empty-sources proposal still proves");
     }
 

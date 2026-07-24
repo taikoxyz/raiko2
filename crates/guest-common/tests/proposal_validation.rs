@@ -11,7 +11,7 @@ use raiko2_primitives::{
     ChainSpec, ExecutionWitness, ProofType, StatelessInput, SupportedChainSpecs, WitnessStateNode,
 };
 use raiko2_primitives_shasta::{
-    build_proof_carry_data, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
+    build_proof_carry_data_from_witness_spec, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
 };
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -197,7 +197,8 @@ fn guest_input_with_single_block() -> GuestInput {
         l1_header.number.try_into().expect("fits in uint48");
     guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
     guest_input.proof_carry_data =
-        build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+            .expect("build carry data");
     guest_input
 }
 
@@ -347,7 +348,8 @@ fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
     second.chain_spec.is_taiko = false;
     guest_input.witnesses.push(second);
     guest_input.proof_carry_data =
-        build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+            .expect("build carry data");
 
     prove_shasta_proposal_with_validator(
         &guest_input,

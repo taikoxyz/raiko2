@@ -8,8 +8,9 @@ use clap::Args;
 use raiko2_pipeline::forks::shasta::validate_shasta_guest_input;
 use raiko2_primitives::ProofType;
 use raiko2_primitives_shasta::{
-    DEFAULT_GUEST_INPUT_ROOT, GuestInput, build_proof_carry_data, guest_input_proposal_path,
-    guest_input_proposals_dir, guest_input_suite_path, parse_guest_input_proposal_id,
+    DEFAULT_GUEST_INPUT_ROOT, GuestInput, build_proof_carry_data_from_witness_spec,
+    guest_input_proposal_path, guest_input_proposals_dir, guest_input_suite_path,
+    parse_guest_input_proposal_id,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -222,7 +223,7 @@ fn replay_proposal(path: &Path, proposal_id: u64) -> ProposalReplayResult {
             .last()
             .map(|witness| witness.block.header.number);
 
-        let native_carry = build_proof_carry_data(&input, ProofType::Native)
+        let native_carry = build_proof_carry_data_from_witness_spec(&input, ProofType::Native)
             .map_err(|err| anyhow::anyhow!("{err}"))?;
         if input.proof_carry_data != ProofCarryData::default()
             && input.proof_carry_data != native_carry

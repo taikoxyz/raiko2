@@ -19,12 +19,16 @@ use alloy_primitives::{B256, Bytes, U256, address, keccak256};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
+    alloy::providers::DynProvider,
     contracts::RequestId,
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
     price_oracle::{Amount, Asset},
-    request_builder::OfferParams,
-    storage::StorageUploaderType,
+    request_builder::{OfferParams, StandardRequestBuilder},
+    storage::{
+        FileStorageDownloader, GcsStorageDownloader, HttpDownloader, S3StorageDownloader,
+        StandardUploader, StorageDownloader, StorageError, StorageUploaderType,
+    },
 };
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, ProofType, ProverConfig};
@@ -121,6 +125,91 @@ fn now_secs() -> u64 {
 }
 
 type BoundlessStatusRegistry = Arc<Mutex<HashMap<RemoteSubmissionId, BoundlessSubmissionState>>>;
+type BoundlessClient = Client<
+    DynProvider,
+    StandardUploader,
+    BoundlessStorageDownloader,
+    StandardRequestBuilder<DynProvider, StandardUploader, BoundlessStorageDownloader>,
+    PrivateKeySigner,
+>;
+
+/// Downloader used by the Boundless requestor client.
+///
+/// Boundless's standard downloader eagerly constructs every feature-enabled backend. In a GCS-only
+/// deployment that includes the S3 feature for compatibility, that starts AWS's credential chain
+/// and probes IMDS even though no `s3://` URL can be produced. Keep those backends opt-in based on
+/// the configured uploader instead.
+#[derive(Clone, Debug)]
+struct BoundlessStorageDownloader {
+    http: HttpDownloader,
+    file: Option<FileStorageDownloader>,
+    gcs: Option<GcsStorageDownloader>,
+    s3: Option<S3StorageDownloader>,
+}
+
+impl BoundlessStorageDownloader {
+    async fn from_uploader_config(config: &StorageUploaderConfig) -> Result<Self, StorageError> {
+        let gcs = if config.storage_uploader == StorageUploaderType::Gcs {
+            match GcsStorageDownloader::new(None).await {
+                Ok(gcs) => Some(gcs),
+                Err(err) => {
+                    tracing::debug!(%err, "GCS downloader not available, gs:// URLs will fail");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let s3 = if should_initialize_s3_downloader(config) {
+            Some(S3StorageDownloader::new(None).await?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            http: HttpDownloader::default(),
+            file: boundless_dev_mode_enabled().then(FileStorageDownloader::new),
+            gcs,
+            s3,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageDownloader for BoundlessStorageDownloader {
+    async fn download_url_with_limit(
+        &self,
+        url: Url,
+        limit: usize,
+    ) -> Result<Vec<u8>, StorageError> {
+        match url.scheme() {
+            "http" | "https" => self.http.download_url_with_limit(url, limit).await,
+            "file" => match &self.file {
+                Some(file) => file.download_url_with_limit(url, limit).await,
+                None => Err(StorageError::UnsupportedScheme(
+                    "file (dev mode only)".to_string(),
+                )),
+            },
+            "gs" => match &self.gcs {
+                Some(gcs) => gcs.download_url_with_limit(url, limit).await,
+                None => Err(StorageError::CredentialsUnavailable {
+                    scheme: "gs".to_string(),
+                }),
+            },
+            "s3" => match &self.s3 {
+                Some(s3) => s3.download_url_with_limit(url, limit).await,
+                None => Err(StorageError::CredentialsUnavailable {
+                    scheme: "s3".to_string(),
+                }),
+            },
+            scheme => Err(StorageError::UnsupportedScheme(scheme.to_string())),
+        }
+    }
+
+    async fn download_url(&self, url: Url) -> Result<Vec<u8>, StorageError> {
+        self.download_url_with_limit(url, usize::MAX).await
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BoundlessSubmissionMetadata {
@@ -1008,7 +1097,7 @@ struct Submission {
 }
 
 struct FreshSubmissionContext<'a> {
-    client: &'a Client,
+    client: &'a BoundlessClient,
     input: &'a Bytes,
     elf: &'a [u8],
     program: &'a UploadedProgram,
@@ -1294,6 +1383,15 @@ fn env_url(name: &str) -> RaikoResult<Option<Url>> {
         .transpose()
 }
 
+fn boundless_dev_mode_enabled() -> bool {
+    env_var("RISC0_DEV_MODE")
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn should_initialize_s3_downloader(config: &StorageUploaderConfig) -> bool {
+    config.storage_uploader == StorageUploaderType::S3
+}
+
 fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
     let mut config = StorageUploaderConfig::default();
     let selected = env_var("BOUNDLESS_STORAGE_UPLOADER")
@@ -1416,7 +1514,7 @@ pub struct BoundlessProver {
     /// One market `Client` (provider + signer + storage uploader) built lazily on first proof and
     /// reused across every subsequent proof, so we don't rebuild the RPC provider and signer per
     /// proof. Lazy (rather than in `new()`) because building it is fallible and async.
-    client: tokio::sync::OnceCell<Client>,
+    client: tokio::sync::OnceCell<BoundlessClient>,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
     /// Balance gate serializing concurrent on-chain submissions that fund this market account so
     /// they deposit against their combined in-flight claim total instead of each reading the same
@@ -1455,7 +1553,7 @@ impl BoundlessProver {
     /// instance for every later proof. The build is wrapped in `retry_external` so a transient
     /// storage/RPC hiccup at first use retries instead of failing the proof; on success the
     /// `Client` is cached and later callers skip the build entirely.
-    async fn client(&self) -> RaikoResult<&Client> {
+    async fn client(&self) -> RaikoResult<&BoundlessClient> {
         // `Box::pin` the init future: building the client (storage uploader + provider + signer) is
         // a large future, and `get_or_try_init` would otherwise inline it into this frame.
         self.client
@@ -1467,7 +1565,7 @@ impl BoundlessProver {
             .await
     }
 
-    async fn create_client(&self) -> RaikoResult<Client> {
+    async fn create_client(&self) -> RaikoResult<BoundlessClient> {
         let rpc_url = Url::parse(&self.config.rpc_url).map_err(|e| {
             RaikoError::InvalidRequestConfig(format!("Invalid boundless rpc_url: {e}"))
         })?;
@@ -1475,6 +1573,13 @@ impl BoundlessProver {
             RaikoError::InvalidRequestConfig(format!("Invalid boundless signer_key: {e}"))
         })?;
         let storage_config = storage_uploader_config_from_env()?;
+        let downloader = BoundlessStorageDownloader::from_uploader_config(&storage_config)
+            .await
+            .map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to configure boundless storage downloader: {e}"
+                ))
+            })?;
         Client::builder()
             .with_rpc_url(rpc_url)
             .with_deployment(Some(self.deployment.clone()))
@@ -1486,6 +1591,7 @@ impl BoundlessProver {
                 ))
             })?
             .with_private_key(signer)
+            .with_downloader(downloader)
             .build()
             .await
             .map_err(|e| {
@@ -1513,7 +1619,7 @@ impl BoundlessProver {
     /// this runs every rebid rung, and hashing the multi-MB ELF on each cache hit was pure waste.
     async fn ensure_uploaded(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         elf_type: ElfType,
         elf: &[u8],
         image_id: Digest,
@@ -1553,7 +1659,7 @@ impl BoundlessProver {
     /// `cycles`, and `journal` explicitly, so no `GuestEnv` is threaded into `build_request`.
     async fn ensure_input_uploaded(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         input: &[u8],
         cache: &mut Option<UploadedInput>,
     ) -> RaikoResult<Url> {
@@ -1611,7 +1717,7 @@ impl BoundlessProver {
     #[allow(clippy::too_many_arguments)]
     async fn build_request(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         elf: &[u8],
         program: &UploadedProgram,
         offer_spec: &BoundlessOfferParams,
@@ -1753,7 +1859,7 @@ impl BoundlessProver {
     #[allow(clippy::too_many_arguments)]
     async fn submit_request_offchain(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         request: &ProofRequest,
         observer: Option<&Arc<dyn ProverProgressObserver>>,
         permit: crate::SubmissionCheckpointPermit,
@@ -1788,7 +1894,7 @@ impl BoundlessProver {
     #[allow(clippy::too_many_arguments)]
     async fn submit_request_onchain(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         request: &ProofRequest,
         observer: Option<&Arc<dyn ProverProgressObserver>>,
         image_ref: &str,
@@ -1964,7 +2070,7 @@ impl BoundlessProver {
 
     async fn poll_until_fulfilled(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         submission: &Submission,
         context: &FulfillmentContext<'_>,
         no_lock_timeout: NoLockTimeout,
@@ -2105,7 +2211,7 @@ impl BoundlessProver {
 
     async fn fetch_boundless_fulfillment_until(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         submission: &Submission,
         context: &FulfillmentContext<'_>,
         deadline: Instant,
@@ -2164,7 +2270,7 @@ impl BoundlessProver {
 
     async fn fetch_boundless_fulfillment(
         &self,
-        client: &Client,
+        client: &BoundlessClient,
         submission: &Submission,
         context: &FulfillmentContext<'_>,
     ) -> Result<Proof, BoundlessAttemptError> {
@@ -2861,14 +2967,15 @@ fn validate_offer_params(
 mod tests {
     use super::{
         BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
-        BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessSubmissionState,
-        BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
-        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, Submission, TimeoutPolicy,
-        boundless_poll_error_statuses, classify_boundless_status,
-        dispatch_offchain_after_checkpoint, escalate_and_cap_market_prices,
-        exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
-        parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
-        quote_batch_mcycles, should_defer_boundless_poll_timeout, should_rebid_unlocked_request,
+        BoundlessStatusSource, BoundlessStorageDownloader, BoundlessSubmissionMetadata,
+        BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
+        DeploymentConfig, DeploymentType, ElfType, JsonRpcError, JsonRpcResponse,
+        MIN_REBID_TIMEOUT_MS, Submission, TimeoutPolicy, boundless_poll_error_statuses,
+        classify_boundless_status, dispatch_offchain_after_checkpoint,
+        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline,
+        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
+        publish_boundless_progress, quote_batch_mcycles, should_defer_boundless_poll_timeout,
+        should_initialize_s3_downloader, should_rebid_unlocked_request,
         storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
         validate_resume_context,
     };
@@ -2876,7 +2983,7 @@ mod tests {
     use alloy_primitives::{U256, address, utils::parse_ether};
     use boundless_market::{
         price_oracle::{Amount, Asset},
-        storage::StorageUploaderType,
+        storage::{StorageUploaderConfig, StorageUploaderType},
     };
     use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmission, RemoteSubmissionId};
@@ -3178,6 +3285,7 @@ mod tests {
         "GCS_URL",
         "GCS_CREDENTIALS_JSON",
         "GCS_PUBLIC_URL",
+        "GOOGLE_APPLICATION_CREDENTIALS",
         "PINATA_JWT",
         "PINATA_API_URL",
         "IPFS_GATEWAY_URL",
@@ -4363,6 +4471,77 @@ mod tests {
         assert_eq!(config.storage_uploader, StorageUploaderType::Gcs);
         assert_eq!(config.gcs_bucket.as_deref(), Some("raiko-boundless"));
         assert_eq!(config.gcs_public_url, Some(false));
+    }
+
+    #[test]
+    fn storage_uploader_config_keeps_s3_available() {
+        let _guard = StorageEnvGuard::new(&[
+            ("BOUNDLESS_STORAGE_UPLOADER", "s3"),
+            ("S3_BUCKET", "raiko-boundless"),
+            ("S3_URL", "http://127.0.0.1:9000"),
+            ("AWS_ACCESS_KEY_ID", "access-key"),
+            ("AWS_SECRET_ACCESS_KEY", "secret-key"),
+            ("AWS_REGION", "us-east-1"),
+            ("S3_PRESIGNED", "true"),
+            ("S3_PUBLIC_URL", "false"),
+        ]);
+
+        let config = storage_uploader_config_from_env().expect("storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::S3);
+        assert_eq!(config.s3_bucket.as_deref(), Some("raiko-boundless"));
+        assert_eq!(config.s3_url.as_deref(), Some("http://127.0.0.1:9000"));
+        assert_eq!(config.aws_access_key_id.as_deref(), Some("access-key"));
+        assert_eq!(config.aws_secret_access_key.as_deref(), Some("secret-key"));
+        assert_eq!(config.aws_region.as_deref(), Some("us-east-1"));
+        assert_eq!(config.s3_presigned, Some(true));
+        assert_eq!(config.s3_public_url, Some(false));
+    }
+
+    #[tokio::test]
+    async fn storage_downloader_skips_s3_when_s3_is_unconfigured() {
+        let downloader =
+            BoundlessStorageDownloader::from_uploader_config(&StorageUploaderConfig::default())
+                .await
+                .expect("unconfigured storage downloader");
+
+        assert!(downloader.s3.is_none());
+    }
+
+    #[tokio::test]
+    async fn storage_downloader_allows_gcs_uploader_without_adc() {
+        let _guard = StorageEnvGuard::new(&[
+            ("BOUNDLESS_STORAGE_UPLOADER", "gcs"),
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "raiko2-test-missing-gcs-credentials.json",
+            ),
+        ]);
+        let config = storage_uploader_config_from_env().expect("GCS storage config");
+
+        let downloader = BoundlessStorageDownloader::from_uploader_config(&config)
+            .await
+            .expect("GCS uploader must not require downloader ADC");
+
+        assert!(downloader.gcs.is_none());
+    }
+
+    #[test]
+    fn storage_downloader_only_initializes_s3_for_s3_uploads() {
+        let mut config = StorageUploaderConfig::default();
+        assert!(!should_initialize_s3_downloader(&config));
+
+        for storage_uploader in [
+            StorageUploaderType::Gcs,
+            StorageUploaderType::Pinata,
+            StorageUploaderType::File,
+        ] {
+            config.storage_uploader = storage_uploader;
+            assert!(!should_initialize_s3_downloader(&config));
+        }
+
+        config.storage_uploader = StorageUploaderType::S3;
+        assert!(should_initialize_s3_downloader(&config));
     }
 
     #[test]

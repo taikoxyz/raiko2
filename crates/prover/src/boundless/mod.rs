@@ -17,9 +17,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use alloy_primitives::{B256, Bytes, U256, address, keccak256};
 use alloy_signer_local::PrivateKeySigner;
-use boundless_alloy_provider::DynProvider;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
+    alloy::providers::DynProvider,
     contracts::RequestId,
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
@@ -150,7 +150,13 @@ struct BoundlessStorageDownloader {
 impl BoundlessStorageDownloader {
     async fn from_uploader_config(config: &StorageUploaderConfig) -> Result<Self, StorageError> {
         let gcs = if config.storage_uploader == StorageUploaderType::Gcs {
-            Some(GcsStorageDownloader::new(None).await?)
+            match GcsStorageDownloader::new(None).await {
+                Ok(gcs) => Some(gcs),
+                Err(err) => {
+                    tracing::debug!(%err, "GCS downloader not available, gs:// URLs will fail");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -3279,6 +3285,7 @@ mod tests {
         "GCS_URL",
         "GCS_CREDENTIALS_JSON",
         "GCS_PUBLIC_URL",
+        "GOOGLE_APPLICATION_CREDENTIALS",
         "PINATA_JWT",
         "PINATA_API_URL",
         "IPFS_GATEWAY_URL",
@@ -4499,6 +4506,24 @@ mod tests {
                 .expect("unconfigured storage downloader");
 
         assert!(downloader.s3.is_none());
+    }
+
+    #[tokio::test]
+    async fn storage_downloader_allows_gcs_uploader_without_adc() {
+        let _guard = StorageEnvGuard::new(&[
+            ("BOUNDLESS_STORAGE_UPLOADER", "gcs"),
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "raiko2-test-missing-gcs-credentials.json",
+            ),
+        ]);
+        let config = storage_uploader_config_from_env().expect("GCS storage config");
+
+        let downloader = BoundlessStorageDownloader::from_uploader_config(&config)
+            .await
+            .expect("GCS uploader must not require downloader ADC");
+
+        assert!(downloader.gcs.is_none());
     }
 
     #[test]

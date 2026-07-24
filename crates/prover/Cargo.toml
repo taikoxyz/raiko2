@@ -31,7 +31,6 @@ thiserror.workspace = true
 alloy.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
-boundless-alloy-provider.workspace = true
 alloy-consensus.workspace = true
 reth-ethereum-primitives.workspace = true
 serde_with.workspace = true

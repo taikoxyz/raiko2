@@ -58,10 +58,11 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     pipelines: Arc<dyn PipelineFactory>,
 ) -> tokio::task::JoinHandle<()> {
     const TERMINAL_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
-    // Proof artifacts must outlive every root that may still read them. Terminal roots are
-    // swept after 7 days, so retiring artifacts that nothing references after 30 days leaves a
-    // 4x safety margin. Byte-level cleanup of content objects and tombstones is delegated to
-    // the GCS bucket lifecycle rules documented in docs/operations.md.
+    // Retirement safety comes from the zero-reference scan plus the owner-guarded invalidation
+    // re-check, not from this number: the TTL only sets how long an unreferenced proof stays
+    // servable for debugging and idempotent re-reads. Retirement deletes the manifest, the
+    // content object, and the record; only `.tombstone` markers are left to the bucket
+    // lifecycle rule documented in docs/operations.md.
     const ARTIFACT_RETENTION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
     tokio::spawn(async move {
         let mut orphan_cursor = None;
@@ -167,8 +168,9 @@ pub(crate) async fn run_runtime_cleanup_pass(
 /// Invalidates retention-expired proof artifacts that no runtime root references anymore.
 ///
 /// Reuses the owner-guarded invalidation flow, so each candidate is re-checked under the
-/// artifact lifecycle lock before its manifest is tombstoned and deleted; content objects are
-/// left to the bucket lifecycle backstop.
+/// artifact lifecycle lock before its manifest is tombstoned and deleted and its content
+/// object is released. Invalidated leftovers are listed on every pass regardless of age, which
+/// is what retries a transiently failed external finalization.
 async fn retire_expired_proof_artifacts(
     runtime: &RuntimeManager,
     ttl_secs: u64,
@@ -832,7 +834,11 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_cleanup_retires_expired_unreferenced_artifacts() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("artifact-retire"))?);
+        let store = Arc::new(raiko2_runtime::test_support::MemoryProofArtifactStore::new(
+            "development".into(),
+            "artifact-retire".into(),
+        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
         let encoded_proposal_ref = encoded_proposal_task_id(21)?;
         let pipeline = PipelineKey::ShastaRisc0;
@@ -922,6 +928,84 @@ mod tests {
                     &descriptor,
                 )
                 .await?
+        );
+        // The content bytes were released together with the manifest: nothing is left for a
+        // direct store-level delete of the same content name.
+        use raiko2_runtime::test_support::ProofObjectStore as _;
+        let key = raiko2_runtime::ProofArtifactKey {
+            network_pair: "taiko_dev/ethereum".into(),
+            pipeline_key: pipeline,
+            route,
+            proof_ref: proof_ref.clone(),
+        };
+        assert_eq!(
+            store.delete_content(&key, &descriptor.content_hash).await?,
+            raiko2_runtime::ProofArtifactDeleteResult::Missing
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_cleanup_sweeps_lingering_invalidated_artifacts_without_ttl_wait() -> Result<()>
+    {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-lingering",
+        ))?);
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        let pipeline = PipelineKey::ShastaRisc0;
+        let route = pipeline.route();
+        let proof_ref = "lingering-invalidated-ref";
+        let descriptor = publish_active_artifact(runtime.as_ref(), proof_ref).await?;
+
+        // Observer-style invalidation marks the record and refreshes its updated_at, so a pure
+        // TTL scan would sit on the leftover for another full retention window.
+        runtime
+            .mark_proof_artifact_descriptor_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                proof_ref,
+                &descriptor,
+            )
+            .await?;
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    route,
+                    proof_ref,
+                )
+                .await?
+                .is_some()
+        );
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let mut artifact_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            3_600,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+            &mut artifact_cursor,
+        )
+        .await?;
+
+        assert_eq!(stats.artifacts_retired, 1);
+        assert_eq!(stats.artifacts_failed, 0);
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    route,
+                    proof_ref,
+                )
+                .await?
+                .is_none()
         );
         Ok(())
     }

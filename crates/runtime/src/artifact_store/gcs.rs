@@ -570,6 +570,15 @@ impl ProofObjectStore for GcsProofArtifactStore {
         self.delete_named(&self.manifest_name(key), Some(current_generation))
             .await
     }
+
+    async fn delete_content(
+        &self,
+        key: &ProofArtifactKey,
+        content_hash: &str,
+    ) -> Result<ProofArtifactDeleteResult> {
+        self.delete_named(&self.content_name(key, content_hash), None)
+            .await
+    }
 }
 
 #[async_trait]

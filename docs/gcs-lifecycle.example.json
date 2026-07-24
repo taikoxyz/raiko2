@@ -5,15 +5,7 @@
       "condition": {
         "age": 30,
         "matchesPrefix": ["<STORE_PREFIX>/<ENVIRONMENT>/<NAMESPACE>/proofs/"],
-        "matchesSuffix": ["manifest.manifest.json"]
-      }
-    },
-    {
-      "action": { "type": "Delete" },
-      "condition": {
-        "age": 37,
-        "matchesPrefix": ["<STORE_PREFIX>/<ENVIRONMENT>/<NAMESPACE>/proofs/"],
-        "matchesSuffix": [".proof.json", ".tombstone"]
+        "matchesSuffix": [".tombstone"]
       }
     }
   ]

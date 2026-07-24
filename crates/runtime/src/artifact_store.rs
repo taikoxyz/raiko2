@@ -138,6 +138,14 @@ pub trait ProofObjectStore: RuntimeStoreScope {
         key: &ProofArtifactKey,
         descriptor: &ProofArtifactDescriptor,
     ) -> Result<ProofArtifactDeleteResult>;
+    /// Deletes one immutable content object. Content names are hash-addressed, so this needs no
+    /// generation precondition — but callers must only release content whose manifest is already
+    /// committed gone for this exact descriptor, under the artifact lifecycle lock.
+    async fn delete_content(
+        &self,
+        key: &ProofArtifactKey,
+        content_hash: &str,
+    ) -> Result<ProofArtifactDeleteResult>;
 }
 
 #[async_trait]
@@ -411,6 +419,28 @@ impl ProofObjectStore for MemoryProofArtifactStore {
         );
         inner.manifests.remove(key);
         Ok(ProofArtifactDeleteResult::Removed)
+    }
+
+    async fn delete_content(
+        &self,
+        key: &ProofArtifactKey,
+        content_hash: &str,
+    ) -> Result<ProofArtifactDeleteResult> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        Ok(
+            if inner
+                .contents
+                .remove(&(key.clone(), content_hash.to_string()))
+                .is_some()
+            {
+                ProofArtifactDeleteResult::Removed
+            } else {
+                ProofArtifactDeleteResult::Missing
+            },
+        )
     }
 }
 

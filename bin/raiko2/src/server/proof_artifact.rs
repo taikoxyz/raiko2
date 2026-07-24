@@ -225,6 +225,14 @@ mod tests {
         ) -> Result<ProofArtifactDeleteResult> {
             self.inner.delete_exact(key, descriptor).await
         }
+
+        async fn delete_content(
+            &self,
+            key: &ProofArtifactKey,
+            content_hash: &str,
+        ) -> Result<ProofArtifactDeleteResult> {
+            self.inner.delete_content(key, content_hash).await
+        }
     }
 
     #[async_trait]

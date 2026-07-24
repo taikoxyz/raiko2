@@ -1765,6 +1765,14 @@ mod tests {
         ) -> anyhow::Result<raiko2_runtime::ProofArtifactDeleteResult> {
             Ok(raiko2_runtime::ProofArtifactDeleteResult::Missing)
         }
+
+        async fn delete_content(
+            &self,
+            _key: &ProofArtifactKey,
+            _content_hash: &str,
+        ) -> anyhow::Result<raiko2_runtime::ProofArtifactDeleteResult> {
+            Ok(raiko2_runtime::ProofArtifactDeleteResult::Missing)
+        }
     }
 
     #[async_trait::async_trait]

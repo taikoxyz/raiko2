@@ -2012,6 +2012,20 @@ impl RuntimeManager {
                 lifecycle: ProofArtifactLifecycle::Invalidated,
             })
             .await?;
+        // Release the content bytes only after the manifest commit for this exact descriptor,
+        // while still holding the artifact lifecycle lock that serializes publishers. A failure
+        // here leaves the record `Invalidated`, and the retention scan re-lists invalidated
+        // leftovers every pass, so the release is retried until it sticks.
+        {
+            let _commit = self.begin_object_commit()?;
+            self.store
+                .delete_content(
+                    &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
+                    &descriptor.content_hash,
+                )
+                .await
+                .context("failed to release retired proof artifact content")?;
+        }
         self.remove_proof_artifact_if_descriptor(
             network_pair,
             pipeline_key,
@@ -2657,6 +2671,10 @@ impl RuntimeManager {
         };
         let _commit = self.begin_object_commit()?;
         self.store.delete_exact(&key, &descriptor).await?;
+        self.store
+            .delete_content(&key, &descriptor.content_hash)
+            .await
+            .context("failed to release removed pending publication content")?;
         Ok(true)
     }
 
@@ -2833,14 +2851,21 @@ impl RuntimeManager {
         Ok(tasks)
     }
 
-    /// Lists retention-expired proof artifacts that no runtime task references anymore.
+    /// Lists proof artifacts that are eligible for retirement and that no runtime task
+    /// references anymore.
+    ///
+    /// `Active` records become eligible once they are `ttl_secs` past their last registration
+    /// (`updated_at` is refreshed on re-activation, so this is an absolute-age bound only for
+    /// artifacts that were never re-registered). `Invalidated` leftovers are eligible
+    /// immediately — they are already committed to deletion, and re-listing them every pass is
+    /// what retries transiently failed external finalization. `Pending` registrations belong to
+    /// the pending-publication flow and are never listed.
     ///
     /// The scan is stricter than the invalidation guard on purpose: a record is a candidate only
     /// when zero tasks reference its identity, so artifacts held by lingering `Failed` or
     /// `Cancelled` roots stay retained until those roots are swept first. The authoritative
     /// live-owner re-check still happens inside
-    /// [`Self::invalidate_proof_artifact_descriptor_if_unowned`]. `Pending` registrations belong
-    /// to the pending-publication flow and are never listed here.
+    /// [`Self::invalidate_proof_artifact_descriptor_if_unowned`].
     pub async fn list_expired_unreferenced_proof_artifacts(
         &self,
         now: i64,
@@ -2853,25 +2878,35 @@ impl RuntimeManager {
         }
         let cutoff = now.saturating_sub(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
         let state = self.state.read().await;
+        let referenced = state
+            .tasks
+            .values()
+            .flat_map(|task| {
+                task.artifact_refs.iter().map(|proof_ref| {
+                    artifact_record_key(
+                        &task.network_pair,
+                        task.pipeline_key,
+                        task.route,
+                        proof_ref,
+                    )
+                })
+            })
+            .collect::<HashSet<_>>();
         let mut candidates = state
             .artifacts
             .iter()
             .filter(|(key, record)| {
-                record.lifecycle != ProofArtifactLifecycle::Pending
-                    && record.updated_at <= cutoff
+                let eligible = match record.lifecycle {
+                    ProofArtifactLifecycle::Pending => false,
+                    ProofArtifactLifecycle::Active => record.updated_at <= cutoff,
+                    ProofArtifactLifecycle::Invalidated => true,
+                };
+                eligible
                     && after.is_none_or(|cursor| {
                         (record.updated_at, key.as_str())
                             > (cursor.updated_at, cursor.artifact_key.as_str())
                     })
-                    && !state.tasks.values().any(|task| {
-                        task_matches_artifact_identity(
-                            task,
-                            &record.network_pair,
-                            record.pipeline_key,
-                            record.route,
-                            &record.proof_ref,
-                        )
-                    })
+                    && !referenced.contains(key.as_str())
             })
             .map(|(key, record)| (key.clone(), record.clone()))
             .collect::<Vec<_>>();
@@ -4199,6 +4234,14 @@ mod tests {
                 self.allow_artifact_delete_return.notified().await;
             }
             Ok(result)
+        }
+
+        async fn delete_content(
+            &self,
+            key: &ProofArtifactKey,
+            content_hash: &str,
+        ) -> Result<ProofArtifactDeleteResult> {
+            self.inner.delete_content(key, content_hash).await
         }
     }
 
@@ -6495,6 +6538,22 @@ mod tests {
             )
             .await?;
 
+        // A freshly invalidated leftover must be listed without waiting for the TTL: it is
+        // already committed to deletion, and re-listing it every pass is what retries a
+        // transiently failed external finalization.
+        let fresh_invalidated_descriptor =
+            publish_and_activate_artifact(&runtime, "l1-l2", pipeline, "proposal-invalidated-new")
+                .await?;
+        runtime
+            .mark_proof_artifact_descriptor_invalidated(
+                "l1-l2",
+                pipeline,
+                route,
+                "proposal-invalidated-new",
+                &fresh_invalidated_descriptor,
+            )
+            .await?;
+
         let (records, cursor) = runtime
             .list_expired_unreferenced_proof_artifacts(now, ttl_secs, None, 16)
             .await?;
@@ -6503,7 +6562,14 @@ mod tests {
             .map(|record| record.proof_ref.as_str())
             .collect::<Vec<_>>();
         refs.sort_unstable();
-        assert_eq!(refs, vec!["proposal-invalidated", "proposal-old"]);
+        assert_eq!(
+            refs,
+            vec![
+                "proposal-invalidated",
+                "proposal-invalidated-new",
+                "proposal-old"
+            ]
+        );
         assert!(cursor.is_some());
 
         let (disabled, disabled_cursor) = runtime
@@ -6516,6 +6582,94 @@ mod tests {
             .await?;
         assert!(unlimited.is_empty());
         assert!(unlimited_cursor.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retirement_releases_manifest_and_content_objects() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "artifact-retire-content".into(),
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-retire";
+        let descriptor =
+            publish_and_activate_artifact(&runtime, "l1-l2", pipeline, proof_ref).await?;
+
+        assert_eq!(
+            runtime
+                .invalidate_proof_artifact_descriptor_if_unowned(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &descriptor,
+                )
+                .await?,
+            ProofArtifactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+        );
+
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        // The content object must have been released together with the manifest: a direct
+        // store-level delete of the same content name finds nothing left to remove.
+        let key = ProofArtifactKey {
+            network_pair: "l1-l2".into(),
+            pipeline_key: pipeline,
+            route,
+            proof_ref: proof_ref.into(),
+        };
+        assert_eq!(
+            store.delete_content(&key, &descriptor.content_hash).await?,
+            ProofArtifactDeleteResult::Missing
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_publication_invalidation_releases_pending_content() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "pending-retire-content".into(),
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let proof_ref = "proposal-pending-release";
+        runtime
+            .upsert_pending_proof_publication("l1-l2", pipeline, route, proof_ref, b"proof")
+            .await?;
+
+        assert!(
+            runtime
+                .invalidate_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+        );
+
+        let pending_key = ProofArtifactKey {
+            network_pair: "l1-l2".into(),
+            pipeline_key: pipeline,
+            route,
+            proof_ref: format!("__pending__:{proof_ref}"),
+        };
+        assert_eq!(
+            store
+                .delete_content(&pending_key, &artifact_store::content_hash(b"proof"))
+                .await?,
+            ProofArtifactDeleteResult::Missing
+        );
         Ok(())
     }
 

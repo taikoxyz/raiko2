@@ -459,10 +459,11 @@ fn object_layout_is_pinned_for_bucket_lifecycle_rules() -> Result<()> {
     let tombstone = store.invalidation_name(&key, Some(7), "abc123");
     let runtime_state = store.runtime_state_name();
 
-    // docs/operations.md ships GCS bucket lifecycle rules keyed on this exact layout: every
-    // proof object lives under `<prefix>/<environment>/<namespace>/proofs/` and is classified
-    // by suffix, while the live runtime state stays outside the `proofs/` subtree. Renaming
-    // any of these paths requires updating the documented rules in the same change.
+    // docs/operations.md keys the tombstone bucket lifecycle rule and the in-app deletion
+    // paths on this exact layout: every proof object lives under
+    // `<prefix>/<environment>/<namespace>/proofs/` and is classified by suffix, while the live
+    // runtime state stays outside the `proofs/` subtree. Renaming any of these paths requires
+    // updating the documented rules in the same change.
     let scope = "runtime/test/gcs-seam";
     for name in [&manifest, &content, &tombstone] {
         assert!(

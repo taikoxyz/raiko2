@@ -67,9 +67,9 @@ backend = "memory"
 # allow_ephemeral = true
 prefix = "raiko2/runtime/v1"
 # bucket = "my-raiko2-runtime"
-# GCS deployments should attach the bucket lifecycle rules from docs/gcs-lifecycle.example.json
-# (see "Runtime Store Artifact Retention" in docs/operations.md) as the byte-level backstop for
-# retired proof artifacts.
+# GCS deployments should attach the tombstone lifecycle rule from docs/gcs-lifecycle.example.json
+# (see "Runtime Store Artifact Retention" in docs/operations.md). All other retention is
+# application-driven; do not add creation-age deletion rules for manifests or content objects.
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
 # Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.

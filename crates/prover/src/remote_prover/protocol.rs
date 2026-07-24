@@ -3,7 +3,9 @@ use alloy_primitives::map::AddressMap;
 use raiko2_primitives::{
     ChainSpec, ExecutionWitness, Proof, StatelessInput, WitnessHeader, WitnessStateNode,
 };
-use raiko2_primitives_shasta::{GuestInput, proof_carry_from_proof};
+use raiko2_primitives_shasta::{
+    GuestInput, instance::build_shasta_commitment_from_proof_carry_data_vec, proof_carry_from_proof,
+};
 use raiko2_protocol_shasta::TaikoManifest;
 use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
 use reth_ethereum_primitives::Block;
@@ -112,6 +114,12 @@ impl Raiko2AggregateProof {
                 "remote aggregation proof missing shasta carry data".to_string(),
             )
         })?;
+        build_shasta_commitment_from_proof_carry_data_vec(std::slice::from_ref(&proof_carry_data))
+            .ok_or_else(|| {
+                raiko2_primitives::RaikoError::InvalidRequestConfig(
+                    "invalid shasta proof carry data".to_string(),
+                )
+            })?;
         let expected_input = hash_shasta_subproof_input(&proof_carry_data);
         if let Some(input) = proof.input
             && input != expected_input

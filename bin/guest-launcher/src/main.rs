@@ -12,7 +12,7 @@ use raiko2_primitives::{
     AggregationGuestInput, OpcodeLabInput, PrecompileLabInput, Proof, ProofType as RaikoProofType,
 };
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_primitives_shasta::build_proof_carry_data;
+use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
@@ -316,6 +316,7 @@ impl Args {
             proposal_cycle_limit: None,
             aggregation_cycle_limit: None,
             timeout_secs: self.sp1_timeout_secs,
+            network_request_max_attempts: 3,
             max_price_per_pgu: None,
             auction_timeout_secs: None,
             rpc_url: None,
@@ -533,7 +534,8 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
     let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut input: GuestInput = serde_json::from_str(&contents).context("parse input JSON")?;
     if !input.witnesses.is_empty() && input.proof_carry_data == ProofCarryData::default() {
-        input.proof_carry_data = build_proof_carry_data(&input, proof_type.as_raiko())?;
+        input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&input, proof_type.as_raiko())?;
     }
     Ok(input)
 }
@@ -1256,7 +1258,7 @@ mod tests {
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
     use raiko2_primitives::{ProofType as RaikoProofType, SupportedChainSpecs};
-    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use std::fs;
 
@@ -1551,7 +1553,8 @@ mod tests {
         witness.block.header.state_root = B256::from([0x55; 32]);
         input.witnesses.push(witness);
         input.proof_carry_data =
-            build_proof_carry_data(&input, RaikoProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&input, RaikoProofType::Native)
+                .expect("build carry data");
         input
     }
 

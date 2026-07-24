@@ -2,6 +2,11 @@
 
 ## Glossary
 
+Canonical definitions for environment, runtime namespace, the global runtime fence, GCS generation,
+task and artifact identity, publication, runtime storage, and proof URIs live in
+[CONCEPTS.md](CONCEPTS.md). This file records only request-domain terminology and contextual usage
+rules.
+
 - **Proposal proof**: A proof for one Taiko proposal. Public prover interfaces should use this term
   instead of Shasta-specific `batch` wording. The covered L2 blocks are contiguous; the HTTP prover
   v4 request carries an inclusive `l2_block_number_start`/`l2_block_number_end` range instead of

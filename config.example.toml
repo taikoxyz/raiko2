@@ -6,6 +6,11 @@
 #   RAIKO2_CONFIG=./config.toml raiko2
 #
 # CLI flags and explicitly supported environment variables override values from this file.
+#
+# String settings can reference a process environment variable with a singleton
+# inline table, for example `{ env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }`. The
+# reference is resolved before schema validation; it does not support shell
+# expansion or partial string interpolation.
 
 [server]
 host = "0.0.0.0"
@@ -15,9 +20,9 @@ port = 8080
 # ACL key id and key values must be unique.
 # [server.acl]
 # keys = [
-#   { id = "admin", key = "change-me", allow = ["admin"] },
+#   { id = "admin", key = { env = "RAIKO2_ADMIN_API_KEY" }, allow = ["admin"] },
 #   # rate_limit_per_minute defaults to 200 when omitted.
-#   { id = "submit", key = "submit-key", allow = ["prover.submit"], rate_limit_per_minute = 600 },
+#   { id = "submit", key = { env = "RAIKO2_SUBMIT_API_KEY" }, allow = ["prover.submit"], rate_limit_per_minute = 600 },
 # ]
 
 [rpc]
@@ -52,31 +57,32 @@ initial_backoff_ms = 1000
 compute_units_per_second = 1000
 
 [runtime]
-root = "./data/runtime"
-inactive_ttl_secs = 7200
+environment = "development"
+namespace = "raiko2-development"
+
+[runtime.store]
+# Memory is process-local and disposable. Use GCS for durable deployments.
+backend = "memory"
+# Set to true when intentionally using memory outside development, local, or test environments.
+# allow_ephemeral = true
+prefix = "raiko2/runtime/v1"
+# bucket = "my-raiko2-runtime"
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
 # Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.
 # [preflight.verify_checkpoint_l2_rpcs]
 # taiko_hoodi = "https://hoodi-l2-rpc.example.com"
 
-[prover]
-# Server default route.
-# Supported routes:
-# Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
-# Internal regression environments may use proof_type = "native" with route native/local.
-# Routes supported by server config:
-#   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
-guest_system = "risc0"
-runner = "local"
-
 [prover.risc0]
-bonsai = true
+# RISC0 owns its route selection. Boundless settings below are used only for runner = "network".
+enabled = true
+runner = "network"
 snark = true
 mock = false
 execution_po2 = 20
 
 [prover.sp1]
+enabled = true
 mode = "prove"
 prover = "network"
 recursion = "plonk"
@@ -89,15 +95,33 @@ cycle_limit = 1000000000000
 # proposal_cycle_limit = 1000000000000
 # aggregation_cycle_limit = 1000000000000
 timeout_secs = 7200
+# Operator-owned ceiling; request-scoped overrides may lower but never raise this value.
+network_request_max_attempts = 3
 # rpc_url = "https://rpc.production.succinct.xyz"
 
-[prover.boundless]
+[prover.native]
+enabled = true
+
+[prover.sgx]
+enabled = true
+# Point this at the dedicated SGX runtime (`raiko2-sgx-prover`). That runtime may run in
+# `tee` or `native` mode.
+base_url = "http://127.0.0.1:8081"
+timeout_ms = 300000
+
+[prover.sgxgeth]
+enabled = true
+# Point this at the external geth-backed remote SGX server.
+base_url = "http://127.0.0.1:8090"
+timeout_ms = 300000
+
+[prover.risc0.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`
 # can replace `batch_quote`/`aggregation_quote`, runtime timeout/rebid fields,
 # and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
-signer_key = "0xYOUR_PRIVATE_KEY"
+signer_key = { env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }
 poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.
@@ -123,36 +147,28 @@ rebid_max_attempts = 4
 # probability = 0.05
 # per_day = 8
 
-[prover.remote_sgx]
-# For `proof_type=sgx`, point this at the dedicated SGX runtime (`raiko2-sgx-prover`). That
-# runtime may run in `tee` or `native` mode.
-base_url = "http://127.0.0.1:8081"
-# For `proof_type=sgxgeth`, point this at the external geth-backed remote SGX server.
-sgxgeth_base_url = "http://127.0.0.1:8090"
-timeout_ms = 300000
-
-[prover.boundless.deployment]
+[prover.risc0.boundless.deployment]
 # Supported deployments: base, sepolia, taiko.
 # Use taiko when submitting Boundless requests to the Taiko mainnet market.
 deployment_type = "base"
 
-[prover.boundless.deployment.overrides]
+[prover.risc0.boundless.deployment.overrides]
 order_stream_url = "https://base-mainnet.boundless.network"
 
 # Quote sizing per stage. Default `raiko_agent` rounds evaluated cycles up (batch: 1000-step,
 # 2000 floor; aggregation: 100-step, 200 floor). Use `evaluated` for the honest cycle count,
 # or `fixed` to pin the quote. A fixed quote underprices large proposals and overprices small ones.
-[prover.boundless.batch_quote]
+[prover.risc0.boundless.batch_quote]
 strategy = "raiko_agent"
 # strategy = "fixed"
 # mcycles = 6000
 
-[prover.boundless.aggregation_quote]
+[prover.risc0.boundless.aggregation_quote]
 strategy = "raiko_agent"
 # strategy = "fixed"
 # mcycles = 200
 
-[prover.boundless.offer_params.batch]
+[prover.risc0.boundless.offer_params.batch]
 pricing_mode = "market"
 # Optional in market mode: clamp autopriced (and rebid-escalated) offers to this
 # per-mcycle safety cap instead of failing them. Must be positive when set.
@@ -171,7 +187,7 @@ lock_collateral = "20"
 # Without it, rebids escalate max_price by rebid_price_step_bps (compounded) up to rebid_max_attempts.
 # absolute_max_price_per_mcycle = "0.0000024"
 
-[prover.boundless.offer_params.batch.timeouts]
+[prover.risc0.boundless.offer_params.batch.timeouts]
 # Derive lock/request timeouts from the quoted mcycles (per-mcycle, ms). In market mode they are
 # scaled by dynamic_pricing_timeout_modifier; a fixed policy is not scaled.
 mode = "per_mcycle"
@@ -183,14 +199,14 @@ dynamic_pricing_timeout_modifier = 2.0
 # lock_timeout_secs = 600
 # timeout_secs = 3600
 
-[prover.boundless.offer_params.aggregation]
+[prover.risc0.boundless.offer_params.aggregation]
 pricing_mode = "market"
 ramp_up_start_sec = 20
 # Ramp-up duration in seconds (auction price climbs from min to max over this window).
 ramp_up_period_sec = 120
 lock_collateral = "20"
 
-[prover.boundless.offer_params.aggregation.timeouts]
+[prover.risc0.boundless.offer_params.aggregation.timeouts]
 mode = "per_mcycle"
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
@@ -203,8 +219,5 @@ timeout_ms_per_mcycle = 6000
 # absolute_max_price_per_mcycle = "0.0000032"
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 6
 maintenance_interval_ms = 200
-# redis_url = "redis://localhost:6379/"

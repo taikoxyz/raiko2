@@ -11,5 +11,7 @@ mod ready;
 pub(crate) use admin::{get_ballot, set_ballot};
 pub use health::health;
 pub use metrics::metrics;
-pub(crate) use proof::{v3, v4};
+pub(crate) use proof::{
+    recover_pending_runtime_tasks, v3, v4, validate_persisted_runtime_task_metadata,
+};
 pub use ready::ready;

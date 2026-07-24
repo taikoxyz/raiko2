@@ -1,12 +1,11 @@
 use alloy_primitives::keccak256;
 use raiko2_engine::ProverTaskConfig;
-use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
+use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::sp1_config::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 
 use super::super::errors::ApiError;
 use super::proof_types::{BatchProofType, BatchShastaRequest};
-use crate::config::GuestSystem;
 use crate::server::request_identity::RequestFingerprint;
 use crate::server::state::AppState;
 
@@ -14,19 +13,13 @@ use crate::server::state::AppState;
 pub(super) struct CanonicalProofRoute {
     pub(super) route: PipelineRoute,
     pipeline_key: PipelineKey,
-    proof_type: ProofType,
 }
 
 impl CanonicalProofRoute {
-    pub(super) const fn new(
-        route: PipelineRoute,
-        pipeline_key: PipelineKey,
-        proof_type: ProofType,
-    ) -> Self {
+    pub(super) const fn new(route: PipelineRoute, pipeline_key: PipelineKey) -> Self {
         Self {
             route,
             pipeline_key,
-            proof_type,
         }
     }
 
@@ -35,7 +28,7 @@ impl CanonicalProofRoute {
     }
 
     pub(super) const fn proof_type(self) -> ProofType {
-        self.proof_type
+        self.pipeline_key.proof_type()
     }
 }
 
@@ -54,124 +47,89 @@ pub(super) fn route_for_proof_type(
     prover_config: &ProverTaskConfig,
     sp1_context: Sp1RequestContext,
 ) -> Result<CanonicalProofRoute, ApiError> {
-    validate_hosted_proof_type(state.config.prover.route(), proof_type)?;
-
-    let route = match proof_type {
-        BatchProofType::Sp1 => PipelineRoute::new(
-            GuestSystem::Sp1,
-            sp1_runner_for_request(state, prover_config, sp1_context)?,
-        ),
-        BatchProofType::Risc0 => {
-            PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
-        }
-        BatchProofType::Sgx | BatchProofType::SgxGeth => {
-            PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
-        }
-        BatchProofType::Native => native_route_for_request(state)?,
-        BatchProofType::Boundless => {
-            return Err(ApiError::bad_request(format!(
-                "proof_type={} is not supported",
-                proof_type.as_str()
-            )));
-        }
+    let concrete_proof_type = match proof_type {
+        BatchProofType::Sp1 => ProofType::Sp1,
+        BatchProofType::Risc0 => ProofType::Risc0,
+        BatchProofType::Native => ProofType::Native,
+        BatchProofType::Sgx => ProofType::Sgx,
+        BatchProofType::SgxGeth => ProofType::SgxGeth,
+        BatchProofType::Boundless => return Err(unsupported_proof_type(proof_type)),
         BatchProofType::ZkAny => {
             return Err(ApiError::bad_request(
                 "proof_type=zk_any must be resolved before route selection",
             ));
         }
     };
+    let runner = state
+        .config
+        .prover
+        .runner(concrete_proof_type)
+        .ok_or_else(|| unsupported_proof_type(proof_type))?;
 
-    let pipeline_key = match proof_type {
-        BatchProofType::Sp1 => PipelineKey::ShastaSp1,
-        BatchProofType::Risc0 => match route {
-            PipelineRoute {
-                guest_system: GuestSystem::Risc0,
-                runner: RunnerKind::Local,
-            } => PipelineKey::ShastaRisc0,
-            PipelineRoute {
-                guest_system: GuestSystem::Risc0,
-                runner: RunnerKind::Network,
-            } => PipelineKey::ShastaRisc0Network,
-            _ => return Err(ApiError::bad_request("unsupported risc0 proving route")),
-        },
-        BatchProofType::Native => PipelineKey::ShastaNative,
-        BatchProofType::Sgx => PipelineKey::ShastaSgx,
-        BatchProofType::SgxGeth => PipelineKey::ShastaSgxGeth,
-        BatchProofType::Boundless | BatchProofType::ZkAny => {
-            unreachable!("unsupported proof type is filtered before canonical route build")
+    if matches!(proof_type, BatchProofType::Sp1) {
+        validate_sp1_runner_for_request(state, prover_config, sp1_context, runner)?;
+    }
+
+    let (guest_system, pipeline_key) = match (proof_type, runner) {
+        (BatchProofType::Risc0, RunnerKind::Local) => {
+            (GuestSystem::Risc0, PipelineKey::ShastaRisc0)
+        }
+        (BatchProofType::Risc0, RunnerKind::Network) => {
+            (GuestSystem::Risc0, PipelineKey::ShastaRisc0Network)
+        }
+        (BatchProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => {
+            (GuestSystem::Sp1, PipelineKey::ShastaSp1)
+        }
+        (BatchProofType::Native, RunnerKind::Local) => {
+            (GuestSystem::Native, PipelineKey::ShastaNative)
+        }
+        (BatchProofType::Sgx, RunnerKind::Remote) => (GuestSystem::Sgx, PipelineKey::ShastaSgx),
+        (BatchProofType::SgxGeth, RunnerKind::Remote) => {
+            (GuestSystem::SgxGeth, PipelineKey::ShastaSgxGeth)
+        }
+        _ => {
+            return Err(ApiError::internal(format!(
+                "configured prover route {}/{} is invalid",
+                proof_type.as_str(),
+                runner
+            )));
         }
     };
-    let canonical_proof_type = match proof_type {
-        BatchProofType::Sp1 => ProofType::Sp1,
-        BatchProofType::Risc0 => ProofType::Risc0,
-        BatchProofType::Native => ProofType::Native,
-        BatchProofType::Sgx => ProofType::Sgx,
-        BatchProofType::SgxGeth => ProofType::SgxGeth,
-        BatchProofType::Boundless | BatchProofType::ZkAny => {
-            unreachable!("unsupported proof type is filtered before canonical route build")
-        }
-    };
+    let route = PipelineRoute::new(guest_system, runner);
+    Ok(CanonicalProofRoute::new(route, pipeline_key))
+}
 
-    Ok(CanonicalProofRoute::new(
-        route,
-        pipeline_key,
-        canonical_proof_type,
+pub(super) fn unsupported_proof_type(proof_type: BatchProofType) -> ApiError {
+    ApiError::bad_request(format!(
+        "proof_type={} is not supported",
+        proof_type.as_str()
     ))
 }
 
-pub(super) fn validate_hosted_proof_type(
-    route: PipelineRoute,
-    proof_type: BatchProofType,
-) -> Result<(), ApiError> {
-    if matches!(
-        route,
-        PipelineRoute {
-            guest_system: GuestSystem::Sgx,
-            runner: RunnerKind::Remote,
-        }
-    ) && !matches!(proof_type, BatchProofType::Sgx | BatchProofType::SgxGeth)
-    {
-        return Err(ApiError::bad_request(format!(
-            "proof_type={} is not supported when the server prover route is sgx/remote",
-            proof_type.as_str()
-        )));
-    }
-
-    Ok(())
-}
-
-fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
-    let route = state.config.prover.route();
-    if matches!(
-        route,
-        PipelineRoute {
-            guest_system: GuestSystem::Native,
-            runner: RunnerKind::Local,
-        }
-    ) {
-        Ok(route)
-    } else {
-        Err(ApiError::bad_request(
-            "proof_type=native is only supported when the server prover route is native/local",
-        ))
-    }
-}
-
-fn sp1_runner_for_request(
+fn validate_sp1_runner_for_request(
     state: &AppState,
     prover_config: &ProverTaskConfig,
     sp1_context: Sp1RequestContext,
-) -> Result<RunnerKind, ApiError> {
+    configured_runner: RunnerKind,
+) -> Result<(), ApiError> {
     let effective_config = state
         .config
         .prover
         .sp1
         .resolve_request_config(prover_config.sp1.as_ref(), sp1_context)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    Ok(match effective_config.prover {
+    let runner = match effective_config.prover {
         Sp1ProverMode::Network => RunnerKind::Network,
         Sp1ProverMode::Mock | Sp1ProverMode::Local => RunnerKind::Local,
-    })
+    };
+    if runner != configured_runner {
+        return Err(ApiError::bad_request(format!(
+            "request-scoped sp1 prover route {} is unavailable; this server is configured for {}",
+            PipelineRoute::new(GuestSystem::Sp1, runner),
+            PipelineRoute::new(GuestSystem::Sp1, configured_runner),
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn decide_batch_proof_type(
@@ -203,24 +161,6 @@ pub(super) fn decide_batch_proof_type(
     Ok(selected)
 }
 
-fn default_risc0_runner(state: &AppState) -> RunnerKind {
-    default_risc0_runner_for_route(state.config.prover.route())
-}
-
-const fn default_risc0_runner_for_route(route: PipelineRoute) -> RunnerKind {
-    match route {
-        PipelineRoute {
-            guest_system: GuestSystem::Risc0,
-            runner: RunnerKind::Network,
-        } => RunnerKind::Network,
-        PipelineRoute {
-            guest_system: GuestSystem::Risc0,
-            runner,
-        } => runner,
-        _ => RunnerKind::Local,
-    }
-}
-
 impl BatchProofType {
     pub(super) const fn from_canonical(proof_type: ProofType) -> Self {
         match proof_type {
@@ -235,20 +175,18 @@ impl BatchProofType {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchProofType, default_risc0_runner_for_route, route_for_proof_type};
-    use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
+    use super::{BatchProofType, route_for_proof_type};
+    use crate::config::Config;
     use crate::server::state::{AppState, StaticPipelineFactory};
     use axum::http::StatusCode;
     use raiko2_engine::ProverTaskConfig;
-    use raiko2_pipeline::PipelineKey;
-    use raiko2_prover::sp1_config::Sp1RequestContext;
+    use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
+    use raiko2_prover::sp1_config::{
+        ProverMode as Sp1ProverMode, Sp1ConfigOverrides, Sp1RequestContext,
+    };
     use raiko2_runtime::RuntimeManager;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn test_state() -> AppState {
-        test_state_with_config(Config::default())
-    }
 
     fn test_state_with_config(config: Config) -> AppState {
         let nanos = SystemTime::now()
@@ -268,121 +206,201 @@ mod tests {
         )
     }
 
-    #[test]
-    fn default_risc0_runner_keeps_local_routes_local() {
+    fn config_with_routes(routes: &str) -> Config {
+        let mut config = Config::default();
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
+        config
+    }
+
+    fn assert_unsupported(error: super::ApiError, proof_type: BatchProofType) {
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            default_risc0_runner_for_route(PipelineRoute::new(
-                GuestSystem::Risc0,
-                RunnerKind::Local,
-            )),
-            RunnerKind::Local
+            error.message,
+            format!("proof_type={} is not supported", proof_type.as_str())
         );
     }
 
     #[test]
-    fn default_risc0_runner_keeps_network_routes_network() {
-        assert_eq!(
-            default_risc0_runner_for_route(PipelineRoute::new(
-                GuestSystem::Risc0,
-                RunnerKind::Network,
-            )),
-            RunnerKind::Network
+    fn risc0_route_does_not_enable_sp1() {
+        let state = test_state_with_config(config_with_routes("risc0/local"));
+
+        let risc0 = route_for_proof_type(
+            &state,
+            BatchProofType::Risc0,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect("configured RISC0 route");
+        assert_eq!(risc0.route, PipelineKey::ShastaRisc0.route());
+        assert_eq!(risc0.pipeline_key(), PipelineKey::ShastaRisc0);
+
+        let error = route_for_proof_type(
+            &state,
+            BatchProofType::Sp1,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        );
+        assert_unsupported(
+            error.expect_err("SP1 must remain disabled"),
+            BatchProofType::Sp1,
         );
     }
 
     #[test]
-    fn route_for_proof_type_selects_sgxgeth_remote_pipeline() {
-        let state = test_state();
+    fn sp1_route_does_not_enable_risc0() {
+        let mut config = config_with_routes("sp1/local");
+        config.prover.sp1.prover = Sp1ProverMode::Local;
+        let state = test_state_with_config(config);
+
+        let sp1 = route_for_proof_type(
+            &state,
+            BatchProofType::Sp1,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect("configured SP1 route");
+        assert_eq!(sp1.route, PipelineKey::ShastaSp1.route());
+        assert_eq!(sp1.pipeline_key(), PipelineKey::ShastaSp1);
+
+        let error = route_for_proof_type(
+            &state,
+            BatchProofType::Risc0,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        );
+        assert_unsupported(
+            error.expect_err("RISC0 must remain disabled"),
+            BatchProofType::Risc0,
+        );
+    }
+
+    #[test]
+    fn sgxgeth_request_uses_distinct_public_route() {
+        let state = test_state_with_config(config_with_routes("sgxgeth/remote"));
+
         let selection = route_for_proof_type(
             &state,
             BatchProofType::SgxGeth,
             &ProverTaskConfig::default(),
             Sp1RequestContext::ProposalBatch { aggregate: false },
         )
-        .unwrap();
+        .expect("configured SGXGETH route");
 
-        assert_eq!(selection.route.to_string(), "sgx/remote");
+        assert_eq!(selection.route.to_string(), "sgxgeth/remote");
+        assert_ne!(
+            selection.route,
+            "sgx/remote"
+                .parse::<PipelineRoute>()
+                .expect("parse sgx route")
+        );
         assert_eq!(selection.pipeline_key(), PipelineKey::ShastaSgxGeth);
-        assert_eq!(
-            selection.proof_type(),
-            raiko2_primitives::ProofType::SgxGeth
-        );
     }
 
     #[test]
-    fn route_for_proof_type_keeps_native_on_native_local_route() {
-        let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Native;
-        config.prover.runner = RunnerKind::Local;
+    fn all_production_routes_resolve_independently_on_one_host() {
+        let mut config =
+            config_with_routes("risc0/network,sp1/network,native/local,sgx/remote,sgxgeth/remote");
+        config.prover.sp1.prover = Sp1ProverMode::Network;
         let state = test_state_with_config(config);
 
-        let selection = route_for_proof_type(
-            &state,
-            BatchProofType::Native,
-            &ProverTaskConfig::default(),
-            Sp1RequestContext::ProposalBatch { aggregate: false },
-        )
-        .unwrap();
-
-        assert_eq!(selection.route.to_string(), "native/local");
-        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaNative);
-        assert_eq!(selection.proof_type(), raiko2_primitives::ProofType::Native);
-    }
-
-    #[test]
-    fn route_for_proof_type_rejects_native_without_native_local_route() {
-        let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Network;
-        let state = test_state_with_config(config);
-
-        let error = route_for_proof_type(
-            &state,
-            BatchProofType::Native,
-            &ProverTaskConfig::default(),
-            Sp1RequestContext::ProposalBatch { aggregate: false },
-        )
-        .unwrap_err();
-
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            error.message,
-            "proof_type=native is only supported when the server prover route is native/local"
-        );
-    }
-
-    #[test]
-    fn route_for_proof_type_rejects_sp1_on_remote_sgx_host() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
-        let state = AppState::from_parts(
-            Arc::new(config),
-            Arc::new(StaticPipelineFactory::default()),
-            Arc::new(
-                RuntimeManager::new(
-                    std::env::temp_dir()
-                        .join(format!("raiko2-proof-route-remote-sgx-tests-{nanos}")),
-                )
-                .expect("runtime manager"),
+        for (proof_type, expected_route, expected_pipeline) in [
+            (
+                BatchProofType::Risc0,
+                PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
+                PipelineKey::ShastaRisc0Network,
             ),
-        );
+            (
+                BatchProofType::Sp1,
+                PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network),
+                PipelineKey::ShastaSp1,
+            ),
+            (
+                BatchProofType::Native,
+                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+                PipelineKey::ShastaNative,
+            ),
+            (
+                BatchProofType::Sgx,
+                PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
+                PipelineKey::ShastaSgx,
+            ),
+            (
+                BatchProofType::SgxGeth,
+                PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
+                PipelineKey::ShastaSgxGeth,
+            ),
+        ] {
+            let selection = route_for_proof_type(
+                &state,
+                proof_type,
+                &ProverTaskConfig::default(),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .unwrap_or_else(|error| panic!("failed to route {proof_type:?}: {error:?}"));
 
-        let err = route_for_proof_type(
-            &state,
-            BatchProofType::Sp1,
-            &ProverTaskConfig::default(),
-            Sp1RequestContext::ProposalBatch { aggregate: false },
-        )
-        .expect_err("remote sgx host should reject sp1");
+            assert_eq!(selection.route, expected_route);
+            assert_eq!(selection.pipeline_key(), expected_pipeline);
+            assert_eq!(selection.proof_type(), expected_pipeline.proof_type());
+        }
+    }
 
-        assert!(
-            err.message.contains("proof_type=sp1"),
-            "unexpected error: {err:?}"
-        );
+    #[test]
+    fn route_for_proof_type_rejects_sp1_request_route_flip() {
+        for (routes, configured, requested) in [
+            ("sp1/network", Sp1ProverMode::Network, Sp1ProverMode::Local),
+            ("sp1/local", Sp1ProverMode::Local, Sp1ProverMode::Network),
+        ] {
+            let mut config = config_with_routes(routes);
+            config.prover.sp1.prover = configured;
+            let state = test_state_with_config(config);
+            let prover_config = ProverTaskConfig {
+                sp1: Some(Sp1ConfigOverrides {
+                    prover: Some(requested),
+                    ..Sp1ConfigOverrides::default()
+                }),
+                sp1_system: None,
+            };
+
+            for sp1_context in [
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+                Sp1RequestContext::Aggregation,
+            ] {
+                let error =
+                    route_for_proof_type(&state, BatchProofType::Sp1, &prover_config, sp1_context)
+                        .expect_err("request-level route flip must be rejected");
+
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert!(error.message.contains("request-scoped sp1 prover route"));
+            }
+        }
+    }
+
+    #[test]
+    fn sp1_local_route_allows_local_and_mock_request_modes() {
+        for requested in [Sp1ProverMode::Local, Sp1ProverMode::Mock] {
+            let mut config = config_with_routes("sp1/local");
+            config.prover.sp1.prover = Sp1ProverMode::Local;
+            let state = test_state_with_config(config);
+            let prover_config = ProverTaskConfig {
+                sp1: Some(Sp1ConfigOverrides {
+                    prover: Some(requested),
+                    ..Sp1ConfigOverrides::default()
+                }),
+                sp1_system: None,
+            };
+
+            let selection = route_for_proof_type(
+                &state,
+                BatchProofType::Sp1,
+                &prover_config,
+                Sp1RequestContext::Aggregation,
+            )
+            .unwrap_or_else(|error| panic!("failed to route {requested:?}: {error:?}"));
+
+            assert_eq!(selection.route, PipelineKey::ShastaSp1.route());
+            assert_eq!(selection.pipeline_key(), PipelineKey::ShastaSp1);
+        }
     }
 }

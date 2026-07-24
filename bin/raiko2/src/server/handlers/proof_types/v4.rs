@@ -26,6 +26,7 @@ pub(crate) struct TaskResponse<T> {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProofType {
+    Native,
     Risc0,
     Sp1,
     Sgx,
@@ -36,6 +37,7 @@ pub(crate) enum ProofType {
 impl ProofType {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Native => "native",
             Self::Risc0 => "risc0",
             Self::Sp1 => "sp1",
             Self::Sgx => "sgx",
@@ -128,8 +130,8 @@ pub(crate) struct InvalidateArtifactsData {
 pub(crate) struct InvalidateArtifactCounts {
     pub(crate) matched: usize,
     pub(crate) removed: usize,
-    pub(crate) files_removed: usize,
-    pub(crate) files_missing: usize,
+    pub(crate) manifests_removed: usize,
+    pub(crate) manifests_missing: usize,
     pub(crate) failed: usize,
 }
 

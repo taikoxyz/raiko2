@@ -1,6 +1,5 @@
 #![allow(missing_docs)]
 
-use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
 use alloy_primitives::{keccak256, Signature, TxKind, U256};
 use alloy_primitives::{Address, B256};
@@ -12,7 +11,7 @@ use raiko2_primitives::{
     ChainSpec, ExecutionWitness, ProofType, StatelessInput, SupportedChainSpecs, WitnessStateNode,
 };
 use raiko2_primitives_shasta::{
-    build_proof_carry_data, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
+    build_proof_carry_data_from_witness_spec, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
 };
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -198,7 +197,8 @@ fn guest_input_with_single_block() -> GuestInput {
         l1_header.number.try_into().expect("fits in uint48");
     guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
     guest_input.proof_carry_data =
-        build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+            .expect("build carry data");
     guest_input
 }
 
@@ -233,22 +233,12 @@ fn canonical_inline_source_guest_input() -> GuestInput {
         .expect("golden touch anchor signature");
     let anchor_tx: reth_ethereum_primitives::TransactionSigned =
         anchor_tx.into_signed(anchor_signature).into();
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
 
     let parent_witness_header =
         raiko2_primitives::WitnessHeader::from_header(parent_header.clone());
     guest_input.proposal_ancestor_headers = vec![parent_witness_header.clone()];
     guest_input.witnesses[0].witness.headers = vec![parent_witness_header];
     guest_input.witnesses[0].witness.state = parent_state_nodes;
-    guest_input.witnesses[0].accounts.insert(
-        anchor_signer,
-        TrieAccount {
-            nonce: 0,
-            balance: U256::ZERO,
-            storage_root: B256::ZERO,
-            code_hash: B256::ZERO,
-        },
-    );
     guest_input.witnesses[0].block.header.number = TEST_SHASTA_BLOCK_NUMBER;
     guest_input.witnesses[0].block.header.parent_hash = parent_header.hash_slow();
     guest_input.witnesses[0].block.header.timestamp = block_timestamp;
@@ -358,7 +348,8 @@ fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
     second.chain_spec.is_taiko = false;
     guest_input.witnesses.push(second);
     guest_input.proof_carry_data =
-        build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+            .expect("build carry data");
 
     prove_shasta_proposal_with_validator(
         &guest_input,
@@ -400,7 +391,7 @@ fn rejects_taiko_proposal_id_outside_uint48() {
 fn rejects_transition_timestamp_outside_uint48() {
     let mut guest_input = guest_input_with_single_block();
     // proposal.timestamp is sol uint48 and cannot exceed the bound; force the carry field only
-    // so we exercise the fail-closed check before u48 truncation in hashing.
+    // so we exercise the fail-closed validation check before hashing (which aborts on overflow).
     guest_input
         .proof_carry_data
         .transition_input

@@ -283,6 +283,7 @@ fn failure_error_kind(error: &str) -> &'static str {
     } else if error.contains("dependency_not_ready") || error.contains("dependency not ready") {
         "dependency_not_ready"
     } else if error.contains("persist proof output")
+        || error.contains("publish proof artifact")
         || error.contains("serialize proof output")
         || error.contains("write proof artifact")
         || error.contains("register proof artifact")

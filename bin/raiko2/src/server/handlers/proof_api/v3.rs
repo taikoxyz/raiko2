@@ -4,22 +4,23 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
-use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, TaskRegistrationOutcome};
-use std::collections::HashSet;
+use raiko2_runtime::{
+    RunnerStatus as RuntimeRunnerStatus, RuntimeMutationOutcome, TaskRegistrationOutcome,
+};
 use tracing::{debug, info};
 
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchShastaRequest,
     ClearProverStatus, ProofStatus, ProverStatus, ProverTaskScope, PruneStatus, ServerAclFeature,
-    TaskData, TaskLookup, TaskMetadata, authorize_acl_feature_with_rate_limit,
-    batch_request_fingerprint, build_canonical_batch_submission,
-    build_external_aggregate_submission, build_submission_plan, cancel_registered_tasks,
+    TaskData, TaskLookup, authorize_acl_feature_with_rate_limit, batch_request_fingerprint,
+    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
     clear_prover_tasks, collect_prover_status, handle_created_batch_task,
     handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
-    load_task_data, load_task_lookup, planned_external_aggregate_task, prover_type_label,
-    public_task_id_from_fingerprint, register_batch_task, register_external_aggregate_task,
-    remove_task_children, resolve_engine, zk_any_not_drawn_response,
+    load_task_data, load_task_lookup, persist_registered_external_aggregate_inputs,
+    planned_external_aggregate_task, prover_type_label, public_task_id_from_fingerprint,
+    register_batch_task, register_external_aggregate_task, resolve_engine,
+    zk_any_not_drawn_response,
 };
 
 pub(crate) async fn request_batch_shasta_proof(
@@ -62,10 +63,18 @@ async fn request_batch_shasta_proof_inner(
         );
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
-    let request_fingerprint = batch_request_fingerprint(&submission)?;
+    let request_fingerprint = batch_request_fingerprint(
+        state.runtime.environment(),
+        state.runtime.namespace(),
+        &submission,
+    )?;
     submission.public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
-    let plan =
-        build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
+    resolve_engine(
+        &state,
+        &submission.pair.key,
+        submission.route.pipeline_key(),
+    )?;
+    let plan = build_submission_plan(&submission, &request_fingerprint)?;
 
     info!(
         task_id = submission.public_task_id.as_str(),
@@ -83,18 +92,12 @@ async fn request_batch_shasta_proof_inner(
         proposal_ids = ?proposal_ids,
         "received hoodi shasta batch request proposal ids"
     );
-    resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
-
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_batch_task(&state, &submission, existing, None).await
         }
-        TaskRegistrationOutcome::Created(_) => {
-            handle_created_batch_task(&state, &submission, &plan).await
+        TaskRegistrationOutcome::Created(record) => {
+            handle_created_batch_task(&state, &submission, &plan, &record).await
         }
     }
 }
@@ -123,8 +126,7 @@ async fn request_aggregation_proof_inner(
         &submission.pair.key,
         submission.route.pipeline_key(),
     )?;
-    let aggregate = planned_external_aggregate_task(&submission);
-
+    let aggregate = planned_external_aggregate_task(&state.runtime, &submission).await?;
     info!(
         task_id = submission.public_task_id.as_str(),
         proof_type = requested_proof_type.as_str(),
@@ -137,12 +139,15 @@ async fn request_aggregation_proof_inner(
         "received hoodi aggregate request"
     );
 
-    match register_external_aggregate_task(&state, &submission, &aggregate).await? {
+    let mut registration =
+        register_external_aggregate_task(&state, &submission, &aggregate).await?;
+    persist_registered_external_aggregate_inputs(&state, &submission, &mut registration).await?;
+    match registration {
         TaskRegistrationOutcome::Existing(existing) => {
             handle_existing_external_aggregate_task(&state, &engine, &submission, existing).await
         }
         TaskRegistrationOutcome::Created(_) => {
-            handle_created_external_aggregate_task(&state, &engine, &submission, &aggregate).await
+            handle_created_external_aggregate_task(&state, &engine, &submission).await
         }
     }
 }
@@ -167,11 +172,10 @@ pub(crate) async fn cancel_task(
     Path(id): Path<String>,
 ) -> Result<Json<ApiOk<TaskData>>, ApiError> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
-
     let TaskLookup {
         record,
-        metadata,
-        engine,
+        metadata: _,
+        engine: _,
     } = load_task_lookup(&state, &id).await?;
 
     if matches!(
@@ -183,16 +187,17 @@ pub(crate) async fn cancel_task(
         return get_task(State(state), Path(id)).await;
     }
 
-    cancel_registered_tasks(&state.runtime, &engine, &id, record.pipeline_key, &metadata)
+    let outcome = state
+        .lifecycle
+        .cancel(&record, None)
         .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-    state
-        .runtime
-        .sync_status(&id, RuntimeRunnerStatus::Cancelled, None, None)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to sync runtime cancellation: {err}")))?;
-
+        .map_err(|err| ApiError::internal(format!("failed to cancel task: {err}")))?;
+    if !matches!(
+        outcome,
+        RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied
+    ) {
+        return get_task(State(state), Path(id)).await;
+    }
     get_task(State(state), Path(id)).await
 }
 
@@ -244,35 +249,28 @@ pub(crate) async fn prune_proofs(
     headers: HeaderMap,
 ) -> Result<Json<PruneStatus>, ApiError> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
-
     let records = state
         .runtime
         .list_tasks()
         .await
         .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
-    let mut removed_engine_task_ids = HashSet::new();
-
     for record in records {
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-            .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-        let engine = resolve_engine(&state, &metadata.network_pair, record.pipeline_key)?;
-
-        remove_task_children(
-            &engine,
-            record.pipeline_key,
-            &metadata,
-            &mut removed_engine_task_ids,
-        )
-        .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-        state
-            .runtime
-            .remove_task(&record.task_id)
+        let (removal, _) = state
+            .lifecycle
+            .remove(&record, raiko2_queue::DetachMode::Remove)
             .await
             .map_err(|err| {
-                ApiError::internal(format!("failed to prune task {}: {err}", record.task_id))
+                ApiError::internal(format!("failed to remove task {}: {err}", record.task_id))
             })?;
+        if !matches!(
+            removal,
+            RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::Missing
+        ) {
+            return Err(ApiError::internal(format!(
+                "task {} changed while it was being pruned",
+                record.task_id
+            )));
+        }
     }
 
     Ok(Json(PruneStatus { status: "ok" }))

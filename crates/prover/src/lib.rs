@@ -32,6 +32,7 @@ pub mod boundless;
 pub mod boundless_config;
 pub mod gaiko2;
 pub mod native;
+mod pending_recovery;
 pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;
@@ -40,6 +41,9 @@ mod risc0_aggregation;
 #[cfg(feature = "sp1")]
 pub mod sp1;
 pub mod sp1_config;
+pub use pending_recovery::{
+    NetworkProverBackend, PendingProofCheckpoint, PendingProofRecoveryError,
+};
 pub use sp1_config::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
@@ -48,7 +52,7 @@ pub use sp1_config::{
 use alloy::sol_types::SolValue;
 use alloy_primitives::Bytes;
 use alloy_primitives::{Address, B256};
-use raiko2_pipeline::{PipelineRoute, ProverBackend};
+use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data,
@@ -63,6 +67,11 @@ use risc0_ethereum_contracts_boundless::encode_seal;
 use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
@@ -78,9 +87,7 @@ pub struct BoundlessSubmissionProgress {
     pub remote_tx_hash: Option<String>,
     pub expires_at: u64,
     /// Offer lock deadline (`rampUpStart + lockTimeout`), in seconds since the UNIX epoch. The
-    /// client fee is zero for fulfillments past this time, so it bounds the window in which the
-    /// request can still be paid for. `0` for legacy records written before this field existed.
-    #[serde(default)]
+    /// client fee is zero for fulfillments past this time, so it bounds the payable window.
     pub lock_expires_at: u64,
     pub submitted_at: u64,
     pub image_ref: String,
@@ -91,16 +98,12 @@ pub struct BoundlessSubmissionProgress {
     pub max_price_multiplier: u32,
     /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
     /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
-    /// precise bid for telemetry. `None` for legacy records written before the field existed.
-    #[serde(default)]
+    /// precise bid for telemetry.
     pub max_price_wei: Option<String>,
-    /// Rebid attempt number that produced this submission: `1`-based, or `0` when not recorded.
-    /// `#[serde(default)]` supplies `0` for legacy records written before this field existed; the
-    /// resume path treats `0` as "unknown" and falls back to `1`. Persisted so a resume after
-    /// restart restores the attempt count even when rebids reuse the same price (a flat
+    /// Rebid attempt number that produced this submission, starting at one. Persisted so a resume
+    /// after restart restores the attempt count even when rebids reuse the same price (a flat
     /// `rebid_price_step_bps == 0` ladder), which cannot be recovered from `max_price_multiplier`
     /// alone.
-    #[serde(default)]
     pub rebid_attempt: u32,
 }
 
@@ -108,18 +111,19 @@ pub struct BoundlessSubmissionProgress {
 pub struct BoundlessSubmissionResume {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
+    /// Exact guest image used by the submitted request.
+    pub image_ref: String,
+    /// Boundless market deployment that owns the request identifier.
+    pub deployment: String,
+    /// Transport used to submit the request to the Boundless market.
+    pub offchain: bool,
     pub expires_at: u64,
-    /// Offer lock deadline in seconds since the UNIX epoch; `0` when the stored record predates
-    /// this field. See [`BoundlessSubmissionProgress::lock_expires_at`].
-    #[serde(default)]
+    /// Offer lock deadline in seconds since the UNIX epoch.
     pub lock_expires_at: u64,
     pub submitted_at: u64,
     pub max_price_multiplier: u32,
-    /// Exact escalated max price this submission bid, in wei, as a decimal string. See
-    /// [`BoundlessSubmissionProgress::max_price_wei`]. `None` for records written before the field.
-    #[serde(default)]
+    /// Exact escalated max price this submission bid, in wei, as a decimal string.
     pub max_price_wei: Option<String>,
-    #[serde(default)]
     pub rebid_attempt: u32,
 }
 
@@ -130,16 +134,159 @@ pub enum ProverProgress {
     Sp1NetworkSubmission(Sp1NetworkSubmissionProgress),
 }
 
-#[async_trait::async_trait]
-pub trait ProverProgressObserver: Send + Sync {
-    async fn on_progress(&self, progress: &ProverProgress);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressPersistenceError {
+    Retryable(String),
+    Permanent(String),
+}
 
-    async fn load_sp1_network_request_id(&self) -> Option<String> {
-        None
+impl std::fmt::Display for ProgressPersistenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable(error) | Self::Permanent(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for ProgressPersistenceError {}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+const CHECKPOINT_RETRY_BASE_DELAY: Duration = if cfg!(test) {
+    Duration::from_millis(1)
+} else {
+    Duration::from_secs(1)
+};
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+const CHECKPOINT_RETRY_MAX_DELAY: Duration = if cfg!(test) {
+    Duration::from_millis(16)
+} else {
+    Duration::from_secs(30)
+};
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+const CHECKPOINT_RETRY_JITTER_SLOTS: u64 = 8;
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+static CHECKPOINT_RETRY_INVOCATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[derive(Clone, Copy)]
+struct CheckpointRetrySchedule {
+    jitter_slot: u32,
+}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+impl CheckpointRetrySchedule {
+    fn new() -> Self {
+        Self::from_seed(CHECKPOINT_RETRY_INVOCATION.fetch_add(1, Ordering::Relaxed))
     }
 
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {
-        None
+    fn from_seed(seed: u64) -> Self {
+        Self {
+            jitter_slot: u32::try_from(seed % CHECKPOINT_RETRY_JITTER_SLOTS + 1)
+                .expect("checkpoint retry jitter slot fits u32"),
+        }
+    }
+
+    fn delay(self, retry: u32) -> Duration {
+        let exponent = retry.min(31);
+        let exponential = CHECKPOINT_RETRY_BASE_DELAY
+            .saturating_mul(1_u32 << exponent)
+            .min(CHECKPOINT_RETRY_MAX_DELAY);
+        let jitter = (exponential / 64).saturating_mul(self.jitter_slot);
+        exponential
+            .saturating_add(jitter)
+            .min(CHECKPOINT_RETRY_MAX_DELAY)
+    }
+}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+pub(crate) async fn persist_prover_progress(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    progress: &ProverProgress,
+    checkpoint: &'static str,
+    permit: &SubmissionCheckpointPermit,
+) -> RaikoResult<()> {
+    let Some(observer) = observer else {
+        return Ok(());
+    };
+    let schedule = CheckpointRetrySchedule::new();
+    let mut retry = 0_u32;
+    loop {
+        match observer.on_progress(progress, permit).await {
+            Ok(()) => return Ok(()),
+            Err(ProgressPersistenceError::Retryable(error)) => {
+                let delay = schedule.delay(retry);
+                tracing::warn!(
+                    %error,
+                    checkpoint,
+                    retry,
+                    retry_delay_ms = delay.as_millis(),
+                    "failed to persist remote submission checkpoint; retrying without resubmission"
+                );
+                tokio::time::sleep(delay).await;
+                retry = retry.saturating_add(1);
+            }
+            Err(ProgressPersistenceError::Permanent(error)) => {
+                return Err(RaikoError::Guest(error));
+            }
+        }
+    }
+}
+
+/// RAII token spanning provider acceptance through durable checkpoint persistence.
+pub struct SubmissionCheckpointPermit {
+    guard: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl SubmissionCheckpointPermit {
+    /// Wrap a lifecycle-owned guard without exposing its implementation to prover backends.
+    pub fn tracked(guard: impl std::any::Any + Send + Sync + 'static) -> Self {
+        Self {
+            guard: Box::new(guard),
+        }
+    }
+
+    #[must_use]
+    pub fn guard<T: std::any::Any>(&self) -> Option<&T> {
+        self.guard.downcast_ref()
+    }
+
+    fn untracked() -> Self {
+        Self::tracked(())
+    }
+}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+pub(crate) async fn acquire_submission_checkpoint_permit(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+) -> RaikoResult<SubmissionCheckpointPermit> {
+    match observer {
+        Some(observer) => observer
+            .acquire_submission_checkpoint_permit()
+            .await
+            .map_err(|error| RaikoError::Guest(error.to_string())),
+        None => Ok(SubmissionCheckpointPermit::untracked()),
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ProverProgressObserver: Send + Sync {
+    async fn acquire_submission_checkpoint_permit(
+        &self,
+    ) -> Result<SubmissionCheckpointPermit, ProgressPersistenceError> {
+        Ok(SubmissionCheckpointPermit::untracked())
+    }
+
+    async fn on_progress(
+        &self,
+        progress: &ProverProgress,
+        permit: &SubmissionCheckpointPermit,
+    ) -> Result<(), ProgressPersistenceError>;
+
+    async fn load_pending_proof_checkpoint(
+        &self,
+        _backend: NetworkProverBackend,
+    ) -> Result<Option<PendingProofCheckpoint>, ProgressPersistenceError> {
+        Ok(None)
     }
 }
 
@@ -281,7 +428,6 @@ pub(crate) fn build_shasta_aggregation_input(
     proofs: &[Proof],
 ) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
     let image_id = shasta_aggregation_image_id_words(proofs)?;
-    let mut block_inputs = Vec::with_capacity(proofs.len());
     let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
 
     for (index, proof) in proofs.iter().enumerate() {
@@ -294,7 +440,16 @@ pub(crate) fn build_shasta_aggregation_input(
             .ok_or_else(|| {
                 RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
             })?;
-        let expected_input = hash_shasta_subproof_input(&carry);
+        proof_carry_data_vec.push(carry);
+    }
+
+    build_shasta_commitment_from_proof_carry_data_vec(&proof_carry_data_vec).ok_or_else(|| {
+        RaikoError::InvalidRequestConfig("invalid shasta proof carry data".to_string())
+    })?;
+
+    let mut block_inputs = Vec::with_capacity(proofs.len());
+    for (index, (proof, carry)) in proofs.iter().zip(&proof_carry_data_vec).enumerate() {
+        let expected_input = hash_shasta_subproof_input(carry);
         if let Some(input_hash) = proof.input
             && input_hash != expected_input
         {
@@ -303,7 +458,6 @@ pub(crate) fn build_shasta_aggregation_input(
             )));
         }
         block_inputs.push(expected_input);
-        proof_carry_data_vec.push(carry);
     }
 
     Ok(ShastaZkAggregationGuestInput {
@@ -383,13 +537,9 @@ pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], Str
 /// Returns an error when the supplied proofs do not satisfy the route-specific external
 /// aggregation admission contract.
 pub fn validate_external_aggregate_proofs(
-    route: PipelineRoute,
+    pipeline_key: raiko2_pipeline::PipelineKey,
     proofs: &[Proof],
 ) -> Result<(), RaikoError> {
-    let pipeline_key = route
-        .pipeline_key()
-        .map_err(RaikoError::InvalidRequestConfig)?;
-
     for (index, proof) in proofs.iter().enumerate() {
         match pipeline_key {
             raiko2_pipeline::PipelineKey::ShastaNative => {
@@ -517,22 +667,66 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, SubmissionCheckpointPermit,
+        build_shasta_aggregation_input, encode_proof_carry_data,
+        ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
+    };
     #[cfg(any(feature = "risc0", feature = "boundless"))]
     use super::{
         decode_hex_payload, encode_risc0_aggregation_seal_payload,
         encode_risc0_proposal_seal_payload,
     };
-    use super::{
-        encode_proof_carry_data, ensure_shasta_proposal_input_matches_carry,
-        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-        validate_external_aggregate_proofs,
-    };
     use alloy_primitives::B256;
     #[cfg(any(feature = "risc0", feature = "boundless"))]
     use alloy_sol_types::SolValue;
-    use raiko2_pipeline::PipelineRoute;
+    use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::Proof;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn checkpoint_retry_schedule_grows_caps_and_jitters_per_invocation() {
+        let first = CheckpointRetrySchedule::from_seed(1);
+        let second = CheckpointRetrySchedule::from_seed(2);
+        let first_delays = (0..16)
+            .map(|attempt| first.delay(attempt))
+            .collect::<Vec<_>>();
+
+        assert!(first_delays.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(
+            first_delays.last().copied(),
+            Some(CHECKPOINT_RETRY_MAX_DELAY)
+        );
+        assert_ne!(first.delay(0), second.delay(0));
+        assert!(
+            first_delays
+                .iter()
+                .all(|delay| *delay <= CHECKPOINT_RETRY_MAX_DELAY)
+        );
+    }
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn submission_checkpoint_permit_drops_wrapped_guard() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let permit = SubmissionCheckpointPermit::tracked(DropProbe(Arc::clone(&dropped)));
+
+        drop(permit);
+
+        assert!(dropped.load(Ordering::Acquire));
+    }
 
     #[test]
     fn parses_shasta_proposal_input_hash_from_first_committed_word() {
@@ -593,27 +787,54 @@ mod tests {
     }
 
     #[test]
+    fn shasta_aggregation_input_rejects_oversized_timestamp_without_panicking() {
+        let mut carry = ProofCarryData::default();
+        carry.transition_input.transition.timestamp = 1_u64 << 48;
+        let proof = Proof {
+            input: None,
+            uuid: None,
+            extra_data: Some(encode_proof_carry_data(&carry).expect("encode carry data")),
+            ..aggregate_proof_fixture()
+        };
+
+        let result = std::panic::catch_unwind(|| build_shasta_aggregation_input(&[proof]));
+
+        assert!(result.is_ok(), "invalid carry data must not panic");
+        let err = result
+            .expect("checked above")
+            .expect_err("oversized timestamp must be rejected");
+        assert!(err.to_string().contains("invalid shasta proof carry data"));
+    }
+
+    #[test]
     fn aggregate_validator_accepts_native_local_proof() {
-        let route = "native/local"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
-        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+        assert!(
+            validate_external_aggregate_proofs(
+                PipelineKey::ShastaNative,
+                &[aggregate_proof_fixture()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn aggregate_validator_accepts_sgx_remote_proof() {
-        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
-        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+        assert!(
+            validate_external_aggregate_proofs(
+                PipelineKey::ShastaSgx,
+                &[aggregate_proof_fixture()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn aggregate_validator_rejects_missing_sgx_remote_proof_bytes() {
-        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.proof = None;
 
-        let err =
-            validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof bytes");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSgx, &[proof])
+            .expect_err("missing proof bytes");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SGX aggregation metadata")
@@ -622,11 +843,11 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_sp1_fields() {
-        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.uuid = None;
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing uuid");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+            .expect_err("missing uuid");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SP1 aggregation metadata")
@@ -635,13 +856,12 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_sp1_proof_without_quote_or_legacy_payload() {
-        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.proof = None;
         proof.quote = None;
 
-        let err =
-            validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof data");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+            .expect_err("missing proof data");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SP1 aggregation metadata")
@@ -650,11 +870,11 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_risc0_local_fields() {
-        let route = "risc0/local".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0, &[proof])
+            .expect_err("missing receipt");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing RISC0 aggregation metadata")
@@ -663,13 +883,11 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_boundless_receipt() {
-        let route = "risc0/network"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+            .expect_err("missing receipt");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing Boundless aggregation metadata")
@@ -678,9 +896,6 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_boundless_proof_without_carry_data() {
-        let route = "risc0/network"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
         let proof = Proof {
             proof: None,
             input: None,
@@ -690,7 +905,8 @@ mod tests {
             extra_data: None,
         };
 
-        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing carry");
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+            .expect_err("missing carry");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing Boundless aggregation metadata")
@@ -699,9 +915,6 @@ mod tests {
 
     #[test]
     fn aggregate_validator_accepts_boundless_proof_with_receipt_and_carry_data() {
-        let route = "risc0/network"
-            .parse::<PipelineRoute>()
-            .expect("parse route");
         let proof = Proof {
             proof: None,
             input: None,
@@ -713,7 +926,9 @@ mod tests {
             ),
         };
 
-        assert!(validate_external_aggregate_proofs(route, &[proof]).is_ok());
+        assert!(
+            validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof]).is_ok()
+        );
     }
 
     #[test]

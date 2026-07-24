@@ -12,6 +12,7 @@ use super::errors::ApiError;
 use crate::config::ServerAclFeature;
 use crate::server::sampling::{BallotConfig, ZkAnySampler};
 use crate::server::state::AppState;
+use raiko2_primitives::ProofType;
 
 pub(crate) struct AdminBallotReadAuth;
 pub(crate) struct AdminBallotWriteAuth;
@@ -37,6 +38,21 @@ pub(crate) async fn set_ballot(
     State(state): State<AppState>,
     Json(ballot): Json<BallotConfig>,
 ) -> Result<Json<AdminStatus>, ApiError> {
+    for proof_type in ballot.keys() {
+        let parsed = proof_type
+            .parse::<ProofType>()
+            .map_err(ApiError::bad_request)?;
+        if !matches!(parsed, ProofType::Risc0 | ProofType::Sp1) {
+            return Err(ApiError::bad_request(format!(
+                "proof type {parsed} is not supported for zk_any"
+            )));
+        }
+        if !state.config.prover.is_enabled(parsed) {
+            return Err(ApiError::bad_request(format!(
+                "proof type {parsed} is not enabled by prover routes"
+            )));
+        }
+    }
     let new_sampler =
         ZkAnySampler::from_ballot_config(ballot.clone()).map_err(ApiError::bad_request)?;
     let mut sampler = state

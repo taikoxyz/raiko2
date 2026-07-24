@@ -34,9 +34,9 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_PORT")]
     pub port: Option<u16>,
 
-    /// Canonical proving route (`<guest_system>/<runner>`)
-    #[arg(long, env = "RAIKO2_PROVER")]
-    pub prover: Option<String>,
+    /// Atomic prover enablement override (`<proof_type>/<runner>,...`)
+    #[arg(long, env = "RAIKO2_PROVER_ROUTES")]
+    pub prover_routes: Option<String>,
 
     /// Remote SGX prover base URL used by the `sgx/remote` route
     #[arg(long = "remote-sgx-base-url", env = "RAIKO2_REMOTE_SGX_BASE_URL")]
@@ -49,7 +49,7 @@ pub struct Cli {
     )]
     pub remote_sgx_sgxgeth_base_url: Option<String>,
 
-    /// Remote SGX prover timeout in milliseconds used by the `sgx/remote` route
+    /// Shared timeout override in milliseconds for both remote SGX lanes
     #[arg(long = "remote-sgx-timeout-ms", env = "RAIKO2_REMOTE_SGX_TIMEOUT_MS")]
     pub remote_sgx_timeout_ms: Option<u64>,
 
@@ -80,18 +80,6 @@ pub struct Cli {
     /// RPC retry compute units per second budget
     #[arg(long, env = "RAIKO2_RPC_RETRY_CU_PER_SECOND")]
     pub rpc_retry_cu_per_second: Option<u64>,
-
-    /// Queue backend (memory, redis)
-    #[arg(long, env = "RAIKO2_QUEUE_BACKEND")]
-    pub queue_backend: Option<String>,
-
-    /// Redis URL for queue backend (e.g. <redis://localhost:6379/>)
-    #[arg(long, env = "RAIKO2_REDIS_URL")]
-    pub redis_url: Option<String>,
-
-    /// Queue namespace/prefix for Redis keys
-    #[arg(long, env = "RAIKO2_QUEUE_NAMESPACE")]
-    pub queue_namespace: Option<String>,
 
     /// Number of queue worker loops
     #[arg(long, env = "RAIKO2_QUEUE_WORKERS")]
@@ -126,13 +114,44 @@ pub struct FixtureServerArgs {
 }
 
 #[cfg(test)]
+pub(crate) fn lock_test_cli_environment() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().expect("test CLI environment lock poisoned")
+}
+
+#[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, lock_test_cli_environment};
     use clap::Parser;
+
+    #[test]
+    fn prover_routes_flag_parses_complete_override() {
+        let _env_lock = lock_test_cli_environment();
+        let cli = Cli::try_parse_from([
+            "raiko2",
+            "--prover-routes",
+            "risc0/network,sp1/network,sgx/remote,sgxgeth/remote",
+        ])
+        .expect("prover routes override should parse");
+
+        assert_eq!(
+            cli.prover_routes.as_deref(),
+            Some("risc0/network,sp1/network,sgx/remote,sgxgeth/remote")
+        );
+    }
+
+    #[test]
+    fn removed_prover_flag_is_rejected() {
+        let _env_lock = lock_test_cli_environment();
+        let result = Cli::try_parse_from(["raiko2", "--prover", "risc0/local"]);
+
+        assert!(result.is_err(), "--prover must no longer be accepted");
+    }
 
     #[cfg(not(feature = "fixture-server"))]
     #[test]
     fn fixture_server_command_is_rejected_without_feature() {
+        let _env_lock = lock_test_cli_environment();
         let result = Cli::try_parse_from(["raiko2", "fixture-server"]);
 
         assert!(
@@ -144,6 +163,7 @@ mod tests {
     #[cfg(feature = "fixture-server")]
     #[test]
     fn fixture_server_command_parses_with_feature() {
+        let _env_lock = lock_test_cli_environment();
         let result = Cli::try_parse_from(["raiko2", "fixture-server", "--port", "8087"])
             .expect("fixture-server should parse when the feature is enabled");
 

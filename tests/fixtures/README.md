@@ -1,6 +1,6 @@
 # Shasta Fixture
 
-`shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json` is a checked-in Shasta
+`shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` is a checked-in Shasta
 `GuestInput` fixture used by:
 
 - `bin/raiko2/src/server/fixture.rs`
@@ -24,14 +24,17 @@ keep their own copies, but `raiko2` owns the adapter behavior and validates it i
 
 ## Provenance
 
-This fixture was generated on 2026-04-13 from a real Taiko mainnet preflight using:
+This fixture was generated on 2026-07-22 from a real Taiko mainnet preflight using:
 
-- `proposal_id = 2222`
-- `l2_start = 5412225`
-- `l2_end = 5412416`
-- `l1_inclusion_block_number = 24862953`
-- `last_anchor_block_number = 24862885`
+- `proposal_id = 23077`
+- `l2_start = 9051439`
+- `l2_end = 9051630`
+- `l1_inclusion_block_number = 25585003`
+- `last_anchor_block_number = 25584933`
 - `l2_chain_id = 167000`
+
+The generated input passed current native guest-input validation and includes the blob commitments
+and proofs required to verify blob-backed proposal data.
 
 ## Regenerate
 
@@ -41,11 +44,13 @@ target/debug/preflight \
   --l1-rpc-url https://ethereum-rpc.publicnode.com \
   --l2-chain-id 167000 \
   --l1-chain-id 1 \
-  --proposal-id 2222 \
-  --l1-inclusion-block-number 24862953 \
-  --last-anchor-block-number 24862885 \
-  --l2-start 5412225 \
-  --l2-end 5412416 \
+  --proposal-id 23077 \
+  --l1-inclusion-block-number 25585003 \
+  --last-anchor-block-number 25584933 \
+  --l2-start 9051439 \
+  --l2-end 9051630 \
   --proof-type native \
-  --output tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json
+  --validate \
+  --pretty \
+  --output tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json
 ```

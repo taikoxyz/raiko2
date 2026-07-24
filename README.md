@@ -2,7 +2,7 @@
 
 [![CI status](https://img.shields.io/github/actions/workflow/status/taikoxyz/raiko2/ci.yml?branch=main&label=CI)](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml)
 
-Home / [Docs](docs/README.md) / [API](docs/API.md) /
+Home / [Docs](docs/README.md) / [Architecture](docs/architecture.md) / [API](docs/API.md) /
 [Development](docs/development.md) / [Operations](docs/operations.md) /
 [Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
@@ -18,8 +18,9 @@ asynchronous proposal-side proof requests.
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
-- Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
-- In-process memory queue by default, with an optional Redis-backed queue
+- Exactly one live instance per isolated runtime namespace; replacements never overlap
+- GCS for durable operation or explicitly opted-in ephemeral memory mode, with no cross-namespace data sharing
+- In-process queue projected from the namespaced runtime store
 
 ## Quickstart
 
@@ -37,19 +38,117 @@ Run the real server with an explicit config file:
 
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
+export RAIKO2_BOUNDLESS_SIGNER_KEY="replace-with-boundless-signer-key"
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
+`config.example.toml` is a combined production sample. Before running, keep only the desired
+per-proof-type tables enabled and fill every setting, credential, and endpoint they require. For
+example, SP1 network proving requires `prover.sp1.enabled = true`, `prover.sp1.prover = "network"`,
+and `NETWORK_PRIVATE_KEY`, while RISC0 network proving requires `prover.risc0.enabled = true`,
+`prover.risc0.runner = "network"`, and real nested Boundless credentials.
+
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
 override values from the file. The real server checks configured RPC endpoints and hosted prover
-capabilities before it starts, so replace example RPC endpoints and set required prover secrets
-such as `NETWORK_PRIVATE_KEY` for SP1 network proving or a Boundless signer key when the selected
-route is `risc0/network`. The prover loads guest ELF files from `RAIKO2_GUEST_ELF_DIR` when set,
+capabilities before it starts. The prover loads guest ELF files from `RAIKO2_GUEST_ELF_DIR` when set,
 otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally with
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
 
+A config file can keep a sensitive string outside version control by using an explicit
+environment reference:
+
+```toml
+[prover.risc0.boundless]
+signer_key = { env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }
+
+[[server.acl.keys]]
+id = "submit"
+key = { env = "RAIKO2_SUBMIT_API_KEY" }
+allow = ["prover.submit"]
+```
+
+Raiko2 resolves only a singleton `{ env = "NAME" }` table before schema validation. Missing,
+non-Unicode, or empty variables fail startup without printing their values; Raiko2 does not perform
+shell expansion or partial-string interpolation. This lets Kubernetes keep the public TOML in a
+ConfigMap and inject only keys through a Secret-backed environment variable. If a file with an
+environment reference has a schema error, Raiko2 also redacts the decoder details.
+
+## Architecture And Operator Contract
+
+This README is the normative source for Raiko2 architecture and operator workflow. The detailed
+[Architecture](docs/architecture.md) and [Operations](docs/operations.md) documents expand this
+contract; if they conflict with this section, this README governs.
+
+The runtime is governed by these invariants:
+
+1. The configured runtime-state repository is authoritative for task state, artifact registration,
+   and remote submission checkpoints. The in-process queue is an execution projection of that state.
+2. Each `(runtime.environment, runtime.namespace)` has exactly one live process. Replacements never
+   overlap, and the application has no distributed owner lease, owner epoch, or ownership heartbeat.
+3. Namespaces are isolated persistence domains. They never share tasks, artifacts, checkpoints, or
+   invalidation markers, although roots inside one namespace may reuse one canonical artifact.
+4. The namespace fence is the single process-wide mutation authority. Entering `Draining` closes
+   admission and readiness immediately, rejects new ordinary mutations and external writes, and
+   waits only for short repository commits plus request-ID checkpoints covered by provider permits
+   acquired while `Active`. One namespace-fence permit spans each admitted repository write or
+   proof-object operation so draining can wait for that operation to settle. A separate process-local
+   lifecycle transition gate serializes one short active-root transition across its runtime-state CAS
+   and in-memory queue attach or detach. Neither mechanism spans a complete task, provider call, or
+   publication saga, and shutdown does not wait for every proof task to finish.
+5. Proof computation is not task completion. Completion requires a normalized proof to be durably
+   published, registered, readable, and synchronized to the runtime root.
+6. Proof manifests are create-only and first-valid-wins. Content is immutable and addressed by
+   SHA-256; invalidation binds to one manifest generation and content hash.
+7. Remote proving resumes a request identifier only after its submission checkpoint is durable.
+   Request-level retry settings may lower, but never raise, operator-owned limits.
+8. Durable deployments use separate state and proof-object repository semantics over one configured
+   GCS namespace; memory mode is explicitly ephemeral and requires an opt-in outside local
+   environments. The service does not dual-write or automatically fail over between backends.
+9. A replacement starts only after the old process has stopped admissions, completed its bounded
+   fence drain, stopped and joined workers, and exited. The drain does not wait for all proof tasks;
+   deployment configuration must enforce the non-overlapping replacement sequence.
+10. Each runtime task lifetime has an immutable `incarnation_id`. Exact `TaskLifetime`
+    preconditions reject delayed worker, cancellation, cleanup, and publication callbacks after a
+    replacement reuses the same deterministic task ID. A task lifetime is stale-callback identity,
+    not a namespace owner epoch, lease, or distributed lock.
+    `RuntimeTaskRecord.artifact_refs` is the only durable proof-reference index; metadata is decoded
+    only after its network, pipeline, route, proof type, and derived artifact references match that
+    canonical record. Every persisted proposal carries its canonical engine request directly;
+    derived proposal fields and task references are validated projections, never recovery inputs or
+    compatibility fallbacks. Every root has one mandatory, non-empty request fingerprint, unique
+    within the runtime namespace; anonymous task registration is not supported.
+11. Each scheduler lease also carries a non-reused local token. This prevents remove/recreate ABA
+    from accepting an old completion even when task ID, worker label, and attempt number repeat. The
+    token identifies one local execution attempt and never authorizes runtime writes.
+12. The in-process execution projection atomically attaches a complete task graph to a root owner
+    and atomically detaches that owner. Shared stages remain executable while any live root owns
+    them; the last owner leaving cancels or removes the stage. Proposal nodes have root-independent
+    definitions and no proposal-to-proposal dependency; aggregation alone depends on the proposal
+    artifacts it consumes. Cancellation and terminal failure
+    first persist the exact root transition, then remove its owner before another root can reuse the
+    stage. A terminal worker error remains queue-retryable until that runtime transition is durable.
+    Runtime state remains authoritative if projection removal fails, and reconciliation rebuilds the
+    projection instead of rolling state back. Recovery, destructive retirement, and root
+    replacement compare the complete observed runtime-task snapshot; a stale request performs no
+    queue effect, and replacement commits one successor before swapping its owner projection.
+    Publication checkpoints persist their typed owner/hash intent before materializing the pending
+    blob, so a failed state CAS cannot create an untracked object and a failed object write remains
+    retryable from durable state. Final activation briefly refreshes owners under the local lifecycle
+    gate: a newly registered distinct root may share the proof, while a replacement incarnation for a
+    checkpointed task ID may not.
+    Pending-publication records retain their typed artifact identity until unowned object cleanup
+    succeeds, so restart can finish a replacement interrupted after the runtime CAS.
+13. Cross-domain lifecycle work is coordinated by the concrete `ProofLifecycle` service as
+    state-first, idempotent effects. Repository commands use exact task lifetimes and artifact
+    descriptors and return typed outcomes such as `Applied`, `AlreadyApplied`, `Stale`,
+    `BlockedByLiveOwner`, `Missing`, or `Conflict`; no full-span cross-component lock is used.
+
 ## Core Flow
+
+The detailed runtime lifecycle, publication transaction, recovery flow, and deployment sequence are
+illustrated in [Architecture](docs/architecture.md).
 
 1. `Preflight` resolves canonical Shasta inputs from L1 and L2 RPC.
 2. `Validation` checks request invariants and witness-derived data.
@@ -76,9 +175,12 @@ flowchart LR
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
 - Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
-  admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
-  regression when the server route is `native/local`.
-- Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
+  admission-time `zk_any` for proposal sampling. V4 accepts `native` for smoke tests and
+  regression when `prover.native.enabled = true`; it always resolves to `native/local`.
+- Hosted SP1 proposal proving emits Compressed proposal artifacts and SP1 aggregation emits Plonk
+  final proofs. A standalone SP1 proposal may therefore complete with `proof = null` while its
+  readable artifact carries `quote`, `input`, `uuid`, and `extra_data`; aggregate completion always
+  requires a separate artifact with a non-null final `proof`.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
   is not a separate proof type.

@@ -5,6 +5,7 @@ This directory contains the contributor- and operator-facing documentation for `
 ## Start Here
 
 - [Project overview](../README.md)
+- [Architecture](architecture.md)
 - [API contract](API.md)
 - [Precompile status](precompile-status.md)
 - [Development guide](development.md)
@@ -17,6 +18,8 @@ This directory contains the contributor- and operator-facing documentation for `
 ## How to Use These Docs
 
 - Start with [../README.md](../README.md) if you are new to the repository.
+- Read [architecture.md](architecture.md) for component boundaries, runtime lifecycle fencing, proof
+  publication, cancellation, recovery, and readiness flows.
 - Read [API.md](API.md) for request, response, and task lifecycle semantics.
 - Read [precompile-status.md](precompile-status.md) when you need the current Shasta precompile
   activation and guest hook coverage.

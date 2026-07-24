@@ -13,7 +13,7 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::{
     Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
-    default_executor, default_prover, get_prover_server,
+    default_executor, get_prover_server,
 };
 use tracing::info;
 
@@ -102,22 +102,11 @@ impl Risc0Prover {
     }
 
     fn execute_real_proof(
-        &self,
         env: ExecutorEnv<'_>,
         elf: &[u8],
         opts: &ProverOpts,
         stage: &str,
     ) -> RaikoResult<Receipt> {
-        if self.config.bonsai {
-            return default_prover()
-                .prove_with_opts(env, elf, opts)
-                .map(|info| info.receipt)
-                .map_err(|e| {
-                    tracing::error!("Failed to generate RISC0 {} proof: {:?}", stage, e);
-                    RaikoError::Guest(format!("RISC0 {stage} proof generation failed: {e}"))
-                });
-        }
-
         let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
         get_prover_server(opts)
             .map_err(|e| {
@@ -182,8 +171,7 @@ impl Risc0Prover {
         if self.config.mock {
             Self::execute_mock_proof(env, elf, image_id, stage, input_hash)
         } else {
-            self.execute_real_proof(env, elf, opts, stage)
-                .map(|receipt| (receipt, None))
+            Self::execute_real_proof(env, elf, opts, stage).map(|receipt| (receipt, None))
         }
     }
 
@@ -349,7 +337,7 @@ mod tests {
     use alloy_sol_types::{SolCall, sol};
     use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
     use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
-    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_protocol_shasta::TaikoManifest;
     sol! {
         #[derive(Debug)]
@@ -440,15 +428,14 @@ mod tests {
         input.taiko.proposal_event.proposal.originBlockNumber =
             l1_header.number.try_into().expect("fits in uint48");
         input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
-        input.proof_carry_data =
-            build_proof_carry_data(&input, ProofType::Risc0).expect("build carry data");
+        input.proof_carry_data = build_proof_carry_data_from_witness_spec(&input, ProofType::Risc0)
+            .expect("build carry data");
         input
     }
 
     #[tokio::test]
     async fn risc0_mock_proposal_surfaces_guest_validation_errors_after_framed_input() {
         let prover = Risc0Prover::new(Risc0Config {
-            bonsai: false,
             snark: false,
             mock: true,
             profile: false,

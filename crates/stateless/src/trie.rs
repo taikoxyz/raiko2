@@ -1,8 +1,5 @@
 use alloy_consensus::TrieAccount;
-use alloy_primitives::{
-    Address, B256, U256,
-    map::{AddressMap, B256Map},
-};
+use alloy_primitives::{Address, B256, U256, map::B256Map};
 use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessStateNode};
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
@@ -67,9 +64,4 @@ pub trait StatelessTrie: core::fmt::Debug {
         &mut self,
         state: HashedPostState,
     ) -> Result<B256, StatelessValidationError>;
-}
-
-#[allow(clippy::redundant_pub_crate)]
-pub(super) trait StatelessTrieExt: StatelessTrie {
-    fn append_callers(&mut self, callers: AddressMap<TrieAccount>);
 }

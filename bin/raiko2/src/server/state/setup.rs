@@ -62,7 +62,6 @@ pub(crate) fn build_provider(
     pair: &ResolvedNetworkPair,
 ) -> Result<NetworkProvider> {
     let rpc_config = config.rpc.provider_client_config();
-    let _ = config;
     NetworkProvider::new_pair_with_l2_provider_kind_and_chain_specs_and_config(
         &pair.l1_rpc,
         &pair.l2_rpc,
@@ -127,7 +126,6 @@ fn task_lease_duration(config: &Config) -> Duration {
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
-        bonsai: config.prover.risc0.bonsai,
         snark: config.prover.risc0.snark,
         mock: config.prover.risc0.mock,
         profile: false,
@@ -139,7 +137,7 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
 #[cfg(feature = "host")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
-    config.prover.sp1.clone()
+    config.prover.sp1.config.clone()
 }
 
 #[cfg(feature = "host")]
@@ -149,6 +147,7 @@ pub(crate) fn boundless_prover_config(
 ) -> raiko2_prover::boundless::BoundlessConfig {
     let boundless = config
         .prover
+        .risc0
         .boundless
         .apply_pair_override(&pair.boundless)
         .expect("validated boundless config must merge cleanly");
@@ -179,22 +178,13 @@ pub(crate) const fn remote_sgx_prover_config(
     }
 }
 
-#[cfg(feature = "redis-queue")]
-use raiko2_pipeline::PipelineKey;
-
-#[cfg(feature = "redis-queue")]
-pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: PipelineKey) -> String {
-    let base = base.trim_end_matches('/');
-    format!("{}/{}/{}", base, pair.key, key.as_str())
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "local-provers")]
     use super::sp1_scheduler_config;
-    use super::{
-        boundless_prover_config, boundless_scheduler_config, build_context, scheduler_config,
-    };
+    #[cfg(feature = "host")]
+    use super::{boundless_prover_config, boundless_scheduler_config};
+    use super::{build_context, scheduler_config};
     use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
@@ -241,6 +231,7 @@ mod tests {
         assert!(context.config.get("sp1").is_none());
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn boundless_scheduler_uses_general_task_policy() {
         let config = Config::default();
@@ -272,7 +263,7 @@ mod tests {
 
     #[cfg(feature = "local-provers")]
     #[test]
-    fn sp1_scheduler_retries_twenty_times_every_five_minutes() {
+    fn sp1_scheduler_retries_pre_checkpoint_failures() {
         let scheduler = sp1_scheduler_config(&Config::default());
         assert_eq!(
             scheduler.retry,
@@ -304,6 +295,7 @@ mod tests {
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn boundless_prover_inherits_risc0_execution_po2() {
         let mut config = Config::default();
@@ -320,12 +312,16 @@ mod tests {
         assert_eq!(boundless.execution_po2, 24);
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();
-        config.prover.boundless.rebid_timeout_ms = 900_000;
-        config.prover.boundless.rebid_price_step_bps = 3000;
-        config.prover.boundless.rebid_max_attempts = 5;
+        config.prover.risc0.boundless.offchain = true;
+        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.prover.risc0.boundless.rebid_timeout_ms = 900_000;
+        config.prover.risc0.boundless.rebid_price_step_bps = 3000;
+        config.prover.risc0.boundless.rebid_max_attempts = 5;
         config.rpc.pairs[0].boundless.batch_quote =
             Some(raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 });
         config.rpc.pairs[0].boundless.aggregation_quote =
@@ -342,7 +338,7 @@ mod tests {
                     timeout_ms_per_mcycle: 500,
                     dynamic_pricing_timeout_modifier: None,
                 },
-                ..config.prover.boundless.offer_params.batch.clone()
+                ..config.prover.risc0.boundless.offer_params.batch.clone()
             });
         config.rpc.pairs[0].boundless.offer_params.aggregation =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
@@ -351,7 +347,13 @@ mod tests {
                     timeout_ms_per_mcycle: 7_000,
                     dynamic_pricing_timeout_modifier: None,
                 },
-                ..config.prover.boundless.offer_params.aggregation.clone()
+                ..config
+                    .prover
+                    .risc0
+                    .boundless
+                    .offer_params
+                    .aggregation
+                    .clone()
             });
         let pair = config
             .rpc
@@ -362,6 +364,10 @@ mod tests {
 
         let boundless = boundless_prover_config(&config, &pair);
 
+        assert!(boundless.offchain);
+        assert_eq!(boundless.rpc_url, "https://boundless.example.com");
+        assert_eq!(boundless.signer_key, "configured-by-secret-store");
+        assert!(boundless.deployment.is_some());
         assert_eq!(
             boundless.batch_quote,
             raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 }

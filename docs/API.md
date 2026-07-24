@@ -58,8 +58,9 @@ GET /health
 GET /ready
 ```
 
-Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the configured
-queue backend, and the hosted proving capabilities exposed by the endpoint.
+Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the global runtime
+lifecycle and authoritative-store coherence, the in-memory queue, and the hosted proving
+capabilities exposed by the endpoint. Draining or an inaccessible runtime store returns HTTP `503`.
 
 ## Metrics
 
@@ -140,7 +141,7 @@ V4 error envelope:
 {
   "status": "error",
   "error": "invalid_proof_type",
-  "message": "proof_type must be one of: risc0, sp1, sgx, sgxgeth"
+  "message": "proof_type must be one of: native, risc0, sp1, sgx, sgxgeth"
 }
 ```
 
@@ -172,15 +173,17 @@ Common proof submission fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | Concrete proof backend. One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | Concrete proof backend. One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Common proof-type validation:
 
 - Missing `proof_type` returns `missing_proof_type`.
 - `proof_type=zk_any` returns `invalid_proof_type`.
 - Unknown proof type strings return `invalid_proof_type`.
-- Any valid concrete `proof_type` that the configured server route cannot serve returns
+- Any valid concrete `proof_type` whose self-contained prover table is disabled returns
   `unsupported_proof_type`.
+- `proof_type=native` always uses `native/local`. It is intended for smoke tests and regression,
+  and returns local execution output rather than a zk or TEE proof.
 
 Proof submission validation:
 
@@ -234,7 +237,7 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 | `aggregate` | boolean | no | Defaults to `false`. When `false`, `proposals` must contain exactly one item. When `true`, the root task includes an aggregation stage for the submitted proposal batch. |
 | `proposals` | array | yes | For `aggregate=false`, exactly one proposal. For `aggregate=true`, one or more contiguous proposals, up to 1,024 items. |
 | `proposals[].proposal_id` | number | yes | Taiko proposal ID. Proposal IDs must be strictly increasing and contiguous. |
@@ -270,7 +273,7 @@ Response fields:
 | `proposal_id_end` | number | Last proposal ID covered by this request. |
 | `data.task_id` | string | Opaque root task ID derived from the normalized request fingerprint. Use it for task inspection and operational correlation. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
+| `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof. A completed standalone SP1 proposal may return `null` because its canonical artifact is a typed Compressed proposal payload; use `GET /v4/tasks/{id}` to inspect its `proof_ref` and `proof_uri`. |
 | `data.error` | string/null | Terminal root error detail when failed. Omitted when no error is present. |
 
 Polling and idempotency:
@@ -359,13 +362,13 @@ Response:
         "last_anchor_block_number": 199,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json"
+        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_mainnet~2Fethereum/proposal_.../content/<sha256>.proof.json"
       }
     ],
     "aggregate": null,
     "proof": "0x...",
     "proof_ref": "proposal:...",
-    "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json",
+    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/prod/raiko2-prod-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_mainnet~2Fethereum/proposal_.../content/<sha256>.proof.json",
     "error": null
   }
 }
@@ -378,7 +381,7 @@ Response fields:
 | `data.task_id` | string | Opaque root task ID. |
 | `data.route` | string | Resolved route, such as `sp1/network` or `risc0/network`. |
 | `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
-| `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
+| `data.execution_mode` | string/null | SP1 execution mode. Proof API tasks use `prove`; `execute` requests are rejected. |
 | `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
 | `data.network` | string | Server-configured L2 network. |
 | `data.l1_network` | string | Server-configured L1 network. |
@@ -387,10 +390,20 @@ Response fields:
 | `data.proposals` | array | Proposal task views. |
 | `data.proposals[].l2_block_numbers` | array | L2 block numbers covered by the proposal. |
 | `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
-| `data.proof` | string/null | Final root proof hex string when completed. |
+| `data.proof` | string/null | Final root proof hex string when completed. A completed standalone SP1 proposal may be `null` when the canonical artifact is a Compressed proposal payload. |
 | `data.proof_ref` | string/null | Stable persisted proof reference. |
-| `data.proof_path` | string/null | Persisted proof artifact path. |
+| `data.proof_uri` | string/null | Backend-neutral persisted proof URI (`memory://` or `gs://`). |
 | `data.error` | string/null | Terminal error detail when failed. |
+
+SP1 proposal artifacts and final aggregate artifacts have different payload contracts:
+
+- A proposal artifact is readable when it contains a non-null `proof`, or, only for
+  `PipelineKey::ShastaSp1`, when it contains the complete Compressed payload fields `quote`,
+  `input`, `uuid`, and `extra_data`.
+- An aggregate artifact is readable only when it contains a non-null final `proof`.
+- Artifact validation is derived from the proposal or aggregate task identity. Whether the task is
+  currently referenced by a standalone root, an aggregate root, or both does not change the
+  accepted payload class.
 
 Validation:
 
@@ -409,7 +422,7 @@ Query fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 
@@ -484,7 +497,7 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 
@@ -508,15 +521,22 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
+| `status` | string | `ok` when every selected operation completed; `partial_failure` when `data.failed` is non-zero. |
 | `proof_type` | string | Concrete proof backend targeted by the clear operation. |
 | `data.cancelled` | number | Non-terminal root tasks cancelled. |
 | `data.skipped` | object | Records skipped because they are invalid, unavailable, or already have remote progress. |
-| `data.failed` | number | Runtime tasks marked cancelled but not fully cancelled in the engine queue. |
+| `data.failed` | number | Runtime roots cancelled authoritatively whose owner-aware queue detach or exact artifact effect did not yet converge. |
 
 Idempotency:
 
 - If the selected proof type has no non-terminal backlog, the response is `200 ok` with
   `data.cancelled=0`.
+- Cancellation commits the exact non-terminal root lifetime first, then atomically detaches that
+  root owner from the in-process execution projection. Shared stages remain while another live root
+  owns them; the last owner leaving cancels or removes the stage.
+- The endpoint returns completed counts even when a later projection or artifact effect fails. In
+  that case the envelope uses `status="partial_failure"`; clients may retry safely while background
+  reconciliation converges the already-cancelled root.
 
 Validation:
 
@@ -555,11 +575,11 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 | `proof_prefix` | string | no | Optional `0x`-prefixed hex prefix matched against cached proof payloads. Maximum length is 130 characters, including `0x`. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
 | `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
 | `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |
-| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof files. |
+| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof manifests. |
 
 Response:
 
@@ -572,8 +592,8 @@ Response:
     "artifacts": {
       "matched": 10,
       "removed": 0,
-      "files_removed": 0,
-      "files_missing": 0,
+      "manifests_removed": 0,
+      "manifests_missing": 0,
       "failed": 0
     },
     "tasks": {
@@ -587,6 +607,11 @@ Response:
 }
 ```
 
+`manifests_removed` and `manifests_missing` report the exact result of deleting the canonical
+manifest. Immutable content objects are retained and are not counted as removed files.
+The response envelope uses `status="partial_failure"` when either `data.artifacts.failed` or
+`data.tasks.failed` is non-zero; clients must not treat that response as a complete invalidation.
+
 Scope:
 
 - The endpoint invalidates completed, failed, or cancelled local runtime tasks and matching proof
@@ -597,6 +622,14 @@ Scope:
 - If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
   are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
   are linked to a matched runtime task.
+- If deleting a proof manifest fails, `failed` is incremented and the artifact remains
+  tombstoned for a later invalidation retry. Tombstoned artifacts are not eligible for proof reuse.
+- When `dry_run=false`, runtime state reserves invalidation for the exact artifact descriptor before
+  any object-store effect. A matching live root returns a blocked result and retains its artifact.
+  An accepted reservation creates a tombstone for `(logical key, manifest generation, content
+  hash)`, removes only that manifest generation conditionally, and cleans up only the matching
+  pending publication. Immutable content bytes are retained. A dry run performs selection and
+  validation without reserving state or mutating objects.
 
 Validation:
 
@@ -604,7 +637,9 @@ Validation:
 - `proposal_id_start` and `proposal_id_end` must be supplied together, and start must be less than or
   equal to end.
 - `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string no longer than 130
-  characters including `0x`.
+  characters including `0x`. Prefix matching validates the complete manifest-selected content hash
+  before examining the bounded prefix; corrupt or missing content fails the request instead of being
+  treated as a non-match.
 
 ## Legacy V3 Submit Shasta Batch Proof
 
@@ -616,8 +651,8 @@ Content-Type: application/json
 ```
 
 Registers a Shasta batch root task. The server expands it into proposal prove tasks and, when
-`aggregate=true`, an aggregation task. For remote SGX lanes, configure `[prover.remote_sgx]`:
-`base_url` backs `proof_type=sgx`, while `sgxgeth_base_url` backs `proof_type=sgxgeth`.
+`aggregate=true`, an aggregation task. Configure remote lanes independently through `[prover.sgx]`
+and `[prover.sgxgeth]`; each table owns its `enabled`, `base_url`, and `timeout_ms` values.
 
 ### Request
 
@@ -668,15 +703,16 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
-  - `native -> native/local` only when the server route is `native/local`; otherwise rejected
-  - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
-  - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
+  - `native -> native/local` when `prover.native.enabled = true`; otherwise rejected
+  - `sp1 -> sp1/local | sp1/network` from `prover.sp1.enabled` and `prover.sp1.prover`
+  - `risc0 -> risc0/local | risc0/network` from `prover.risc0.enabled` and
+    `prover.risc0.runner`, with
+    `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
   - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
-  - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
+  - `sgxgeth -> sgxgeth/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`
-- When the server prover route is `sgx/remote`, the hosted public API only accepts
-  `proof_type=sgx` and `proof_type=sgxgeth`.
+- Each concrete proof type is accepted only when its matching route is enabled.
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
   proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the
@@ -699,9 +735,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.
-- `sp1.mode=execute` is only valid when `proof_type=sp1`.
-- `sp1.mode=execute` requires `aggregate=false`.
-- `sp1.mode=execute` does not support `sp1.prover=network`.
+- `sp1.mode=execute` is rejected by the proof API because it does not produce the publishable
+  Compressed proposal or final aggregate payload required by the proof lifecycle.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires the selected `(network, l1_network)` pair
   to declare `sp1_verifier_rpc_url` and `sp1_verifier_address` in server config.
@@ -826,6 +861,7 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
+- When provided, `aggregation_ids` must contain exactly one ID per entry in `proofs`.
 - `proof_type` must be a concrete proof type: `risc0`, `sp1`, `sgx`, or `sgxgeth`.
 - `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
@@ -897,8 +933,8 @@ x-api-key: <server.acl.keys[].key with allow=["admin"]>
 
 Requires an ACL key that allows `admin`.
 
-Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
-directories. Reusable proof artifacts under `cache/proofs/...` are retained.
+Removes all registered root tasks and detaches their owner-aware in-process execution projections.
+Reusable proof artifacts in the configured artifact store are retained.
 
 ### Response
 
@@ -952,8 +988,8 @@ under the original `zk_any` request for this operator view.
 ```
 
 `orphaned` counts non-terminal runtime records without active local queue execution and without
-remote submission progress. The runtime cleanup pass cancels stale orphaned records after
-`runtime.inactive_ttl_secs`.
+remote submission progress. The runtime cleanup pass cancels stale orphaned records after the
+seven-day runtime retention window.
 `clean=true` means there are no matching non-terminal queue tasks in `pending`, `ready`,
 `retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.
@@ -967,9 +1003,9 @@ POST /v3/prover/clear
 x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
 ```
 
-Requires an ACL key that allows `prover.clear` or `admin`. Marks every non-terminal root originally
-submitted with `proof_type=zk_any` as `cancelled` first, then best-effort cancels owned proposal and
-aggregation queue tasks.
+Requires an ACL key that allows `prover.clear` or `admin`. Marks every exact non-terminal root
+originally submitted with `proof_type=zk_any` as `cancelled` first, then detaches its owner from the
+proposal and aggregation execution graph.
 
 Shared child tasks still referenced by another live root are left running.
 Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipped.
@@ -988,6 +1024,10 @@ Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipp
   "failed": 0
 }
 ```
+
+`status` is `partial_failure` when `failed` is non-zero; callers must retry or alert on those
+incomplete projection or artifact effects. The authoritative root remains cancelled while
+reconciliation retries the effect.
 
 ## Legacy V3 Query Root Task
 
@@ -1033,7 +1073,7 @@ Returns the root-task view derived from the original batch request.
         "last_anchor_block_number": 41,
         "proof": "0x...",
         "proof_ref": "proposal:...",
-        "proof_path": "cache/proofs/taiko_hoodi_hoodi/proposal_....json"
+        "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_hoodi~2Fhoodi/proposal_.../content/<sha256>.proof.json"
       }
     ],
     "aggregate": {
@@ -1041,11 +1081,11 @@ Returns the root-task view derived from the original batch request.
       "status": "completed",
       "proof": "0x...",
       "proof_ref": "aggregate:...",
-      "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+      "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_hoodi~2Fhoodi/aggregate_.../content/<sha256>.proof.json"
     },
     "proof": "0x...",
     "proof_ref": "aggregate:...",
-    "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+    "proof_uri": "gs://raiko2-runtime/raiko2/runtime/v1/devnet/raiko2-devnet-a/proofs/shasta-sp1-local/sp1~2Fnetwork/taiko_hoodi~2Fhoodi/aggregate_.../content/<sha256>.proof.json"
   }
 }
 ```
@@ -1057,24 +1097,27 @@ Returns the root-task view derived from the original batch request.
 - `data.prover_type` is present for zkVM proof types and reports the effective prover mode:
   `mock`, `local`, or `network`. For RISC0, the network mode is currently backed by Boundless.
 - `data.execution_mode` is present for SP1 tasks and distinguishes `prove` from `execute`.
-- `data.runtime.runner_status` is the persisted root runtime lifecycle stored in `runtime.sqlite`:
+- `data.runtime.runner_status` is the root runtime lifecycle stored by the configured runtime store:
   `allocated`, `running`, `completed`, `failed`, or `cancelled`.
 - `data.status` is the proof-oriented root status shown to API clients:
   `pending`, `proving`, `completed`, `failed`, or `cancelled`.
-- `proof_ref` and `proof_path`, when present, point at the persisted proof artifact for the
+- `proof_ref` and `proof_uri`, when present, point at the persisted proof artifact for the
   resolved concrete route. For `zk_any` requests these fields use the selected `sp1` or `risc0`
   artifact key, never `zk_any`.
+- A standalone SP1 proposal can be `completed` with `data.proof = null` when `proof_ref` and
+  `proof_uri` identify a readable Compressed proposal artifact. Proposal entries in an aggregate
+  task use the same contract. The aggregate root itself becomes `completed` only after a separate
+  final artifact with a non-null `proof` is readable.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
-- Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
-  `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
-  Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
-  stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
-- When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
-  execute report under `proposals[].extra_data.sp1`. When present,
-  `proposals[].extra_data.sp1.gas` is SP1 prover gas from `ExecutionReport::gas()`, not EVM gas.
+- Terminal root task records use a seven-day retention policy. Artifact manifests, including
+  external aggregation inputs, remain governed by explicit activation and invalidation rather than
+  root-record age. Active manifests must not have a bucket age rule, and immutable proof or program
+  content must remain available until every manifest that references it is gone. Generation-scoped
+  tombstones and unreferenced content use a minimum thirty-day retention window. Active root tasks
+  are never removed by runtime cleanup.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1089,9 +1132,10 @@ x-api-key: <server.acl.keys[].key with allow=["admin"]>
 
 Requires an ACL key that allows `admin`.
 
-Cancelling a root task cascades to its proposal stage tasks and optional aggregate task. The root
-runtime is only marked `cancelled` after child-task cancellation succeeds; shared child tasks are
-left running for the other live root that still references them.
+Cancelling a root task first marks the exact non-terminal runtime lifetime `cancelled`, then detaches
+that root owner from its proposal and optional aggregation graph. Shared child tasks remain for any
+other live owner. A failed detach does not roll the root back; the request returns an error and
+reconciliation retries the incomplete effect.
 
 ## Error Envelope
 
@@ -1107,6 +1151,72 @@ All API errors use the Hoodi-style envelope:
 
 ## Configuration Notes
 
+Each proof type owns a self-contained table and an explicit `enabled` value. RISC0 selects
+`runner = "local" | "network"`; SP1 derives local/network from `prover = "local" | "mock" |
+"network"`; native is always local; SGX and SGXGETH are always remote and each owns its endpoint
+and timeout. Native is enabled by default and can be disabled explicitly. One host may enable any
+supported combination, with at least one proof type required.
+Boundless is nested under `[prover.risc0.boundless]` because it is the RISC0 network backend.
+
+`--prover-routes` and `RAIKO2_PROVER_ROUTES` accept a comma-separated list such as
+`risc0/network,sp1/network,sgx/remote,sgxgeth/remote`. The operational override atomically disables
+omitted proof types, enables the listed proof types, and updates the RISC0/SP1 execution selectors;
+it never appends to the file configuration.
+
+`--remote-sgx-timeout-ms` and `RAIKO2_REMOTE_SGX_TIMEOUT_MS` are shared operational overrides that
+set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
+`prover.sgxgeth.timeout_ms` file values when the lanes need different timeouts.
+
+- A string setting may use the explicit TOML reference `{ env = "NAME" }`. Raiko2 resolves only
+  that singleton table before schema validation; missing, non-Unicode, or empty variables fail
+  startup without printing their values. Shell expansion and partial-string interpolation are not
+  supported. Schema error details are redacted when a file contains an environment reference.
+- `runtime.environment` is the business/deployment boundary. `runtime.namespace` is the immutable
+  single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
+  reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
+  runtime records, provider checkpoints, and proof artifacts.
+- `runtime.store.backend` selects the backend used by both the authoritative state repository and
+  proof-object repository. Use `gcs` with a non-empty `bucket` for durable deployments. `memory`
+  is process-local and disposable; it is accepted outside `development`, `local`, or `test` only
+  when `runtime.store.allow_ephemeral = true`. Switching backends is a drain-and-cutover operator
+  action and there is no automatic failover, merge, writeback, SQLite import, or compatibility
+  migration.
+- GCS object names start with `<prefix>/<environment>/<namespace>/`. The service intentionally has no
+  distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
+  and replacement processes never overlap for one namespace.
+- The namespace fence is global to the process but short-lived: draining closes mutation admission
+  and readiness immediately, then waits only for repository commits already admitted and provider
+  request-ID checkpoints covered by existing permits. It is not held across a full task,
+  cancellation, or publication saga, and shutdown does not wait for all proof tasks to finish.
+- Runtime state is authoritative. Submission attaches a complete owner-aware execution graph only
+  after root registration; cancellation, terminal failure, and cleanup transition the exact
+  `TaskLifetime` before detaching its root owner. Projection failures are reconciled from runtime
+  state and do not roll an authoritative transition back.
+- Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
+  pointer. Runtime snapshots use `*.runtime.json`; the suffixes allow operations to apply seven-day
+  runtime retention and a minimum thirty-day retention window to generation-scoped tombstones and
+  unreferenced content without a bucket-wide age rule. Active manifests must not be deleted by age,
+  and immutable content must remain available while any active manifest references it.
+- A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
+  registered, readable, and satisfies its task-identity payload contract. Proposal tasks accept a
+  non-null `proof`, plus the complete Compressed SP1 tuple (`quote`, `input`, `uuid`, `extra_data`)
+  on `ShastaSp1`; aggregate tasks require a non-null final `proof`. Publication is create-only: an
+  identical existing object is idempotent, while a different late object is discarded.
+- Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
+  `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
+- Before the first canonical publication attempt, a completed proof payload is checkpointed under
+  the queue lease. Authoritative runtime state first records a publication intent containing the
+  typed artifact identity, content hash, and exact `TaskLifetime` owners; only then is the immutable
+  pending blob materialized. State updates do not rewrite large proofs. A failed intent write creates
+  no object, while a failed blob write leaves a durable retry intent. Recovery uses the same intent
+  and pending blob after restart, and in-process publication retries do not run the prover again.
+- Invalidation first reserves the exact artifact expectation in authoritative runtime state and
+  verifies that no live matching owner remains. It then writes a tombstone for `(logical key,
+  manifest generation, content hash)`, conditionally deletes only that manifest generation, and
+  removes only the exact pending blob. Immutable proof content is retained. Recovery checks the
+  exact marker during reconciliation and publication finalization, so a failed manifest deletion
+  cannot make that descriptor reusable. A later lifecycle may publish identical or different
+  content under a new manifest generation.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.
@@ -1117,29 +1227,29 @@ All API errors use the Hoodi-style envelope:
   geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
-- `prover.boundless.batch_quote` and `prover.boundless.aggregation_quote` select how proposal and
-  aggregation quote cycles are sized for `risc0/network`. Each is a table with
+- `prover.risc0.boundless.batch_quote` and `prover.risc0.boundless.aggregation_quote` select how
+  proposal and aggregation quote cycles are sized for `risc0/network`. Each is a table with
   `strategy = "raiko_agent"` (default; rounds the evaluated dry-run mcycle count up locally — batch
   to the next `1000` mcycles with a `2000` mcycle floor, aggregation to the next `100` mcycles with a
   `200` mcycle floor), `"evaluated"` (use the local dry-run mcycle count as-is), or `"fixed"` with a
   positive `mcycles` value.
   `rpc.pairs[*].boundless` can override either table for one `(network, l1_network)` pair.
-- `prover.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
+- `prover.risc0.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It must be at least `1000` ms and is separate from the overall
-  `prover.boundless.timeout_ms` fulfillment deadline.
-- `prover.boundless.rebid_price_step_bps` defaults to `5000` (+50% per rung) and sets the
+  `prover.risc0.boundless.timeout_ms` fulfillment deadline.
+- `prover.risc0.boundless.rebid_price_step_bps` defaults to `5000` (+50% per rung) and sets the
   per-rebid max-price escalation, in basis points, compounded over the offer's base max price
   (`1 → 1.5 → 2.25 → 3.375×`). `0` is a valid flat (no-escalation) ladder; any value in `1..100`
   is rejected as a likely basis-points/multiplier confusion (a `2` meant as "×2" is really
   +0.02%/rung). `manual` pricing escalates the configured max price; `market` pricing escalates
   the SDK autopriced max price, still subject to the optional cap.
-- `prover.boundless.rebid_max_attempts` defaults to `4` and caps rebids across every retry
+- `prover.risc0.boundless.rebid_max_attempts` defaults to `4` and caps rebids across every retry
   path: no-lock, expired, and timed-out requests all draw from the same submission budget, and
   the proof task fails once it is exhausted. It must be no greater than `31`.
   `rpc.pairs[*].boundless` can override `poll_interval_ms`, `timeout_ms`, `rebid_timeout_ms`,
   `rebid_price_step_bps`, and `rebid_max_attempts` per `(network, l1_network)` pair.
-- `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` delegates price selection to the Boundless SDK price provider and optionally accepts a
   per-mcycle safety cap spelled either `absolute_max_price_per_mcycle` (canonical) or
@@ -1148,18 +1258,18 @@ All API errors use the Hoodi-style envelope:
   rebid-escalated) `maxPrice` exceeds that total cap are clamped to it instead of failing, with the
   min price lowered to the cap when needed to keep the offer well-formed. `market` must omit
   `min_price_per_mcycle`.
-- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the absolute
-  per-mcycle bid ceiling in both pricing modes: no attempt, initial or rebid-escalated, ever bids
-  above it. In `manual` mode it is optional, must be at least `max_price_per_mcycle`, and clamps the
-  bps rebid escalation; without it, manual escalation is unbounded by config. In `market` mode it is
-  the canonical spelling of the safety cap. Once a rebid is clamped, later rebids repeat the ceiling
-  price.
-- `prover.boundless.offer_params.{batch,aggregation}.timeouts` is a tagged table selecting the
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
+  absolute per-mcycle bid ceiling in both pricing modes: no attempt, initial or rebid-escalated,
+  ever bids above it. In `manual` mode it is optional, must be at least `max_price_per_mcycle`, and
+  clamps the bps rebid escalation; without it, manual escalation is unbounded by config. In
+  `market` mode it is the canonical spelling of the safety cap. Once a rebid is clamped, later
+  rebids repeat the ceiling price.
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.timeouts` is a tagged table selecting the
   timeout policy. `mode = "per_mcycle"` sets `lock_timeout_ms_per_mcycle` and
   `timeout_ms_per_mcycle` (scaled by the quoted mcycle count) and, under `market` pricing only, may
   set `dynamic_pricing_timeout_modifier >= 1.0` to multiply `lockTimeout` and `timeout` after
   dynamic pricing. `mode = "fixed"` sets `lock_timeout_secs` and `timeout_secs` directly.
-- `prover.boundless.offer_params.{batch,aggregation}.ramp_up_period_sec` is the offer ramp-up
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.ramp_up_period_sec` is the offer ramp-up
   duration in seconds (previously `ramp_up_period_blocks`, scaled by a per-deployment block time).
 - Boundless offer tables reject unknown keys, so a stale offer-level field left over from the
   pre-cutover schema — for example `dynamic_pricing_timeout_modifier` at the offer level instead of
@@ -1167,13 +1277,17 @@ All API errors use the Hoodi-style envelope:
   deeper, inside the tagged `timeouts` / `*_quote` tables, are **not** rejected (a serde limitation
   on internally-tagged enums), so double-check those tables by hand during migration.
 - Expired Boundless requests are resubmitted automatically up to the shared
-  `prover.boundless.rebid_max_attempts` budget, each resubmission escalating the max price by
-  `prover.boundless.rebid_price_step_bps` (compounded), clamped to `absolute_max_price_per_mcycle`
-  when it is set; min price is unchanged. `market` resubmissions are re-priced by the SDK price
-  provider and then escalated by the same step, subject to the cap.
+  `prover.risc0.boundless.rebid_max_attempts` budget, each resubmission escalating the max price by
+  `prover.risc0.boundless.rebid_price_step_bps` (compounded), clamped to
+  `absolute_max_price_per_mcycle` when it is set; min price is unchanged. `market` resubmissions are
+  re-priced by the SDK price provider and then escalated by the same step, subject to the cap.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
+- `prover.sp1.network_request_max_attempts` bounds the full SP1 network lifecycle, including a
+  request resumed after restart. Exhausting the budget fails the task instead of submitting
+  requests indefinitely. A request-scoped `prover_args.sp1.network_request_max_attempts` may lower
+  this operator-owned cap but cannot raise it.
 - `rpc.client.timeout_ms` defaults to `600000` to tolerate slow preflight witness and
   `eth_getProof` RPC calls. It controls provider RPC calls, not remote prover request deadlines.
 - `preflight.verify_checkpoint_l2_rpcs` is an optional map from `rpc.pairs[*].network` to a

@@ -60,7 +60,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let evaluated_elapsed = evaluated_start.elapsed();
 
     let prover = Risc0Prover::new(Risc0Config {
-        bonsai: false,
         snark: false,
         mock: false,
         profile: false,

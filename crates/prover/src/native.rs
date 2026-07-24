@@ -225,7 +225,8 @@ mod tests {
         AggregationGuestInput, Proof, ProofType, ProverConfig, RaikoError, SupportedChainSpecs,
     };
     use raiko2_primitives_shasta::{
-        GuestInput, build_proof_carry_data, encode_proof_carry_data, instance::words_to_bytes_be,
+        GuestInput, build_proof_carry_data_from_witness_spec, encode_proof_carry_data,
+        instance::words_to_bytes_be,
     };
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -261,7 +262,8 @@ mod tests {
                 witness.chain_spec = chain_spec.clone();
             }
             guest_input.proof_carry_data =
-                build_proof_carry_data(&guest_input, ProofType::Native).expect("rebuild carry");
+                build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                    .expect("rebuild carry");
         }
         guest_input
     }

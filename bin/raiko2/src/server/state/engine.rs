@@ -1,8 +1,8 @@
-use raiko2_engine::{
-    AggregateProofInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
-    ProposalTaskRequest,
+use raiko2_engine::{Engine, EngineExecutionPlan, EngineTaskId, EngineTaskKey};
+use raiko2_queue::{
+    AttachOutcome, DetachMode, DetachOutcome, RootOwner, TaskState, TaskStateKind, TaskStoreError,
+    TaskView,
 };
-use raiko2_queue::{TaskState, TaskStateKind, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -14,16 +14,11 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Engine abstraction used by the HTTP server.
 pub trait EngineHandle: Send + Sync {
-    fn submit_proposal_proof_with_dependencies(
-        &self,
-        request: ProposalTaskRequest,
-        dependencies: Vec<EngineTaskId>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
-    fn submit_aggregation_proof_from_inputs(
-        &self,
-        request: AggregationTaskRequest,
-        inputs: Vec<AggregateProofInput>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
+    fn start_workers(&self, _workers: usize, _maintenance_interval: std::time::Duration) {}
+
+    fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
+        true
+    }
     fn get_status(
         &self,
         id: EngineTaskId,
@@ -32,8 +27,21 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
-    fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
-    fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
+    fn has_active_execution(&self, owner: RootOwner)
+    -> BoxFuture<'_, Result<bool, TaskStoreError>>;
+    fn attach_execution_plan(
+        &self,
+        owner: RootOwner,
+        plan: EngineExecutionPlan,
+    ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>>;
+    fn detach_execution(
+        &self,
+        owner: RootOwner,
+        mode: DetachMode,
+    ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>>;
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +57,6 @@ pub(crate) enum EngineQueueTaskState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct EngineQueueTaskView {
-    pub(crate) id: EngineTaskId,
     pub(crate) state: EngineQueueTaskState,
 }
 
@@ -113,26 +120,12 @@ where
     S::Backend: raiko2_pipeline::ProverBackend + 'static,
     S::Provider: raiko2_provider::Provider + 'static,
 {
-    fn submit_proposal_proof_with_dependencies(
-        &self,
-        request: ProposalTaskRequest,
-        dependencies: Vec<EngineTaskId>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move {
-            self.submit_proposal_proof_with_dependencies(request, dependencies)
-                .await
-        })
+    fn start_workers(&self, workers: usize, maintenance_interval: std::time::Duration) {
+        self.start_workers_with_maintenance_interval(workers, maintenance_interval);
     }
 
-    fn submit_aggregation_proof_from_inputs(
-        &self,
-        request: AggregationTaskRequest,
-        inputs: Vec<AggregateProofInput>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move {
-            self.submit_aggregation_proof_from_inputs(request, inputs)
-                .await
-        })
+    fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {
+        Engine::queue_maintenance_ready(self, max_age)
     }
 
     fn get_status(
@@ -152,19 +145,52 @@ where
         Box::pin(async move {
             Engine::get_task_state(self, id).await.map(|view| {
                 view.map(|view| EngineQueueTaskView {
-                    id: view.id,
                     state: queue_task_state(view.state),
                 })
             })
         })
     }
 
-    fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-        Box::pin(async move { self.cancel(id).await })
+    fn has_active_execution(
+        &self,
+        owner: RootOwner,
+    ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+        Box::pin(async move {
+            Ok(self
+                .inspect_execution(&owner)
+                .await?
+                .is_some_and(|projection| {
+                    projection.tasks.iter().any(|task| {
+                        matches!(
+                            task.state,
+                            TaskStateKind::Pending
+                                | TaskStateKind::Ready
+                                | TaskStateKind::Retrying
+                                | TaskStateKind::Running
+                        )
+                    })
+                }))
+        })
     }
 
-    fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-        Box::pin(async move { self.remove(id).await })
+    fn attach_execution_plan(
+        &self,
+        owner: RootOwner,
+        plan: EngineExecutionPlan,
+    ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>> {
+        Box::pin(async move { self.attach_execution_plan(owner, plan).await })
+    }
+
+    fn detach_execution(
+        &self,
+        owner: RootOwner,
+        mode: DetachMode,
+    ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>> {
+        Box::pin(async move { self.detach_execution(&owner, mode).await })
+    }
+
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { self.shutdown_workers().await })
     }
 }
 

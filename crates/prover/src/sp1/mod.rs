@@ -1561,15 +1561,19 @@ const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
 
 const fn sp1_network_submission_progress(
     provider_request_id: String,
+    submitted_at: u64,
     config: &Sp1Config,
+    attempt: u32,
 ) -> Sp1NetworkSubmissionProgress {
     Sp1NetworkSubmissionProgress {
         provider_request_id,
+        submitted_at,
         network_mode: config.network_mode,
         fulfillment_strategy: config.fulfillment_strategy,
         skip_simulation: config.skip_simulation,
         cycle_limit: config.cycle_limit,
         timeout_secs: config.timeout_secs,
+        attempt,
         max_price_per_pgu: config.max_price_per_pgu,
         auction_timeout_secs: config.auction_timeout_secs,
     }
@@ -1577,16 +1581,134 @@ const fn sp1_network_submission_progress(
 
 async fn notify_sp1_network_submission(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
-    provider_request_id: String,
+    permit: &crate::SubmissionCheckpointPermit,
+    progress: &Sp1NetworkSubmissionProgress,
+) -> RaikoResult<()> {
+    let progress = ProverProgress::Sp1NetworkSubmission(progress.clone());
+    crate::persist_prover_progress(observer, &progress, "sp1_network_submission", permit).await
+}
+
+fn load_sp1_resume(
+    checkpoint: Option<crate::PendingProofCheckpoint>,
     config: &Sp1Config,
-) {
-    if let Some(observer) = observer {
-        observer
-            .on_progress(&ProverProgress::Sp1NetworkSubmission(
-                sp1_network_submission_progress(provider_request_id, config),
-            ))
-            .await;
+) -> RaikoResult<(u64, Option<u64>, Option<Sp1NetworkSubmissionProgress>)> {
+    let Some(checkpoint) = checkpoint else {
+        return Ok((1, None, None));
+    };
+    if checkpoint.deadline_secs == 0 {
+        return Err(RaikoError::Guest(
+            "SP1 checkpoint has zero deadline".to_string(),
+        ));
     }
+    let resume = checkpoint
+        .decode_payload_for::<Sp1NetworkSubmissionProgress>(crate::NetworkProverBackend::Sp1)
+        .map_err(|error| RaikoError::Guest(error.to_string()))?;
+    if resume.provider_request_id.is_empty() {
+        return Err(RaikoError::Guest(
+            "SP1 checkpoint has empty provider request id".to_string(),
+        ));
+    }
+    if resume.submitted_at != checkpoint.submitted_at_secs
+        || resume.submitted_at.checked_add(resume.timeout_secs) != Some(checkpoint.deadline_secs)
+    {
+        return Err(RaikoError::Guest(
+            "SP1 checkpoint timestamps do not match its provider payload".to_string(),
+        ));
+    }
+    let target_matches = resume.network_mode == config.network_mode
+        && resume.fulfillment_strategy == config.fulfillment_strategy
+        && resume.skip_simulation == config.skip_simulation
+        && resume.cycle_limit == config.cycle_limit
+        && resume.timeout_secs == config.timeout_secs
+        && resume.max_price_per_pgu == config.max_price_per_pgu
+        && resume.auction_timeout_secs == config.auction_timeout_secs;
+    if !target_matches {
+        return Err(RaikoError::Guest(
+            "SP1 checkpoint provider target does not match current configuration".to_string(),
+        ));
+    }
+    if resume.attempt != checkpoint.attempt.get() {
+        return Err(RaikoError::Guest(
+            "SP1 checkpoint attempt does not match its provider payload".to_string(),
+        ));
+    }
+    Ok((
+        u64::from(checkpoint.attempt.get()),
+        Some(checkpoint.deadline_secs),
+        Some(resume),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_or_resume_sp1_request(
+    client: &NetworkProver,
+    pk: &SP1ProvingKey,
+    stdin: &SP1Stdin,
+    proof_mode: SP1ProofMode,
+    config: &Sp1Config,
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    stage: &str,
+    request_attempt: u64,
+    stored_submission: Option<Sp1NetworkSubmissionProgress>,
+) -> RaikoResult<(String, bool)> {
+    if let Some(submission) = stored_submission {
+        let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
+        notify_sp1_network_submission(observer, &checkpoint_permit, &submission).await?;
+        let request_id = submission.provider_request_id;
+        tracing::info!(
+            stage,
+            request_id = %request_id,
+            timeout_secs = config.timeout_secs,
+            "Resuming SP1 network proof wait"
+        );
+        return Ok((request_id, true));
+    }
+
+    tracing::info!(
+        stage,
+        proof_mode = ?proof_mode,
+        network_mode = %config.network_mode.as_str(),
+        fulfillment_strategy = %config.fulfillment_strategy.as_str(),
+        skip_simulation = config.skip_simulation,
+        cycle_limit = config.cycle_limit,
+        timeout_secs = config.timeout_secs,
+        max_price_per_pgu = ?config.max_price_per_pgu,
+        auction_timeout_secs = ?config.auction_timeout_secs,
+        request_attempt,
+        "Submitting SP1 network proof request"
+    );
+
+    let mut request = client
+        .prove(pk, stdin.clone())
+        .mode(proof_mode)
+        .strategy(config.fulfillment_strategy.into())
+        .skip_simulation(config.skip_simulation)
+        .cycle_limit(config.cycle_limit)
+        .timeout(Duration::from_secs(config.timeout_secs));
+    if let Some(max_price_per_pgu) = config.max_price_per_pgu {
+        request = request.max_price_per_pgu(max_price_per_pgu);
+    }
+    let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
+    let request_id = request.request().await.map_err(|error| {
+        tracing::error!("Failed to request SP1 {stage} proof: {error:?}");
+        RaikoError::Guest(format!("SP1 {stage} proof request failed: {error}"))
+    })?;
+    let request_id = request_id.to_string();
+    let submission = sp1_network_submission_progress(
+        request_id.clone(),
+        sp1_now_secs(),
+        config,
+        u32::try_from(request_attempt).unwrap_or(u32::MAX),
+    );
+    notify_sp1_network_submission(observer, &checkpoint_permit, &submission).await?;
+    tracing::info!(
+        stage,
+        request_id = %request_id,
+        timeout_secs = config.timeout_secs,
+        request_attempt,
+        "Waiting for SP1 network proof"
+    );
+    Ok((request_id, false))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1605,79 +1727,63 @@ async fn request_network_proof(
     let auction_timeout = (config.network_mode == Sp1NetworkMode::Mainnet)
         .then(|| config.auction_timeout_secs.map(Duration::from_secs))
         .flatten();
-    let mut stored_request_id = if let Some(observer) = observer.as_ref() {
-        observer.load_sp1_network_request_id().await
+    let checkpoint = if let Some(observer) = observer.as_ref() {
+        observer
+            .load_pending_proof_checkpoint(crate::NetworkProverBackend::Sp1)
+            .await
+            .map_err(|error| RaikoError::Guest(error.to_string()))?
     } else {
         None
     };
-    let mut request_attempt = 1_u64;
+    let (mut request_attempt, resumed_deadline_secs, mut stored_submission) =
+        load_sp1_resume(checkpoint, config)?;
 
     loop {
-        let request_id_string = if let Some(request_id_string) = stored_request_id.take() {
-            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
-                .await;
-
-            tracing::info!(
-                stage,
-                request_id = %request_id_string,
-                timeout_secs = config.timeout_secs,
-                "Resuming SP1 network proof wait"
-            );
-            request_id_string
-        } else {
-            tracing::info!(
-                stage,
-                proof_mode = ?proof_mode,
-                network_mode = %config.network_mode.as_str(),
-                fulfillment_strategy = %config.fulfillment_strategy.as_str(),
-                skip_simulation = config.skip_simulation,
-                cycle_limit = config.cycle_limit,
-                timeout_secs = config.timeout_secs,
-                max_price_per_pgu = ?config.max_price_per_pgu,
-                auction_timeout_secs = ?config.auction_timeout_secs,
-                request_attempt,
-                "Submitting SP1 network proof request"
-            );
-
-            let mut request = client
-                .prove(pk, stdin.clone())
-                .mode(proof_mode)
-                .strategy(config.fulfillment_strategy.into())
-                .skip_simulation(config.skip_simulation)
-                .cycle_limit(config.cycle_limit)
-                .timeout(timeout);
-            if let Some(max_price_per_pgu) = config.max_price_per_pgu {
-                request = request.max_price_per_pgu(max_price_per_pgu);
-            }
-
-            let request_id = request.request().await.map_err(|e| {
-                tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
-            })?;
-
-            let request_id_string = request_id.to_string();
-            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
-                .await;
-
-            tracing::info!(
-                stage,
-                request_id = %request_id_string,
-                timeout_secs = config.timeout_secs,
-                request_attempt,
-                "Waiting for SP1 network proof"
-            );
-            request_id_string
-        };
+        let (request_id_string, resuming_request) = submit_or_resume_sp1_request(
+            client,
+            pk,
+            &stdin,
+            proof_mode,
+            config,
+            observer.as_ref(),
+            stage,
+            request_attempt,
+            stored_submission.take(),
+        )
+        .await?;
 
         let request_id = B256::from_str(&request_id_string).map_err(|e| {
             RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
         })?;
+        let (wait_timeout, check_before_wait) = sp1_resume_wait_plan(
+            resuming_request,
+            resumed_deadline_secs,
+            sp1_now_secs(),
+            timeout,
+        );
+        if check_before_wait {
+            let (status, maybe_proof) =
+                client.get_proof_status(request_id).await.map_err(|err| {
+                    RaikoError::Guest(format!(
+                        "Failed to check expired SP1 {stage} request {request_id_string}: {err}"
+                    ))
+                })?;
+            if decode_fulfillment_status(status.fulfillment_status())
+                == FulfillmentStatus::Fulfilled
+                && let Some(proof) = maybe_proof
+            {
+                return Ok(NetworkProofRequestResult {
+                    request_id: request_id_string,
+                    proof,
+                });
+            }
+        }
         match wait_sp1_network_proof(
             client,
             status_tracker,
             status_registry,
             request_id,
-            timeout,
+            wait_timeout,
             auction_timeout,
             stage,
             &request_id_string,
@@ -1691,6 +1797,12 @@ async fn request_network_proof(
                 });
             }
             Sp1NetworkWaitOutcome::RetryRequest(reason) => {
+                if request_attempt >= u64::from(config.network_request_max_attempts) {
+                    return Err(RaikoError::Guest(format!(
+                        "SP1 {stage} proof exhausted {} network request attempts: {reason}",
+                        config.network_request_max_attempts
+                    )));
+                }
                 tracing::warn!(
                     stage,
                     request_id = %request_id_string,
@@ -1702,6 +1814,22 @@ async fn request_network_proof(
                 tokio::time::sleep(SP1_NETWORK_REQUEST_RETRY_DELAY).await;
             }
         }
+    }
+}
+
+const fn sp1_resume_wait_plan(
+    resuming_request: bool,
+    resumed_deadline_secs: Option<u64>,
+    now_secs: u64,
+    configured_timeout: Duration,
+) -> (Duration, bool) {
+    if !resuming_request {
+        return (configured_timeout, false);
+    }
+    match resumed_deadline_secs {
+        Some(deadline) if deadline <= now_secs => (Duration::from_secs(1), true),
+        Some(deadline) => (Duration::from_secs(deadline - now_secs), false),
+        None => (configured_timeout, false),
     }
 }
 
@@ -1865,9 +1993,13 @@ fn insert_sp1_metadata(
 mod tests {
     use super::{
         decode_execution_status, decode_fulfillment_status, default_sp1_network_rpc_url,
-        encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
-        remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
+        encode_sp1_onchain_payload, load_sp1_resume, load_sp1_subproof_for_aggregation,
+        notify_sp1_network_submission, remote_verifier_program_vkey, remote_verifier_proof_bytes,
+        resolve_sp1_network_rpc_url, sp1_network_submission_progress, sp1_resume_wait_plan,
         sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
+    };
+    use crate::{
+        Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress, sp1_config::Sp1Config,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -1883,7 +2015,61 @@ mod tests {
         network::NetworkMode as Sp1SdkNetworkMode,
         network::proto::types::{ExecutionStatus, FulfillmentStatus},
     };
-    use std::str::FromStr;
+    use std::{
+        num::NonZeroU32,
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    struct FlakyProgressObserver {
+        remaining_failures: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    struct PermanentProgressObserver {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for PermanentProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::ProgressPersistenceError::Permanent(
+                "runtime is draining".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for FlakyProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::ProgressPersistenceError::Retryable(
+                    "checkpoint unavailable".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
@@ -1898,6 +2084,113 @@ mod tests {
         assert_eq!(status.submission_id, submission_id);
         assert_eq!(status.status, RemoteStatus::Pending);
         assert!(status.reason.is_none());
+    }
+
+    #[test]
+    fn zero_deadline_checkpoint_is_rejected() {
+        let checkpoint = crate::PendingProofCheckpoint::from_payload(
+            crate::NetworkProverBackend::Sp1,
+            NonZeroU32::new(2).expect("non-zero attempt"),
+            100,
+            0,
+            &serde_json::json!({"provider_request_id": "0x1234"}),
+        )
+        .expect("checkpoint");
+
+        let error = load_sp1_resume(Some(checkpoint), &Sp1Config::default())
+            .expect_err("zero deadline must fail closed");
+        assert!(error.to_string().contains("zero deadline"));
+    }
+
+    #[test]
+    fn checkpoint_provider_target_must_match_current_config() {
+        let config = Sp1Config::default();
+        let resume = Sp1NetworkSubmissionProgress {
+            provider_request_id: "0x1234".into(),
+            submitted_at: 100,
+            network_mode: Sp1NetworkMode::Mainnet,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Auction,
+            skip_simulation: config.skip_simulation,
+            cycle_limit: config.cycle_limit,
+            timeout_secs: config.timeout_secs,
+            attempt: 1,
+            max_price_per_pgu: config.max_price_per_pgu,
+            auction_timeout_secs: config.auction_timeout_secs,
+        };
+        let checkpoint = crate::PendingProofCheckpoint::from_payload(
+            crate::NetworkProverBackend::Sp1,
+            NonZeroU32::new(1).expect("non-zero attempt"),
+            100,
+            100 + config.timeout_secs,
+            &resume,
+        )
+        .expect("checkpoint");
+
+        let error = load_sp1_resume(Some(checkpoint), &config)
+            .expect_err("provider target drift must fail closed");
+        assert!(error.to_string().contains("provider target"));
+    }
+
+    #[test]
+    fn expired_resume_requires_status_check_before_short_wait() {
+        let configured = Duration::from_secs(600);
+
+        assert_eq!(
+            sp1_resume_wait_plan(true, Some(99), 100, configured),
+            (Duration::from_secs(1), true)
+        );
+        assert_eq!(
+            sp1_resume_wait_plan(true, Some(140), 100, configured),
+            (Duration::from_secs(40), false)
+        );
+        assert_eq!(
+            sp1_resume_wait_plan(true, None, 100, configured),
+            (configured, false)
+        );
+    }
+
+    #[tokio::test]
+    async fn submission_checkpoint_retries_without_resubmission() {
+        let observer = Arc::new(FlakyProgressObserver {
+            remaining_failures: AtomicUsize::new(2),
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+        let progress = sp1_network_submission_progress(
+            "0x1234".to_string(),
+            100,
+            &super::Sp1Config::default(),
+            1,
+        );
+
+        notify_sp1_network_submission(Some(&progress_observer), &permit, &progress)
+            .await
+            .expect("checkpoint eventually persists");
+
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn submission_checkpoint_stops_on_permanent_runtime_fence() {
+        let observer = Arc::new(PermanentProgressObserver {
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+        let progress = sp1_network_submission_progress(
+            "0x1234".to_string(),
+            100,
+            &super::Sp1Config::default(),
+            1,
+        );
+
+        let error = notify_sp1_network_submission(Some(&progress_observer), &permit, &progress)
+            .await
+            .expect_err("permanent runtime fence must stop checkpoint persistence");
+
+        assert!(error.to_string().contains("runtime is draining"));
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

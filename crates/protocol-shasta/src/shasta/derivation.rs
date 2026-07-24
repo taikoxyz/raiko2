@@ -101,6 +101,9 @@ pub enum ValidationError {
 /// Errors that can occur while preparing a source manifest from host-provided data.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SourceDerivationError {
+    /// The host supplied payload data for a source without on-chain blob hashes.
+    #[error("inline manifest payloads are not bound to on-chain data")]
+    InlinePayloadUnsupported,
     /// The host omitted raw blob bytes for a blob-backed source.
     #[error("blob-backed derivation source is missing blob data")]
     MissingBlobData,
@@ -197,8 +200,10 @@ pub fn apply_inherited_metadata(
 ///
 /// # Errors
 ///
-/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or a
-/// provided blob has an unexpected size (host-input corruption rather than proposal content).
+/// Returns [`SourceDerivationError`] when a source without on-chain blob hashes carries payload
+/// bytes (nothing on-chain binds them), when a blob-backed source is missing raw blob bytes, or
+/// when a provided blob has an unexpected size (host-input corruption rather than proposal
+/// content).
 pub fn prepare_source_manifest(
     source: &DerivationSource,
     data_source: Option<&InputDataSource>,
@@ -225,8 +230,10 @@ pub fn prepare_source_manifest(
 ///
 /// # Errors
 ///
-/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or a
-/// provided blob has an unexpected size (host-input corruption rather than proposal content).
+/// Returns [`SourceDerivationError`] when a source without on-chain blob hashes carries payload
+/// bytes (nothing on-chain binds them), when a blob-backed source is missing raw blob bytes, or
+/// when a provided blob has an unexpected size (host-input corruption rather than proposal
+/// content).
 pub fn prepare_source_manifest_with_max_blocks(
     source: &DerivationSource,
     data_source: Option<&InputDataSource>,
@@ -236,11 +243,11 @@ pub fn prepare_source_manifest_with_max_blocks(
     max_blocks: usize,
 ) -> Result<DerivationSourceManifest, SourceDerivationError> {
     let mut manifest = if source.blobSlice.blobHashes.is_empty() {
-        decode_inline_manifest(
-            data_source,
-            source.blobSlice.offset.to::<usize>(),
-            max_blocks,
-        )
+        // A source without on-chain blob hashes has no payload bound to the proposal: inline
+        // calldata, loose blob bytes, or orphan KZG metadata would describe unanchored data, so
+        // the only accepted shape is an empty source, which derives the default manifest.
+        ensure_no_inline_payload(data_source)?;
+        DerivationSourceManifest::default()
     } else if !is_source_offset_valid(source) {
         DerivationSourceManifest::default()
     } else {
@@ -311,39 +318,20 @@ pub const fn block_count(manifest: &DerivationSourceManifest) -> usize {
     manifest.blocks.len()
 }
 
-fn decode_inline_manifest(
+const fn ensure_no_inline_payload(
     data_source: Option<&InputDataSource>,
-    offset: usize,
-    max_blocks: usize,
-) -> DerivationSourceManifest {
+) -> Result<(), SourceDerivationError> {
     let Some(data_source) = data_source else {
-        return DerivationSourceManifest::default();
+        return Ok(());
     };
-
-    if !data_source.tx_data_from_calldata.is_empty() {
-        return DerivationSourceManifest::decompress_and_decode_with_max_blocks(
-            &data_source.tx_data_from_calldata,
-            offset,
-            max_blocks,
-        )
-        .unwrap_or_default();
+    if data_source.tx_data_from_calldata.is_empty()
+        && data_source.tx_data_from_blob.is_empty()
+        && data_source.blob_commitments.is_empty()
+        && data_source.blob_proofs.is_empty()
+    {
+        return Ok(());
     }
-
-    if data_source.tx_data_from_blob.is_empty() {
-        return DerivationSourceManifest::default();
-    }
-
-    let concatenated = data_source
-        .tx_data_from_blob
-        .iter()
-        .flat_map(|chunk| chunk.iter().copied())
-        .collect::<Vec<_>>();
-    DerivationSourceManifest::decompress_and_decode_with_max_blocks(
-        &concatenated,
-        offset,
-        max_blocks,
-    )
-    .unwrap_or_default()
+    Err(SourceDerivationError::InlinePayloadUnsupported)
 }
 
 fn decode_blob_backed_manifest(
@@ -548,6 +536,111 @@ mod tests {
         }
     }
 
+    /// Encode a payload into a single Kona-compatible blob, mirroring taiko-mono-rs
+    /// `BlobCoder::code`. Test fixture only: raiko2 never encodes blobs in production and the
+    /// vendored coder exposes decoding exclusively, so the helper round-trips its output through
+    /// [`BlobCoder::decode_blob`] to stay faithful to the real codec.
+    fn encode_kona_blob(payload: &[u8]) -> Vec<u8> {
+        const ROUNDS: usize = 1024;
+        const MAX_PAYLOAD: usize = (4 * 31 + 3) * ROUNDS - 4;
+
+        fn read1(payload: &[u8], offset: &mut usize) -> u8 {
+            let Some(&value) = payload.get(*offset) else {
+                return 0;
+            };
+            *offset += 1;
+            value
+        }
+
+        fn read31(buf: &mut [u8; 31], payload: &[u8], offset: &mut usize) {
+            buf.fill(0);
+            if *offset < payload.len() {
+                let to_copy = (payload.len() - *offset).min(31);
+                buf[..to_copy].copy_from_slice(&payload[*offset..*offset + to_copy]);
+                *offset += to_copy;
+            }
+        }
+
+        fn write_fe(blob: &mut [u8], fe_index: usize, header: u8, body: &[u8; 31]) {
+            let start = fe_index * 32;
+            blob[start] = header;
+            blob[start + 1..start + 32].copy_from_slice(body);
+        }
+
+        assert!(
+            !payload.is_empty() && payload.len() <= MAX_PAYLOAD,
+            "test payload must be non-empty and fit into a single blob"
+        );
+
+        let mut blob = vec![0u8; BYTES_PER_BLOB];
+        let mut offset = 0usize;
+        let mut buf31 = [0u8; 31];
+
+        for round in 0..ROUNDS {
+            if offset >= payload.len() {
+                break;
+            }
+
+            if round == 0 {
+                // Round zero packs version 0 plus the 24-bit payload length before the first
+                // 27 payload bytes.
+                buf31.fill(0);
+                let length = u32::try_from(payload.len()).expect("payload length fits in u32");
+                buf31[1] = ((length >> 16) & 0xff) as u8;
+                buf31[2] = ((length >> 8) & 0xff) as u8;
+                buf31[3] = (length & 0xff) as u8;
+                let to_copy = payload.len().min(27);
+                buf31[4..4 + to_copy].copy_from_slice(&payload[..to_copy]);
+                offset += to_copy;
+            } else {
+                read31(&mut buf31, payload, &mut offset);
+            }
+            let x = read1(payload, &mut offset);
+            write_fe(&mut blob, 4 * round, x & 0b0011_1111, &buf31);
+
+            read31(&mut buf31, payload, &mut offset);
+            let y = read1(payload, &mut offset);
+            write_fe(
+                &mut blob,
+                4 * round + 1,
+                (y & 0b0000_1111) | ((x & 0b1100_0000) >> 2),
+                &buf31,
+            );
+
+            read31(&mut buf31, payload, &mut offset);
+            let z = read1(payload, &mut offset);
+            write_fe(&mut blob, 4 * round + 2, z & 0b0011_1111, &buf31);
+
+            read31(&mut buf31, payload, &mut offset);
+            write_fe(
+                &mut blob,
+                4 * round + 3,
+                ((z & 0b1100_0000) >> 2) | ((y & 0b1111_0000) >> 4),
+                &buf31,
+            );
+        }
+
+        let decoded =
+            BlobCoder::decode_blob(&Blob::try_from(blob.as_slice()).expect("blob length"))
+                .expect("test blob encoding must decode");
+        assert_eq!(decoded, payload, "test blob encoding must round-trip");
+
+        blob
+    }
+
+    fn blob_backed_source() -> DerivationSource {
+        let mut source = DerivationSource::default();
+        source.blobSlice.blobHashes = vec![alloy_primitives::B256::repeat_byte(0xAA)];
+        source
+    }
+
+    fn blob_data_source(payload: &[u8]) -> InputDataSource {
+        InputDataSource {
+            tx_data_from_blob: vec![encode_kona_blob(payload)],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn validate_source_manifest_marks_default() {
         let ctx = ValidationContext {
@@ -610,27 +703,110 @@ mod tests {
     }
 
     #[test]
-    fn prepare_source_manifest_uses_inline_payloads() {
+    fn prepare_source_manifest_rejects_inline_payloads() {
+        // Empty blobHashes means nothing on-chain commits to the payload bytes, so any inline
+        // payload must fail closed instead of being decoded.
         let source = DerivationSource::default();
         let manifest = DerivationSourceManifest {
             blocks: vec![block_manifest(901)],
         };
-        let data_source = InputDataSource {
+
+        let calldata_source = InputDataSource {
             tx_data_from_calldata: manifest.encode_and_compress().expect("payload"),
             ..Default::default()
         };
+        let err = prepare_source_manifest(
+            &source,
+            Some(&calldata_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect_err("inline calldata payload must be rejected");
+        assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
 
-        let prepared = prepare_source_manifest(
+        // Loose blob bytes without on-chain blob hashes are equally unbound; rejection is
+        // shape-based and must not depend on the bytes decoding.
+        let loose_blob_source = InputDataSource {
+            tx_data_from_blob: vec![vec![0xAB; 4]],
+            ..Default::default()
+        };
+        let err = prepare_source_manifest(
+            &source,
+            Some(&loose_blob_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect_err("loose blob payload must be rejected");
+        assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
+    }
+
+    #[test]
+    fn prepare_source_manifest_rejects_commitments_without_blob_hashes() {
+        let source = DerivationSource::default();
+        let data_source = InputDataSource {
+            blob_commitments: vec![vec![0xCC; 48]],
+            ..Default::default()
+        };
+
+        let err = prepare_source_manifest(
             &source,
             Some(&data_source),
             parent_context(),
             proposal_metadata(),
             0,
         )
-        .expect("prepared manifest");
+        .expect_err("blob commitment without an on-chain hash must be rejected");
 
-        assert!(prepared.blocks[0].transactions.is_empty());
-        assert_eq!(prepared.blocks[0].anchor_block_number, 901);
+        assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
+    }
+
+    #[test]
+    fn prepare_source_manifest_rejects_proofs_without_blob_hashes() {
+        let source = DerivationSource::default();
+        let data_source = InputDataSource {
+            blob_proofs: vec![vec![0xDD; 48]],
+            ..Default::default()
+        };
+
+        let err = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect_err("blob proof without an on-chain hash must be rejected");
+
+        assert_eq!(err, SourceDerivationError::InlinePayloadUnsupported);
+    }
+
+    #[test]
+    fn prepare_source_manifest_empty_source_derives_default_manifest() {
+        // The legitimate empty-source shape (no blob hashes, no payload bytes) keeps deriving
+        // the default manifest with inherited metadata, whether the host sends no data source
+        // or an empty one.
+        let source = DerivationSource::default();
+
+        for data_source in [None, Some(InputDataSource::default())] {
+            let prepared = prepare_source_manifest(
+                &source,
+                data_source.as_ref(),
+                parent_context(),
+                proposal_metadata(),
+                0,
+            )
+            .expect("empty source must derive the default manifest");
+
+            assert_eq!(prepared.blocks.len(), 1);
+            assert!(prepared.blocks[0].transactions.is_empty());
+            assert_eq!(prepared.blocks[0].coinbase, proposal_metadata().proposer);
+            assert_eq!(
+                prepared.blocks[0].anchor_block_number,
+                parent_context().anchor_block_number
+            );
+        }
     }
 
     #[test]
@@ -677,12 +853,10 @@ mod tests {
             "trailing junk must not allow crafted gas_limit to survive"
         );
 
-        // Host/guest derivation entrypoint must observe the same defaulting.
-        let source = DerivationSource::default();
-        let data_source = InputDataSource {
-            tx_data_from_calldata: payload,
-            ..Default::default()
-        };
+        // Host/guest derivation entrypoint must observe the same defaulting (fed through the
+        // blob-backed path, the only shape that still decodes payloads).
+        let source = blob_backed_source();
+        let data_source = blob_data_source(&payload);
         let prepared = prepare_source_manifest(
             &source,
             Some(&data_source),
@@ -697,7 +871,7 @@ mod tests {
 
     #[test]
     fn prepare_source_manifest_accepts_unzen_block_limit() {
-        let source = DerivationSource::default();
+        let source = blob_backed_source();
         let manifest = DerivationSourceManifest {
             blocks: (0..crate::shasta::constants::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS)
                 .map(|index| {
@@ -707,10 +881,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let data_source = InputDataSource {
-            tx_data_from_calldata: manifest.encode_and_compress().expect("payload"),
-            ..Default::default()
-        };
+        let data_source = blob_data_source(&manifest.encode_and_compress().expect("payload"));
         let meta = ProposalMetadata {
             proposal_timestamp: 2_000,
             origin_block_number: 1_000,
@@ -845,15 +1016,12 @@ mod tests {
     fn prepare_source_manifest_defaults_invalid_forced_inclusion_segments() {
         let source = DerivationSource {
             isForcedInclusion: true,
-            ..Default::default()
+            ..blob_backed_source()
         };
         let manifest = DerivationSourceManifest {
             blocks: vec![block_manifest(901), block_manifest(902)],
         };
-        let data_source = InputDataSource {
-            tx_data_from_calldata: manifest.encode_and_compress().expect("payload"),
-            ..Default::default()
-        };
+        let data_source = blob_data_source(&manifest.encode_and_compress().expect("payload"));
 
         let prepared = prepare_source_manifest(
             &source,
@@ -935,12 +1103,9 @@ mod tests {
     fn derivation_stalled_normal_source_collapses_to_default() {
         // Normal source that does not advance the anchor -> default manifest with anchor = parent anchor.
         // This is the P-1 "coerce to default (matches client)" evidence.
-        let source = DerivationSource::default(); // isForcedInclusion = false
+        let source = blob_backed_source(); // isForcedInclusion = false
         let manifest = manifest_with_anchors(&[parent_context().anchor_block_number]); // stalled
-        let data_source = InputDataSource {
-            tx_data_from_calldata: manifest.encode_and_compress().expect("payload"),
-            ..Default::default()
-        };
+        let data_source = blob_data_source(&manifest.encode_and_compress().expect("payload"));
         let prepared = prepare_source_manifest(
             &source,
             Some(&data_source),
@@ -964,13 +1129,10 @@ mod tests {
     fn derivation_forced_inclusion_zero_blocks_defaults() {
         let source = DerivationSource {
             isForcedInclusion: true,
-            ..Default::default()
+            ..blob_backed_source()
         };
         let empty = DerivationSourceManifest { blocks: Vec::new() };
-        let data_source = InputDataSource {
-            tx_data_from_calldata: empty.encode_and_compress().expect("payload"),
-            ..Default::default()
-        };
+        let data_source = blob_data_source(&empty.encode_and_compress().expect("payload"));
         let prepared = prepare_source_manifest(
             &source,
             Some(&data_source),
@@ -1010,7 +1172,7 @@ mod tests {
 
     #[test]
     fn derivation_over_max_blocks_collapses_to_default() {
-        let source = DerivationSource::default();
+        let source = blob_backed_source();
         // Use TAIKO_HOODI_CHAIN_ID with proposal_timestamp=0 to stay pre-Unzen (192-block cap).
         let max_blocks = crate::shasta::constants::DERIVATION_SOURCE_MAX_BLOCKS;
         let over = DerivationSourceManifest {
@@ -1022,10 +1184,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let data_source = InputDataSource {
-            tx_data_from_calldata: over.encode_and_compress().expect("payload"),
-            ..Default::default()
-        };
+        let data_source = blob_data_source(&over.encode_and_compress().expect("payload"));
         let meta = ProposalMetadata {
             proposal_timestamp: 0,
             chain_id: crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,

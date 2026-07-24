@@ -1748,7 +1748,6 @@ fn validate_shasta_guest_input_with_chain_spec(
                 &stateless_input.witness,
                 &ancestor_headers,
                 input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
                 &taiko_chain_spec,
                 &evm_config,
             )
@@ -1874,7 +1873,7 @@ mod tests {
         hardfork::{TaikoHardfork as AlethiaTaikoHardfork, TaikoHardforks as _},
     };
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
-    use alloy_eips::eip4844::BYTES_PER_BLOB;
+    use alloy_eips::eip4844::{BYTES_PER_BLOB, Blob};
     use alloy_hardforks::ForkCondition as AlethiaForkCondition;
     use alloy_primitives::{
         Address, B256, Bytes, KECCAK256_EMPTY, Signature, TxKind, U256, keccak256, map::AddressMap,
@@ -1891,7 +1890,7 @@ mod tests {
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{
-        BlobSlice, DerivationSource, ShastaEventData,
+        BlobCoder, BlobSlice, DerivationSource, ShastaEventData,
         manifest::{BlockManifest, DerivationSourceManifest},
     };
     use raiko2_provider::{Provider, StorageProofTargets};
@@ -2462,14 +2461,110 @@ mod tests {
         }
     }
 
-    fn add_inline_shasta_source(provider: &mut TestProvider) {
+    /// Encode a payload into a single Kona-compatible blob, mirroring taiko-mono-rs
+    /// `BlobCoder::code`. Test fixture only: raiko2 never encodes blobs in production and the
+    /// vendored coder exposes decoding exclusively, so the helper round-trips its output through
+    /// [`BlobCoder::decode_blob`] to stay faithful to the real codec.
+    fn encode_kona_blob(payload: &[u8]) -> Vec<u8> {
+        const ROUNDS: usize = 1024;
+        const MAX_PAYLOAD: usize = (4 * 31 + 3) * ROUNDS - 4;
+
+        fn read1(payload: &[u8], offset: &mut usize) -> u8 {
+            let Some(&value) = payload.get(*offset) else {
+                return 0;
+            };
+            *offset += 1;
+            value
+        }
+
+        fn read31(buf: &mut [u8; 31], payload: &[u8], offset: &mut usize) {
+            buf.fill(0);
+            if *offset < payload.len() {
+                let to_copy = (payload.len() - *offset).min(31);
+                buf[..to_copy].copy_from_slice(&payload[*offset..*offset + to_copy]);
+                *offset += to_copy;
+            }
+        }
+
+        fn write_fe(blob: &mut [u8], fe_index: usize, header: u8, body: &[u8; 31]) {
+            let start = fe_index * 32;
+            blob[start] = header;
+            blob[start + 1..start + 32].copy_from_slice(body);
+        }
+
+        assert!(
+            !payload.is_empty() && payload.len() <= MAX_PAYLOAD,
+            "test payload must be non-empty and fit into a single blob"
+        );
+
+        let mut blob = vec![0u8; BYTES_PER_BLOB];
+        let mut offset = 0usize;
+        let mut buf31 = [0u8; 31];
+
+        for round in 0..ROUNDS {
+            if offset >= payload.len() {
+                break;
+            }
+
+            if round == 0 {
+                // Round zero packs version 0 plus the 24-bit payload length before the first
+                // 27 payload bytes.
+                buf31.fill(0);
+                let length = u32::try_from(payload.len()).expect("payload length fits in u32");
+                buf31[1] = ((length >> 16) & 0xff) as u8;
+                buf31[2] = ((length >> 8) & 0xff) as u8;
+                buf31[3] = (length & 0xff) as u8;
+                let to_copy = payload.len().min(27);
+                buf31[4..4 + to_copy].copy_from_slice(&payload[..to_copy]);
+                offset += to_copy;
+            } else {
+                read31(&mut buf31, payload, &mut offset);
+            }
+            let x = read1(payload, &mut offset);
+            write_fe(&mut blob, 4 * round, x & 0b0011_1111, &buf31);
+
+            read31(&mut buf31, payload, &mut offset);
+            let y = read1(payload, &mut offset);
+            write_fe(
+                &mut blob,
+                4 * round + 1,
+                (y & 0b0000_1111) | ((x & 0b1100_0000) >> 2),
+                &buf31,
+            );
+
+            read31(&mut buf31, payload, &mut offset);
+            let z = read1(payload, &mut offset);
+            write_fe(&mut blob, 4 * round + 2, z & 0b0011_1111, &buf31);
+
+            read31(&mut buf31, payload, &mut offset);
+            write_fe(
+                &mut blob,
+                4 * round + 3,
+                ((z & 0b1100_0000) >> 2) | ((y & 0b1111_0000) >> 4),
+                &buf31,
+            );
+        }
+
+        let decoded =
+            BlobCoder::decode_blob(&Blob::try_from(blob.as_slice()).expect("blob length"))
+                .expect("test blob encoding must decode");
+        assert_eq!(decoded, payload, "test blob encoding must round-trip");
+
+        blob
+    }
+
+    fn blob_backed_shasta_slice() -> BlobSlice {
+        BlobSlice {
+            blobHashes: vec![B256::from([0x44; 32])],
+            offset: 0usize.try_into().expect("fits in uint24"),
+            timestamp: 0u64.try_into().expect("fits in uint48"),
+        }
+    }
+
+    fn add_blob_backed_shasta_source(provider: &mut TestProvider) {
         provider.proposal_event.proposal.sources = vec![DerivationSource {
             isForcedInclusion: false,
-            blobSlice: BlobSlice {
-                blobHashes: Vec::new(),
-                offset: 0usize.try_into().expect("fits in uint24"),
-                timestamp: 0u64.try_into().expect("fits in uint48"),
-            },
+            blobSlice: blob_backed_shasta_slice(),
         }];
         let manifest = DerivationSourceManifest {
             blocks: vec![BlockManifest {
@@ -2481,28 +2576,26 @@ mod tests {
             }],
         };
         provider.data_sources = vec![InputDataSource {
-            tx_data_from_calldata: manifest.encode_and_compress().expect("encode manifest"),
+            tx_data_from_blob: vec![encode_kona_blob(
+                &manifest.encode_and_compress().expect("encode manifest"),
+            )],
             is_forced_inclusion: false,
             ..Default::default()
         }];
     }
 
-    fn add_invalid_inline_shasta_source_with_transaction(provider: &mut TestProvider) {
+    fn add_invalid_blob_backed_shasta_source_with_transaction(provider: &mut TestProvider) {
         let tx = sample_derived_tx();
-        add_inline_shasta_source_with_transactions(provider, vec![tx]);
+        add_blob_backed_shasta_source_with_transactions(provider, vec![tx]);
     }
 
-    fn add_inline_shasta_source_with_transactions(
+    fn add_blob_backed_shasta_source_with_transactions(
         provider: &mut TestProvider,
         transactions: Vec<reth_ethereum_primitives::TransactionSigned>,
     ) {
         provider.proposal_event.proposal.sources = vec![DerivationSource {
             isForcedInclusion: false,
-            blobSlice: BlobSlice {
-                blobHashes: Vec::new(),
-                offset: 0usize.try_into().expect("fits in uint24"),
-                timestamp: 0u64.try_into().expect("fits in uint48"),
-            },
+            blobSlice: blob_backed_shasta_slice(),
         }];
         let manifest = DerivationSourceManifest {
             blocks: vec![BlockManifest {
@@ -2520,7 +2613,9 @@ mod tests {
             }],
         };
         provider.data_sources = vec![InputDataSource {
-            tx_data_from_calldata: manifest.encode_and_compress().expect("encode manifest"),
+            tx_data_from_blob: vec![encode_kona_blob(
+                &manifest.encode_and_compress().expect("encode manifest"),
+            )],
             is_forced_inclusion: false,
             ..Default::default()
         }];
@@ -2588,7 +2683,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_uses_tx_list_witnesses_for_shasta_sources() {
         let mut provider = sample_provider();
-        add_inline_shasta_source(&mut provider);
+        add_blob_backed_shasta_source(&mut provider);
         let ctx = sample_context(42, 11, 9);
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
@@ -2612,7 +2707,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_defaults_invalid_manifest_before_tx_list_witness() {
         let mut provider = sample_provider();
-        add_invalid_inline_shasta_source_with_transaction(&mut provider);
+        add_invalid_blob_backed_shasta_source_with_transaction(&mut provider);
         let ctx = sample_context(42, 11, 9);
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
@@ -2645,7 +2740,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_fetches_only_anchor_account_state() {
         let mut provider = sample_provider();
-        add_inline_shasta_source(&mut provider);
+        add_blob_backed_shasta_source(&mut provider);
         let ctx = sample_context(42, 11, 9);
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
@@ -3270,11 +3365,7 @@ mod tests {
             },
             DerivationSource {
                 isForcedInclusion: false,
-                blobSlice: BlobSlice {
-                    blobHashes: Vec::new(),
-                    offset: 0usize.try_into().expect("fits in uint24"),
-                    timestamp: 0u64.try_into().expect("fits in uint48"),
-                },
+                blobSlice: blob_backed_shasta_slice(),
             },
         ];
         let normal_manifest = DerivationSourceManifest {
@@ -3287,14 +3378,18 @@ mod tests {
             }],
         };
         provider.data_sources = vec![
+            // The forced source stays the legitimate empty shape (no blob hashes, no payload):
+            // it derives the default manifest instead of decoding host-supplied bytes.
             InputDataSource {
                 is_forced_inclusion: true,
                 ..Default::default()
             },
             InputDataSource {
-                tx_data_from_calldata: normal_manifest
-                    .encode_and_compress()
-                    .expect("encode normal manifest"),
+                tx_data_from_blob: vec![encode_kona_blob(
+                    &normal_manifest
+                        .encode_and_compress()
+                        .expect("encode normal manifest"),
+                )],
                 is_forced_inclusion: false,
                 ..Default::default()
             },

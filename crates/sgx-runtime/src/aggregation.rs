@@ -68,7 +68,17 @@ fn validate_request(
         ));
     }
 
-    let mut carries = Vec::with_capacity(request.payload.proofs.len());
+    // Validate the carry-data vec (uint48 bounds, linkage, prover consistency) before hashing
+    // anything below: hash_shasta_subproof_input aborts on out-of-range uint48 fields, and
+    // request-supplied data must fail as an invalid request, not panic the handler.
+    let carries: Vec<_> = request
+        .payload
+        .proofs
+        .iter()
+        .map(|item| item.proof_carry_data.clone())
+        .collect();
+    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&carries)
+        .ok_or_else(|| RequestFailure::invalid_request("invalid shasta proof carry data"))?;
 
     for (index, item) in request.payload.proofs.iter().enumerate() {
         if item.input.trim().is_empty() {
@@ -107,12 +117,7 @@ fn validate_request(
             expected_instance_id,
             expected_instance_address,
         )?;
-
-        carries.push(item.proof_carry_data.clone());
     }
-
-    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&carries)
-        .ok_or_else(|| RequestFailure::invalid_request("invalid shasta proof carry data"))?;
 
     Ok(ValidatedAggregateRequest {
         carries,
@@ -301,6 +306,23 @@ mod tests {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
             payload: Raiko2ShastaAggregatePayload { proofs },
         }
+    }
+
+    #[test]
+    fn validate_request_rejects_oversized_uint48_before_hashing() {
+        let mut request = aggregate_request_fixture();
+        // Above uint48: pre-validation hashing would abort the handler; the carry-vec validation
+        // must reject this as an invalid request before any subproof-input hashing happens.
+        request.payload.proofs[0]
+            .proof_carry_data
+            .transition_input
+            .transition
+            .timestamp = 1_u64 << 48;
+
+        let Err(failure) = super::validate_request(&request, 0, Address::ZERO) else {
+            panic!("oversized uint48 timestamp must fail as invalid request, not panic");
+        };
+        assert!(failure.message.contains("invalid shasta proof carry data"));
     }
 
     fn sgx_proof_for_input(

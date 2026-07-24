@@ -1,8 +1,5 @@
 use alloy_consensus::TrieAccount;
-use alloy_primitives::{
-    Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256,
-    map::{AddressMap, B256Map},
-};
+use alloy_primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256, map::B256Map};
 use alloy_trie::EMPTY_ROOT_HASH;
 use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessStateNode};
 use reth_errors::ProviderError;
@@ -16,7 +13,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
-use crate::trie::{StatelessTrie, StatelessTrieExt};
+use crate::trie::StatelessTrie;
 
 /// Zero-overhead helper for tries that only contain RLP encoded data.
 #[derive(Debug, Clone, Default)]
@@ -81,9 +78,6 @@ pub(super) struct SparseState {
 
     /// all relevant MPT nodes by their Keccak hash
     rlp_by_digest: B256Map<Bytes>,
-
-    // all callers for invalid transaction validation
-    callers: AddressMap<TrieAccount>,
 }
 
 impl SparseState {
@@ -230,7 +224,6 @@ impl StatelessTrie for SparseState {
                 state,
                 storages: RefCell::new(B256Map::default()),
                 rlp_by_digest,
-                callers: AddressMap::default(),
             },
             bytecode,
         ))
@@ -343,13 +336,5 @@ impl StatelessTrie for SparseState {
         }
 
         Ok(self.state.hash())
-    }
-}
-
-impl StatelessTrieExt for SparseState {
-    fn append_callers(&mut self, callers: AddressMap<TrieAccount>) {
-        for (addr, caller) in callers {
-            self.callers.insert(addr, caller);
-        }
     }
 }

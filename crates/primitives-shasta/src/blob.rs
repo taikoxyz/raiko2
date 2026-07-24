@@ -58,6 +58,8 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
         if expected_blob_hashes.is_empty() {
             if !data_source.tx_data_from_calldata.is_empty()
                 || !data_source.tx_data_from_blob.is_empty()
+                || !data_source.blob_commitments.is_empty()
+                || !data_source.blob_proofs.is_empty()
             {
                 return Err(RaikoError::InvalidBlobOption(format!(
                     "inline payloads are not accepted for ZK proposal source {source_idx}"
@@ -176,6 +178,38 @@ mod tests {
         );
 
         let err = verify_proposal_mode_blob_usage(&input).expect_err("inline payload rejected");
+
+        assert!(err.to_string().contains("inline payloads are not accepted"));
+    }
+
+    #[test]
+    fn rejects_blob_commitments_for_empty_hash_source() {
+        let input = guest_input(
+            source(Vec::new()),
+            InputDataSource {
+                blob_commitments: vec![vec![0xCC; 48]],
+                ..Default::default()
+            },
+        );
+
+        let err = verify_proposal_mode_blob_usage(&input)
+            .expect_err("blob commitment without an on-chain hash must be rejected");
+
+        assert!(err.to_string().contains("inline payloads are not accepted"));
+    }
+
+    #[test]
+    fn rejects_blob_proofs_for_empty_hash_source() {
+        let input = guest_input(
+            source(Vec::new()),
+            InputDataSource {
+                blob_proofs: vec![vec![0xDD; 48]],
+                ..Default::default()
+            },
+        );
+
+        let err = verify_proposal_mode_blob_usage(&input)
+            .expect_err("blob proof without an on-chain hash must be rejected");
 
         assert!(err.to_string().contains("inline payloads are not accepted"));
     }

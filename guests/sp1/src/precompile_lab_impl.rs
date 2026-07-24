@@ -1,8 +1,21 @@
 use crate::crypto::install_guest_crypto;
 use raiko2_primitives::PrecompileLabInput;
 use revm_precompile::{
-    blake2, bls12_381, bn254, hash, identity, kzg_point_evaluation, modexp, secp256k1,
+    blake2, bls12_381,
+    bls12_381_const::{
+        G1_ADD_ADDRESS, G1_MSM_ADDRESS, G2_ADD_ADDRESS, G2_MSM_ADDRESS, MAP_FP2_TO_G2_ADDRESS,
+        MAP_FP_TO_G1_ADDRESS, PAIRING_ADDRESS,
+    },
+    bn254, hash, identity, kzg_point_evaluation, modexp, secp256k1,
 };
+
+const BLS12_G1ADD: u8 = G1_ADD_ADDRESS.into_array()[19];
+const BLS12_G1MSM: u8 = G1_MSM_ADDRESS.into_array()[19];
+const BLS12_G2ADD: u8 = G2_ADD_ADDRESS.into_array()[19];
+const BLS12_G2MSM: u8 = G2_MSM_ADDRESS.into_array()[19];
+const BLS12_PAIRING: u8 = PAIRING_ADDRESS.into_array()[19];
+const BLS12_MAP_FP_TO_G1: u8 = MAP_FP_TO_G1_ADDRESS.into_array()[19];
+const BLS12_MAP_FP2_TO_G2: u8 = MAP_FP2_TO_G2_ADDRESS.into_array()[19];
 
 pub fn execute_precompile(input: &PrecompileLabInput) -> u64 {
     install_guest_crypto();
@@ -64,32 +77,32 @@ pub fn execute_precompile(input: &PrecompileLabInput) -> u64 {
                 &mut accumulator,
                 kzg_point_evaluation::run(&input.input, gas_limit).expect("kzg point eval failed"),
             ),
-            0x0B => fold_precompile_output(
+            BLS12_G1ADD => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g1_add::g1_add(&input.input, gas_limit).expect("bls12 g1add failed"),
             ),
-            0x0C => fold_precompile_output(
+            BLS12_G1MSM => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g1_msm::g1_msm(&input.input, gas_limit).expect("bls12 g1msm failed"),
             ),
-            0x0E => fold_precompile_output(
+            BLS12_G2ADD => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g2_add::g2_add(&input.input, gas_limit).expect("bls12 g2add failed"),
             ),
-            0x0F => fold_precompile_output(
+            BLS12_G2MSM => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g2_msm::g2_msm(&input.input, gas_limit).expect("bls12 g2msm failed"),
             ),
-            0x11 => fold_precompile_output(
+            BLS12_PAIRING => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::pairing::pairing(&input.input, gas_limit).expect("bls12 pairing failed"),
             ),
-            0x12 => fold_precompile_output(
+            BLS12_MAP_FP_TO_G1 => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::map_fp_to_g1::map_fp_to_g1(&input.input, gas_limit)
                     .expect("bls12 map fp to g1 failed"),
             ),
-            0x13 => fold_precompile_output(
+            BLS12_MAP_FP2_TO_G2 => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::map_fp2_to_g2::map_fp2_to_g2(&input.input, gas_limit)
                     .expect("bls12 map fp2 to g2 failed"),
@@ -115,7 +128,10 @@ fn fold_bytes(accumulator: &mut u64, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::execute_precompile;
+    use super::{
+        execute_precompile, BLS12_G1ADD, BLS12_G1MSM, BLS12_G2ADD, BLS12_G2MSM,
+        BLS12_MAP_FP2_TO_G2, BLS12_MAP_FP_TO_G1, BLS12_PAIRING,
+    };
     use raiko2_primitives::PrecompileLabInput;
 
     #[test]
@@ -149,6 +165,30 @@ mod tests {
     }
 
     #[test]
+    fn bls12_lab_addresses_match_eip2537() {
+        // Contiguous Prague / revm mapping — reject the legacy gapped lab table.
+        assert_eq!(BLS12_G1ADD, 0x0b);
+        assert_eq!(BLS12_G1MSM, 0x0c);
+        assert_eq!(BLS12_G2ADD, 0x0d);
+        assert_eq!(BLS12_G2MSM, 0x0e);
+        assert_eq!(BLS12_PAIRING, 0x0f);
+        assert_eq!(BLS12_MAP_FP_TO_G1, 0x10);
+        assert_eq!(BLS12_MAP_FP2_TO_G2, 0x11);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported precompile address 0x12")]
+    fn rejects_legacy_bls12_map_fp_to_g1_address() {
+        execute_precompile(&precompile_input(0x12));
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported precompile address 0x13")]
+    fn rejects_legacy_bls12_map_fp2_to_g2_address() {
+        execute_precompile(&precompile_input(0x13));
+    }
+
+    #[test]
     fn executes_all_direct_body_precompiles() {
         for (case, address, target_raw_gas, input) in [
             ("ecrecover", 0x01, 3_000, ecrecover_input()),
@@ -161,13 +201,23 @@ mod tests {
             ("bn128_pairing", 0x08, 79_000, vec![0u8; 192]),
             ("blake2f", 0x09, 12, blake2f_input()),
             ("point_evaluation", 0x0a, 50_000, kzg_input()),
-            ("bls12_g1add", 0x0b, 375, vec![0u8; 256]),
-            ("bls12_g1msm", 0x0c, 12_000, vec![0u8; 160]),
-            ("bls12_g2add", 0x0e, 600, vec![0u8; 512]),
-            ("bls12_g2msm", 0x0f, 22_500, vec![0u8; 288]),
-            ("bls12_pairing", 0x11, 70_300, vec![0u8; 384]),
-            ("bls12_map_fp_to_g1", 0x12, 5_500, vec![0u8; 64]),
-            ("bls12_map_fp2_to_g2", 0x13, 23_800, vec![0u8; 128]),
+            ("bls12_g1add", BLS12_G1ADD, 375, vec![0u8; 256]),
+            ("bls12_g1msm", BLS12_G1MSM, 12_000, vec![0u8; 160]),
+            ("bls12_g2add", BLS12_G2ADD, 600, vec![0u8; 512]),
+            ("bls12_g2msm", BLS12_G2MSM, 22_500, vec![0u8; 288]),
+            ("bls12_pairing", BLS12_PAIRING, 70_300, vec![0u8; 384]),
+            (
+                "bls12_map_fp_to_g1",
+                BLS12_MAP_FP_TO_G1,
+                5_500,
+                vec![0u8; 64],
+            ),
+            (
+                "bls12_map_fp2_to_g2",
+                BLS12_MAP_FP2_TO_G2,
+                23_800,
+                vec![0u8; 128],
+            ),
         ] {
             let input = PrecompileLabInput {
                 case: case.to_string(),
@@ -200,6 +250,16 @@ mod tests {
             0x1d, 0x17, 0x61, 0xeb, 0x82, 0xec, 0x87, 0x22,
         ]);
         input
+    }
+
+    fn precompile_input(address: u8) -> PrecompileLabInput {
+        PrecompileLabInput {
+            case: "unsupported".to_string(),
+            scenario: "precompile".to_string(),
+            address,
+            target_count: 1,
+            ..Default::default()
+        }
     }
 
     fn modexp_input() -> Vec<u8> {

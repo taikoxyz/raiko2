@@ -244,11 +244,11 @@ UZEN_PRECOMPILE_ENTRIES = {
     0x0A: ("point_evaluation", 398),
     0x0B: ("bls12_g1add", 112),
     0x0C: ("bls12_g1msm", 52),
-    0x0E: ("bls12_g2add", 111),
-    0x0F: ("bls12_g2msm", 39),
-    0x11: ("bls12_pairing", 134),
-    0x12: ("bls12_map_fp_to_g1", 159),
-    0x13: ("bls12_map_fp2_to_g2", 112),
+    0x0D: ("bls12_g2add", 111),
+    0x0E: ("bls12_g2msm", 39),
+    0x0F: ("bls12_pairing", 134),
+    0x10: ("bls12_map_fp_to_g1", 159),
+    0x11: ("bls12_map_fp2_to_g2", 112),
 }
 
 UZEN_OPCODE_MULTIPLIERS = {
@@ -363,11 +363,11 @@ PRECOMPILE_BODY_DEFAULTS = {
     0x0A: ("precompile_kzg_point_evaluation", 192, 50_000),
     0x0B: ("precompile_bls12_g1add_zero", 256, 375),
     0x0C: ("precompile_bls12_g1msm_zero", 160, 12_000),
-    0x0E: ("precompile_bls12_g2add_zero", 512, 600),
-    0x0F: ("precompile_bls12_g2msm_zero", 288, 22_500),
-    0x11: ("precompile_bls12_pairing_zero", 384, 70_300),
-    0x12: ("precompile_bls12_map_fp_to_g1_zero", 64, 5_500),
-    0x13: ("precompile_bls12_map_fp2_to_g2_zero", 128, 23_800),
+    0x0D: ("precompile_bls12_g2add_zero", 512, 600),
+    0x0E: ("precompile_bls12_g2msm_zero", 288, 22_500),
+    0x0F: ("precompile_bls12_pairing_zero", 384, 70_300),
+    0x10: ("precompile_bls12_map_fp_to_g1_zero", 64, 5_500),
+    0x11: ("precompile_bls12_map_fp2_to_g2_zero", 128, 23_800),
 }
 
 

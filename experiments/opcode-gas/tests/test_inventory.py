@@ -17,7 +17,25 @@ class InventoryTests(unittest.TestCase):
 
         self.assertEqual(opcode_gas.UZEN_PRECOMPILE_MULTIPLIERS[0x01], 81)
         self.assertEqual(opcode_gas.UZEN_PRECOMPILE_MULTIPLIERS[0x05], 1363)
-        self.assertEqual(opcode_gas.UZEN_PRECOMPILE_MULTIPLIERS[0x13], 112)
+        self.assertEqual(opcode_gas.UZEN_PRECOMPILE_MULTIPLIERS[0x11], 112)
+
+    def test_bls12_precompile_addresses_match_eip2537(self):
+        self.assertEqual(
+            {
+                address: name
+                for address, (name, _) in opcode_gas.UZEN_PRECOMPILE_ENTRIES.items()
+                if name.startswith("bls12_")
+            },
+            {
+                0x0B: "bls12_g1add",
+                0x0C: "bls12_g1msm",
+                0x0D: "bls12_g2add",
+                0x0E: "bls12_g2msm",
+                0x0F: "bls12_pairing",
+                0x10: "bls12_map_fp_to_g1",
+                0x11: "bls12_map_fp2_to_g2",
+            },
+        )
 
     def test_inventory_marks_manifest_cases_as_measured(self):
         manifest = opcode_gas.load_manifest(

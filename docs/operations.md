@@ -641,6 +641,51 @@ application-default credentials). Inline service account JSON through
 supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
 alias, and existing S3/Pinata/File settings continue to work.
 
+## Runtime Store Artifact Retention
+
+The runtime cleanup loop bounds record growth on its own: terminal roots are removed after
+7 days, and proof artifacts that no root references anymore are retired after 30 days
+(constants in `bin/raiko2/src/server/task_cleanup.rs`). Retiring an artifact reuses the
+owner-guarded invalidation flow, which writes a `.tombstone` marker, deletes the
+`manifest.manifest.json` object, and drops the artifact record from the runtime state.
+
+The application never deletes immutable `content/<hash>.proof.json` objects or tombstones,
+so a GCS-backed runtime store needs bucket lifecycle rules as the byte-level backstop.
+`docs/gcs-lifecycle.example.json` is the canonical template:
+
+- Rule 1 deletes manifests under the runtime `proofs/` subtree after 30 days.
+- Rule 2 deletes content objects and tombstones after 37 days.
+
+Keep the manifest age at or below the content age. Reads resolve manifest first and then
+content: once the manifest is gone a lookup is a clean miss, while a manifest whose content
+was deleted first turns every read of that artifact into an error
+(`proof manifest references missing content`). The 7-day stagger guarantees the safe order
+even though GCS applies age rules with day granularity in arbitrary within-day order.
+
+Substitute the placeholders from the deployment config before applying. The scope is
+`<runtime.store.prefix>/<runtime.environment>/<runtime.namespace>/proofs/`; with the
+`config.example.toml` values that is `raiko2/runtime/v1/development/raiko2-development/proofs/`.
+The store escapes path-component bytes outside `[A-Za-z0-9._-]` as `~XX`, so verify the final
+prefix against an actual object listing when environment or namespace names use other
+characters. Then apply:
+
+```bash
+gcloud storage buckets update gs://<runtime.store.bucket> --lifecycle-file=docs/gcs-lifecycle.example.json
+```
+
+Guardrails:
+
+- Never add a rule that can match the `work/` subtree: `work/runtime-state.runtime.json` is
+  the live runtime state, and deleting it destroys the namespace. Every rule must carry a
+  `matchesPrefix` ending in `/proofs/`.
+- The object layout these rules key on (`proofs/` subtree, `manifest.manifest.json`,
+  `.proof.json`, `.tombstone` suffixes, runtime state under `work/`) is pinned by the
+  `object_layout_is_pinned_for_bucket_lifecycle_rules` test in
+  `crates/runtime/src/artifact_store/gcs_tests.rs`; change both together or not at all.
+- If the bucket has object versioning enabled, add noncurrent-version expiry as well. The
+  runtime state object is rewritten on every mutation, so its noncurrent versions — not the
+  proof objects — become the dominant growth source under versioning.
+
 ## Release TEE Provider Metadata
 
 TEE-backed remote prover images have a separate pre-release metadata flow.

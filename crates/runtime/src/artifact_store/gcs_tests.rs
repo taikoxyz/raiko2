@@ -449,3 +449,39 @@ async fn runtime_state_conflict_reads_back_the_observed_generation() -> Result<(
     assert_ne!(observed.generation, Some(first_generation));
     Ok(())
 }
+
+#[test]
+fn object_layout_is_pinned_for_bucket_lifecycle_rules() -> Result<()> {
+    let store = store(Arc::new(FakeGcsTransport::default()))?;
+    let key = key();
+    let manifest = store.manifest_name(&key);
+    let content = store.content_name(&key, "abc123");
+    let tombstone = store.invalidation_name(&key, Some(7), "abc123");
+    let runtime_state = store.runtime_state_name();
+
+    // docs/operations.md ships GCS bucket lifecycle rules keyed on this exact layout: every
+    // proof object lives under `<prefix>/<environment>/<namespace>/proofs/` and is classified
+    // by suffix, while the live runtime state stays outside the `proofs/` subtree. Renaming
+    // any of these paths requires updating the documented rules in the same change.
+    let scope = "runtime/test/gcs-seam";
+    for name in [&manifest, &content, &tombstone] {
+        assert!(
+            name.starts_with(&format!("{scope}/proofs/")),
+            "proof object escaped the proofs/ subtree: {name}"
+        );
+    }
+    assert!(manifest.ends_with("/manifest.manifest.json"), "{manifest}");
+    assert!(
+        content.contains("/content/") && content.ends_with(".proof.json"),
+        "{content}"
+    );
+    assert!(
+        tombstone.contains("/invalidated/") && tombstone.ends_with(".tombstone"),
+        "{tombstone}"
+    );
+    assert_eq!(
+        runtime_state,
+        format!("{scope}/work/runtime-state.runtime.json")
+    );
+    Ok(())
+}

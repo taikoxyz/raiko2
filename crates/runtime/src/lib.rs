@@ -201,6 +201,16 @@ pub struct ExpiredTaskCursor {
     pub task_id: String,
 }
 
+/// Pagination cursor for expired proof-artifact scans.
+///
+/// `artifact_key` is the opaque state key of the last returned record; callers must treat it as an
+/// implementation detail and only feed it back unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredArtifactCursor {
+    pub updated_at: i64,
+    pub artifact_key: String,
+}
+
 /// Exact identity of one authoritative runtime-task lifetime.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskLifetime {
@@ -1484,6 +1494,27 @@ impl RuntimeManager {
             .await;
         self.upsert_proof_artifact_with_lifecycle(registration, ProofArtifactLifecycle::Active)
             .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn set_proof_artifact_updated_at(
+        &self,
+        network_pair: &str,
+        pipeline_key: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+        updated_at: i64,
+    ) -> Result<()> {
+        let key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
+        self.mutate(move |state| {
+            let record = state
+                .artifacts
+                .get_mut(&key)
+                .context("missing proof artifact for updated_at override")?;
+            record.updated_at = updated_at;
+            Ok(())
+        })
+        .await
     }
 
     pub(crate) async fn register_pending_proof_artifact(
@@ -2800,6 +2831,67 @@ impl RuntimeManager {
         });
         tasks.truncate(limit);
         Ok(tasks)
+    }
+
+    /// Lists retention-expired proof artifacts that no runtime task references anymore.
+    ///
+    /// The scan is stricter than the invalidation guard on purpose: a record is a candidate only
+    /// when zero tasks reference its identity, so artifacts held by lingering `Failed` or
+    /// `Cancelled` roots stay retained until those roots are swept first. The authoritative
+    /// live-owner re-check still happens inside
+    /// [`Self::invalidate_proof_artifact_descriptor_if_unowned`]. `Pending` registrations belong
+    /// to the pending-publication flow and are never listed here.
+    pub async fn list_expired_unreferenced_proof_artifacts(
+        &self,
+        now: i64,
+        ttl_secs: u64,
+        after: Option<&ExpiredArtifactCursor>,
+        limit: usize,
+    ) -> Result<(Vec<ProofArtifactRecord>, Option<ExpiredArtifactCursor>)> {
+        if ttl_secs == 0 || limit == 0 {
+            return Ok((Vec::new(), None));
+        }
+        let cutoff = now.saturating_sub(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
+        let state = self.state.read().await;
+        let mut candidates = state
+            .artifacts
+            .iter()
+            .filter(|(key, record)| {
+                record.lifecycle != ProofArtifactLifecycle::Pending
+                    && record.updated_at <= cutoff
+                    && after.is_none_or(|cursor| {
+                        (record.updated_at, key.as_str())
+                            > (cursor.updated_at, cursor.artifact_key.as_str())
+                    })
+                    && !state.tasks.values().any(|task| {
+                        task_matches_artifact_identity(
+                            task,
+                            &record.network_pair,
+                            record.pipeline_key,
+                            record.route,
+                            &record.proof_ref,
+                        )
+                    })
+            })
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        drop(state);
+        candidates.sort_by(|(left_key, left), (right_key, right)| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left_key.cmp(right_key))
+        });
+        candidates.truncate(limit);
+        let cursor = candidates
+            .last()
+            .map(|(key, record)| ExpiredArtifactCursor {
+                updated_at: record.updated_at,
+                artifact_key: key.clone(),
+            });
+        Ok((
+            candidates.into_iter().map(|(_, record)| record).collect(),
+            cursor,
+        ))
     }
 
     /// Removes exactly one retired task lifetime and its pending-publication ownership.
@@ -6232,6 +6324,249 @@ mod tests {
                 )
                 .await?
         );
+        Ok(())
+    }
+
+    async fn publish_and_activate_artifact(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        pipeline: PipelineKey,
+        proof_ref: &str,
+    ) -> Result<ProofArtifactDescriptor> {
+        let route = pipeline.route();
+        let object = runtime
+            .publish_proof_artifact_bytes(network_pair, pipeline, route, proof_ref, b"proof")
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+        Ok(object.descriptor())
+    }
+
+    async fn register_referencing_task(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        pipeline: PipelineKey,
+        proof_ref: &str,
+    ) -> Result<RuntimeTaskRecord> {
+        runtime
+            .register_task(TaskRegistration {
+                task_id: task_id.into(),
+                pipeline_key: pipeline,
+                route: pipeline.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: format!("request-{task_id}"),
+            })
+            .await?;
+        current_test_task(runtime, task_id).await
+    }
+
+    #[tokio::test]
+    async fn expired_artifact_listing_skips_referenced_pending_and_fresh_records() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "artifact-retention-scan".into())?;
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        let now = now_ts();
+        let ttl_secs = 3_600_u64;
+        let expired_at = now.saturating_sub(7_200);
+
+        publish_and_activate_artifact(&runtime, "l1-l2", pipeline, "proposal-old").await?;
+        runtime
+            .set_proof_artifact_updated_at("l1-l2", pipeline, route, "proposal-old", expired_at)
+            .await?;
+
+        publish_and_activate_artifact(&runtime, "l1-l2", pipeline, "proposal-fresh").await?;
+
+        let completed_descriptor =
+            publish_and_activate_artifact(&runtime, "l1-l2", pipeline, "proposal-completed")
+                .await?;
+        let mut completed_root =
+            register_referencing_task(&runtime, "completed-root", pipeline, "proposal-completed")
+                .await?;
+        completed_root.runner_status = RunnerStatus::Completed;
+        completed_root.proof_uri = Some(completed_descriptor.proof_uri.clone());
+        runtime.upsert_task(&completed_root).await?;
+        runtime
+            .set_proof_artifact_updated_at(
+                "l1-l2",
+                pipeline,
+                route,
+                "proposal-completed",
+                expired_at,
+            )
+            .await?;
+
+        publish_and_activate_artifact(&runtime, "l1-l2", pipeline, "proposal-cancelled").await?;
+        register_referencing_task(&runtime, "cancelled-root", pipeline, "proposal-cancelled")
+            .await?;
+        cancel_test_task(&runtime, "cancelled-root").await?;
+        runtime
+            .set_proof_artifact_updated_at(
+                "l1-l2",
+                pipeline,
+                route,
+                "proposal-cancelled",
+                expired_at,
+            )
+            .await?;
+
+        let pending_root =
+            register_referencing_task(&runtime, "pending-root", pipeline, "proposal-pending")
+                .await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    "proposal-pending",
+                    &[pending_root.incarnation_id],
+                    b"proof",
+                )
+                .await?
+        );
+        assert_eq!(
+            runtime
+                .register_pending_proof_artifact(ProofArtifactRegistration {
+                    network_pair: "l1-l2".into(),
+                    proof_ref: "proposal-pending".into(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_uri: "memory://pending/proposal-pending".into(),
+                    content_hash: artifact_store::content_hash(b"proof"),
+                    generation: None,
+                })
+                .await?,
+            ProofArtifactLifecycle::Pending
+        );
+        // Drop the owning root without releasing the publication so the record stays `Pending`
+        // with zero referencing tasks — the state this listing must never touch.
+        let pending_root = current_test_task(&runtime, "pending-root").await?;
+        assert_eq!(
+            runtime
+                .retire_task_if_unchanged(&pending_root, None)
+                .await?,
+            RuntimeMutationOutcome::Applied
+        );
+        let pending_root = current_test_task(&runtime, "pending-root").await?;
+        assert_eq!(
+            runtime
+                .remove_task_if_current(&pending_root.lifetime())
+                .await?,
+            RuntimeMutationOutcome::Applied
+        );
+        runtime
+            .set_proof_artifact_updated_at("l1-l2", pipeline, route, "proposal-pending", expired_at)
+            .await?;
+
+        let invalidated_descriptor =
+            publish_and_activate_artifact(&runtime, "l1-l2", pipeline, "proposal-invalidated")
+                .await?;
+        runtime
+            .mark_proof_artifact_descriptor_invalidated(
+                "l1-l2",
+                pipeline,
+                route,
+                "proposal-invalidated",
+                &invalidated_descriptor,
+            )
+            .await?;
+        runtime
+            .set_proof_artifact_updated_at(
+                "l1-l2",
+                pipeline,
+                route,
+                "proposal-invalidated",
+                expired_at,
+            )
+            .await?;
+
+        let (records, cursor) = runtime
+            .list_expired_unreferenced_proof_artifacts(now, ttl_secs, None, 16)
+            .await?;
+        let mut refs = records
+            .iter()
+            .map(|record| record.proof_ref.as_str())
+            .collect::<Vec<_>>();
+        refs.sort_unstable();
+        assert_eq!(refs, vec!["proposal-invalidated", "proposal-old"]);
+        assert!(cursor.is_some());
+
+        let (disabled, disabled_cursor) = runtime
+            .list_expired_unreferenced_proof_artifacts(now, 0, None, 16)
+            .await?;
+        assert!(disabled.is_empty());
+        assert!(disabled_cursor.is_none());
+        let (unlimited, unlimited_cursor) = runtime
+            .list_expired_unreferenced_proof_artifacts(now, ttl_secs, None, 0)
+            .await?;
+        assert!(unlimited.is_empty());
+        assert!(unlimited_cursor.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_artifact_listing_paginates_with_cursor() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".into(), "artifact-retention-pagination".into())?;
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+        for (proof_ref, updated_at) in [
+            ("proposal-a", 100_i64),
+            ("proposal-b", 200_i64),
+            ("proposal-c", 300_i64),
+        ] {
+            publish_and_activate_artifact(&runtime, "l1-l2", pipeline, proof_ref).await?;
+            runtime
+                .set_proof_artifact_updated_at("l1-l2", pipeline, route, proof_ref, updated_at)
+                .await?;
+        }
+        let now = 1_000_000_i64;
+
+        let (first_page, first_cursor) = runtime
+            .list_expired_unreferenced_proof_artifacts(now, 3_600, None, 2)
+            .await?;
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|record| record.proof_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["proposal-a", "proposal-b"]
+        );
+        let first_cursor = first_cursor.expect("first page cursor");
+        assert_eq!(first_cursor.updated_at, 200);
+
+        let (second_page, second_cursor) = runtime
+            .list_expired_unreferenced_proof_artifacts(now, 3_600, Some(&first_cursor), 2)
+            .await?;
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|record| record.proof_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["proposal-c"]
+        );
+        let second_cursor = second_cursor.expect("second page cursor");
+
+        let (exhausted, exhausted_cursor) = runtime
+            .list_expired_unreferenced_proof_artifacts(now, 3_600, Some(&second_cursor), 2)
+            .await?;
+        assert!(exhausted.is_empty());
+        assert!(exhausted_cursor.is_none());
         Ok(())
     }
 

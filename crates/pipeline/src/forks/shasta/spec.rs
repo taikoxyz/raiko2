@@ -1749,7 +1749,6 @@ fn validate_shasta_guest_input_with_chain_spec(
                 &stateless_input.witness,
                 &ancestor_headers,
                 input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
                 &taiko_chain_spec,
                 &evm_config,
             )

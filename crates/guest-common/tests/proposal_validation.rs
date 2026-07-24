@@ -1,6 +1,5 @@
 #![allow(missing_docs)]
 
-use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
 use alloy_primitives::{keccak256, Signature, TxKind, U256};
 use alloy_primitives::{Address, B256};
@@ -234,22 +233,12 @@ fn canonical_inline_source_guest_input() -> GuestInput {
         .expect("golden touch anchor signature");
     let anchor_tx: reth_ethereum_primitives::TransactionSigned =
         anchor_tx.into_signed(anchor_signature).into();
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
 
     let parent_witness_header =
         raiko2_primitives::WitnessHeader::from_header(parent_header.clone());
     guest_input.proposal_ancestor_headers = vec![parent_witness_header.clone()];
     guest_input.witnesses[0].witness.headers = vec![parent_witness_header];
     guest_input.witnesses[0].witness.state = parent_state_nodes;
-    guest_input.witnesses[0].accounts.insert(
-        anchor_signer,
-        TrieAccount {
-            nonce: 0,
-            balance: U256::ZERO,
-            storage_root: B256::ZERO,
-            code_hash: B256::ZERO,
-        },
-    );
     guest_input.witnesses[0].block.header.number = TEST_SHASTA_BLOCK_NUMBER;
     guest_input.witnesses[0].block.header.parent_hash = parent_header.hash_slow();
     guest_input.witnesses[0].block.header.timestamp = block_timestamp;
@@ -402,7 +391,7 @@ fn rejects_taiko_proposal_id_outside_uint48() {
 fn rejects_transition_timestamp_outside_uint48() {
     let mut guest_input = guest_input_with_single_block();
     // proposal.timestamp is sol uint48 and cannot exceed the bound; force the carry field only
-    // so we exercise the fail-closed check before u48 truncation in hashing.
+    // so we exercise the fail-closed validation check before hashing (which aborts on overflow).
     guest_input
         .proof_carry_data
         .transition_input

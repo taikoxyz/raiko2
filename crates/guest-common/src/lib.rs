@@ -6,7 +6,6 @@ use alethia_reth_chainspec::{
     spec::TaikoChainSpec,
 };
 use alethia_reth_consensus::validation::{validate_anchor_transaction, AnchorValidationContext};
-use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{
     transaction::{SignerRecoverable, Transaction as _},
     BlockHeader as _, Header,
@@ -532,22 +531,8 @@ fn validate_anchor_transaction_binding(
     expected_block: &BlockManifest,
 ) -> Result<()> {
     let block = &stateless_input.block;
-    let anchor_tx = block
-        .body
-        .transactions()
-        .next()
-        .context("missing anchor transaction")?;
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
-    let pre_state_account = stateless_input
-        .accounts
-        .get(&anchor_signer)
-        .context("missing anchor signer account in pre-state callers")?;
-    ensure!(
-        anchor_tx.nonce() == pre_state_account.nonce,
-        "anchor transaction nonce mismatch: expected {}, got {}",
-        pre_state_account.nonce,
-        anchor_tx.nonce()
-    );
+    // The anchor signer nonce is enforced by execution against the Merkle-verified pre-state;
+    // a host-supplied account snapshot proves nothing.
 
     let checkpoint = decode_anchor_checkpoint(block)?;
     ensure!(
@@ -845,7 +830,8 @@ where
         proposal_event_id,
         guest_input.taiko.proposal_id
     );
-    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48 without silent truncation.
+    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48; the hash primitive aborts
+    // on wider values, so pre-validate here to surface a clean validation error instead.
     ensure!(
         fits_shasta_uint48(proof_carry_data.transition_input.transition.timestamp),
         "proof_carry_data.transition.timestamp does not fit in uint48: {}",
@@ -1036,7 +1022,6 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
                 &stateless_input.witness,
                 ancestor_headers,
                 guest_input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
                 &runtime.chain_spec,
                 &runtime.evm_config,
             )
@@ -1100,6 +1085,12 @@ where
         input.prover_address
     );
 
+    // Bounds-validate every carry (uint48 fields, linkage, prover consistency) before hashing:
+    // hash_shasta_subproof_input aborts on out-of-range uint48 values, and malformed input must
+    // surface as a validation error — not a panic — when this path runs host-side (native prover).
+    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&input.proof_carry_data_vec)
+        .context("invalid proof_carry_data_vec")?;
+
     for (i, block_input) in input.block_inputs.iter().enumerate() {
         verify_proof(i, block_input)
             .with_context(|| format!("proof verification failed at index {i}"))?;
@@ -1111,8 +1102,6 @@ where
         );
     }
 
-    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&input.proof_carry_data_vec)
-        .context("invalid proof_carry_data_vec")?;
     let first = input.proof_carry_data_vec.first().expect("checked");
     let aggregation_hash = shasta_aggregation_output(
         &commitment,
@@ -2130,6 +2119,24 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_rejects_oversized_uint48_timestamp_without_panicking() {
+        let mut proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        // Above uint48: hashing this carry would abort, so the bounds validation must reject the
+        // input first. block_inputs stays a dummy value because hashing it here would panic too.
+        proof_carry_data.transition_input.transition.timestamp = 1_u64 << 48;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![B256::ZERO],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::ZERO,
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("oversized uint48 timestamp must fail validation, not panic");
+        assert!(err.to_string().contains("invalid proof_carry_data_vec"));
+    }
+
+    #[test]
     fn aggregate_rejects_block_input_mismatch() {
         let proof_carry_data = guest_input_with_single_block().proof_carry_data;
         let input = ShastaZkAggregationGuestInput {
@@ -2536,7 +2543,8 @@ mod tests {
         );
         set_origin_header_timestamp(&mut guest_input, 122);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         prove_identity(&guest_input).expect("proposal timestamp above origin timestamp proves");
     }
 

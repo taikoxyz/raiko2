@@ -18,7 +18,11 @@ pub struct StatelessInput {
     pub chain_spec: ChainSpec,
     /// `ExecutionWitness` for the stateless validation function.
     pub witness: crate::ExecutionWitness,
-    /// The accounts being accessed in the stateless validation function.
+    /// Host-provided account snapshots, retained only for wire-format compatibility.
+    ///
+    /// These are never verified against the pre-state root and are not consumed by consensus
+    /// validation — they must not be used in guest logic. Execution reads accounts from the
+    /// Merkle-verified witness trie instead.
     pub accounts: AddressMap<TrieAccount>,
 }
 

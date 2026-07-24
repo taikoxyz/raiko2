@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum value of Solidity `uint48` used by Shasta protocol fields.
 ///
-/// Guest hashing uses `u48_to_b256`, which silently truncates wider `u64` values. Callers must
-/// reject out-of-range values before hashing so sub-proof public inputs stay aligned with on-chain
-/// `uint48` packing.
+/// Guest hashing uses `u48_to_b256`, which aborts (panics) on wider `u64` values instead of
+/// silently truncating them. Callers must still reject out-of-range values before hashing so
+/// they surface as validation errors rather than proving aborts, and so sub-proof public inputs
+/// stay aligned with on-chain `uint48` packing.
 pub const SHASTA_UINT48_MAX: u64 = (1_u64 << 48) - 1;
 
 /// Alias: proposal IDs are encoded as Solidity `uint48` on-chain.

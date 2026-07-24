@@ -428,7 +428,6 @@ pub(crate) fn build_shasta_aggregation_input(
     proofs: &[Proof],
 ) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
     let image_id = shasta_aggregation_image_id_words(proofs)?;
-    let mut block_inputs = Vec::with_capacity(proofs.len());
     let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
 
     for (index, proof) in proofs.iter().enumerate() {
@@ -441,7 +440,16 @@ pub(crate) fn build_shasta_aggregation_input(
             .ok_or_else(|| {
                 RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
             })?;
-        let expected_input = hash_shasta_subproof_input(&carry);
+        proof_carry_data_vec.push(carry);
+    }
+
+    build_shasta_commitment_from_proof_carry_data_vec(&proof_carry_data_vec).ok_or_else(|| {
+        RaikoError::InvalidRequestConfig("invalid shasta proof carry data".to_string())
+    })?;
+
+    let mut block_inputs = Vec::with_capacity(proofs.len());
+    for (index, (proof, carry)) in proofs.iter().zip(&proof_carry_data_vec).enumerate() {
+        let expected_input = hash_shasta_subproof_input(carry);
         if let Some(input_hash) = proof.input
             && input_hash != expected_input
         {
@@ -450,7 +458,6 @@ pub(crate) fn build_shasta_aggregation_input(
             )));
         }
         block_inputs.push(expected_input);
-        proof_carry_data_vec.push(carry);
     }
 
     Ok(ShastaZkAggregationGuestInput {
@@ -662,9 +669,9 @@ where
 mod tests {
     use super::{
         CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, SubmissionCheckpointPermit,
-        encode_proof_carry_data, ensure_shasta_proposal_input_matches_carry,
-        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-        validate_external_aggregate_proofs,
+        build_shasta_aggregation_input, encode_proof_carry_data,
+        ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
     };
     #[cfg(any(feature = "risc0", feature = "boundless"))]
     use super::{
@@ -777,6 +784,26 @@ mod tests {
                 encode_proof_carry_data(&ProofCarryData::default()).expect("encode carry data"),
             ),
         }
+    }
+
+    #[test]
+    fn shasta_aggregation_input_rejects_oversized_timestamp_without_panicking() {
+        let mut carry = ProofCarryData::default();
+        carry.transition_input.transition.timestamp = 1_u64 << 48;
+        let proof = Proof {
+            input: None,
+            uuid: None,
+            extra_data: Some(encode_proof_carry_data(&carry).expect("encode carry data")),
+            ..aggregate_proof_fixture()
+        };
+
+        let result = std::panic::catch_unwind(|| build_shasta_aggregation_input(&[proof]));
+
+        assert!(result.is_ok(), "invalid carry data must not panic");
+        let err = result
+            .expect("checked above")
+            .expect_err("oversized timestamp must be rejected");
+        assert!(err.to_string().contains("invalid shasta proof carry data"));
     }
 
     #[test]

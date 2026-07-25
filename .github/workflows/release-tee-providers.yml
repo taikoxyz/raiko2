@@ -28,13 +28,19 @@ jobs:
         with:
           toolchain: "1.94.0"
 
-      - name: Validate dispatch ref
+      - name: Validate dispatch inputs
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
             echo "Release signing workflow must be dispatched from refs/heads/main" >&2
             exit 1
           fi
+          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || {
+            echo "Invalid release tag: $INPUT_TAG" >&2
+            exit 1
+          }
 
       - id: auth
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
@@ -55,10 +61,6 @@ jobs:
           GCP_ENCLAVE_KEY_PROJECT: ${{ vars.GCP_ENCLAVE_KEY_PROJECT }}
         run: |
           set -euo pipefail
-          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || {
-            echo "Invalid release tag: $INPUT_TAG" >&2
-            exit 1
-          }
           cargo run -r -p xtask -- release-tee-providers --tag "$INPUT_TAG"
 
       - name: Upload TEE attestation manifest

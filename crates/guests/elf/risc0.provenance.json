@@ -2,7 +2,7 @@
   "schema_version": 1,
   "backend": "risc0",
   "bench": false,
-  "source_fingerprint": "70785f4dfa80f2061168f292175135309ba8795901a540e2f31ec1143e64a1f0",
+  "source_fingerprint": "c10c4f77a5ee612bda3e65f1fc90c4ece3569f8f10d8f46b79cde2e34f475631",
   "artifacts": {
     "crates/guests/elf/risc0_shasta_aggregation.elf": "006a1ffe709adb407e2735aaa06b77edd7f89287d86506eca516c21139d7352a",
     "crates/guests/elf/risc0_shasta_proposal.elf": "b9704c52da64f7acc3359378136ccf6dfeef67277b1482128527f1e89d8dcfff"

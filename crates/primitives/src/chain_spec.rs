@@ -1579,7 +1579,7 @@ mod tests {
         assert_eq!(spec.spec_id(0, unzen_timestamp), Some(SpecId::OSAKA));
         assert_eq!(
             spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
-            address!("3477f9e8a890c2286c5e62150ad6593eef4590b9")
+            address!("1a34fe6a3db08c954f20ee9ded6a0b893c675f91")
         );
         assert_eq!(
             spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::Risc0)?,
@@ -1840,7 +1840,7 @@ mod tests {
         assert_eq!(spec.chain_id, 167_011);
         assert_eq!(
             spec.get_fork_l1_contract_address_at(0, 0)?,
-            address!("3477f9e8a890c2286c5e62150ad6593eef4590b9")
+            address!("1a34fe6a3db08c954f20ee9ded6a0b893c675f91")
         );
         assert_eq!(
             spec.l2_contract,

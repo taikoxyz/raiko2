@@ -51,6 +51,7 @@ sp1 = ["dep:sp1-sdk"]
 boundless = ["risc0", "dep:boundless-market"]
 [dev-dependencies]
 httpmock = "0.7"
+alloy-signer = "=1.8.3"
 alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
 reth-ethereum-primitives.workspace = true

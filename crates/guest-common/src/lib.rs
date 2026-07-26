@@ -122,6 +122,11 @@ fn decode_anchor_checkpoint(
             block.header.number
         )
     })?;
+    ensure!(
+        input.as_ref() == decoded.abi_encode().as_slice(),
+        "block {} anchor transaction calldata must use canonical anchorV4 encoding",
+        block.header.number
+    );
 
     Ok(DecodedAnchorCheckpoint {
         block_number: decoded._checkpoint.blockNumber.to::<u64>(),
@@ -550,13 +555,17 @@ fn validate_anchor_transaction_common(
     stateless_input: &StatelessInput,
     chain_spec: &TaikoChainSpec,
     anchor_signer: &FixedKSigner,
-) -> Result<()> {
+) -> Result<DecodedAnchorCheckpoint> {
     let block = &stateless_input.block;
     let anchor_tx = block
         .body
         .transactions()
         .next()
         .context("missing anchor transaction")?;
+    ensure!(
+        anchor_tx.is_eip1559(),
+        "anchor transaction must use EIP-1559 envelope"
+    );
     let expected_anchor_recipient = shasta_taiko_l2_address(stateless_input.chain_spec.chain_id)
         .context("failed to derive TaikoL2 address")?;
     ensure!(
@@ -585,17 +594,7 @@ fn validate_anchor_transaction_common(
         },
     )
     .map_err(|err| anyhow::anyhow!(err))?;
-    let signature_hash = anchor_tx.signature_hash();
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes.copy_from_slice(signature_hash.as_slice());
-    let expected_signature = anchor_signer
-        .sign_with_predefined_k(&hash_bytes)
-        .context("failed to derive canonical anchor transaction signature")?
-        .signature;
-    ensure!(
-        anchor_tx.signature() == &expected_signature,
-        "anchor transaction signature mismatch"
-    );
+    let checkpoint = decode_anchor_checkpoint(block)?;
     ensure!(
         anchor_tx.max_fee_per_gas() == u128::from(base_fee),
         "anchor transaction max_fee_per_gas mismatch: expected {base_fee}, got {}",
@@ -611,8 +610,19 @@ fn validate_anchor_transaction_common(
             "anchor transaction access list must be empty"
         );
     }
+    let signature_hash = anchor_tx.signature_hash();
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(signature_hash.as_slice());
+    let expected_signature = anchor_signer
+        .sign_with_predefined_k(&hash_bytes)
+        .context("failed to derive canonical anchor transaction signature")?
+        .signature;
+    ensure!(
+        anchor_tx.signature() == &expected_signature,
+        "anchor transaction signature mismatch"
+    );
 
-    Ok(())
+    Ok(checkpoint)
 }
 
 fn validate_shasta_manifest_block_metadata(
@@ -920,7 +930,7 @@ where
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
-        validate_anchor_transaction_common(
+        let anchor_checkpoint = validate_anchor_transaction_common(
             stateless_input,
             runtime.chain_spec.as_ref(),
             &anchor_signer,
@@ -966,7 +976,7 @@ where
         last_block_number = Some(block.header.number);
         last_block_hash = Some(validated_hash);
         last_state_root = Some(block.header.state_root);
-        anchor_checkpoints.push(decode_anchor_checkpoint(block)?);
+        anchor_checkpoints.push(anchor_checkpoint);
         if canonical_parent_header.is_some() {
             canonical_parent_header = Some(block.header.clone());
         }
@@ -1138,7 +1148,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
+    use alloy_consensus::{
+        constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559, TxEip7702,
+    };
     use alloy_primitives::{keccak256, Address, Signature, TxKind, U256};
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
@@ -1295,7 +1307,10 @@ mod tests {
         .expect("golden touch signer")
     }
 
-    fn canonical_golden_touch_signature(tx: &TxEip1559) -> Signature {
+    fn canonical_golden_touch_signature<T>(tx: &T) -> Signature
+    where
+        T: SignableTransaction<Signature>,
+    {
         let signature_hash = tx.signature_hash();
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(signature_hash.as_slice());
@@ -2382,6 +2397,29 @@ mod tests {
         tx.into_signed(signature).into()
     }
 
+    fn eip7702_anchor_tx(
+        checkpoint: &AnchorV4Checkpoint,
+    ) -> reth_ethereum_primitives::TransactionSigned {
+        let tx = TxEip7702 {
+            chain_id: 167_000,
+            nonce: 0,
+            gas_limit: ANCHOR_GAS_LIMIT,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: test_anchor_address(),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Default::default(),
+            input: anchorV4Call {
+                _checkpoint: checkpoint.clone(),
+            }
+            .abi_encode()
+            .into(),
+        };
+        let signature = canonical_golden_touch_signature(&tx);
+        tx.into_signed(signature).into()
+    }
+
     fn base_checkpoint() -> AnchorV4Checkpoint {
         // Matches the anchor checkpoint built inside guest_input_with_single_block (L1 block 7).
         let header = sample_l1_header(TEST_PARENT_ANCHOR_BLOCK_NUMBER, B256::from([0x66; 32]));
@@ -2390,6 +2428,16 @@ mod tests {
             blockHash: header.hash_slow(),
             stateRoot: header.state_root,
         }
+    }
+
+    #[test]
+    fn anchortx_accepts_canonical_eip1559_envelope_and_calldata() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
+
+        prove_identity(&guest_input).expect("canonical anchor transaction must remain accepted");
     }
 
     #[test]
@@ -2408,6 +2456,34 @@ mod tests {
             vec![tx.into_signed(non_canonical_signature).into()];
 
         assert_guest_rejects(guest_input, "anchor transaction signature mismatch");
+    }
+
+    #[test]
+    fn anchortx_rejects_eip7702_envelope() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.witnesses[0].block.body.transactions =
+            vec![eip7702_anchor_tx(&base_checkpoint())];
+
+        assert_guest_rejects(guest_input, "anchor transaction must use EIP-1559 envelope");
+    }
+
+    #[test]
+    fn anchortx_rejects_trailing_calldata() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        let mut input = tx.input.to_vec();
+        input.push(0);
+        tx.input = input.into();
+        assert!(
+            anchorV4Call::abi_decode_validate(&tx.input).is_ok(),
+            "fixture must characterize Alloy accepting trailing calldata"
+        );
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+
+        assert_guest_rejects(
+            guest_input,
+            "anchor transaction calldata must use canonical anchorV4 encoding",
+        );
     }
 
     #[test]

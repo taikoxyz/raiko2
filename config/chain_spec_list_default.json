@@ -115,7 +115,7 @@
     {
         "name": "taiko_masaya",
         "l1_contract": {
-            "SHASTA": "0x3477f9e8a890c2286c5e62150ad6593eef4590b9"
+            "SHASTA": "0x1A34fe6a3Db08c954f20ee9dED6A0b893c675F91"
         },
         "l2_contract": "0x1670110000000000000000000000000000010001",
         "checkpoint_store_contract": "0x1670110000000000000000000000000000000005",

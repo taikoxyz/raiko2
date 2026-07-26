@@ -3672,8 +3672,8 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 
 [[package]]
 name = "protocol"
-version = "2.1.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=2a752addafd6bf4fc1a67443e82513ecaf484b2d#2a752addafd6bf4fc1a67443e82513ecaf484b2d"
+version = "2.2.0"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=448ce1b02c212d2447a75dbcf9b12e9ef8430b3e#448ce1b02c212d2447a75dbcf9b12e9ef8430b3e"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",
@@ -3744,6 +3744,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "anyhow",
+ "protocol",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol",

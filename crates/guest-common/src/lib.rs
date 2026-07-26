@@ -39,6 +39,7 @@ use raiko2_stateless::{
     reconstruct_block_from_transactions_with_witness_resources,
 };
 use std::sync::Arc;
+use taiko_client_protocol::FixedKSigner;
 
 const ANCHOR_BLOCK_STATE_SLOT: u64 = 256;
 
@@ -548,6 +549,7 @@ fn validate_anchor_transaction_binding(
 fn validate_anchor_transaction_common(
     stateless_input: &StatelessInput,
     chain_spec: &TaikoChainSpec,
+    anchor_signer: &FixedKSigner,
 ) -> Result<()> {
     let block = &stateless_input.block;
     let anchor_tx = block
@@ -583,6 +585,17 @@ fn validate_anchor_transaction_common(
         },
     )
     .map_err(|err| anyhow::anyhow!(err))?;
+    let signature_hash = anchor_tx.signature_hash();
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(signature_hash.as_slice());
+    let expected_signature = anchor_signer
+        .sign_with_predefined_k(&hash_bytes)
+        .context("failed to derive canonical anchor transaction signature")?
+        .signature;
+    ensure!(
+        anchor_tx.signature() == &expected_signature,
+        "anchor transaction signature mismatch"
+    );
     ensure!(
         anchor_tx.max_fee_per_gas() == u128::from(base_fee),
         "anchor transaction max_fee_per_gas mismatch: expected {base_fee}, got {}",
@@ -874,6 +887,8 @@ where
     bench_report_start("proposal_runtime");
     let runtime = TaikoRuntime::from_chain_id(first_chain_id)
         .context("Failed to build Taiko runtime from GuestInput chain_id")?;
+    let anchor_signer =
+        FixedKSigner::golden_touch().context("failed to initialize Golden Touch fixed-k signer")?;
     bench_report_end("proposal_runtime");
 
     bench_report_start("proposal_derivation");
@@ -905,8 +920,12 @@ where
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
-        validate_anchor_transaction_common(stateless_input, runtime.chain_spec.as_ref())
-            .with_context(|| format!("anchor transaction validation failed at index {index}"))?;
+        validate_anchor_transaction_common(
+            stateless_input,
+            runtime.chain_spec.as_ref(),
+            &anchor_signer,
+        )
+        .with_context(|| format!("anchor transaction validation failed at index {index}"))?;
         let expected_block = expected_blocks.and_then(|blocks| blocks.get(index));
         let parent_header = canonical_parent_header.as_ref();
 
@@ -1131,6 +1150,7 @@ mod tests {
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::TaikoManifest;
     use risc0_ethereum_trie::Trie;
+    use taiko_client_protocol::FixedKSigner;
 
     const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
     const TEST_SHASTA_BLOCK_NUMBER: u64 = 1_166_000;
@@ -1275,11 +1295,20 @@ mod tests {
         .expect("golden touch signer")
     }
 
+    fn canonical_golden_touch_signature(tx: &TxEip1559) -> Signature {
+        let signature_hash = tx.signature_hash();
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes.copy_from_slice(signature_hash.as_slice());
+        FixedKSigner::golden_touch()
+            .expect("golden touch fixed-k signer")
+            .sign_with_predefined_k(&hash_bytes)
+            .expect("canonical golden touch signature")
+            .signature
+    }
+
     fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
         let tx = unsigned_anchor_tx(checkpoint, test_anchor_address());
-        let signature = golden_touch_signer()
-            .sign_hash_sync(&tx.signature_hash())
-            .expect("golden touch anchor signature");
+        let signature = canonical_golden_touch_signature(&tx);
         tx.into_signed(signature).into()
     }
 
@@ -2349,9 +2378,7 @@ mod tests {
     // ── Task 5: anchor-transaction common checks ──────────────────────────────
 
     fn golden_touch_sign(tx: TxEip1559) -> reth_ethereum_primitives::TransactionSigned {
-        let signature = golden_touch_signer()
-            .sign_hash_sync(&tx.signature_hash())
-            .expect("golden touch signature");
+        let signature = canonical_golden_touch_signature(&tx);
         tx.into_signed(signature).into()
     }
 
@@ -2363,6 +2390,24 @@ mod tests {
             blockHash: header.hash_slow(),
             stateRoot: header.state_root,
         }
+    }
+
+    #[test]
+    fn anchortx_rejects_non_canonical_golden_touch_signature() {
+        let mut guest_input = guest_input_with_single_block();
+        let tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        let non_canonical_signature = golden_touch_signer()
+            .sign_hash_sync(&tx.signature_hash())
+            .expect("ordinary Golden Touch signature");
+        assert_ne!(
+            non_canonical_signature,
+            canonical_golden_touch_signature(&tx),
+            "negative fixture must differ from the protocol's fixed-k signature"
+        );
+        guest_input.witnesses[0].block.body.transactions =
+            vec![tx.into_signed(non_canonical_signature).into()];
+
+        assert_guest_rejects(guest_input, "anchor transaction signature mismatch");
     }
 
     #[test]

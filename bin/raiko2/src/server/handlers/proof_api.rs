@@ -1101,25 +1101,40 @@ async fn handle_existing_batch_task(
         if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
-        if let Err(err) = recover_existing_task(state, &existing, || {
+        match recover_existing_task(state, &existing, || {
             reenqueue_existing_batch_task(state, &existing, &existing_metadata)
         })
         .await
         {
-            warn!(
-                task_id = existing.task_id,
-                existing_pipeline = %existing.pipeline_key,
-                requested_pipeline = %submission.route.pipeline_key(),
-                error = %err.message,
-                "failed to recover reenqueueable task; replacing from scratch"
-            );
-            return replace_existing_batch_task(
-                state,
-                submission,
-                &existing,
-                replacement_request_fingerprint,
-            )
-            .await;
+            Ok(ExistingTaskRecovery::Reenqueued) => {}
+            Ok(ExistingTaskRecovery::TaskChanged) if !missing_completed_artifact => {
+                return compatibility_response_for_task(state, &existing.task_id).await;
+            }
+            Ok(ExistingTaskRecovery::TaskChanged) => {
+                return replace_existing_batch_task(
+                    state,
+                    submission,
+                    &existing,
+                    replacement_request_fingerprint,
+                )
+                .await;
+            }
+            Err(err) => {
+                warn!(
+                    task_id = existing.task_id,
+                    existing_pipeline = %existing.pipeline_key,
+                    requested_pipeline = %submission.route.pipeline_key(),
+                    error = %err.message,
+                    "failed to recover reenqueueable task; replacing from scratch"
+                );
+                return replace_existing_batch_task(
+                    state,
+                    submission,
+                    &existing,
+                    replacement_request_fingerprint,
+                )
+                .await;
+            }
         }
     }
     compatibility_response_for_task(state, &existing.task_id).await
@@ -1356,7 +1371,7 @@ async fn handle_existing_external_aggregate_task(
         if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
-        recover_existing_task(state, &existing, || {
+        let recovery = recover_existing_task(state, &existing, || {
             reenqueue_existing_external_aggregate_task(
                 state,
                 engine,
@@ -1366,32 +1381,65 @@ async fn handle_existing_external_aggregate_task(
             )
         })
         .await?;
+        match recovery {
+            ExistingTaskRecovery::Reenqueued => {}
+            ExistingTaskRecovery::TaskChanged if !missing_completed_artifact => {
+                return compatibility_response_for_task(state, &existing.task_id).await;
+            }
+            ExistingTaskRecovery::TaskChanged => {
+                return Err(ApiError::internal(format!(
+                    "task {} changed while recovering its missing completed artifact",
+                    existing.task_id
+                )));
+            }
+        }
     }
     compatibility_response_for_task(state, &existing.task_id).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExistingTaskRecovery {
+    Reenqueued,
+    TaskChanged,
 }
 
 async fn recover_existing_task<'a, F, Fut>(
     state: &AppState,
     existing: &'a raiko2_runtime::RuntimeTaskRecord,
     reenqueue: F,
-) -> Result<(), ApiError>
+) -> Result<ExistingTaskRecovery, ApiError>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), ApiError>> + 'a,
 {
-    let reopened = reset_runtime_task_to_allocated(state, existing).await?;
+    let Some(reopened) = try_reset_runtime_task_to_allocated(state, existing).await? else {
+        return Ok(ExistingTaskRecovery::TaskChanged);
+    };
     if let Err(err) = reenqueue().await {
         restore_runtime_task_status(state, &reopened, existing, &err).await;
         return Err(err);
     }
-    Ok(())
+    Ok(ExistingTaskRecovery::Reenqueued)
 }
 
 async fn reset_runtime_task_to_allocated(
     state: &AppState,
     record: &raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<raiko2_runtime::RuntimeTaskRecord, ApiError> {
-    let reopened = state
+    let reopened = try_reset_runtime_task_to_allocated(state, record).await?;
+    reopened.ok_or_else(|| {
+        ApiError::internal(format!(
+            "task {} is no longer eligible for failed-task recovery",
+            record.task_id
+        ))
+    })
+}
+
+async fn try_reset_runtime_task_to_allocated(
+    state: &AppState,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<Option<raiko2_runtime::RuntimeTaskRecord>, ApiError> {
+    state
         .runtime
         .prepare_task_for_recovery_if_unchanged(record)
         .await
@@ -1400,13 +1448,7 @@ async fn reset_runtime_task_to_allocated(
                 "failed to reset recovered task {}: {err}",
                 record.task_id
             ))
-        })?;
-    reopened.ok_or_else(|| {
-        ApiError::internal(format!(
-            "task {} is no longer eligible for failed-task recovery",
-            record.task_id
-        ))
-    })
+        })
 }
 
 async fn restore_runtime_task_status(
@@ -2907,16 +2949,14 @@ async fn should_reenqueue_existing_submission(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
 ) -> Result<bool, ApiError> {
-    if should_reenqueue_existing_submission_without_engine(record, metadata) {
-        return Ok(true);
+    if record.runner_status == RuntimeRunnerStatus::Failed {
+        return Ok(failed_stage_is_reenqueueable(record, metadata));
     }
 
     if !matches!(
         record.runner_status,
         RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
-    ) || !metadata.has_runtime_progress()
-        || metadata.has_remote_submission_progress()
-    {
+    ) {
         return Ok(false);
     }
 
@@ -2928,24 +2968,17 @@ async fn should_reenqueue_existing_submission(
         ))
         .await
         .map_err(|err| ApiError::internal(format!("failed to inspect execution: {err}")))?;
+    if !metadata.has_runtime_progress() {
+        return Ok(!engine_state_present);
+    }
+    if metadata.has_remote_submission_progress() {
+        return Ok(false);
+    }
     Ok(stale_nonterminal_runtime_is_reenqueueable(
         record,
         metadata,
         engine_state_present,
     ))
-}
-
-fn should_reenqueue_existing_submission_without_engine(
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &TaskMetadata,
-) -> bool {
-    match record.runner_status {
-        RuntimeRunnerStatus::Failed => failed_stage_is_reenqueueable(record, metadata),
-        RuntimeRunnerStatus::Completed | RuntimeRunnerStatus::Cancelled => false,
-        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => {
-            !metadata.has_runtime_progress()
-        }
-    }
 }
 
 fn stale_nonterminal_runtime_is_reenqueueable(
@@ -2979,6 +3012,15 @@ fn failed_stage_is_reenqueueable(
         }
         None => !metadata.has_remote_submission_progress(),
     }
+}
+
+#[cfg(test)]
+fn should_reenqueue_existing_submission_without_engine(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> bool {
+    record.runner_status == RuntimeRunnerStatus::Failed
+        && failed_stage_is_reenqueueable(record, metadata)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4743,6 +4785,105 @@ mod tests {
             .await?
             .expect("runtime task");
         assert_eq!(stored.runner_status, RuntimeRunnerStatus::Allocated);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_allocated_duplicate_is_not_reenqueued() -> Result<()> {
+        let route = native_local_route();
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "active-allocated-duplicate",
+        ))?);
+        let mut submission = canonical_submission(route, false);
+        let mut metadata = task_metadata_with_stage(None);
+        metadata.proof_type = ProofType::Native;
+        metadata.aggregate_requested = false;
+        let mut record = runtime_record(RuntimeRunnerStatus::Allocated, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        align_runtime_record_identity(
+            &mut record,
+            &mut metadata,
+            PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
+        );
+        record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        runtime.upsert_task(&record).await?;
+        submission.public_task_id.clone_from(&record.task_id);
+
+        let recorder = Arc::new(RecordingEngine::new());
+        recorder
+            .attached
+            .lock()
+            .expect("attached owners mutex")
+            .push(RootOwner::new(
+                record.task_id.clone(),
+                record.incarnation_id,
+            ));
+        let state = test_state(Arc::clone(&runtime), recorder.clone());
+
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.message))?;
+
+        assert!(!response_is_completed(&response));
+        assert_eq!(
+            recorder
+                .attached
+                .lock()
+                .expect("attached owners mutex")
+                .len(),
+            1
+        );
+        assert!(
+            recorder
+                .proposals
+                .lock()
+                .expect("proposal submissions mutex")
+                .is_empty()
+        );
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Allocated);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_skips_reenqueue_when_task_changed() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "recover-task-changed",
+        ))?);
+        let metadata = task_metadata_with_stage(Some("preflight"));
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        record.pipeline_key = PipelineKey::ShastaNative;
+        record.route = "native/local".parse().expect("parse route");
+        runtime.upsert_task(&record).await?;
+
+        let mut changed = record.clone();
+        changed.error = Some("updated by another worker".to_string());
+        runtime.upsert_task(&changed).await?;
+
+        let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
+        let reenqueue_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&reenqueue_calls);
+        let recovery = recover_existing_task(&state, &record, move || {
+            let calls = Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(recovery, ExistingTaskRecovery::TaskChanged);
+        assert_eq!(reenqueue_calls.load(Ordering::Relaxed), 0);
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        assert_eq!(stored.error.as_deref(), Some("updated by another worker"));
         Ok(())
     }
 

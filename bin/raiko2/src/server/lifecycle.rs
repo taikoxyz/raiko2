@@ -18,6 +18,14 @@ pub(crate) struct ProofLifecycle {
     pipelines: Arc<dyn PipelineFactory>,
 }
 
+/// Result of atomically preparing and attaching a recovered runtime root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryOutcome {
+    Recovered,
+    Active,
+    TaskChanged,
+}
+
 impl ProofLifecycle {
     pub(crate) fn new(runtime: Arc<RuntimeManager>, pipelines: Arc<dyn PipelineFactory>) -> Self {
         Self { runtime, pipelines }
@@ -64,6 +72,96 @@ impl ProofLifecycle {
             )
             .await?;
         Ok(())
+    }
+
+    /// Recovers an exact inactive root and attaches its execution plan as one lifecycle
+    /// transition. An active owner always wins over duplicate recovery.
+    pub(crate) async fn recover_if_inactive<F>(
+        &self,
+        expected: &RuntimeTaskRecord,
+        build_plan: F,
+    ) -> Result<RecoveryOutcome>
+    where
+        F: FnOnce() -> Result<EngineExecutionPlan>,
+    {
+        if matches!(
+            expected.runner_status,
+            RunnerStatus::Completed | RunnerStatus::Cancelled
+        ) {
+            return Ok(RecoveryOutcome::TaskChanged);
+        }
+
+        let gate = self.runtime.execution_lifecycle_gate();
+        let _gate = gate.lock().await;
+        if !self.runtime.is_lifecycle_active() {
+            bail!("runtime root is no longer active for recovery attachment");
+        }
+        let Some(engine) = self
+            .pipelines
+            .get(&expected.network_pair, expected.pipeline_key)
+        else {
+            bail!(
+                "execution pipeline is unavailable for recovered task {}",
+                expected.task_id
+            );
+        };
+        let owner = RootOwner::new(expected.task_id.clone(), expected.incarnation_id);
+        // A failed runtime root is explicitly eligible for recovery before remote
+        // submission, even when its in-memory execution graph is still attached.
+        // Only live roots need the active-owner guard that prevents a duplicate
+        // poll from racing a concurrent attachment.
+        if matches!(
+            expected.runner_status,
+            RunnerStatus::Allocated | RunnerStatus::Running
+        ) && engine.has_active_execution(owner.clone()).await?
+        {
+            return Ok(RecoveryOutcome::Active);
+        }
+        let Some(prepared) = self
+            .runtime
+            .prepare_task_for_recovery_if_unchanged(expected)
+            .await?
+        else {
+            return Ok(RecoveryOutcome::TaskChanged);
+        };
+
+        let plan = match build_plan() {
+            Ok(plan) => plan,
+            Err(error) => {
+                if let Err(rollback_error) =
+                    self.restore_recovery_snapshot(&prepared, expected).await
+                {
+                    return Err(anyhow::anyhow!(
+                        "failed to build recovered execution plan: {error:#}; {rollback_error:#}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = engine.attach_execution_plan(owner, plan).await {
+            if let Err(rollback_error) = self.restore_recovery_snapshot(&prepared, expected).await {
+                return Err(anyhow::anyhow!(
+                    "failed to attach recovered execution: {error}; {rollback_error:#}"
+                ));
+            }
+            return Err(error.into());
+        }
+        Ok(RecoveryOutcome::Recovered)
+    }
+
+    async fn restore_recovery_snapshot(
+        &self,
+        prepared: &RuntimeTaskRecord,
+        expected: &RuntimeTaskRecord,
+    ) -> Result<()> {
+        match self
+            .runtime
+            .restore_task_after_recovery_if_unchanged(prepared, expected)
+            .await?
+        {
+            RuntimeMutationOutcome::Applied => Ok(()),
+            outcome => bail!("recovery rollback was not applied: {outcome:?}"),
+        }
     }
 
     /// Replaces one unchanged runtime root and swaps its queue projection while holding the
@@ -274,7 +372,7 @@ mod tests {
     use raiko2_runtime::TaskRegistration;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -332,6 +430,105 @@ mod tests {
                 self.attached.store(false, Ordering::SeqCst);
                 Ok(DetachOutcome::not_attached(mode))
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingAttachEngine {
+        attach_started: Notify,
+        allow_attach: Notify,
+        attached: AtomicBool,
+        attach_calls: AtomicUsize,
+    }
+
+    impl EngineHandle for BlockingAttachEngine {
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn has_active_execution(
+            &self,
+            _owner: RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            let attached = self.attached.load(Ordering::SeqCst);
+            Box::pin(async move { Ok(attached) })
+        }
+
+        fn attach_execution_plan(
+            &self,
+            _owner: RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>> {
+            Box::pin(async move {
+                self.attach_calls.fetch_add(1, Ordering::SeqCst);
+                self.attach_started.notify_one();
+                self.allow_attach.notified().await;
+                self.attached.store(true, Ordering::SeqCst);
+                Ok(AttachOutcome::Attached)
+            })
+        }
+
+        fn detach_execution(
+            &self,
+            _owner: RootOwner,
+            mode: DetachMode,
+        ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>> {
+            Box::pin(async move { Ok(DetachOutcome::not_attached(mode)) })
+        }
+    }
+
+    struct FailingAttachEngine;
+
+    impl EngineHandle for FailingAttachEngine {
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn has_active_execution(
+            &self,
+            _owner: RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn attach_execution_plan(
+            &self,
+            _owner: RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<AttachOutcome, TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "attachment failed",
+                )))
+            })
+        }
+
+        fn detach_execution(
+            &self,
+            _owner: RootOwner,
+            mode: DetachMode,
+        ) -> BoxFuture<'_, Result<DetachOutcome<EngineTaskKey>, TaskStoreError>> {
+            Box::pin(async move { Ok(DetachOutcome::not_attached(mode)) })
         }
     }
 
@@ -399,6 +596,126 @@ mod tests {
                 .expect("cancelled root")
                 .runner_status,
             RunnerStatus::Cancelled
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_reattach_an_owner_attached_after_candidate_evaluation() -> Result<()>
+    {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            format!("recovery-attach-race-{}", uuid::Uuid::new_v4()),
+        )?);
+        let record = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "taiko_dev/ethereum".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        let engine = Arc::new(BlockingAttachEngine::default());
+        let mut pipelines = StaticPipelineFactory::default();
+        pipelines.insert(
+            &record.network_pair,
+            record.pipeline_key,
+            engine.clone() as Arc<dyn EngineHandle>,
+        );
+        let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::new(pipelines));
+
+        let attach_started = engine.attach_started.notified();
+        let attach_lifecycle = lifecycle.clone();
+        let attach_record = record.clone();
+        let attach_engine = engine.clone() as Arc<dyn EngineHandle>;
+        let attachment = tokio::spawn(async move {
+            attach_lifecycle
+                .attach(
+                    &attach_record,
+                    &attach_engine,
+                    EngineExecutionPlan {
+                        proposals: Vec::new(),
+                        aggregate: None,
+                    },
+                )
+                .await
+        });
+        attach_started.await;
+
+        let recover_lifecycle = lifecycle.clone();
+        let recover_record = record.clone();
+        let recovery = tokio::spawn(async move {
+            recover_lifecycle
+                .recover_if_inactive(&recover_record, || {
+                    Ok(EngineExecutionPlan {
+                        proposals: Vec::new(),
+                        aggregate: None,
+                    })
+                })
+                .await
+        });
+        engine.allow_attach.notify_one();
+
+        attachment.await??;
+        assert_eq!(recovery.await??, RecoveryOutcome::Active);
+        assert_eq!(engine.attach_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime
+                .get_task(&record.task_id)
+                .await?
+                .expect("runtime root"),
+            record
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_attachment_failure_restores_the_exact_runtime_snapshot() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            format!("recovery-attach-rollback-{}", uuid::Uuid::new_v4()),
+        )?);
+        let record = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "taiko_dev/ethereum".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "root-request".into(),
+            })
+            .await?;
+        let mut pipelines = StaticPipelineFactory::default();
+        pipelines.insert(
+            &record.network_pair,
+            record.pipeline_key,
+            Arc::new(FailingAttachEngine) as Arc<dyn EngineHandle>,
+        );
+        let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::new(pipelines));
+
+        let error = lifecycle
+            .recover_if_inactive(&record, || {
+                Ok(EngineExecutionPlan {
+                    proposals: Vec::new(),
+                    aggregate: None,
+                })
+            })
+            .await
+            .expect_err("failed recovery attachment");
+
+        assert!(error.to_string().contains("attachment failed"));
+        assert_eq!(
+            runtime
+                .get_task(&record.task_id)
+                .await?
+                .expect("runtime root"),
+            record
         );
         Ok(())
     }

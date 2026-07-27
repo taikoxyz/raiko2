@@ -3442,7 +3442,7 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "2.2.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=448ce1b02c212d2447a75dbcf9b12e9ef8430b3e#448ce1b02c212d2447a75dbcf9b12e9ef8430b3e"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118#4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",

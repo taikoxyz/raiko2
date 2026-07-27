@@ -106,7 +106,15 @@ impl ProofLifecycle {
             );
         };
         let owner = RootOwner::new(expected.task_id.clone(), expected.incarnation_id);
-        if engine.has_active_execution(owner.clone()).await? {
+        // A failed runtime root is explicitly eligible for recovery before remote
+        // submission, even when its in-memory execution graph is still attached.
+        // Only live roots need the active-owner guard that prevents a duplicate
+        // poll from racing a concurrent attachment.
+        if matches!(
+            expected.runner_status,
+            RunnerStatus::Allocated | RunnerStatus::Running
+        ) && engine.has_active_execution(owner.clone()).await?
+        {
             return Ok(RecoveryOutcome::Active);
         }
         let Some(prepared) = self

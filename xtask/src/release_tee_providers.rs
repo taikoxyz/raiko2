@@ -206,6 +206,11 @@ fn local_sgx_variant_tag(release_tag: &str, edmm: bool) -> String {
 
 fn validate_release_tag(tag: &str) -> Result<()> {
     validate_oci_tag(tag, "release tag")?;
+    if tag.ends_with(LOCAL_SGX_EDMM_TAG_SUFFIX) {
+        bail!(
+            "release tag {tag:?} uses reserved local SGX EDMM suffix {LOCAL_SGX_EDMM_TAG_SUFFIX:?}"
+        );
+    }
     for variant in LOCAL_SGX_VARIANTS {
         let variant_tag = local_sgx_variant_tag(tag, variant.edmm);
         validate_oci_tag(
@@ -827,6 +832,14 @@ mod tests {
         let err = validate_release_tag("v1.2.3/evil").expect_err("slash is not valid in OCI tags");
 
         assert!(err.to_string().contains("outside [A-Za-z0-9_.-]"));
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_reserved_edmm_suffix() {
+        let err =
+            validate_release_tag("v1.2.3-edmm").expect_err("EDMM suffix namespace is reserved");
+
+        assert!(err.to_string().contains("reserved local SGX EDMM suffix"));
     }
 
     #[test]

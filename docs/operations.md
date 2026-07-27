@@ -669,6 +669,21 @@ GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
 ```
 
+The same pushed release flow is available as the `Release - TEE provider images` GitHub Actions
+workflow. Dispatch it from the protected `sgx-release-signing` environment with the release tag.
+The workflow authenticates through Workload Identity Federation, fetches the enclave signing key
+from GCP Secret Manager, pushes provider images to Artifact Registry, and uploads the generated
+`tee-attestation-manifest-<tag>.json` as a workflow artifact. It may reuse the existing enclave
+signing Google service account when that account already has the required Secret Manager and
+Artifact Registry permissions, but its Workload Identity Provider or binding must be scoped to
+`taikoxyz/raiko2`, `refs/heads/main`, and this workflow file. Configure these repository variables:
+
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_ENCLAVE_SIGNER_SA`
+- `GCP_ENCLAVE_KEY_SECRET`
+- `GCP_ENCLAVE_KEY_PROJECT`
+- `GCP_ENCLAVE_KEY_VERSION` (optional; defaults to `latest` when unset)
+
 This flow:
 
 - reads exact external provider pins from `release/providers.toml`

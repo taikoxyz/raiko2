@@ -16,6 +16,9 @@ jobs:
   build-sign-push:
     runs-on: [taiko-runner]
     environment: sgx-release-signing
+    concurrency:
+      group: release-tee-providers-${{ inputs.tag }}
+      cancel-in-progress: false
     timeout-minutes: 180
     env:
       CARGO_TERM_COLOR: always
@@ -37,7 +40,7 @@ jobs:
             echo "Release signing workflow must be dispatched from refs/heads/main" >&2
             exit 1
           fi
-          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || {
+          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,122}$ ]] || {
             echo "Invalid release tag: $INPUT_TAG" >&2
             exit 1
           }

@@ -24,6 +24,8 @@ const ENV_GCP_ENCLAVE_KEY_SECRET: &str = "GCP_ENCLAVE_KEY_SECRET";
 const ENV_GCP_ENCLAVE_KEY_VERSION: &str = "GCP_ENCLAVE_KEY_VERSION";
 const ENV_GCP_ENCLAVE_KEY_PROJECT: &str = "GCP_ENCLAVE_KEY_PROJECT";
 const ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST: &str = "RAIKO2_SGX_ENCLAVE_KEY_HOST";
+const OCI_TAG_MAX_LEN: usize = 128;
+const LOCAL_SGX_EDMM_TAG_SUFFIX: &str = "-edmm";
 
 #[derive(Debug, Clone, Copy)]
 struct LocalSgxVariant {
@@ -82,6 +84,7 @@ pub(crate) struct ReleaseTeeProvidersArgs {
 
 pub(crate) fn run(root: &Path, args: ReleaseTeeProvidersArgs) -> Result<()> {
     ensure_non_empty("tag", &args.tag)?;
+    validate_release_tag(&args.tag)?;
     util::ensure_docker()?;
     util::ensure_docker_buildx()?;
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
@@ -195,10 +198,45 @@ fn validate_local_sgx_entries(entries: &[TeeProviderManifestEntry], no_push: boo
 
 fn local_sgx_variant_tag(release_tag: &str, edmm: bool) -> String {
     if edmm {
-        format!("{release_tag}-edmm")
+        format!("{release_tag}{LOCAL_SGX_EDMM_TAG_SUFFIX}")
     } else {
         release_tag.to_string()
     }
+}
+
+fn validate_release_tag(tag: &str) -> Result<()> {
+    validate_oci_tag(tag, "release tag")?;
+    for variant in LOCAL_SGX_VARIANTS {
+        let variant_tag = local_sgx_variant_tag(tag, variant.edmm);
+        validate_oci_tag(
+            &variant_tag,
+            &format!("local SGX provider tag for {}", variant.provider),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_oci_tag(tag: &str, label: &str) -> Result<()> {
+    if tag.is_empty() {
+        bail!("{label} must not be empty");
+    }
+    if tag.len() > OCI_TAG_MAX_LEN {
+        bail!(
+            "{label} {tag:?} is too long for an OCI image tag: {} bytes > {OCI_TAG_MAX_LEN}",
+            tag.len()
+        );
+    }
+
+    let mut chars = tag.chars();
+    let first = chars.next().expect("empty tag handled above");
+    if !first.is_ascii_alphanumeric() && first != '_' {
+        bail!("{label} {tag:?} must start with [A-Za-z0-9_]");
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')) {
+        bail!("{label} {tag:?} contains characters outside [A-Za-z0-9_.-]");
+    }
+
+    Ok(())
 }
 
 fn local_sgx_manifest_entry(
@@ -718,7 +756,7 @@ mod tests {
         gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
         local_sgx_docker_build_command, local_sgx_manifest_entry, local_sgx_variant_tag,
         parse_attestation_json, resolve_gramine_enclave_key_from_values, validate_attestation_path,
-        validate_local_sgx_entries,
+        validate_local_sgx_entries, validate_release_tag,
     };
     use crate::release_tee_manifest::{TeeProviderAttestation, TeeProviderManifestEntry};
 
@@ -763,6 +801,32 @@ mod tests {
     fn release_tee_providers_local_sgx_uses_unsuffixed_and_edmm_tags() {
         assert_eq!(local_sgx_variant_tag("v1.2.3", false), "v1.2.3");
         assert_eq!(local_sgx_variant_tag("v1.2.3", true), "v1.2.3-edmm");
+    }
+
+    #[test]
+    fn release_tee_providers_accepts_longest_local_sgx_release_tag() {
+        let tag = format!("v{}", "a".repeat(122));
+        assert_eq!(tag.len(), 123);
+        assert_eq!(local_sgx_variant_tag(&tag, true).len(), 128);
+
+        validate_release_tag(&tag).expect("derived EDMM tag fits OCI tag limit");
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_release_tag_when_edmm_suffix_overflows() {
+        let tag = format!("v{}", "a".repeat(123));
+        assert_eq!(tag.len(), 124);
+        let err = validate_release_tag(&tag).expect_err("derived EDMM tag must exceed OCI limit");
+
+        assert!(err.to_string().contains("raiko2-sgx-edmm"));
+        assert!(err.to_string().contains("129 bytes > 128"));
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_invalid_oci_tag_characters() {
+        let err = validate_release_tag("v1.2.3/evil").expect_err("slash is not valid in OCI tags");
+
+        assert!(err.to_string().contains("outside [A-Za-z0-9_.-]"));
     }
 
     #[test]

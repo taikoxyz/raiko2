@@ -3,8 +3,6 @@
 use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
 use alloy_primitives::{keccak256, Signature, TxKind, U256};
 use alloy_primitives::{Address, B256};
-use alloy_signer::SignerSync;
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use raiko2_guest_common::{prove_shasta_proposal, prove_shasta_proposal_with_validator};
 use raiko2_primitives::{
@@ -21,6 +19,7 @@ use raiko2_protocol_shasta::shasta::{
 };
 use raiko2_protocol_shasta::TaikoManifest;
 use risc0_ethereum_trie::Trie;
+use taiko_client_protocol::FixedKSigner;
 
 const ANCHOR_BLOCK_STATE_SLOT: u64 = 256;
 const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
@@ -81,21 +80,20 @@ fn unsigned_anchor_tx(checkpoint: &AnchorV4Checkpoint, to: Address) -> TxEip1559
     }
 }
 
-fn golden_touch_signer() -> PrivateKeySigner {
-    [
-        "92954368afd3caa1f3ce3ead0069c1af",
-        "414054aefe1ef9aeacc1bf426222ce38",
-    ]
-    .concat()
-    .parse()
-    .expect("golden touch signer")
+fn canonical_golden_touch_signature(tx: &TxEip1559) -> Signature {
+    let signature_hash = tx.signature_hash();
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(signature_hash.as_slice());
+    FixedKSigner::golden_touch()
+        .expect("golden touch fixed-k signer")
+        .sign_with_predefined_k(&hash_bytes)
+        .expect("canonical golden touch signature")
+        .signature
 }
 
 fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
     let tx = unsigned_anchor_tx(checkpoint, test_anchor_address());
-    let signature = golden_touch_signer()
-        .sign_hash_sync(&tx.signature_hash())
-        .expect("golden touch anchor signature");
+    let signature = canonical_golden_touch_signature(&tx);
     tx.into_signed(signature).into()
 }
 
@@ -228,9 +226,7 @@ fn canonical_inline_source_guest_input() -> GuestInput {
         .l2_contract
         .expect("shasta chain has l2 contract");
     let anchor_tx = unsigned_anchor_tx(&checkpoint, anchor_address);
-    let anchor_signature = golden_touch_signer()
-        .sign_hash_sync(&anchor_tx.signature_hash())
-        .expect("golden touch anchor signature");
+    let anchor_signature = canonical_golden_touch_signature(&anchor_tx);
     let anchor_tx: reth_ethereum_primitives::TransactionSigned =
         anchor_tx.into_signed(anchor_signature).into();
 

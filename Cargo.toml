@@ -78,7 +78,7 @@ raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "2a752addafd6bf4fc1a67443e82513ecaf484b2d", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }

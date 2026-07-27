@@ -2,17 +2,17 @@
   "schema_version": 1,
   "backend": "sp1",
   "bench": false,
-  "source_fingerprint": "9c2b683ad51bbe43293724247532303b1adcfc9b199fa2d05920914f929ac925",
+  "source_fingerprint": "82d3a71c2287a22b60c80ef0e2c3b90ba4b91351eee3c6a775535e8be2b7ef47",
   "artifacts": {
-    "crates/guests/elf/sp1_opcode_lab.elf": "3c19ba138259a3b28257dbfe906bd0c7aa1a01f0ad5c94a7ff9ad29099fde9b4",
+    "crates/guests/elf/sp1_opcode_lab.elf": "a29a8f3ccdff34c8fd247dd732dd2f500b73f8ec410ed4d653a05f8077074d0d",
     "crates/guests/elf/sp1_opcode_lab.vk.bin": "087e073b27066ff28e88ce77cf3d1eecfdd8a17e66bd084c8ac55f6867bab77f",
-    "crates/guests/elf/sp1_precompile_lab.elf": "70ee1bcf07d0d43818851092991398c7d80372a7527fd773a3afcbc20e4e9aa0",
-    "crates/guests/elf/sp1_precompile_lab.vk.bin": "b7f75b8eafe946142403d852e80cf85496cb84d75e100c5f694da6e3358be0e5",
-    "crates/guests/elf/sp1_revm_opcode_lab.elf": "259dbe8399b53fc334f30b648982025a5f874cd274c06a5c53679296923f507f",
-    "crates/guests/elf/sp1_revm_opcode_lab.vk.bin": "432eba0208496642f3f2db282aa07dca34150c8c9a9c8daddb49fa5d467e03b4",
-    "crates/guests/elf/sp1_shasta_aggregation.elf": "05ed72258941b6c81afd5025ca2dc5e14d37d09ef64bf6398235a3cef20d53a5",
-    "crates/guests/elf/sp1_shasta_aggregation.vk.bin": "12a9ef6008504311497dac77198bfceed509ed3549101e8a332a3842a60975a3",
-    "crates/guests/elf/sp1_shasta_proposal.elf": "018aba44bbb91ae418daf6e453fbf18a0685e1c8c456e37a32e9da223362ca38",
-    "crates/guests/elf/sp1_shasta_proposal.vk.bin": "33274004883f684310e8eac6414ab8a8edd2468bfadd09ab041cf654a98f1af8"
+    "crates/guests/elf/sp1_precompile_lab.elf": "c01fa9ec736e9e185fe6826e2fb696a4cfaa5da422d3e8a40784e12b12086c42",
+    "crates/guests/elf/sp1_precompile_lab.vk.bin": "231e3d1681e50ca7497f4016801d47d4c6fc0f8a1b2be2c3b22e070b7016d51d",
+    "crates/guests/elf/sp1_revm_opcode_lab.elf": "ee5cfc46651fc2cb83a6c04fd3150d2c1562e5933c41a57bbbc5891cb704ba92",
+    "crates/guests/elf/sp1_revm_opcode_lab.vk.bin": "99bcb3f536eb8fdd236ca652204a4d7b8eb1617e4498c5c2c8c1239a2b7719f5",
+    "crates/guests/elf/sp1_shasta_aggregation.elf": "bb7ee4b886e64bb9dbf5fcfc1fc892129a8cd114130b54f08ab00f84d51079bb",
+    "crates/guests/elf/sp1_shasta_aggregation.vk.bin": "f6e3af42dda82cbfa8eda223311f31975e91f60a145c3070a54797ec3af165f4",
+    "crates/guests/elf/sp1_shasta_proposal.elf": "61407684f627efdf8373bea74d56a1c397c092cf64129a42cbe4b2c5671d7b68",
+    "crates/guests/elf/sp1_shasta_proposal.vk.bin": "a38b65b7b60db1c8d0b161079e4db5ef91445be721213834e7b4fbdc3036b24c"
   }
 }

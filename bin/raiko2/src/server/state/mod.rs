@@ -12,6 +12,9 @@ pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};
 
 use crate::config::{Config, GuestSystem, ResolvedNetworkPair, RunnerKind, RuntimeStoreBackend};
+use crate::server::proof_identity::{
+    ProofIdentityRegistry, RemoteSgxIdentity, SgxInstanceIdentity,
+};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{NativeBackend, PipelineKey, PipelineRoute, forks::shasta::ShastaSpec};
@@ -27,6 +30,8 @@ use tracing::warn;
 
 const SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(feature = "host")]
+use crate::server::proof_identity::ZkProofIdentity;
 #[cfg(feature = "local-provers")]
 use raiko2_pipeline::forks::shasta::{ShastaBackends, load_shasta_backends};
 #[cfg(all(feature = "host", not(feature = "local-provers")))]
@@ -34,13 +39,17 @@ use raiko2_pipeline::forks::shasta::{
     load_risc0_boundless_shasta_backend, load_sp1_shasta_backend,
 };
 #[cfg(feature = "host")]
+use raiko2_pipeline::{ProofStage, ProverBackend};
+#[cfg(feature = "host")]
 use raiko2_pipeline::{Risc0ShastaBackend, Sp1ShastaBackend};
 #[cfg(feature = "local-provers")]
 use raiko2_prover::risc0::Risc0Prover;
 #[cfg(feature = "host")]
 use raiko2_prover::{
     boundless::{BoundlessBalanceGate, BoundlessProver},
+    risc0::risc0_image_id_from_elf,
     sp1::Sp1Prover,
+    sp1::{sp1_vk_contract_id_from_bytes, sp1_vk_digest_from_bytes},
 };
 
 #[cfg(feature = "local-provers")]
@@ -88,6 +97,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub pipelines: Arc<dyn PipelineFactory>,
     pub runtime: Arc<RuntimeManager>,
+    pub(crate) proof_identities: Arc<ProofIdentityRegistry>,
     pub(crate) lifecycle: ProofLifecycle,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
     pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
@@ -284,11 +294,123 @@ impl PipelineResources {
     }
 }
 
+fn remote_sgx_identity(expected: Option<SgxInstanceIdentity>) -> RemoteSgxIdentity {
+    expected.map_or_else(RemoteSgxIdentity::unknown, RemoteSgxIdentity::configured)
+}
+
+#[cfg(feature = "host")]
+fn risc0_proof_identity(backend: &Risc0ShastaBackend) -> Result<ZkProofIdentity> {
+    let proposal_image_id =
+        risc0_image_id_from_elf(backend.elf(ProofStage::Proposal)?).map_err(anyhow::Error::msg)?;
+    let aggregation_image_id = risc0_image_id_from_elf(backend.elf(ProofStage::Aggregation)?)
+        .map_err(anyhow::Error::msg)?;
+    Ok(ZkProofIdentity::risc0(
+        proposal_image_id,
+        aggregation_image_id,
+    ))
+}
+
+#[cfg(feature = "host")]
+fn sp1_proof_identity(backend: &Sp1ShastaBackend) -> Result<ZkProofIdentity> {
+    let proposal_vkey_digest = sp1_vk_digest_from_bytes(backend.sp1_vk(ProofStage::Proposal)?)
+        .map_err(anyhow::Error::msg)?;
+    let aggregation_vkey_digest =
+        sp1_vk_digest_from_bytes(backend.sp1_vk(ProofStage::Aggregation)?)
+            .map_err(anyhow::Error::msg)?;
+    let aggregation_contract_vkey =
+        sp1_vk_contract_id_from_bytes(backend.sp1_vk(ProofStage::Aggregation)?)
+            .map_err(anyhow::Error::msg)?;
+    Ok(ZkProofIdentity::sp1(
+        proposal_vkey_digest,
+        aggregation_vkey_digest,
+        aggregation_contract_vkey,
+    ))
+}
+
+fn build_proof_identity_registry(
+    config: &Config,
+    pipelines: &[PipelineRegistration],
+    resources: &PipelineResources,
+) -> Result<ProofIdentityRegistry> {
+    #[cfg(not(any(feature = "host", feature = "local-provers")))]
+    let _ = resources;
+
+    let mut identities = ProofIdentityRegistry::default();
+    for registration in pipelines {
+        match registration.pipeline_key {
+            PipelineKey::ShastaSgx => identities.insert_remote_sgx(
+                registration.pipeline_key,
+                remote_sgx_identity(config.prover.sgx.expected_instance.map(|instance| {
+                    SgxInstanceIdentity {
+                        id: instance.id,
+                        address: instance.address,
+                    }
+                })),
+            ),
+            PipelineKey::ShastaSgxGeth => identities.insert_remote_sgx(
+                registration.pipeline_key,
+                remote_sgx_identity(config.prover.sgxgeth.expected_instance.map(|instance| {
+                    SgxInstanceIdentity {
+                        id: instance.id,
+                        address: instance.address,
+                    }
+                })),
+            ),
+            #[cfg(feature = "local-provers")]
+            PipelineKey::ShastaRisc0 => identities.insert_zk(
+                registration.pipeline_key,
+                risc0_proof_identity(
+                    &resources
+                        .shasta_backends
+                        .as_ref()
+                        .expect("RISC0 route requires Shasta backends")
+                        .risc0,
+                )?,
+            ),
+            #[cfg(feature = "host")]
+            PipelineKey::ShastaRisc0Network => {
+                #[cfg(feature = "local-provers")]
+                let backend = &resources
+                    .shasta_backends
+                    .as_ref()
+                    .expect("Boundless route requires Shasta backends")
+                    .risc0_boundless;
+                #[cfg(all(feature = "host", not(feature = "local-provers")))]
+                let backend = resources
+                    .boundless_backend
+                    .as_ref()
+                    .expect("Boundless route requires a RISC0 backend");
+                identities.insert_zk(registration.pipeline_key, risc0_proof_identity(backend)?);
+            }
+            #[cfg(feature = "host")]
+            PipelineKey::ShastaSp1 => {
+                #[cfg(feature = "local-provers")]
+                let backend = &resources
+                    .shasta_backends
+                    .as_ref()
+                    .expect("SP1 route requires Shasta backends")
+                    .sp1;
+                #[cfg(all(feature = "host", not(feature = "local-provers")))]
+                let backend = resources
+                    .sp1_backend
+                    .as_ref()
+                    .expect("SP1 route requires an SP1 backend");
+                identities.insert_zk(registration.pipeline_key, sp1_proof_identity(backend)?);
+            }
+            PipelineKey::ShastaNative => {}
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+    }
+    Ok(identities)
+}
+
 fn build_pipeline_factory(
     config: &Config,
     pairs: &[ResolvedNetworkPair],
     pipelines: &[PipelineRegistration],
     runtime: &Arc<RuntimeManager>,
+    proof_identities: &Arc<ProofIdentityRegistry>,
     scheduler_config: &SchedulerConfig,
     #[cfg(any(feature = "host", feature = "local-provers"))] resources: &PipelineResources,
     #[cfg(not(any(feature = "host", feature = "local-provers")))] _resources: &PipelineResources,
@@ -300,6 +422,7 @@ fn build_pipeline_factory(
             pair,
             pipelines,
             runtime: Arc::clone(runtime),
+            proof_identities: Arc::clone(proof_identities),
             #[cfg(feature = "host")]
             boundless_balance_gate: resources.boundless_balance_gate.clone(),
             #[cfg(feature = "local-provers")]
@@ -330,18 +453,30 @@ impl AppState {
         #[cfg(not(any(feature = "host", feature = "local-provers")))]
         let resources = PipelineResources {};
 
+        let proof_identities = Arc::new(build_proof_identity_registry(
+            &config,
+            &pipeline_registrations,
+            &resources,
+        )?);
+
         runtime.initialize().await?;
         let factory = build_pipeline_factory(
             &config,
             &resolved_pairs,
             &pipeline_registrations,
             &runtime,
+            &proof_identities,
             &scheduler_config,
             &resources,
         )?;
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-        let state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
+        let state = Self::from_parts_with_proof_identities(
+            config,
+            pipelines,
+            Arc::clone(&runtime),
+            proof_identities,
+        );
         state.finish_initialization().await
     }
 
@@ -379,6 +514,7 @@ impl AppState {
             Arc::clone(&self.config),
             Arc::clone(&self.runtime),
             Arc::clone(&self.pipelines),
+            Arc::clone(&self.proof_identities),
         );
         self.background_tasks
             .lock()
@@ -388,10 +524,25 @@ impl AppState {
         Ok(self)
     }
 
+    #[cfg(any(test, feature = "fixture-server"))]
     pub(crate) fn from_parts(
         config: Arc<Config>,
         pipelines: Arc<dyn PipelineFactory>,
         runtime: Arc<RuntimeManager>,
+    ) -> Self {
+        Self::from_parts_with_proof_identities(
+            config,
+            pipelines,
+            runtime,
+            Arc::new(ProofIdentityRegistry::default()),
+        )
+    }
+
+    pub(crate) fn from_parts_with_proof_identities(
+        config: Arc<Config>,
+        pipelines: Arc<dyn PipelineFactory>,
+        runtime: Arc<RuntimeManager>,
+        proof_identities: Arc<ProofIdentityRegistry>,
     ) -> Self {
         let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
         let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
@@ -399,6 +550,7 @@ impl AppState {
             config,
             pipelines,
             runtime,
+            proof_identities,
             lifecycle,
             zk_any_sampler,
             acl_rate_limiter: Arc::new(AclRateLimiter::default()),
@@ -447,6 +599,7 @@ struct PairPipelineRegistration<'a> {
     pair: &'a ResolvedNetworkPair,
     pipelines: &'a [PipelineRegistration],
     runtime: Arc<RuntimeManager>,
+    proof_identities: Arc<ProofIdentityRegistry>,
     /// Balance gate shared across all pairs by `PipelineResources`.
     #[cfg(feature = "host")]
     boundless_balance_gate: Option<BoundlessBalanceGate>,
@@ -467,10 +620,11 @@ fn register_pair_pipelines(
     registration: &PairPipelineRegistration<'_>,
 ) -> Result<()> {
     for pipeline in registration.pipelines {
-        let observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+        let observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::with_proof_identities(
             Arc::clone(&registration.runtime),
             registration.pair.key.clone(),
             pipeline.route(),
+            Arc::clone(&registration.proof_identities),
         ));
         match (pipeline.proof_type, pipeline.runner) {
             (ProofType::Risc0, RunnerKind::Local) => {

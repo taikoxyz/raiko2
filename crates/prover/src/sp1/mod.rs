@@ -452,6 +452,46 @@ pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
     alloy_primitives::hex::encode_prefixed(vk.hash_bytes())
 }
 
+/// Computes the canonical SP1 verifying-key digest from its persisted encoding.
+///
+/// # Errors
+///
+/// Returns an error when the bytes are not an SP1 verifying key.
+pub fn sp1_vk_digest_from_bytes(bytes: &[u8]) -> RaikoResult<B256> {
+    let vk: SP1VerifyingKey = bincode::deserialize(bytes).map_err(|error| {
+        RaikoError::Guest(format!("failed to decode SP1 verifying key: {error}"))
+    })?;
+    Ok(B256::from_slice(&vk.hash_bytes()))
+}
+
+/// Computes the contract-facing SP1 verifier-key identifier from its persisted encoding.
+///
+/// # Errors
+///
+/// Returns an error when the bytes are not an SP1 verifying key.
+pub fn sp1_vk_contract_id_from_bytes(bytes: &[u8]) -> RaikoResult<B256> {
+    let vk: SP1VerifyingKey = bincode::deserialize(bytes).map_err(|error| {
+        RaikoError::Guest(format!("failed to decode SP1 verifying key: {error}"))
+    })?;
+    Ok(B256::from_slice(&vk.bytes32_raw()))
+}
+
+/// Returns the canonical SP1 verifier-key digest encoded in proof metadata.
+///
+/// Metadata may contain a serialized verifying key from local proving or a
+/// 32-byte digest supplied by a remote response.
+///
+/// # Errors
+///
+/// Returns an error when the input is neither representation.
+pub fn sp1_vk_digest_from_uuid(raw: &str) -> Result<B256, String> {
+    if let Ok(vk) = serde_json::from_str::<SP1VerifyingKey>(raw) {
+        return Ok(B256::from_slice(&vk.hash_bytes()));
+    }
+    raw.parse::<B256>()
+        .map_err(|error| format!("invalid SP1 verifying-key digest: {error}"))
+}
+
 /// Parses either an SP1 verifying key JSON string or a 32-byte hex image id.
 ///
 /// SP1 verifying key JSON is kept in SP1's native `hash_u32` word form. Raw 32-byte
@@ -1996,15 +2036,16 @@ mod tests {
         encode_sp1_onchain_payload, load_sp1_resume, load_sp1_subproof_for_aggregation,
         notify_sp1_network_submission, remote_verifier_program_vkey, remote_verifier_proof_bytes,
         resolve_sp1_network_rpc_url, sp1_network_submission_progress, sp1_resume_wait_plan,
-        sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
+        sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_contract_id_from_bytes,
+        sp1_vk_digest_from_bytes, sp1_vk_digest_from_uuid, sp1_vk_uuid,
     };
     use crate::{
         Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress, sp1_config::Sp1Config,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
-    use raiko2_pipeline::ProofStage;
     use raiko2_pipeline::forks::shasta::sp1_shasta_backend_from_elves;
+    use raiko2_pipeline::{ProofStage, ProverBackend};
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmissionId};
@@ -2073,6 +2114,48 @@ mod tests {
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
+    }
+
+    #[test]
+    fn sp1_vk_identity_helpers_match_the_loaded_verifying_keys() {
+        let backend = sp1_shasta_backend_from_elves(sp1_test_elves());
+        let proposal_vk: SP1VerifyingKey = bincode::deserialize(
+            backend
+                .sp1_vk(ProofStage::Proposal)
+                .expect("SP1 proposal verifying key"),
+        )
+        .expect("decode SP1 proposal verifying key");
+        let aggregation_vk: SP1VerifyingKey = bincode::deserialize(
+            backend
+                .sp1_vk(ProofStage::Aggregation)
+                .expect("SP1 aggregation verifying key"),
+        )
+        .expect("decode SP1 aggregation verifying key");
+
+        assert_eq!(
+            sp1_vk_digest_from_bytes(
+                backend
+                    .sp1_vk(ProofStage::Proposal)
+                    .expect("SP1 proposal verifying key"),
+            )
+            .expect("derive SP1 proposal digest"),
+            B256::from_slice(&proposal_vk.hash_bytes())
+        );
+        assert_eq!(
+            sp1_vk_contract_id_from_bytes(
+                backend
+                    .sp1_vk(ProofStage::Aggregation)
+                    .expect("SP1 aggregation verifying key"),
+            )
+            .expect("derive SP1 aggregation contract id"),
+            B256::from_slice(&aggregation_vk.bytes32_raw())
+        );
+
+        assert_eq!(
+            sp1_vk_digest_from_uuid(&sp1_vk_uuid(&proposal_vk))
+                .expect("derive SP1 digest from local proof metadata"),
+            B256::from_slice(&proposal_vk.hash_bytes())
+        );
     }
 
     #[test]

@@ -1167,6 +1167,21 @@ it never appends to the file configuration.
 set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 `prover.sgxgeth.timeout_ms` file values when the lanes need different timeouts.
 
+Each remote SGX lane may set `expected_instance = { id = <u32>, address = "0x..." }`.
+When present, every newly returned remote proof and every cached proof for that lane must match
+the full pair; instance id `0` is valid. When omitted, the host starts with no trusted remote
+identity, treats persisted SGX artifacts as cache misses, and learns the first identity only after
+it activates a newly returned root proof. That learned value is process-local, so operators who
+need cache reuse across a restart should configure `expected_instance` explicitly. An external SGX
+aggregate request requires all submitted sub-proofs to carry one consistent pair, but never teaches
+an unknown lane from request data.
+
+ZK cache compatibility is derived from the local artifacts loaded at host startup, not from
+configuration. A cached proposal used as an aggregate sub-proof is checked against the proposal
+ELF/verifying key. A cached final aggregate is checked against both its aggregation ELF/verifying
+key and the proposal identity encoded in its aggregate payload. This distinction is intentional:
+aggregation expects proposal/sub-proof identity, not aggregation identity.
+
 - A string setting may use the explicit TOML reference `{ env = "NAME" }`. Raiko2 resolves only
   that singleton table before schema validation; missing, non-Unicode, or empty variables fail
   startup without printing their values. Shell expansion and partial-string interpolation are not

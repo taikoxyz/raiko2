@@ -108,12 +108,15 @@ enabled = true
 # `tee` or `native` mode.
 base_url = "http://127.0.0.1:8081"
 timeout_ms = 300000
+# Optional fixed SecureSgxVerifier identity. Instance id 0 is valid.
+# expected_instance = { id = 0, address = "0x1111111111111111111111111111111111111111" }
 
 [prover.sgxgeth]
 enabled = true
 # Point this at the external geth-backed remote SGX server.
 base_url = "http://127.0.0.1:8090"
 timeout_ms = 300000
+# expected_instance = { id = 0, address = "0x1111111111111111111111111111111111111111" }
 
 [prover.risc0.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`

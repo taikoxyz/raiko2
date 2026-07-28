@@ -76,6 +76,26 @@ pub enum AggregateProofInput {
     },
 }
 
+/// Semantic role of an artifact consumed by an aggregation task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggregationArtifactRole {
+    /// Request-supplied input validated by the selected aggregation backend.
+    ExternalInput,
+    /// A locally produced proposal proof consumed as an aggregation sub-proof.
+    ProposalSubproof,
+}
+
+impl AggregateProofInput {
+    /// Returns the validation role for this aggregation input.
+    #[must_use]
+    pub const fn artifact_role(&self) -> AggregationArtifactRole {
+        match self {
+            Self::ProofArtifact(_) => AggregationArtifactRole::ExternalInput,
+            Self::PendingProofArtifact { .. } => AggregationArtifactRole::ProposalSubproof,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofArtifactRef {
     pub network_pair: String,
@@ -235,6 +255,27 @@ mod tests {
             route: PipelineKey::ShastaNative.route(),
             proof_ref: proof_ref.to_string(),
         }
+    }
+
+    #[test]
+    fn aggregation_input_distinguishes_external_inputs_from_proposal_subproofs() {
+        let external = AggregateProofInput::ProofArtifact(proof_artifact("external"));
+        let proposal = AggregateProofInput::PendingProofArtifact {
+            artifact: proof_artifact("proposal"),
+            dependency: Box::new(proposal_task_id(
+                PipelineKey::ShastaNative,
+                proposal_request(1),
+            )),
+        };
+
+        assert_eq!(
+            external.artifact_role(),
+            AggregationArtifactRole::ExternalInput
+        );
+        assert_eq!(
+            proposal.artifact_role(),
+            AggregationArtifactRole::ProposalSubproof
+        );
     }
 
     #[test]

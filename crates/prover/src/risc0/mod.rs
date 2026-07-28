@@ -191,6 +191,15 @@ impl Risc0Prover {
     }
 }
 
+/// Computes the canonical RISC0 program image identifier for an ELF.
+///
+/// # Errors
+///
+/// Returns an error when the ELF cannot be decoded by RISC0.
+pub fn risc0_image_id_from_elf(elf: &[u8]) -> RaikoResult<B256> {
+    Risc0Prover::compute_image_id(elf).map(|image_id| B256::from_slice(image_id.as_bytes()))
+}
+
 impl GuestInputCodec<GuestInput> for Risc0Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
         let bytes = bincode::serialize(input)
@@ -329,13 +338,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Risc0Config, Risc0Prover};
+    use super::{Risc0Config, Risc0Prover, risc0_image_id_from_elf};
     use crate::Prover;
     use alloy::eips::eip2930::AccessList;
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, B256, Signature, TxKind, U256};
     use alloy_sol_types::{SolCall, sol};
-    use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
+    use raiko2_pipeline::{ProofStage, ProverBackend, forks::shasta::load_risc0_shasta_backend};
     use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_protocol_shasta::TaikoManifest;
@@ -431,6 +440,20 @@ mod tests {
         input.proof_carry_data = build_proof_carry_data_from_witness_spec(&input, ProofType::Risc0)
             .expect("build carry data");
         input
+    }
+
+    #[test]
+    fn risc0_image_id_from_elf_matches_the_guest_program_identity() {
+        let backend = load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs");
+        let elf = backend
+            .elf(ProofStage::Proposal)
+            .expect("RISC0 proposal ELF");
+        let expected = Risc0Prover::compute_image_id(elf).expect("compute RISC0 image id");
+
+        assert_eq!(
+            risc0_image_id_from_elf(elf).expect("derive RISC0 image id"),
+            B256::from_slice(expected.as_bytes())
+        );
     }
 
     #[tokio::test]

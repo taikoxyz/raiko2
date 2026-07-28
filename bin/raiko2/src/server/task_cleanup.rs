@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::server::lifecycle::ProofLifecycle;
 use crate::server::proof_artifact::ProofArtifactPayload;
+use crate::server::proof_identity::ProofIdentityRegistry;
 use crate::server::state::PipelineFactory;
 use crate::server::task_metadata::{
     ProofArtifactKind, TaskMetadata, proposal_proof_artifact_refs, root_proof_artifact_refs,
@@ -49,6 +50,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     config: Arc<Config>,
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
+    proof_identities: Arc<ProofIdentityRegistry>,
 ) -> tokio::task::JoinHandle<()> {
     const TERMINAL_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
     tokio::spawn(async move {
@@ -59,6 +61,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
             run_runtime_cleanup_pass(
                 Arc::clone(&runtime),
                 Arc::clone(&pipelines),
+                proof_identities.as_ref(),
                 TERMINAL_TASK_TTL_SECS,
                 &mut orphan_cursor,
                 &mut terminal_cursor,
@@ -76,6 +79,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
                 run_runtime_cleanup_pass(
                     Arc::clone(&runtime),
                     Arc::clone(&pipelines),
+                    proof_identities.as_ref(),
                     TERMINAL_TASK_TTL_SECS,
                     &mut orphan_cursor,
                     &mut terminal_cursor,
@@ -89,6 +93,7 @@ pub(crate) fn spawn_runtime_cleanup_loop(
 pub(crate) async fn run_runtime_cleanup_pass(
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
+    proof_identities: &ProofIdentityRegistry,
     ttl_secs: u64,
     orphan_cursor: &mut Option<ExpiredTaskCursor>,
     terminal_cursor: &mut Option<ExpiredTaskCursor>,
@@ -98,9 +103,14 @@ pub(crate) async fn run_runtime_cleanup_pass(
     }
     let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
 
-    let orphaned_cancelled =
-        cancel_orphaned_runtime_tasks(runtime.as_ref(), &lifecycle, ttl_secs, orphan_cursor)
-            .await?;
+    let orphaned_cancelled = cancel_orphaned_runtime_tasks(
+        runtime.as_ref(),
+        &lifecycle,
+        proof_identities,
+        ttl_secs,
+        orphan_cursor,
+    )
+    .await?;
     let records = runtime
         .list_expired_terminal_tasks(
             now_ts(),
@@ -140,6 +150,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
 async fn cancel_orphaned_runtime_tasks(
     runtime: &RuntimeManager,
     lifecycle: &ProofLifecycle,
+    proof_identities: &ProofIdentityRegistry,
     ttl_secs: u64,
     cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<usize> {
@@ -170,7 +181,7 @@ async fn cancel_orphaned_runtime_tasks(
             }
         };
 
-        if reconcile_runtime_task_from_artifacts(runtime, &record, &metadata)
+        if reconcile_runtime_task_from_artifacts(runtime, &record, &metadata, proof_identities)
             .await?
             .is_some()
         {
@@ -203,6 +214,7 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
     runtime: &RuntimeManager,
     record: &RuntimeTaskRecord,
     metadata: &TaskMetadata,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Option<String>> {
     if !matches!(
         record.runner_status,
@@ -217,8 +229,14 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
             ProofArtifactKind::Proposal => ProofArtifactPayload::Proposal,
             ProofArtifactKind::Aggregate => ProofArtifactPayload::Final,
         };
-        let Some(artifact) =
-            load_first_artifact(runtime, record, &root_refs.refs, expected_payload).await?
+        let Some(artifact) = load_first_artifact(
+            runtime,
+            record,
+            &root_refs.refs,
+            expected_payload,
+            proof_identities,
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -226,8 +244,14 @@ pub(crate) async fn reconcile_runtime_task_from_artifacts(
     } else {
         for proposal in &metadata.proposals {
             let refs = proposal_proof_artifact_refs(record.pipeline_key, proposal);
-            let Some(artifact) =
-                load_first_artifact(runtime, record, &refs, ProofArtifactPayload::Proposal).await?
+            let Some(artifact) = load_first_artifact(
+                runtime,
+                record,
+                &refs,
+                ProofArtifactPayload::Proposal,
+                proof_identities,
+            )
+            .await?
             else {
                 return Ok(None);
             };
@@ -267,6 +291,7 @@ async fn load_first_artifact(
     record: &RuntimeTaskRecord,
     proof_refs: &[String],
     expected_payload: ProofArtifactPayload,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Option<ProofArtifactRecord>> {
     for proof_ref in proof_refs {
         if let Some(material) = crate::server::proof_artifact::load_proof_artifact_material(
@@ -276,6 +301,7 @@ async fn load_first_artifact(
             record.route,
             proof_ref,
             expected_payload,
+            proof_identities,
         )
         .await?
         {
@@ -352,6 +378,7 @@ mod tests {
         ExpiredTaskCursor, RuntimeCleanupStats, cleanup_expired_root_task, proposal_task_id,
         run_runtime_cleanup_pass,
     };
+    use crate::server::proof_identity::ProofIdentityRegistry;
     use crate::server::state::{
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
     };
@@ -466,6 +493,7 @@ mod tests {
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -624,6 +652,7 @@ mod tests {
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -686,6 +715,7 @@ mod tests {
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -749,9 +779,14 @@ mod tests {
             })
             .await?;
 
-        let proof_uri = super::reconcile_runtime_task_from_artifacts(&runtime, &record, &metadata)
-            .await?
-            .expect("compressed proposal should reconcile root completion");
+        let proof_uri = super::reconcile_runtime_task_from_artifacts(
+            &runtime,
+            &record,
+            &metadata,
+            ProofIdentityRegistry::empty(),
+        )
+        .await?
+        .expect("compressed proposal should reconcile root completion");
         let completed = runtime
             .get_task("sp1-root")
             .await?
@@ -790,6 +825,7 @@ mod tests {
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -835,6 +871,7 @@ mod tests {
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -863,6 +900,7 @@ mod tests {
         let empty_page = run_runtime_cleanup_pass(
             runtime.clone(),
             healthy_factory.clone(),
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -874,6 +912,7 @@ mod tests {
         let retry = run_runtime_cleanup_pass(
             runtime.clone(),
             healthy_factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -924,6 +963,7 @@ mod tests {
         let first = run_runtime_cleanup_pass(
             runtime.clone(),
             factory.clone(),
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,
@@ -960,6 +1000,7 @@ mod tests {
         let second = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
+            ProofIdentityRegistry::empty(),
             7_200,
             &mut orphan_cursor,
             &mut terminal_cursor,

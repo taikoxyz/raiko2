@@ -199,6 +199,12 @@ flowchart LR
   `raiko2-sgx-prover` for `proof_type=sgx`; that runtime can run in `tee` or `native` mode
   without changing the remote API. `proof_type=sgxgeth` is served by an external remote prover
   implementation such as `gaiko2` over the same remote protocol.
+- Remote SGX lanes can pin `expected_instance = { id, address }` in their prover configuration.
+  Without it, the host learns one remote identity only after activating a newly produced proof and
+  does not reuse SGX artifacts after restart until it learns again.
+- ZK proposal artifacts are checked against the proposal guest identity when used as aggregation
+  sub-proofs; final aggregates check both their aggregation guest identity and the proposal guest
+  identity encoded in their payload.
 - `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
   add a dockerized `raiko2` for regression work.
 

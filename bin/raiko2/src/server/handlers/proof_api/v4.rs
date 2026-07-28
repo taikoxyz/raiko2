@@ -2605,6 +2605,7 @@ mod tests {
                 pipeline_key.route(),
                 proof_ref,
                 crate::server::proof_artifact::ProofArtifactPayload::Final,
+                crate::server::proof_identity::ProofIdentityRegistry::empty(),
             )
             .await
             .expect("load invalidated proof artifact")

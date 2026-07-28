@@ -37,8 +37,9 @@ RISC0, SP1, and remote SGX proof headers.
 - Test: touched unit tests
 
 1. Add the optional complete remote SGX pair to each SGX lane configuration.
-2. Derive ZK expected identities from the active backend ELF or verifying key
-   material at startup.
+2. Derive proposal and aggregation ZK identities separately from the active
+   backend ELF or verifying-key material at startup. Aggregation sub-proof
+   validation uses the proposal identity; final aggregate validation uses both.
 3. Construct one identity registry per active pipeline without writing a
    durable expected record.
 4. Run focused configuration and state tests.
@@ -52,7 +53,8 @@ RISC0, SP1, and remote SGX proof headers.
 
 1. Add failing regressions for stale cache suppression, no leaked `proof_uri`,
    and no learning before root activation.
-2. Apply compatibility only where completed artifacts are read or delivered.
+2. Apply compatibility only where completed artifacts are read or delivered,
+   distinguishing cached proposal sub-proofs from cached final aggregates.
 3. Serialize unknown remote SGX finalization through root activation, then
    learn the winning pair without allowing mismatches to mutate state.
 4. Treat a configured/learned mismatch as a non-retryable returned-proof
@@ -68,7 +70,8 @@ RISC0, SP1, and remote SGX proof headers.
 1. Add a failing Boundless receipt-only aggregate-input regression.
 2. Add a failing mixed-instance remote SGX aggregate-input regression.
 3. Preserve receipt-based RISC0 validation and reject only mixed SGX pairs in
-   one aggregate request.
+   one aggregate request. Do not require a `uuid` for Boundless inputs or
+   apply the cached ZK identity gate to `AggregateInput`.
 4. Re-run focused tests.
 
 ### Task 5: Verify and Document

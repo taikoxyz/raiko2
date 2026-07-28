@@ -16,9 +16,9 @@ pub mod tasks;
 pub mod worker;
 
 pub use tasks::{
-    AggregateProofInput, AggregationSource, AggregationTaskRequest, EncodedGuestInput,
-    EngineAggregationPlan, EngineExecutionPlan, EngineTaskId, EngineTaskKey, ProofArtifactRef,
-    ProposalStage, ProposalTaskRequest, ProverTaskConfig,
+    AggregateProofInput, AggregationArtifactRole, AggregationSource, AggregationTaskRequest,
+    EncodedGuestInput, EngineAggregationPlan, EngineExecutionPlan, EngineTaskId, EngineTaskKey,
+    ProofArtifactRef, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 
 use std::sync::{
@@ -415,6 +415,7 @@ pub trait EngineObserver: Send + Sync {
     async fn load_proof_artifact(
         &self,
         _artifact: &ProofArtifactRef,
+        _role: AggregationArtifactRole,
     ) -> Result<Option<raiko2_primitives::Proof>, String> {
         Ok(None)
     }
@@ -1479,6 +1480,7 @@ where
     async fn get_proof_artifact(
         &self,
         artifact: ProofArtifactRef,
+        role: AggregationArtifactRole,
     ) -> Result<raiko2_primitives::Proof, String> {
         let observer = self
             .inner
@@ -1486,7 +1488,7 @@ where
             .as_ref()
             .ok_or_else(|| "proof artifact resolver is not configured".to_string())?;
         observer
-            .load_proof_artifact(&artifact)
+            .load_proof_artifact(&artifact, role)
             .await?
             .ok_or_else(|| format!("proof artifact {} is missing", artifact.proof_ref))
     }
@@ -1499,12 +1501,12 @@ where
             AggregationSource::Inputs(inputs) => {
                 let mut proofs = Vec::with_capacity(inputs.len());
                 for input in inputs {
-                    match input {
+                    let role = input.artifact_role();
+                    let artifact = match input {
                         AggregateProofInput::ProofArtifact(artifact)
-                        | AggregateProofInput::PendingProofArtifact { artifact, .. } => {
-                            proofs.push(self.get_proof_artifact(artifact).await?);
-                        }
-                    }
+                        | AggregateProofInput::PendingProofArtifact { artifact, .. } => artifact,
+                    };
+                    proofs.push(self.get_proof_artifact(artifact, role).await?);
                 }
                 Ok(proofs)
             }

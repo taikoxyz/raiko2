@@ -1,3 +1,4 @@
+use crate::server::proof_identity::ProofIdentityRegistry;
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
@@ -43,6 +44,7 @@ pub(crate) async fn load_proof_artifact_material(
     route: PipelineRoute,
     proof_ref: &str,
     expected_payload: ProofArtifactPayload,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Option<ProofArtifactMaterial>> {
     let Some(record) = runtime
         .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
@@ -92,6 +94,21 @@ pub(crate) async fn load_proof_artifact_material(
         );
     }
 
+    match proof_identities.matches_cached_artifact(pipeline_key, expected_payload, &proof) {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) => {
+            tracing::warn!(
+                proof_ref,
+                pipeline = %pipeline_key,
+                payload = ?expected_payload,
+                %error,
+                "proof artifact identity is invalid; treating it as a cache miss"
+            );
+            return Ok(None);
+        }
+    }
+
     let still_active = runtime
         .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
         .await
@@ -107,6 +124,10 @@ pub(crate) async fn load_proof_artifact_material(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "host")]
+    use crate::server::proof_identity::{ProofIdentityRegistry, ZkProofIdentity};
+    #[cfg(feature = "host")]
+    use alloy_primitives::B256;
     use async_trait::async_trait;
     use raiko2_runtime::test_support::{
         ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
@@ -244,6 +265,69 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn stale_zk_proposal_artifact_is_a_cache_miss() -> Result<()> {
+        let namespace = format!("proof-artifact-identity-{}", uuid::Uuid::new_v4());
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".to_string(),
+            namespace,
+        )?);
+        let runtime = RuntimeManager::with_store(store);
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline_key = PipelineKey::ShastaRisc0;
+        let route = pipeline_key.route();
+        let proof_ref = "proposal-proof";
+        let proof = Proof {
+            uuid: Some(format!("{:#x}", B256::repeat_byte(0x33))),
+            proof: Some("0x01".to_string()),
+            ..Proof::default()
+        };
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                &serde_json::to_vec(&proof)?,
+            )
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let mut identities = ProofIdentityRegistry::default();
+        identities.insert_zk(
+            pipeline_key,
+            ZkProofIdentity::risc0(B256::repeat_byte(0x11), B256::repeat_byte(0x22)),
+        );
+
+        assert!(
+            load_proof_artifact_material(
+                &runtime,
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                ProofArtifactPayload::Proposal,
+                &identities,
+            )
+            .await?
+            .is_none()
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn stale_reconciliation_preserves_replacement_registration() -> Result<()> {
         let namespace = format!("proof-artifact-reconciliation-{}", uuid::Uuid::new_v4());
@@ -289,6 +373,7 @@ mod tests {
                 route,
                 proof_ref,
                 ProofArtifactPayload::Final,
+                ProofIdentityRegistry::empty(),
             )
             .await
         });

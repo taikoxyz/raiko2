@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
-    EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey, EngineTaskSuccess,
-    ProofCompletionPermit, ProposalStage, TaskExecutionPermit, TerminalFailurePermit,
-    TerminalFailureProjection,
+    AggregationArtifactRole, EngineObserver, EngineObserverError, EngineTaskId, EngineTaskKey,
+    EngineTaskSuccess, ProofCompletionPermit, ProposalStage, TaskExecutionPermit,
+    TerminalFailurePermit, TerminalFailureProjection,
     tasks::{EngineTask, ProofArtifactRef},
 };
 use raiko2_pipeline::PipelineRoute;
@@ -23,6 +23,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::server::proof_artifact::ProofArtifactPayload;
+use crate::server::proof_identity::ProofIdentityRegistry;
 #[cfg(test)]
 use crate::server::task_metadata::publication_proof_artifact_refs;
 use crate::server::task_metadata::{
@@ -38,6 +39,7 @@ pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
     route: PipelineRoute,
+    proof_identities: Arc<ProofIdentityRegistry>,
 }
 
 static STARTED_STAGE_TASKS: LazyLock<Mutex<HashMap<String, MetricContext>>> =
@@ -134,15 +136,31 @@ impl RuntimeObserver {
         EngineObserverError::RuntimeSync(message)
     }
 
-    pub(crate) const fn new(
+    #[cfg(any(test, feature = "fixture-server"))]
+    pub(crate) fn new(
         runtime: Arc<RuntimeManager>,
         network_pair: String,
         route: PipelineRoute,
+    ) -> Self {
+        Self::with_proof_identities(
+            runtime,
+            network_pair,
+            route,
+            Arc::new(ProofIdentityRegistry::default()),
+        )
+    }
+
+    pub(crate) const fn with_proof_identities(
+        runtime: Arc<RuntimeManager>,
+        network_pair: String,
+        route: PipelineRoute,
+        proof_identities: Arc<ProofIdentityRegistry>,
     ) -> Self {
         Self {
             runtime,
             network_pair,
             route,
+            proof_identities,
         }
     }
 
@@ -882,6 +900,16 @@ impl RuntimeObserver {
         completion_owners: &RuntimeExecutionOwners,
     ) -> Result<()> {
         let task_id = Self::timing_key_for_task(id, task);
+        let _remote_finalization_guard =
+            if let Some(identity) = self.proof_identities.remote_sgx(id.0.pipeline_key()) {
+                let guard = identity.lock_finalization().await;
+                self.proof_identities
+                    .validate_new_remote_sgx_proof(id.0.pipeline_key(), proof)
+                    .map_err(ProofInvalidatedError)?;
+                Some(guard)
+            } else {
+                None
+            };
         let publication_delays = [Duration::from_millis(100), Duration::from_millis(500)];
         for attempt in 0..=publication_delays.len() {
             match self
@@ -1026,6 +1054,15 @@ impl RuntimeObserver {
             Ok(updated_roots) => updated_roots,
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
+        if updated_roots > 0
+            && let Err(error) = self
+                .proof_identities
+                .learn_remote_sgx_after_root_activation(id.0.pipeline_key(), proof)
+        {
+            return ProofCommitAttempt::Retryable(anyhow::anyhow!(
+                "failed to learn committed remote SGX identity: {error}"
+            ));
+        }
         self.finalize_committed_publication(id, publication, updated_roots, synchronized_roots)
             .await
     }
@@ -1358,6 +1395,9 @@ impl EngineObserver for RuntimeObserver {
         proof: &raiko2_primitives::Proof,
         execution_permit: &TaskExecutionPermit,
     ) -> std::result::Result<ProofCompletionPermit, EngineObserverError> {
+        self.proof_identities
+            .validate_new_remote_sgx_proof(id.0.pipeline_key(), proof)
+            .map_err(EngineObserverError::ProofInvalidated)?;
         let proof_ref = Self::root_task_ref(id);
         let execution_owners = Self::execution_owners(execution_permit)?;
         let active_owners = self
@@ -1444,6 +1484,7 @@ impl EngineObserver for RuntimeObserver {
             self.route,
             &proof_ref,
             Self::expected_proof_payload(id),
+            self.proof_identities.as_ref(),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -1472,6 +1513,14 @@ impl EngineObserver for RuntimeObserver {
                 "completed proof artifact {proof_ref} has an invalid {:?} payload",
                 Self::expected_proof_payload(id)
             ));
+        }
+        match self.proof_identities.matches_cached_artifact(
+            pipeline_key,
+            Self::expected_proof_payload(id),
+            &proof,
+        ) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Ok(None),
         }
         Ok(Some(proof))
     }
@@ -1650,14 +1699,20 @@ impl EngineObserver for RuntimeObserver {
     async fn load_proof_artifact(
         &self,
         artifact: &ProofArtifactRef,
+        role: AggregationArtifactRole,
     ) -> std::result::Result<Option<raiko2_primitives::Proof>, String> {
+        let expected_payload = match role {
+            AggregationArtifactRole::ExternalInput => ProofArtifactPayload::AggregateInput,
+            AggregationArtifactRole::ProposalSubproof => ProofArtifactPayload::Proposal,
+        };
         let material = crate::server::proof_artifact::load_proof_artifact_material(
             &self.runtime,
             &artifact.network_pair,
             artifact.pipeline_key,
             artifact.route,
             &artifact.proof_ref,
-            ProofArtifactPayload::AggregateInput,
+            expected_payload,
+            self.proof_identities.as_ref(),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2103,6 +2158,9 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "host")]
+    use crate::server::proof_identity::ZkProofIdentity;
+    use crate::server::proof_identity::{RemoteSgxIdentity, SgxInstanceIdentity};
     use crate::server::task_metadata::{
         AggregateInputProofArtifact, ProposalTask, RuntimeMetadata, aggregate_task_ref,
         proposal_task_ref, stage_task_ref,
@@ -2690,6 +2748,19 @@ mod tests {
         }
     }
 
+    fn remote_sgx_proof_fixture(
+        id: u32,
+        address: alloy_primitives::Address,
+    ) -> raiko2_primitives::Proof {
+        let mut bytes = vec![0_u8; 89];
+        bytes[..4].copy_from_slice(&id.to_be_bytes());
+        bytes[4..24].copy_from_slice(address.as_slice());
+        raiko2_primitives::Proof {
+            proof: Some(alloy_primitives::hex::encode_prefixed(bytes)),
+            ..raiko2_primitives::Proof::default()
+        }
+    }
+
     async fn checkpoint_proof_fixture(
         observer: &RuntimeObserver,
         id: &EngineTaskId,
@@ -2749,6 +2820,143 @@ mod tests {
         let mut record = runtime.get_task(task_id).await?.expect("runtime task");
         record.runner_status = runner_status;
         runtime.upsert_task(&record).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_remote_sgx_mismatch_is_rejected_before_checkpoint() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-sgx-mismatch",
+        ))?);
+        let pipeline = PipelineKey::ShastaSgx;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: task_id.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "sgx-mismatch-root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &proposal_request(),
+            RunnerStatus::Running,
+        )
+        .await?;
+
+        let mut identities = ProofIdentityRegistry::default();
+        identities.insert_remote_sgx(
+            pipeline,
+            RemoteSgxIdentity::configured(SgxInstanceIdentity {
+                id: 0,
+                address: alloy_primitives::Address::repeat_byte(0x11),
+            }),
+        );
+        let observer = RuntimeObserver::with_proof_identities(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+            Arc::new(identities),
+        );
+        let proof = remote_sgx_proof_fixture(1, alloy_primitives::Address::repeat_byte(0x22));
+
+        let Err(error) = engine_checkpoint_proof(&observer, &task_id, &task, &proof).await else {
+            panic!("mismatched remote identity must be terminal");
+        };
+        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
+        let proof_ref = proposal_task_ref(pipeline, &proposal_request());
+        assert!(
+            runtime
+                .get_recoverable_pending_proof_publication(
+                    "taiko_dev/ethereum",
+                    pipeline,
+                    route,
+                    &proof_ref,
+                )
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_remote_sgx_identity_learns_after_root_activation() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-sgx-learn",
+        ))?);
+        let pipeline = PipelineKey::ShastaSgx;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: task_id.clone(),
+        };
+        register_observer_task(
+            runtime.as_ref(),
+            "sgx-learn-root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+
+        let identity = RemoteSgxIdentity::unknown();
+        let mut identities = ProofIdentityRegistry::default();
+        identities.insert_remote_sgx(pipeline, identity.clone());
+        let observer = RuntimeObserver::with_proof_identities(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+            Arc::new(identities),
+        );
+        let proof = remote_sgx_proof_fixture(0, alloy_primitives::Address::repeat_byte(0x11));
+        let execution_permit = engine_execution_permit(&observer, &task_id, &task).await?;
+        let completion_permit = EngineObserver::checkpoint_completed_proof(
+            &observer,
+            &task_id,
+            &task,
+            &proof,
+            &execution_permit,
+        )
+        .await?;
+        assert!(identity.expected().map_err(anyhow::Error::msg)?.is_none());
+
+        EngineObserver::on_task_succeeded(
+            &observer,
+            &task_id,
+            &task,
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof,
+            },
+            Some(&completion_permit),
+            &execution_permit,
+        )
+        .await?;
+
+        assert_eq!(
+            identity.expected().map_err(anyhow::Error::msg)?,
+            Some(SgxInstanceIdentity {
+                id: 0,
+                address: alloy_primitives::Address::repeat_byte(0x11),
+            })
+        );
         Ok(())
     }
 
@@ -3195,6 +3403,7 @@ mod tests {
                 runtime.as_ref(),
                 &standalone,
                 &metadata,
+                ProofIdentityRegistry::empty(),
             )
             .await?;
             standalone = runtime
@@ -3212,6 +3421,7 @@ mod tests {
             route,
             &proof_ref,
             ProofArtifactPayload::Proposal,
+            ProofIdentityRegistry::empty(),
         )
         .await?
         .expect("proposal artifact");
@@ -3224,6 +3434,7 @@ mod tests {
                 route,
                 &proof_ref,
                 ProofArtifactPayload::Final,
+                ProofIdentityRegistry::empty(),
             )
             .await
             .is_err(),
@@ -3877,6 +4088,7 @@ mod tests {
                 route,
                 &loading_ref,
                 ProofArtifactPayload::Final,
+                ProofIdentityRegistry::empty(),
             )
             .await
         });
@@ -3946,6 +4158,7 @@ mod tests {
                 route,
                 &loading_ref,
                 ProofArtifactPayload::Final,
+                ProofIdentityRegistry::empty(),
             )
             .await
         });
@@ -4045,15 +4258,103 @@ mod tests {
         );
         assert!(
             observer
-                .load_proof_artifact(&ProofArtifactRef {
-                    network_pair: "taiko_dev/ethereum".to_string(),
-                    pipeline_key: pipeline,
-                    route,
-                    proof_ref,
-                })
+                .load_proof_artifact(
+                    &ProofArtifactRef {
+                        network_pair: "taiko_dev/ethereum".to_string(),
+                        pipeline_key: pipeline,
+                        route,
+                        proof_ref,
+                    },
+                    raiko2_engine::AggregationArtifactRole::ExternalInput
+                )
                 .await
                 .map_err(anyhow::Error::msg)?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn internal_aggregate_subproof_uses_the_proposal_guest_identity() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-zk-subproof-identity",
+        ))?);
+        let pipeline = PipelineKey::ShastaRisc0;
+        let route = pipeline.route();
+        let proof_ref = "proposal-subproof";
+        let stale_proof = raiko2_primitives::Proof {
+            proof: Some("0x01".to_string()),
+            input: Some(alloy_primitives::B256::ZERO),
+            quote: Some("receipt".to_string()),
+            uuid: Some(format!("{:#x}", alloy_primitives::B256::repeat_byte(0x33))),
+            extra_data: Some(serde_json::json!({ "shasta": {} })),
+            ..raiko2_primitives::Proof::default()
+        };
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                proof_ref,
+                &serde_json::to_vec(&stale_proof)?,
+            )
+            .await?;
+        let object = publication
+            .try_object()
+            .expect("proof publication should materialize content");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri.clone(),
+                content_hash: object.content_hash.clone(),
+                generation: object.generation,
+            })
+            .await?;
+
+        let mut identities = ProofIdentityRegistry::default();
+        identities.insert_zk(
+            pipeline,
+            ZkProofIdentity::risc0(
+                alloy_primitives::B256::repeat_byte(0x11),
+                alloy_primitives::B256::repeat_byte(0x22),
+            ),
+        );
+        let observer = RuntimeObserver::with_proof_identities(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+            Arc::new(identities),
+        );
+        let artifact = ProofArtifactRef {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            pipeline_key: pipeline,
+            route,
+            proof_ref: proof_ref.to_string(),
+        };
+
+        assert!(
+            observer
+                .load_proof_artifact(
+                    &artifact,
+                    raiko2_engine::AggregationArtifactRole::ProposalSubproof,
+                )
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        assert!(
+            observer
+                .load_proof_artifact(
+                    &artifact,
+                    raiko2_engine::AggregationArtifactRole::ExternalInput,
+                )
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_some()
         );
         Ok(())
     }

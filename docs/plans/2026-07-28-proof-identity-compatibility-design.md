@@ -38,8 +38,13 @@ the pair explicitly.
 
 ### Cached Artifacts
 
-- A cached RISC0 or SP1 artifact is reusable only when its recorded program
-  identity matches the current locally derived identity.
+- A cached RISC0 or SP1 proposal artifact is reusable as an aggregation
+  sub-proof only when its recorded identity matches the current **proposal**
+  ELF or verifying key. It must not be compared to the aggregation guest.
+- A cached final RISC0 or SP1 aggregate is reusable only when it identifies
+  the current aggregation guest and its encoded aggregate payload identifies
+  the current proposal guest. These are separate checks because the final
+  aggregate executes a different guest while consuming proposal sub-proofs.
 - A cached remote SGX artifact is reusable only when the lane has an expected
   pair and its proof header matches that pair. An unknown lane treats every
   persisted SGX artifact as a cache miss.
@@ -49,7 +54,12 @@ the pair explicitly.
 
 ### Aggregation Inputs
 
-- Completed cached child artifacts use the cached-artifact rule.
+- A completed cached child artifact is a proposal artifact, even when it is
+  being loaded to assemble an aggregate. It therefore uses the proposal
+  identity rule above: RISC0 aggregation expects the sub-proof proposal image
+  ID, and SP1 aggregation expects the sub-proof proposal verifying key.
+- `AggregateInput` represents externally supplied request data, not a cached
+  completed child proof. It must not pass through the cached ZK identity gate.
 - Externally supplied inputs are new request data, not cache artifacts. RISC0
   network inputs retain receipt-based validation. Remote SGX inputs must have
   one consistent instance pair within an aggregate request, but do not teach

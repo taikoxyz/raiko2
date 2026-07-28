@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use anyhow::{Context, Result, bail};
 use raiko2_pipeline::RunnerKind;
 use raiko2_primitives::ProofType;
@@ -432,6 +433,16 @@ pub struct RemoteProverConfig {
     pub enabled: bool,
     pub base_url: String,
     pub timeout_ms: u64,
+    /// Optional complete instance identity required from this remote SGX lane.
+    pub expected_instance: Option<RemoteSgxInstanceConfig>,
+}
+
+/// Complete remote SGX instance identity used for cache compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteSgxInstanceConfig {
+    pub id: u32,
+    pub address: Address,
 }
 
 impl Default for RemoteProverConfig {
@@ -440,6 +451,7 @@ impl Default for RemoteProverConfig {
             enabled: false,
             base_url: String::new(),
             timeout_ms: 300_000,
+            expected_instance: None,
         }
     }
 }
@@ -655,6 +667,7 @@ mod tests {
         MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, ProverRoutesOverride,
         REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
+    use alloy_primitives::Address;
     use raiko2_pipeline::RunnerKind;
     use raiko2_primitives::ProofType;
     use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
@@ -667,6 +680,28 @@ mod tests {
         let mut config = ProverConfig::default();
         config.apply_routes_override(&routes(value));
         config
+    }
+
+    #[test]
+    fn remote_sgx_expected_instance_allows_instance_zero() {
+        let config: ProverConfig = toml::from_str(
+            r#"
+[sgx]
+enabled = true
+base_url = "http://sgx-prover:8080"
+timeout_ms = 300000
+expected_instance = { id = 0, address = "0x1111111111111111111111111111111111111111" }
+"#,
+        )
+        .expect("remote SGX expected instance should deserialize");
+
+        let expected = config
+            .sgx
+            .expected_instance
+            .expect("configured expected instance");
+        assert_eq!(expected.id, 0);
+        assert_eq!(expected.address, Address::repeat_byte(0x11));
+        config.validate().expect("configured remote SGX lane");
     }
 
     fn boundless_network_config() -> ProverConfig {

@@ -53,6 +53,7 @@ use crate::server::lifecycle::RecoveryOutcome;
 use crate::server::proof_artifact::{
     ProofArtifactMaterial, ProofArtifactPayload, load_proof_artifact_material,
 };
+use crate::server::proof_identity::ProofIdentityRegistry;
 use crate::server::state::{
     AppState, EngineHandle, EngineQueueTaskState, EngineQueueTaskView, EngineStatusView,
     ProofStatus,
@@ -561,6 +562,10 @@ async fn build_external_aggregate_submission(
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.pipeline_key(), &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    state
+        .proof_identities
+        .validate_external_aggregate_inputs(route.pipeline_key(), &req.proofs)
+        .map_err(ApiError::bad_request)?;
     let request_fingerprint = external_aggregate_request_fingerprint(
         state.runtime.environment(),
         state.runtime.namespace(),
@@ -1066,9 +1071,13 @@ async fn handle_existing_batch_task(
         network_pair = %submission.pair.key,
         "detected duplicate shasta batch request"
     );
-    let missing_completed_artifact =
-        completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
-            .await?;
+    let missing_completed_artifact = completed_root_artifact_missing(
+        state.runtime.as_ref(),
+        &existing,
+        &existing_metadata,
+        state.proof_identities.as_ref(),
+    )
+    .await?;
     telemetry::record_duplicate_request(
         &MetricContext::new(
             submission.route.route.to_string(),
@@ -1368,9 +1377,13 @@ async fn handle_existing_external_aggregate_task(
         network_pair = %submission.pair.key,
         "detected duplicate shasta aggregate request"
     );
-    let missing_completed_artifact =
-        completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
-            .await?;
+    let missing_completed_artifact = completed_root_artifact_missing(
+        state.runtime.as_ref(),
+        &existing,
+        &existing_metadata,
+        state.proof_identities.as_ref(),
+    )
+    .await?;
     telemetry::record_duplicate_request(
         &MetricContext::new(
             submission.route.route.to_string(),
@@ -1662,7 +1675,13 @@ async fn recover_external_aggregate_runtime_task(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
 ) -> Result<(), ApiError> {
-    recover_external_aggregate_input_artifacts(state.runtime.as_ref(), record, metadata).await?;
+    recover_external_aggregate_input_artifacts(
+        state.runtime.as_ref(),
+        record,
+        metadata,
+        state.proof_identities.as_ref(),
+    )
+    .await?;
     let engine = resolve_engine(state, &record.network_pair, record.pipeline_key)?;
     reenqueue_existing_external_aggregate_task(state, &engine, None, record, metadata).await
 }
@@ -1690,6 +1709,7 @@ async fn recover_external_aggregate_input_artifacts(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<(), ApiError> {
     let mut bytes = Vec::with_capacity(metadata.aggregate_input_artifacts.len());
     for artifact in &metadata.aggregate_input_artifacts {
@@ -1753,6 +1773,27 @@ async fn recover_external_aggregate_input_artifacts(
         };
         bytes.push(payload);
     }
+    let proofs = bytes
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            serde_json::from_slice::<Proof>(bytes).map_err(|error| {
+                ApiError::internal(format!(
+                    "failed to decode persisted aggregate input {index}: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_external_aggregate_proofs(record.pipeline_key, &proofs).map_err(|error| {
+        ApiError::internal(format!("persisted aggregate inputs are invalid: {error}"))
+    })?;
+    proof_identities
+        .validate_external_aggregate_inputs(record.pipeline_key, &proofs)
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "persisted aggregate inputs have incompatible identity: {error}"
+            ))
+        })?;
     persist_external_aggregate_input_artifacts(
         runtime,
         &record.network_pair,
@@ -1823,6 +1864,7 @@ async fn load_task_data_from_lookup(
         state.runtime.as_ref(),
         &lookup.record,
         &lookup.metadata,
+        state.proof_identities.as_ref(),
     )
     .await
     .map_err(|err| ApiError::internal(format!("failed to reconcile task completion: {err}")))?;
@@ -1838,6 +1880,7 @@ async fn load_task_data_from_lookup(
             &lookup.engine,
             &lookup.metadata,
             &record,
+            state.proof_identities.as_ref(),
         )
         .await?;
     let (aggregate, aggregate_engine_state_present): (Option<AggregateStatus>, bool) =
@@ -1846,6 +1889,7 @@ async fn load_task_data_from_lookup(
             &lookup.engine,
             &lookup.metadata,
             &record,
+            state.proof_identities.as_ref(),
         )
         .await?;
     let root_engine_state_present = proposal_engine_state_present || aggregate_engine_state_present;
@@ -1856,14 +1900,19 @@ async fn load_task_data_from_lookup(
         lookup.metadata.has_runtime_progress(),
         record.error.as_deref(),
     );
-    let root_proof_location =
-        root_proof_location(&record, &lookup.metadata, &proposals, aggregate.as_ref());
+    let root_proof_location = root_proof_location(&proposals, aggregate.as_ref());
     let root_proof = root_state.proof;
     let root_proof = if root_proof.is_none()
         && matches!(root_state.status, ProofStatus::Completed)
         && root_proof_artifact_refs(&lookup.metadata, record.pipeline_key).is_some()
     {
-        load_persisted_root_proof(state.runtime.as_ref(), &record, &lookup.metadata).await?
+        load_persisted_root_proof(
+            state.runtime.as_ref(),
+            &record,
+            &lookup.metadata,
+            state.proof_identities.as_ref(),
+        )
+        .await?
     } else {
         root_proof
     };
@@ -1892,9 +1941,10 @@ async fn load_persisted_root_proof(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Option<String>, ApiError> {
     Ok(
-        load_persisted_root_proof_material(runtime, record, metadata)
+        load_persisted_root_proof_material(runtime, record, metadata, proof_identities)
             .await?
             .and_then(|proof| proof.proof),
     )
@@ -1904,6 +1954,7 @@ async fn load_persisted_root_proof_material(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Option<Proof>, ApiError> {
     let Some(refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return Ok(None);
@@ -1920,6 +1971,7 @@ async fn load_persisted_root_proof_material(
             record.route,
             &proof_ref,
             expected_payload,
+            proof_identities,
         )
         .await
         .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
@@ -1966,19 +2018,9 @@ fn status_proof_location(
 }
 
 fn root_proof_location(
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &TaskMetadata,
     proposals: &[ProposalStatus],
     aggregate: Option<&AggregateStatus>,
 ) -> Option<ProofLocation> {
-    let record_location = || {
-        root_proof_artifact_refs(metadata, record.pipeline_key)?;
-        record.proof_uri.as_ref().map(|proof_uri| ProofLocation {
-            proof_ref: None,
-            proof_uri: Some(proof_uri.clone()),
-        })
-    };
-
     if let Some(aggregate) = aggregate
         && let Some(location) =
             status_proof_location(aggregate.proof_ref.as_ref(), aggregate.proof_uri.as_ref())
@@ -1986,7 +2028,7 @@ fn root_proof_location(
         return Some(location);
     }
     if aggregate.is_some() {
-        return record_location();
+        return None;
     }
 
     if let [proposal] = proposals
@@ -1996,7 +2038,7 @@ fn root_proof_location(
         return Some(location);
     }
 
-    record_location()
+    None
 }
 
 async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError> {
@@ -2357,6 +2399,7 @@ async fn load_proposal_statuses(
     engine: &Arc<dyn EngineHandle>,
     metadata: &TaskMetadata,
     record: &raiko2_runtime::RuntimeTaskRecord,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<(Vec<ProposalStatus>, bool), ApiError> {
     let mut proposals = Vec::with_capacity(metadata.proposals.len());
     let mut any_engine_state_present = false;
@@ -2391,6 +2434,7 @@ async fn load_proposal_statuses(
                 record.route,
                 &proof_refs,
                 ProofArtifactPayload::Proposal,
+                proof_identities,
             )
             .await?
             {
@@ -2436,6 +2480,7 @@ async fn load_aggregate_status(
     engine: &Arc<dyn EngineHandle>,
     metadata: &TaskMetadata,
     record: &raiko2_runtime::RuntimeTaskRecord,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<(Option<AggregateStatus>, bool), ApiError> {
     let Some(_task_id) = metadata.aggregate_task_id.as_ref() else {
         return Ok((None, false));
@@ -2470,6 +2515,7 @@ async fn load_aggregate_status(
                 record.route,
                 &refs.refs,
                 ProofArtifactPayload::Final,
+                proof_identities,
             )
             .await?
             {
@@ -2526,6 +2572,7 @@ async fn load_first_proof_artifact_material(
     route: PipelineRoute,
     proof_refs: &[String],
     expected_payload: ProofArtifactPayload,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Option<ProofArtifactMaterial>, ApiError> {
     for proof_ref in proof_refs {
         if let Some(material) = load_proof_artifact_material(
@@ -2535,6 +2582,7 @@ async fn load_first_proof_artifact_material(
             route,
             proof_ref,
             expected_payload,
+            proof_identities,
         )
         .await
         .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
@@ -3066,6 +3114,7 @@ async fn completed_root_artifact_missing(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<bool, ApiError> {
     if record.runner_status != RuntimeRunnerStatus::Completed {
         return Ok(false);
@@ -3073,7 +3122,7 @@ async fn completed_root_artifact_missing(
     let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
         return Ok(false);
     };
-    if load_persisted_root_proof_material(runtime, record, metadata)
+    if load_persisted_root_proof_material(runtime, record, metadata, proof_identities)
         .await?
         .is_some()
     {
@@ -3127,6 +3176,7 @@ async fn compatibility_response_for_task(
                 &lookup.record,
                 &lookup.metadata,
                 task.proof,
+                state.proof_identities.as_ref(),
             )
             .await?,
         ),
@@ -3161,9 +3211,11 @@ async fn legacy_root_proof_material(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
     fallback_proof: Option<String>,
+    proof_identities: &ProofIdentityRegistry,
 ) -> Result<Proof, ApiError> {
     if root_proof_artifact_refs(metadata, record.pipeline_key).is_some()
-        && let Some(proof) = load_persisted_root_proof_material(runtime, record, metadata).await?
+        && let Some(proof) =
+            load_persisted_root_proof_material(runtime, record, metadata, proof_identities).await?
     {
         return Ok(proof);
     }
@@ -5376,14 +5428,24 @@ mod tests {
         .await?;
 
         assert!(
-            !completed_root_artifact_missing(&runtime, &record, &metadata)
-                .await
-                .map_err(|err| anyhow!(err.message))?
+            !completed_root_artifact_missing(
+                &runtime,
+                &record,
+                &metadata,
+                ProofIdentityRegistry::empty(),
+            )
+            .await
+            .map_err(|err| anyhow!(err.message))?
         );
         assert_eq!(
-            load_persisted_root_proof_material(&runtime, &record, &metadata)
-                .await
-                .map_err(|err| anyhow!(err.message))?,
+            load_persisted_root_proof_material(
+                &runtime,
+                &record,
+                &metadata,
+                ProofIdentityRegistry::empty(),
+            )
+            .await
+            .map_err(|err| anyhow!(err.message))?,
             Some(proof)
         );
         assert!(
@@ -5394,6 +5456,7 @@ mod tests {
                 route,
                 &proof_ref,
                 ProofArtifactPayload::Final,
+                ProofIdentityRegistry::empty(),
             )
             .await
             .is_err(),
@@ -6722,6 +6785,7 @@ mod tests {
             PipelineKey::ShastaNative.route(),
             &plan.proposals[0].task_ref,
             ProofArtifactPayload::Proposal,
+            ProofIdentityRegistry::empty(),
         )
         .await
         {
@@ -6800,9 +6864,14 @@ mod tests {
                 &bytes[0],
             )
             .await?;
-        let error = recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
-            .await
-            .expect_err("raw pending bytes without durable ownership must be rejected");
+        let error = recover_external_aggregate_input_artifacts(
+            &runtime,
+            &record,
+            &metadata,
+            ProofIdentityRegistry::empty(),
+        )
+        .await
+        .expect_err("raw pending bytes without durable ownership must be rejected");
         assert!(error.message.contains("no owned pending"));
         assert!(
             runtime
@@ -6824,9 +6893,14 @@ mod tests {
                 &bytes[0],
             )
             .await?;
-        recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
-            .await
-            .expect("recover aggregate input from raw pending outbox");
+        recover_external_aggregate_input_artifacts(
+            &runtime,
+            &record,
+            &metadata,
+            ProofIdentityRegistry::empty(),
+        )
+        .await
+        .expect("recover aggregate input from raw pending outbox");
         assert!(
             runtime
                 .get_pending_proof_publication(
@@ -6860,13 +6934,19 @@ mod tests {
             PipelineKey::ShastaNative.route(),
             &artifacts[0].proof_ref,
             ProofArtifactPayload::AggregateInput,
+            ProofIdentityRegistry::empty(),
         )
         .await?
         .expect("stored aggregate input proof");
         assert_eq!(stored.proof, proof);
-        recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
-            .await
-            .expect("recover exact active aggregate input registration");
+        recover_external_aggregate_input_artifacts(
+            &runtime,
+            &record,
+            &metadata,
+            ProofIdentityRegistry::empty(),
+        )
+        .await
+        .expect("recover exact active aggregate input registration");
 
         let active = runtime
             .get_proof_artifact(
@@ -6896,9 +6976,14 @@ mod tests {
                 b"different-canonical-input",
             )
             .await?;
-        let error = recover_external_aggregate_input_artifacts(&runtime, &record, &metadata)
-            .await
-            .expect_err("stale active registration must not adopt replacement bytes");
+        let error = recover_external_aggregate_input_artifacts(
+            &runtime,
+            &record,
+            &metadata,
+            ProofIdentityRegistry::empty(),
+        )
+        .await
+        .expect_err("stale active registration must not adopt replacement bytes");
         assert!(error.message.contains("descriptor changed"));
         Ok(())
     }
@@ -6955,6 +7040,7 @@ mod tests {
             PipelineKey::ShastaNative.route(),
             "proposal-recovery",
             ProofArtifactPayload::Proposal,
+            ProofIdentityRegistry::empty(),
         )
         .await?;
 
@@ -6993,6 +7079,7 @@ mod tests {
             route.route,
             "sp1-network-proposal",
             ProofArtifactPayload::Proposal,
+            ProofIdentityRegistry::empty(),
         )
         .await
         .map_err(|err| anyhow!(err.to_string()))?;

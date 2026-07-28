@@ -16,6 +16,10 @@ jobs:
   build-sign-push:
     runs-on: [taiko-runner]
     environment: sgx-release-signing
+    concurrency:
+      group: release-tee-providers
+      queue: max
+      cancel-in-progress: false
     timeout-minutes: 180
     env:
       CARGO_TERM_COLOR: always
@@ -37,10 +41,14 @@ jobs:
             echo "Release signing workflow must be dispatched from refs/heads/main" >&2
             exit 1
           fi
-          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || {
+          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,122}$ ]] || {
             echo "Invalid release tag: $INPUT_TAG" >&2
             exit 1
           }
+          if [[ "$INPUT_TAG" == *-edmm ]]; then
+            echo "Invalid release tag: $INPUT_TAG uses the reserved local SGX EDMM suffix" >&2
+            exit 1
+          fi
 
       - id: auth
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2

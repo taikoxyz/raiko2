@@ -950,7 +950,8 @@ state. Each manifest `image.digest` field contains a mutable `repository:tag` re
 an immutable registry digest. The resulting manifest must not be used as release handoff metadata;
 run the command without `--no-push` to push the images and resolve immutable digests first.
 
-For a formal pre-release export, use:
+For a formal pre-release export, prefer the `Release - TEE provider images` GitHub Actions
+workflow below. The raw publishing command is available for controlled operations only:
 
 ```bash
 GCP_ENCLAVE_KEY_SECRET=<secret-name> \
@@ -958,6 +959,10 @@ GCP_ENCLAVE_KEY_VERSION=latest \
 GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
 ```
+
+Publishing mode verifies that every target Artifact Registry Docker repository has immutable tags
+enabled before any image build or push starts. Do not run the raw publishing command against mutable
+registry repositories; use `--no-push` for local smoke verification instead.
 
 The same pushed release flow is available as the `Release - TEE provider images` GitHub Actions
 workflow. Dispatch it from the protected `sgx-release-signing` environment with the release tag.
@@ -979,6 +984,7 @@ This flow:
 - reads exact external provider pins from `release/providers.toml`
 - fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
   `GCP_ENCLAVE_KEY_SECRET` is set
+- verifies target Artifact Registry Docker repositories have immutable tags enabled for pushed runs
 - builds two local `raiko2-sgx` provider images from the same source revision and signing key, with
   the key passed as a Docker BuildKit secret:
   - `<tag>` is the non-EDMM compatibility/default image

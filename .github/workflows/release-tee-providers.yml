@@ -18,6 +18,7 @@ jobs:
     environment: sgx-release-signing
     concurrency:
       group: release-tee-providers
+      queue: max
       cancel-in-progress: false
     timeout-minutes: 180
     env:

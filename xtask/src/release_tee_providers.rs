@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -91,6 +92,9 @@ pub(crate) fn run(root: &Path, args: ReleaseTeeProvidersArgs) -> Result<()> {
     ensure_clean_source_tree(root, "before release-tee-providers starts")?;
 
     let provider_lock = load(&provider_lock_path(root))?;
+    if !args.no_push {
+        ensure_release_destination_tags_unpublished(&args.tag, &provider_lock.providers)?;
+    }
     let manifest = build_manifest(root, &args.tag, args.no_push, &provider_lock.providers)?;
     let output_path = release_manifest_path(root, &args.tag);
     write_manifest(&output_path, &manifest)?;
@@ -106,7 +110,7 @@ fn build_manifest(
     root: &Path,
     tag: &str,
     no_push: bool,
-    providers: &std::collections::BTreeMap<String, TeeProviderEntry>,
+    providers: &BTreeMap<String, TeeProviderEntry>,
 ) -> Result<TeeAttestationManifest> {
     let generated_at = current_timestamp_rfc3339()?;
     let mut entries = build_local_provider_entries(root, tag, no_push)?;
@@ -122,6 +126,34 @@ fn build_manifest(
         generated_at,
         providers: entries,
     })
+}
+
+fn ensure_release_destination_tags_unpublished(
+    tag: &str,
+    providers: &BTreeMap<String, TeeProviderEntry>,
+) -> Result<()> {
+    for image_ref in release_destination_image_refs(tag, providers) {
+        ensure_remote_image_tag_unpublished(&image_ref)?;
+    }
+    Ok(())
+}
+
+fn release_destination_image_refs(
+    tag: &str,
+    providers: &BTreeMap<String, TeeProviderEntry>,
+) -> BTreeSet<String> {
+    let mut image_refs = BTreeSet::new();
+    for variant in LOCAL_SGX_VARIANTS {
+        let variant_tag = local_sgx_variant_tag(tag, variant.edmm);
+        image_refs.insert(local_provider_image_ref(
+            &variant_tag,
+            DEFAULT_LOCAL_REPOSITORY,
+        ));
+    }
+    for provider in providers.values() {
+        image_refs.insert(local_provider_image_ref(tag, &provider.repository));
+    }
+    image_refs
 }
 
 fn build_local_provider_entries(
@@ -525,6 +557,42 @@ fn docker_push(image_ref: &str) -> Result<()> {
     util::run(cmd)
 }
 
+fn ensure_remote_image_tag_unpublished(image_ref: &str) -> Result<()> {
+    let output = docker_manifest_inspect_command(image_ref)
+        .output()
+        .with_context(|| format!("failed to inspect remote image tag {image_ref}"))?;
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        bail!("release destination image tag already exists: {image_ref}");
+    }
+    if docker_manifest_inspect_reports_missing(&output_text) {
+        return Ok(());
+    }
+    bail!(
+        "failed to confirm release destination image tag is unpublished: {image_ref}\n{}",
+        output_text.trim_end(),
+    )
+}
+
+fn docker_manifest_inspect_command(image_ref: &str) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.arg("manifest").arg("inspect").arg(image_ref);
+    cmd
+}
+
+fn docker_manifest_inspect_reports_missing(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("manifest unknown")
+        || output.contains("no such manifest")
+        || output.contains("name unknown")
+        || output.contains("requested entity was not found")
+        || (output.contains("manifest for") && output.contains("not found"))
+}
+
 fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
     let output = Command::new("docker")
         .arg("image")
@@ -752,24 +820,42 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
     use std::process::Command;
 
     use super::{
         ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST, LOCAL_SGX_VARIANTS,
+        docker_manifest_inspect_command, docker_manifest_inspect_reports_missing,
         external_provider_docker_build_command, external_source_checkout_dir, file_sha256_hex,
         gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
         local_sgx_docker_build_command, local_sgx_manifest_entry, local_sgx_variant_tag,
-        parse_attestation_json, resolve_gramine_enclave_key_from_values, validate_attestation_path,
+        parse_attestation_json, release_destination_image_refs,
+        resolve_gramine_enclave_key_from_values, validate_attestation_path,
         validate_local_sgx_entries, validate_release_tag,
     };
     use crate::release_tee_manifest::{TeeProviderAttestation, TeeProviderManifestEntry};
+    use crate::tee_provider_lock::TeeProviderEntry;
 
     fn command_args(command: &Command) -> Vec<String> {
         command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn external_provider(repository: &str) -> TeeProviderEntry {
+        TeeProviderEntry {
+            repo: "https://github.com/taikoxyz/gaiko2.git".to_string(),
+            commit: "abcdef1234567890".to_string(),
+            provider: "gaiko2-sgxgeth".to_string(),
+            lane: "sgxgeth".to_string(),
+            image_name: "gaiko2-sgxgeth".to_string(),
+            repository: repository.to_string(),
+            dockerfile: "docker/Dockerfile.tee".to_string(),
+            context: ".".to_string(),
+            attestation_path: "/opt/gaiko2/etc/attestation.json".to_string(),
+        }
     }
 
     fn valid_local_sgx_entries() -> Vec<TeeProviderManifestEntry> {
@@ -800,6 +886,69 @@ mod tests {
             local_provider_image_ref("v1.2.3", "us-docker.pkg.dev/evmchain/images/raiko2-sgx"),
             "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3"
         );
+    }
+
+    #[test]
+    fn release_tee_providers_lists_all_destination_image_refs_before_push() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "gaiko2".to_string(),
+            external_provider("us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth"),
+        );
+
+        let refs = release_destination_image_refs("v1.2.3", &providers);
+
+        assert_eq!(refs.len(), 3);
+        assert!(refs.contains("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3"));
+        assert!(refs.contains("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3-edmm"));
+        assert!(refs.contains("us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth:v1.2.3"));
+    }
+
+    #[test]
+    fn release_tee_providers_builds_manifest_inspect_command() {
+        let command =
+            docker_manifest_inspect_command("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3");
+
+        assert_eq!(command.get_program().to_string_lossy(), "docker");
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "manifest",
+                "inspect",
+                "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
+            ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_recognizes_missing_remote_manifests() {
+        for output in [
+            "manifest unknown: Failed to fetch",
+            "no such manifest: us-docker.pkg.dev/example/image:v1",
+            "name unknown: Repository does not exist",
+            "requested entity was not found",
+            "manifest for example/image:v1 not found",
+        ] {
+            assert!(
+                docker_manifest_inspect_reports_missing(output),
+                "should recognize missing manifest: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_tee_providers_does_not_treat_registry_errors_as_missing() {
+        for output in [
+            "denied: Permission \"artifactregistry.dockerimages.get\" denied",
+            "error getting credentials - err: exec: \"docker-credential-gcloud\": executable file not found in $PATH",
+            "503 service unavailable",
+            "net/http: request canceled while waiting for connection",
+        ] {
+            assert!(
+                !docker_manifest_inspect_reports_missing(output),
+                "should fail closed for registry error: {output}"
+            );
+        }
     }
 
     #[test]

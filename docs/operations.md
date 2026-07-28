@@ -731,7 +731,7 @@ for backend in risc0 sp1; do
 
   find crates/guests/elf -maxdepth 1 -type f \
     \( -name "${backend}_*.elf" -o -name "${backend}_*.vk.bin" \) \
-    -printf '%p\n' \
+    -print \
     | sort > "${disk_artifacts}"
 
   diff -u "${provenance_artifacts}" "${disk_artifacts}"
@@ -814,7 +814,7 @@ IMMUTABLE_TAGS=$(gcloud artifacts repositories describe "${AR_REPOSITORY}" \
   --project "${AR_PROJECT}" \
   --location "${AR_LOCATION}" \
   --format='value(dockerConfig.immutableTags)')
-test "${IMMUTABLE_TAGS,,}" = "true"
+test "$(printf '%s' "${IMMUTABLE_TAGS}" | tr '[:upper:]' '[:lower:]')" = "true"
 
 if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
   echo "image tag already exists: ${IMAGE_REF}" >&2

@@ -97,7 +97,8 @@ Required sequence:
 
 1. Resolve the exact host commit and guest release commit.
 2. Create a named composition branch and clean worktree from the host commit. Use a traceable name
-   such as `main-<host-short-sha>-elf-<release-tag>`.
+   such as `main-<host-short-sha>-elf-<release-tag>`. Fetch only the selected remote release tag into
+   a dedicated ref; do not fetch every tag.
 3. Restore the complete release-tag `crates/guests/elf` directory. Keep ELF, SP1 VK, lab artifacts,
    and both provenance manifests together; do not assemble a partial directory from downloads.
 4. Verify the directory against the release tag, exact expected GitHub Release Shasta asset set, and
@@ -105,13 +106,13 @@ Required sequence:
 5. Before checking source closure, validate each backend's provenance manifest and exact artifact
    inventory, every recorded artifact hash, and the Shasta SP1 ELF/VK pairs. A source mismatch must
    not mask an artifact, manifest, or SP1 failure.
-6. Run the source-closure check. A passing source fingerprint permits the automatic lane. A source
-   fingerprint mismatch does not prove incompatibility, but it stops the automatic lane until a
-   reviewed guest-facing diff, proposal regression, aggregation regression, and soundness
-   assessment explicitly approve the pairing. The exception is source-only and is available only
+6. Run the source-closure check. It covers tracked guest build inputs, not host-side pipeline/prover
+   input construction. Every composition therefore requires proposal and aggregation regressions on
+   the selected old artifacts. A source fingerprint mismatch additionally requires a reviewed
+   guest-facing diff and soundness assessment. The exception is source-only and is available only
    after the artifact-only checks pass for both backends.
-7. Commit only the artifact composition, record both source commits in the commit message, push the
-   composition branch, and require a clean worktree.
+7. Commit only the artifact composition, record both source commits and regression evidence in the
+   PR, push the composition branch, and require a clean worktree.
 8. Reconfirm the selected moving host ref still resolves to the frozen host commit. Require
    registry-side immutable tags, then fail closed unless the selected image tag is conclusively
    absent; authentication, network, or registry errors are not absence.
@@ -126,9 +127,11 @@ hardening added after that release cannot replace a missing guest-side check.
 Stop instead of publishing when:
 
 - the release tag, GitHub Release, or artifact set cannot be resolved exactly;
+- the operation fetches every tag or the selected tag cannot be isolated in its dedicated ref;
 - artifacts come from different releases or provenance is omitted/regenerated against old binaries;
 - either backend fails artifact-only provenance, inventory, or digest validation;
 - the composition changes files outside `crates/guests/elf`;
+- proposal or aggregation regression on the selected release artifacts is missing or fails;
 - guest-facing source drift lacks the explicit compatibility and soundness approval above;
 - the worktree is dirty, the source branch is not reachable, registry-side tag immutability is not
   confirmed, or tag absence is inconclusive;

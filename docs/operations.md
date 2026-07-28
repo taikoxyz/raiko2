@@ -614,11 +614,16 @@ export AR_REPOSITORY=images
 test "${ELF_TAG}" != "vX.Y.Z"
 test "${IMAGE_REPOSITORY}" = \
   "${AR_LOCATION}-docker.pkg.dev/${AR_PROJECT}/${AR_REPOSITORY}/raiko2"
-git fetch origin main --tags
 
-export HOST_SHA ELF_SHA HOST_SHORT COMPOSE_BRANCH COMPOSE_WORKTREE IMAGE_TAG
+export ELF_RELEASE_REF HOST_SHA ELF_SHA HOST_SHORT COMPOSE_BRANCH COMPOSE_WORKTREE IMAGE_TAG
+ELF_RELEASE_REF="refs/raiko2-release-tags/${ELF_TAG}"
+
+git fetch --no-tags origin main
+git fetch --no-tags origin \
+  "+refs/tags/${ELF_TAG}:${ELF_RELEASE_REF}"
+
 HOST_SHA=$(git rev-parse "${HOST_REF}^{commit}")
-ELF_SHA=$(git rev-parse "${ELF_TAG}^{commit}")
+ELF_SHA=$(git rev-parse "${ELF_RELEASE_REF}^{commit}")
 HOST_SHORT=${HOST_SHA:0:12}
 COMPOSE_BRANCH="main-${HOST_SHORT}-elf-${ELF_TAG}"
 COMPOSE_WORKTREE="../raiko2-${COMPOSE_BRANCH}"
@@ -628,8 +633,9 @@ test "$(gh release view "${ELF_TAG}" --repo taikoxyz/raiko2 \
   --json isDraft --jq '.isDraft')" = "false"
 ```
 
-Stop if the host revision, release tag, or non-draft GitHub Release cannot be resolved. Use a new
-branch and image tag; do not overwrite an existing publication.
+The selected remote tag is fetched into a dedicated local ref so unrelated local tag conflicts cannot
+abort the operation. Stop if the host revision, selected release tag, or non-draft GitHub Release
+cannot be resolved. Use a new branch and image tag; do not overwrite an existing publication.
 
 #### 2. Create The Composition Branch
 
@@ -742,21 +748,26 @@ cargo run --locked -p xtask-build-guest --bin xtask-build-guest -- all --check
 ```
 
 A pass means the current host revision has the same tracked guest build inputs and artifact hashes
-as the selected release. It permits the automatic composition lane.
+as the selected release. It does not cover host-side input construction or encoding in the pipeline
+and prover crates.
+
+Every mixed host/released guest composition must record:
+
+- proposal regression on the exact old release artifacts;
+- aggregation regression on the exact old release artifacts;
+- the regression inputs and request IDs in the composition PR.
 
 A `source fingerprint mismatch` is not proof that the host and old guest are incompatible, but it
-stops this automatic lane. Before resuming, the composition PR must record all of:
+requires the composition PR to additionally record all of:
 
 - a reviewed diff of guest-facing input types, serialization, public-input construction, manifest
   and carry-data hashing, and proposal and aggregation behavior;
-- proposal regression on the exact old release artifacts;
-- aggregation regression on the exact old release artifacts;
 - confirmation that the old guest contains every required soundness check and that its RISC0 image
   IDs and SP1 verification keys remain trusted on the target network.
 
-Record the regression inputs and request IDs in the PR. Artifact SHA-256 equality and SP1 ELF/VK
-consistency establish artifact identity; they do not establish protocol compatibility or soundness.
-The proof executes the old guest constraints, regardless of newer host-side validation.
+Artifact SHA-256 equality and SP1 ELF/VK consistency establish artifact identity; they do not
+establish protocol compatibility or soundness. The proof executes the old guest constraints,
+regardless of newer host-side validation.
 
 The source-drift exception is available only after the artifact-only pass above succeeds for both
 backends. Any other provenance failure is a hard stop.
@@ -787,7 +798,7 @@ detached commit.
 #### 6. Build And Publish Without Guest Refresh
 
 ```bash
-git fetch origin main
+git fetch --no-tags origin main
 test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
 
 mkdir -p target/release-image-logs
@@ -874,7 +885,7 @@ Composition branch: <COMPOSE_BRANCH>
 Composition commit: <COMPOSE_SHA>
 Image tag:          <IMAGE_REPOSITORY>:<IMAGE_TAG>
 Image digest:       <DIGEST_REF>
-Compatibility:      source-closure match, or reviewed exception with regression evidence
+Compatibility:      proposal and aggregation regressions, plus any source-drift review
 ```
 
 If tag-to-digest, revision-label, or packaged-artifact verification fails after push, mark the

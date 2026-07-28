@@ -21,9 +21,9 @@ when compatibility is not established.
 
 **Step 1: Document fixed inputs and the composition branch**
 
-Add commands that resolve `HOST_REF`, `ELF_TAG`, `HOST_SHA`, and `ELF_SHA`, create a clean
-`main-<host>-elf-<release>` worktree branch, and restore the complete `crates/guests/elf` directory
-from the release tag.
+Add commands that resolve `HOST_REF`, `ELF_TAG`, `HOST_SHA`, and `ELF_SHA`, fetch only the selected
+remote tag into a dedicated ref, create a clean `main-<host>-elf-<release>` worktree branch, and
+restore the complete `crates/guests/elf` directory from the release tag.
 
 **Step 2: Document independent validation gates**
 
@@ -33,6 +33,8 @@ Require:
 - tag-directory equality and exact published Shasta asset inventory and byte equality;
 - artifact-only provenance, per-backend inventory, hash validation, and Shasta SP1 VK recomputation;
 - source-closure check after artifact-only validation;
+- mandatory proposal and aggregation regressions because source closure excludes host-side
+  pipeline/prover construction;
 - explicit source-only reviewed exception handling for guest-facing source drift.
 
 State that digest and SP1 VK checks do not prove host/guest protocol or soundness compatibility.
@@ -56,10 +58,11 @@ existing release reliably load the skill.
 
 **Step 2: Add a concise mandatory workflow**
 
-Require the composition branch, exact release asset set, artifact-only provenance and SP1 VK
-validation for both backends, compatibility gate, clean commit, immutable registry tags,
-fail-closed tag absence, host build without refresh, and immutable output report. Link the full
-commands to `docs/operations.md`.
+Require the selected-tag ref, composition branch, exact release asset set, artifact-only provenance
+and SP1 VK validation for both backends, mandatory proposal and aggregation regressions,
+source-drift compatibility gate, clean commit, immutable registry tags, fail-closed tag absence,
+host build without refresh, and immutable output report. Link the full commands to
+`docs/operations.md`.
 
 **Step 3: Add explicit stop conditions**
 
@@ -94,6 +97,8 @@ all RISC0/SP1 artifacts from `vX.Y.Z`, without modifying files or deploying. Con
 - exact-set checks the GitHub Release assets and validates both provenance manifests before source
   closure;
 - distinguishes artifact identity from compatibility;
+- always requires proposal and aggregation regressions because host-side construction is outside the
+  source-closure fingerprint;
 - stops on unresolved guest-facing drift;
 - refuses mutable repositories, existing tags, and inconclusive registry errors;
 - verifies the published tag resolves to the captured digest;

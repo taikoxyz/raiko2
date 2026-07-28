@@ -62,6 +62,10 @@ For TEE-backed provider image attestation capture, use the dedicated `xtask` flo
 
 - `cargo run -r -p xtask -- release-tee-providers --tag <tag>`
 
+Pushed TEE provider release runs require target Artifact Registry Docker repositories with immutable
+tags enabled. Use `--no-push` for local smoke/reproduction checks that must not publish registry
+tags.
+
 That flow owns:
 
 - external provider source pin resolution

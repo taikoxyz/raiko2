@@ -1,6 +1,6 @@
 ---
 name: raiko2-image-release
-description: Use when building and publishing a raiko2 runtime image from this repository with just release-image or xtask release-image. Use when Codex must keep the workflow limited to guest ELF refresh, image build/push, digest capture, and optional register-image checks, without any kubectl, GKE, or rollout steps.
+description: Use when building or publishing a raiko2 runtime image, including a host-only source revision paired with guest ELF/VK artifacts from an existing release, without deployment or rollout work.
 ---
 
 # Raiko2 Image Release
@@ -87,6 +87,45 @@ artifacts before retrying.
 
 Do not bypass this by using ad-hoc `docker build`. The published image must match the selected
 source revision and the guest ELF assets expected by the deployment.
+
+## Host Image With Released Guest Artifacts
+
+Use `docs/operations.md` -> `Compose A Host Image With Released Guest Artifacts` when a new host
+revision must keep the RISC0 and SP1 programs from an existing release.
+
+Required sequence:
+
+1. Resolve the exact host commit and guest release commit.
+2. Create a named composition branch and clean worktree from the host commit. Use a traceable name
+   such as `main-<host-short-sha>-elf-<release-tag>`.
+3. Restore the complete release-tag `crates/guests/elf` directory. Keep ELF, SP1 VK, lab artifacts,
+   and both provenance manifests together; do not assemble a partial directory from downloads.
+4. Verify the directory against the release tag and published Shasta assets.
+5. Run the provenance check. A passing source fingerprint permits the automatic lane. A source
+   fingerprint mismatch does not prove incompatibility, but it stops the automatic lane until a
+   reviewed guest-facing diff, proposal regression, aggregation regression, and soundness
+   assessment explicitly approve the pairing.
+6. Commit only the artifact composition, record both source commits in the commit message, push the
+   composition branch, and require a clean worktree.
+7. Reconfirm the selected moving host ref still resolves to the frozen host commit, run
+   `release-image host ... --skip-guest-refresh`, capture the immutable digest, then pull that digest
+   and verify its OCI revision label and packaged artifacts against the composition commit.
+
+Artifact hashes and SP1 ELF/VK consistency prove artifact identity, not host/guest protocol
+compatibility or guest soundness. The old guest supplies the proof constraints, so host-side
+hardening added after that release cannot replace a missing guest-side check.
+
+Stop instead of publishing when:
+
+- the release tag, GitHub Release, or artifact set cannot be resolved exactly;
+- artifacts come from different releases or provenance is omitted/regenerated against old binaries;
+- the composition changes files outside `crates/guests/elf`;
+- guest-facing source drift lacks the explicit compatibility and soundness approval above;
+- the worktree is dirty, the source branch is not reachable, or the image tag would be overwritten;
+- post-push revision or artifact verification fails.
+
+Never hide artifact changes with Git index flags, create only a detached unreferenced composition
+commit, or treat `--skip-guest-refresh` as a compatibility override.
 
 ## Optional Register Check
 

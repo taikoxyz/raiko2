@@ -590,6 +590,307 @@ If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing;
 and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
 provenance still matches the committed repo state.
 
+### Compose A Host Image With Released Guest Artifacts
+
+Use this SOP when a selected host revision must package the complete RISC0 and SP1 artifact set from
+an existing raiko2 release. This creates a source branch whose commit records both sides of the
+composition. It publishes an image only; it does not register verifier digests, deploy the image, or
+perform a Kubernetes rollout.
+
+#### 1. Freeze The Inputs
+
+Run from a raiko2 checkout. Replace the example tag before continuing:
+
+```bash
+set -Eeuo pipefail
+
+export HOST_REF=origin/main
+export ELF_TAG=vX.Y.Z
+export IMAGE_REPOSITORY=us-docker.pkg.dev/evmchain/images/raiko2
+export AR_PROJECT=evmchain
+export AR_LOCATION=us
+export AR_REPOSITORY=images
+
+test "${ELF_TAG}" != "vX.Y.Z"
+test "${IMAGE_REPOSITORY}" = \
+  "${AR_LOCATION}-docker.pkg.dev/${AR_PROJECT}/${AR_REPOSITORY}/raiko2"
+
+export ELF_RELEASE_REF HOST_SHA ELF_SHA HOST_SHORT COMPOSE_BRANCH COMPOSE_WORKTREE IMAGE_TAG
+ELF_RELEASE_REF="refs/raiko2-release-tags/${ELF_TAG}"
+
+git fetch --no-tags origin main
+git fetch --no-tags origin \
+  "+refs/tags/${ELF_TAG}:${ELF_RELEASE_REF}"
+
+HOST_SHA=$(git rev-parse "${HOST_REF}^{commit}")
+ELF_SHA=$(git rev-parse "${ELF_RELEASE_REF}^{commit}")
+HOST_SHORT=${HOST_SHA:0:12}
+COMPOSE_BRANCH="main-${HOST_SHORT}-elf-${ELF_TAG}"
+COMPOSE_WORKTREE="../raiko2-${COMPOSE_BRANCH}"
+IMAGE_TAG="${COMPOSE_BRANCH}"
+
+test "$(gh release view "${ELF_TAG}" --repo taikoxyz/raiko2 \
+  --json isDraft --jq '.isDraft')" = "false"
+```
+
+The selected remote tag is fetched into a dedicated local ref so unrelated local tag conflicts cannot
+abort the operation. Stop if the host revision, selected release tag, or non-draft GitHub Release
+cannot be resolved. Use a new branch and image tag; do not overwrite an existing publication.
+
+#### 2. Create The Composition Branch
+
+```bash
+git worktree add -b "${COMPOSE_BRANCH}" "${COMPOSE_WORKTREE}" "${HOST_SHA}"
+cd "${COMPOSE_WORKTREE}"
+
+git restore --source="${ELF_SHA}" --staged --worktree -- crates/guests/elf
+
+# The complete directory, including provenance, must equal the release tag.
+git diff --exit-code "${ELF_SHA}" -- crates/guests/elf
+
+# Nothing outside the artifact directory may be staged.
+git diff --cached --quiet -- . ':(exclude,glob)crates/guests/elf/**'
+git diff --cached --check
+```
+
+Restore the whole directory. Do not combine one release's RISC0 ELF with another release's SP1
+ELF/VK, omit lab artifacts or provenance manifests, or regenerate provenance against old binaries.
+Provenance records the source fingerprint and artifact hashes that produced that release; raiko2
+does not consume it as a runtime trust anchor.
+
+#### 3. Verify Release Artifact Identity
+
+Derive the expected Shasta asset names from the release tag, require the GitHub Release to publish
+that exact set, then download and compare every byte with the tag checkout:
+
+```bash
+mkdir -p target/release-guest-verification
+export VERIFY_ROOT VERIFY_DIR EXPECTED_RELEASE_ASSETS ACTUAL_RELEASE_ASSETS
+VERIFY_ROOT=$(mktemp -d "target/release-guest-verification/${ELF_TAG}.XXXXXXXX")
+VERIFY_DIR="${VERIFY_ROOT}/downloads"
+EXPECTED_RELEASE_ASSETS="${VERIFY_ROOT}/release-assets.expected"
+ACTUAL_RELEASE_ASSETS="${VERIFY_ROOT}/release-assets.actual"
+mkdir -p "${VERIFY_DIR}"
+
+git ls-tree -r --name-only "${ELF_SHA}" -- crates/guests/elf \
+  | grep -E \
+    '^crates/guests/elf/(risc0_shasta_.*\.elf|sp1_shasta_.*\.(elf|vk\.bin))$' \
+  | sed 's#^crates/guests/elf/##' \
+  | sort > "${EXPECTED_RELEASE_ASSETS}"
+test -s "${EXPECTED_RELEASE_ASSETS}"
+
+gh release view "${ELF_TAG}" --repo taikoxyz/raiko2 \
+  --json assets --jq '.assets[].name' \
+  | grep -E '^(risc0_shasta_.*\.elf|sp1_shasta_.*\.(elf|vk\.bin))$' \
+  | sort > "${ACTUAL_RELEASE_ASSETS}"
+
+diff -u "${EXPECTED_RELEASE_ASSETS}" "${ACTUAL_RELEASE_ASSETS}"
+
+cargo run --locked -r -p xtask -- download-guest-elves \
+  --tag "${ELF_TAG}" \
+  --repo taikoxyz/raiko2 \
+  --backend all \
+  --dir "${VERIFY_DIR}"
+
+while IFS= read -r artifact; do
+  test -f "${VERIFY_DIR}/${artifact}"
+  cmp -s "${VERIFY_DIR}/${artifact}" "crates/guests/elf/${artifact}"
+done < "${EXPECTED_RELEASE_ASSETS}"
+```
+
+Any missing asset or byte mismatch is a hard stop. The GitHub Release assets, release tag, and
+composition directory must identify the same programs.
+
+#### 4. Gate Host/Guest Compatibility
+
+First validate both provenance manifests, each backend's exact inventory, every recorded artifact,
+and the Shasta SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
+prevents a source mismatch from hiding an artifact, manifest, or SP1 failure:
+
+```bash
+for backend in risc0 sp1; do
+  manifest="crates/guests/elf/${backend}.provenance.json"
+  provenance_artifacts="${VERIFY_ROOT}/${backend}.provenance-artifacts"
+  disk_artifacts="${VERIFY_ROOT}/${backend}.disk-artifacts"
+
+  jq -e --arg backend "${backend}" '
+    .schema_version == 1
+    and .backend == $backend
+    and .bench == false
+    and (.source_fingerprint | test("^[0-9a-f]{64}$"))
+    and ((.artifacts | type) == "object")
+    and ((.artifacts | length) > 0)
+    and ([.artifacts[] | test("^[0-9a-f]{64}$")] | all)
+  ' "${manifest}" >/dev/null
+
+  jq -r '.artifacts | to_entries[] | "\(.value)  \(.key)"' "${manifest}" \
+    | sha256sum --check --strict -
+
+  jq -r '.artifacts | keys[]' "${manifest}" \
+    | sort > "${provenance_artifacts}"
+
+  find crates/guests/elf -maxdepth 1 -type f \
+    \( -name "${backend}_*.elf" -o -name "${backend}_*.vk.bin" \) \
+    -printf '%p\n' \
+    | sort > "${disk_artifacts}"
+
+  diff -u "${provenance_artifacts}" "${disk_artifacts}"
+done
+
+cargo run --locked -r -p xtask-build-guest --bin guest-digests --features digests -- \
+  --output "${VERIFY_ROOT}/guest-digests-summary.json"
+```
+
+Only after the artifact-only pass succeeds, run the source-closure check:
+
+```bash
+cargo run --locked -p xtask-build-guest --bin xtask-build-guest -- all --check
+```
+
+A pass means the current host revision has the same tracked guest build inputs and artifact hashes
+as the selected release. It does not cover host-side input construction or encoding in the pipeline
+and prover crates.
+
+Every mixed host/released guest composition must record:
+
+- proposal regression on the exact old release artifacts;
+- aggregation regression on the exact old release artifacts;
+- the regression inputs and request IDs in the composition PR.
+
+A `source fingerprint mismatch` is not proof that the host and old guest are incompatible, but it
+requires the composition PR to additionally record all of:
+
+- a reviewed diff of guest-facing input types, serialization, public-input construction, manifest
+  and carry-data hashing, and proposal and aggregation behavior;
+- confirmation that the old guest contains every required soundness check and that its RISC0 image
+  IDs and SP1 verification keys remain trusted on the target network.
+
+Artifact SHA-256 equality and SP1 ELF/VK consistency establish artifact identity; they do not
+establish protocol compatibility or soundness. The proof executes the old guest constraints,
+regardless of newer host-side validation.
+
+The source-drift exception is available only after the artifact-only pass above succeeds for both
+backends. Any other provenance failure is a hard stop.
+
+#### 5. Commit The Auditable Pairing
+
+```bash
+git commit --allow-empty \
+  -m "chore(release): compose host ${HOST_SHORT} with ${ELF_TAG} guests" \
+  -m "Host-Commit: ${HOST_SHA}" \
+  -m "Guest-Release: ${ELF_TAG}" \
+  -m "Guest-Commit: ${ELF_SHA}"
+
+export COMPOSE_SHA
+COMPOSE_SHA=$(git rev-parse HEAD)
+
+test -z "$(git status --porcelain)"
+git push -u origin "${COMPOSE_BRANCH}"
+test "$(git ls-remote origin "refs/heads/${COMPOSE_BRANCH}" | cut -f1)" \
+  = "${COMPOSE_SHA}"
+```
+
+The empty-commit case is intentional: even when the host branch already contains identical guest
+bytes, the composition commit and branch still record the selected guest release explicitly. Do not
+hide changes with `assume-unchanged` or `skip-worktree`, and do not publish from an unreferenced
+detached commit.
+
+#### 6. Build And Publish Without Guest Refresh
+
+```bash
+git fetch --no-tags origin main
+test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
+
+mkdir -p target/release-image-logs
+export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG IMMUTABLE_TAGS
+IMAGE_REF="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+RELEASE_LOG="target/release-image-logs/${IMAGE_TAG}.log"
+TAG_INSPECT_LOG=$(mktemp \
+  "target/release-image-logs/tag-inspect.${IMAGE_TAG}.XXXXXXXX")
+
+# The absence preflight is advisory against operator mistakes. Registry-side immutable tags close
+# the check/push race and are mandatory for this SOP.
+IMMUTABLE_TAGS=$(gcloud artifacts repositories describe "${AR_REPOSITORY}" \
+  --project "${AR_PROJECT}" \
+  --location "${AR_LOCATION}" \
+  --format='value(dockerConfig.immutableTags)')
+test "${IMMUTABLE_TAGS,,}" = "true"
+
+if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
+  echo "image tag already exists: ${IMAGE_REF}" >&2
+  exit 1
+fi
+
+# Accept only a registry response that conclusively means the tag is absent. Authentication,
+# authorization, connectivity, rate-limit, and server failures must stop the release.
+BLOCKING_TAG_ERROR_PATTERN='authenticat|authoriz|credential|denied|forbidden|permission|reauthentication|login|service unavailable|too many requests|timeout|timed out|deadline|request canceled|connection|temporary failure|network is unreachable|no route to host|dial tcp|i/o timeout|tls handshake|certificate|unexpected eof|500 internal server error|502 bad gateway|504 gateway timeout|(^|[[:space:]:])(429|503)([[:space:]:]|$)'
+if grep -Eqi "${BLOCKING_TAG_ERROR_PATTERN}" "${TAG_INSPECT_LOG}"; then
+  cat "${TAG_INSPECT_LOG}" >&2
+  exit 1
+fi
+
+if ! grep -Eqi \
+  'manifest unknown|no such manifest|name unknown|requested entity was not found|manifest .* not found' \
+  "${TAG_INSPECT_LOG}"; then
+  cat "${TAG_INSPECT_LOG}" >&2
+  exit 1
+fi
+
+just release-image host "${IMAGE_TAG}" "${IMAGE_REPOSITORY}" \
+  --skip-guest-refresh 2>&1 | tee "${RELEASE_LOG}"
+
+export DIGEST_REF
+DIGEST_REF=$(sed -n 's/^\[INFO\] Image pushed: //p' "${RELEASE_LOG}")
+test -n "${DIGEST_REF}"
+
+# Resolve the mutable tag's manifest directly from the registry and compare exactly.
+export TAG_MANIFEST_DIGEST
+TAG_MANIFEST_DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}" \
+  --format '{{json .Manifest}}' | jq -er '.digest')
+test "${IMAGE_REPOSITORY}@${TAG_MANIFEST_DIGEST}" = "${DIGEST_REF}"
+
+docker buildx imagetools inspect "${DIGEST_REF}"
+```
+
+`host` already skips guest refresh by default; the explicit flag documents the composition
+decision. This SOP supports the default Google Artifact Registry repository shown above. A different
+registry requires an equivalent server-side immutable-tag guarantee and a fail-closed absence
+preflight. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
+
+#### 7. Verify The Published Image
+
+```bash
+docker pull "${DIGEST_REF}"
+
+test "$(docker image inspect "${DIGEST_REF}" \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" \
+  = "${COMPOSE_SHA}"
+
+export IMAGE_ARTIFACT_DIR
+IMAGE_ARTIFACT_DIR=$(mktemp -d "target/image-guest-artifacts.${IMAGE_TAG}.XXXXXXXX")
+CID=$(docker create "${DIGEST_REF}")
+docker cp "${CID}:/app/crates/guests/elf/." "${IMAGE_ARTIFACT_DIR}"
+docker rm "${CID}"
+
+diff -qr crates/guests/elf "${IMAGE_ARTIFACT_DIR}"
+```
+
+Report and retain:
+
+```text
+Host commit:        <HOST_SHA>
+Guest release:      <ELF_TAG>
+Guest commit:       <ELF_SHA>
+Composition branch: <COMPOSE_BRANCH>
+Composition commit: <COMPOSE_SHA>
+Image tag:          <IMAGE_REPOSITORY>:<IMAGE_TAG>
+Image digest:       <DIGEST_REF>
+Compatibility:      proposal and aggregation regressions, plus any source-drift review
+```
+
+If tag-to-digest, revision-label, or packaged-artifact verification fails after push, mark the
+publication invalid and do not hand off its tag or digest.
+
 ## Register Guest Digests
 
 Guest builds and image releases do not update verifier trust lists automatically.

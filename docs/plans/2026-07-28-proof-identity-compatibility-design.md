@@ -16,7 +16,7 @@ The host has one expected identity for each enabled proving lane.
   locally loaded verifying keys.
 - Each remote SGX lane has an optional configured `(instance_id, address)`
   pair. When omitted, the lane starts unknown and learns the pair from the
-  first successfully activated local proof.
+  first successfully finalized newly returned root proof.
 
 ZK identities are reconstructed at each host startup. They are not operator
 configuration and are not duplicated in runtime storage. Remote SGX learning
@@ -30,7 +30,7 @@ the pair explicitly.
 - A configured or learned remote SGX identity must exactly match the proof
   header. A mismatch returns an error and never mutates the learned state.
 - An unknown remote SGX lane accepts only a structurally valid candidate. It
-  learns the pair after the proof has been activated as the root result. The
+  learns the pair after the proof has fully finalized as the root result. The
   pair is immutable for the process lifetime.
 - ZK proof generation and verification continue to use their backend-native
   validation. In particular, a Boundless aggregation input remains a receipt
@@ -68,11 +68,11 @@ the pair explicitly.
 ## Lifecycle Boundary
 
 For an unknown remote SGX lane, a per-lane finalization mutex spans canonical
-artifact publication and root activation. The winner records its identity only
-after root activation succeeds. A failure before activation leaves the lane
-unknown. After activation, the identity remains fixed even if later cleanup
-work retries; it represents the active remote lane rather than the retention
-state of one artifact.
+artifact publication and root finalization. The winner records its identity only
+after finalization succeeds. A failure before finalization leaves the lane
+unknown. After finalization, the identity remains fixed for the process
+lifetime; it represents the active remote lane rather than the retention state
+of one artifact.
 
 ## Non-Goals
 

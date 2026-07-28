@@ -44,7 +44,7 @@ RISC0, SP1, and remote SGX proof headers.
    durable expected record.
 4. Run focused configuration and state tests.
 
-### Task 3: Gate Reuse and Learn After Activation
+### Task 3: Gate Reuse and Learn After Finalization
 
 **Files:**
 - Modify: `bin/raiko2/src/server/handlers/proof_api.rs`
@@ -52,10 +52,10 @@ RISC0, SP1, and remote SGX proof headers.
 - Test: corresponding focused tests
 
 1. Add failing regressions for stale cache suppression, no leaked `proof_uri`,
-   and no learning before root activation.
+   and no learning before root finalization.
 2. Apply compatibility only where completed artifacts are read or delivered,
    distinguishing cached proposal sub-proofs from cached final aggregates.
-3. Serialize unknown remote SGX finalization through root activation, then
+3. Serialize unknown remote SGX finalization through root finalization, then
    learn the winning pair without allowing mismatches to mutate state.
 4. Treat a configured/learned mismatch as a non-retryable returned-proof
    error, rather than a durable publication retry.

@@ -1171,7 +1171,7 @@ Each remote SGX lane may set `expected_instance = { id = <u32>, address = "0x...
 When present, every newly returned remote proof and every cached proof for that lane must match
 the full pair; instance id `0` is valid. When omitted, the host starts with no trusted remote
 identity, treats persisted SGX artifacts as cache misses, and learns the first identity only after
-it activates a newly returned root proof. That learned value is process-local, so operators who
+it fully finalizes a newly returned root proof. That learned value is process-local, so operators who
 need cache reuse across a restart should configure `expected_instance` explicitly. An external SGX
 aggregate request requires all submitted sub-proofs to carry one consistent pair, but never teaches
 an unknown lane from request data.

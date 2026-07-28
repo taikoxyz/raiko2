@@ -199,15 +199,15 @@ impl ProofIdentityRegistry {
         }
     }
 
-    /// Learns a remote identity only after the corresponding root artifact has committed.
-    pub(crate) fn learn_remote_sgx_after_root_activation(
+    /// Learns a remote identity only after the corresponding root artifact has fully finalized.
+    pub(crate) fn learn_remote_sgx_after_finalization(
         &self,
         pipeline_key: PipelineKey,
         proof: &Proof,
     ) -> Result<(), String> {
         match self.identities.get(&pipeline_key) {
             Some(ProofIdentity::RemoteSgx(identity)) => {
-                identity.learn_after_activation_from_proof(proof)
+                identity.learn_after_finalization_from_proof(proof)
             }
             #[cfg(feature = "host")]
             Some(ProofIdentity::Zk(_)) | None => Ok(()),
@@ -334,7 +334,10 @@ impl RemoteSgxIdentity {
             .is_some_and(|(expected, actual)| expected == actual))
     }
 
-    pub(crate) fn learn_after_activation(&self, actual: SgxInstanceIdentity) -> Result<(), String> {
+    pub(crate) fn learn_after_finalization(
+        &self,
+        actual: SgxInstanceIdentity,
+    ) -> Result<(), String> {
         let mut expected = self
             .expected
             .write()
@@ -352,8 +355,8 @@ impl RemoteSgxIdentity {
         }
     }
 
-    pub(crate) fn learn_after_activation_from_proof(&self, proof: &Proof) -> Result<(), String> {
-        self.learn_after_activation(Self::required_identity(proof)?)
+    pub(crate) fn learn_after_finalization_from_proof(&self, proof: &Proof) -> Result<(), String> {
+        self.learn_after_finalization(Self::required_identity(proof)?)
     }
 
     fn required_identity(proof: &Proof) -> Result<SgxInstanceIdentity, String> {
@@ -515,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_sgx_identity_learns_only_after_activation_and_never_rotates() {
+    fn remote_sgx_identity_learns_only_after_finalization_and_never_rotates() {
         let identity = RemoteSgxIdentity::unknown();
         let first = proof(1, Address::repeat_byte(0x11));
         let rotated = proof(2, Address::repeat_byte(0x22));
@@ -532,8 +535,8 @@ mod tests {
         );
 
         identity
-            .learn_after_activation(first_instance)
-            .expect("learn activated proof identity");
+            .learn_after_finalization(first_instance)
+            .expect("learn finalized proof identity");
 
         assert!(
             identity
@@ -574,8 +577,8 @@ mod tests {
             "a concurrent completion must wait for the first lane finalization"
         );
         identity
-            .learn_after_activation(first_instance)
-            .expect("learn first activated identity");
+            .learn_after_finalization(first_instance)
+            .expect("learn first finalized identity");
         drop(first_guard);
 
         assert!(

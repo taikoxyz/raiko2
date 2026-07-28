@@ -1054,17 +1054,20 @@ impl RuntimeObserver {
             Ok(updated_roots) => updated_roots,
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
-        if updated_roots > 0
+        let finalization = self
+            .finalize_committed_publication(id, publication, updated_roots, synchronized_roots)
+            .await;
+        if matches!(&finalization, ProofCommitAttempt::Committed)
+            && updated_roots > 0
             && let Err(error) = self
                 .proof_identities
-                .learn_remote_sgx_after_root_activation(id.0.pipeline_key(), proof)
+                .learn_remote_sgx_after_finalization(id.0.pipeline_key(), proof)
         {
             return ProofCommitAttempt::Retryable(anyhow::anyhow!(
-                "failed to learn committed remote SGX identity: {error}"
+                "failed to learn finalized remote SGX identity: {error}"
             ));
         }
-        self.finalize_committed_publication(id, publication, updated_roots, synchronized_roots)
-            .await
+        finalization
     }
 
     async fn finalize_committed_publication(
@@ -2891,7 +2894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_remote_sgx_identity_learns_after_root_activation() -> Result<()> {
+    async fn unknown_remote_sgx_identity_learns_after_publication_finalization() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-sgx-learn",
         ))?);
@@ -4032,6 +4035,100 @@ mod tests {
                 .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
                 .await?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn final_invalidation_does_not_learn_unknown_remote_sgx_identity() -> Result<()> {
+        let artifact_root = unique_runtime_root("runtime-observer-sgx-finalization-race-artifacts");
+        let store = Arc::new(InvalidatesDuringPublicationStore {
+            inner: MemoryProofArtifactStore::new(
+                "shared-environment".to_string(),
+                artifact_root
+                    .file_name()
+                    .expect("artifact root has a file name")
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            checks: AtomicUsize::new(0),
+            block_on_check: 2,
+            recheck_entered: tokio::sync::Notify::new(),
+            allow_recheck: tokio::sync::Notify::new(),
+        });
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaSgx;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: task_id.clone(),
+        };
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        let proof = remote_sgx_proof_fixture(0, alloy_primitives::Address::repeat_byte(0x11));
+        register_observer_task(
+            runtime.as_ref(),
+            "sgx-finalization-race-root",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+
+        let identity = RemoteSgxIdentity::unknown();
+        let mut identities = ProofIdentityRegistry::default();
+        identities.insert_remote_sgx(pipeline, identity.clone());
+        let observer = RuntimeObserver::with_proof_identities(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+            Arc::new(identities),
+        );
+
+        let publication = tokio::spawn(async move {
+            drive_engine_success(
+                &observer,
+                &task_id,
+                &task,
+                &EngineTaskSuccess::Proof {
+                    stage: raiko2_pipeline::PipelineStage::Prove,
+                    proof,
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), store.recheck_entered.notified())
+            .await
+            .context("publication never reached its final invalidation fence")?;
+        let canonical = runtime
+            .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref)
+            .await?
+            .expect("published canonical artifact");
+        runtime
+            .mark_proof_artifact_descriptor_invalidated(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                &proof_ref,
+                &canonical.descriptor(),
+            )
+            .await?;
+        store.allow_recheck.notify_one();
+
+        let error = publication
+            .await?
+            .expect_err("final invalidation must reject the remote proof");
+        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
+        assert_eq!(
+            identity.expected().map_err(anyhow::Error::msg)?,
+            None,
+            "a rejected proof must not pin an unknown remote SGX lane"
         );
         Ok(())
     }

@@ -69,7 +69,8 @@ jobs:
           GCP_ENCLAVE_KEY_PROJECT: ${{ vars.GCP_ENCLAVE_KEY_PROJECT }}
         run: |
           set -euo pipefail
-          cargo run -r -p xtask -- release-tee-providers --tag "$INPUT_TAG"
+          cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+            release-tee-providers --tag "$INPUT_TAG"
 
       - name: Upload TEE attestation manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

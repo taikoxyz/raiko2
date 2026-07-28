@@ -261,6 +261,7 @@ Key properties:
 
 The command must abort if any provider fails to:
 
+- confirm target Artifact Registry Docker repositories enforce immutable tags for pushed runs
 - clone or check out the pinned commit
 - build
 - push

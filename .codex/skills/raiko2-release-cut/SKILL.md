@@ -89,9 +89,11 @@ Do not create the GitHub Release before requested release paths complete:
 
 1. Run the source runtime build, guest digest export, and release manifest steps from
    `docs/operations.md` -> `Source Releases`.
-2. For the default `full` profile, before writing release notes or creating the GitHub Release, run:
-   `cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z`
-   with `GCP_ENCLAVE_KEY_*` set as documented in `docs/operations.md`.
+2. For the default `full` profile, before writing release notes or creating the GitHub Release, run
+   the `Release - TEE provider images` GitHub Actions workflow, or an equivalent controlled
+   `release-tee-providers --tag vX.Y.Z` operation with `GCP_ENCLAVE_KEY_*` set as documented in
+   `docs/operations.md`. Publishing requires every target Artifact Registry Docker repository to
+   have immutable tags enabled; use `--no-push` only for local reproduction/smoke checks.
 3. Verify requested image refs exist in registry:
    - `us-docker.pkg.dev/evmchain/images/raiko2:vX.Y.Z`
    - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z`

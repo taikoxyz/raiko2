@@ -31,12 +31,16 @@ The operation has four independent gates:
 
 1. **Input identity:** resolve and record the host commit, guest release tag, and release commit.
 2. **Artifact identity:** require the restored directory to match the release tag and published
-   Shasta assets.
-3. **Compatibility:** run the guest provenance check. A source fingerprint mismatch is not proof of
-   incompatibility, but it blocks the automatic lane and requires explicit guest-facing diff review,
-   proposal regression, aggregation regression, and soundness approval.
-4. **Published-image identity:** verify the OCI revision label and packaged artifact hashes, then
-   report the immutable image digest.
+   Shasta asset inventory exactly, compare every published byte, and validate both backend
+   provenance manifests plus their separate complete artifact inventories and hashes and recompute
+   Shasta SP1 VKs without source closure.
+3. **Compatibility:** only after artifact identity succeeds, run the source-closure check. A source
+   fingerprint mismatch is not proof of incompatibility, but it blocks the automatic lane and
+   requires explicit guest-facing diff review, proposal regression, aggregation regression, and
+   soundness approval. The reviewed exception applies only to source drift.
+4. **Published-image identity:** require server-side immutable tags and a fail-closed unused-tag
+   preflight, then verify the tag resolves to the captured digest, the OCI revision label matches,
+   and the packaged artifacts match before reporting the immutable image digest.
 
 The operation stops at image publication. It does not register verifier digests, deploy the image,
 or perform Kubernetes operations.

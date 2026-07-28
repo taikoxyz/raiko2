@@ -607,8 +607,13 @@ set -Eeuo pipefail
 export HOST_REF=origin/main
 export ELF_TAG=vX.Y.Z
 export IMAGE_REPOSITORY=us-docker.pkg.dev/evmchain/images/raiko2
+export AR_PROJECT=evmchain
+export AR_LOCATION=us
+export AR_REPOSITORY=images
 
 test "${ELF_TAG}" != "vX.Y.Z"
+test "${IMAGE_REPOSITORY}" = \
+  "${AR_LOCATION}-docker.pkg.dev/${AR_PROJECT}/${AR_REPOSITORY}/raiko2"
 git fetch origin main --tags
 
 export HOST_SHA ELF_SHA HOST_SHORT COMPOSE_BRANCH COMPOSE_WORKTREE IMAGE_TAG
@@ -649,13 +654,31 @@ does not consume it as a runtime trust anchor.
 
 #### 3. Verify Release Artifact Identity
 
-Download the published Shasta assets into an ignored temporary directory and compare every byte with
-the tag checkout:
+Derive the expected Shasta asset names from the release tag, require the GitHub Release to publish
+that exact set, then download and compare every byte with the tag checkout:
 
 ```bash
 mkdir -p target/release-guest-verification
-export VERIFY_DIR
-VERIFY_DIR=$(mktemp -d "target/release-guest-verification/${ELF_TAG}.XXXXXXXX")
+export VERIFY_ROOT VERIFY_DIR EXPECTED_RELEASE_ASSETS ACTUAL_RELEASE_ASSETS
+VERIFY_ROOT=$(mktemp -d "target/release-guest-verification/${ELF_TAG}.XXXXXXXX")
+VERIFY_DIR="${VERIFY_ROOT}/downloads"
+EXPECTED_RELEASE_ASSETS="${VERIFY_ROOT}/release-assets.expected"
+ACTUAL_RELEASE_ASSETS="${VERIFY_ROOT}/release-assets.actual"
+mkdir -p "${VERIFY_DIR}"
+
+git ls-tree -r --name-only "${ELF_SHA}" -- crates/guests/elf \
+  | grep -E \
+    '^crates/guests/elf/(risc0_shasta_.*\.elf|sp1_shasta_.*\.(elf|vk\.bin))$' \
+  | sed 's#^crates/guests/elf/##' \
+  | sort > "${EXPECTED_RELEASE_ASSETS}"
+test -s "${EXPECTED_RELEASE_ASSETS}"
+
+gh release view "${ELF_TAG}" --repo taikoxyz/raiko2 \
+  --json assets --jq '.assets[].name' \
+  | grep -E '^(risc0_shasta_.*\.elf|sp1_shasta_.*\.(elf|vk\.bin))$' \
+  | sort > "${ACTUAL_RELEASE_ASSETS}"
+
+diff -u "${EXPECTED_RELEASE_ASSETS}" "${ACTUAL_RELEASE_ASSETS}"
 
 cargo run --locked -r -p xtask -- download-guest-elves \
   --tag "${ELF_TAG}" \
@@ -663,10 +686,10 @@ cargo run --locked -r -p xtask -- download-guest-elves \
   --backend all \
   --dir "${VERIFY_DIR}"
 
-for artifact in "${VERIFY_DIR}"/*; do
-  cmp -s "${artifact}" \
-    "crates/guests/elf/$(basename "${artifact}")"
-done
+while IFS= read -r artifact; do
+  test -f "${VERIFY_DIR}/${artifact}"
+  cmp -s "${VERIFY_DIR}/${artifact}" "crates/guests/elf/${artifact}"
+done < "${EXPECTED_RELEASE_ASSETS}"
 ```
 
 Any missing asset or byte mismatch is a hard stop. The GitHub Release assets, release tag, and
@@ -674,7 +697,45 @@ composition directory must identify the same programs.
 
 #### 4. Gate Host/Guest Compatibility
 
-Run the source-closure and provenance check:
+First validate both provenance manifests, each backend's exact inventory, every recorded artifact,
+and the Shasta SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
+prevents a source mismatch from hiding an artifact, manifest, or SP1 failure:
+
+```bash
+for backend in risc0 sp1; do
+  manifest="crates/guests/elf/${backend}.provenance.json"
+  provenance_artifacts="${VERIFY_ROOT}/${backend}.provenance-artifacts"
+  disk_artifacts="${VERIFY_ROOT}/${backend}.disk-artifacts"
+
+  jq -e --arg backend "${backend}" '
+    .schema_version == 1
+    and .backend == $backend
+    and .bench == false
+    and (.source_fingerprint | test("^[0-9a-f]{64}$"))
+    and ((.artifacts | type) == "object")
+    and ((.artifacts | length) > 0)
+    and ([.artifacts[] | test("^[0-9a-f]{64}$")] | all)
+  ' "${manifest}" >/dev/null
+
+  jq -r '.artifacts | to_entries[] | "\(.value)  \(.key)"' "${manifest}" \
+    | sha256sum --check --strict -
+
+  jq -r '.artifacts | keys[]' "${manifest}" \
+    | sort > "${provenance_artifacts}"
+
+  find crates/guests/elf -maxdepth 1 -type f \
+    \( -name "${backend}_*.elf" -o -name "${backend}_*.vk.bin" \) \
+    -printf '%p\n' \
+    | sort > "${disk_artifacts}"
+
+  diff -u "${provenance_artifacts}" "${disk_artifacts}"
+done
+
+cargo run --locked -r -p xtask-build-guest --bin guest-digests --features digests -- \
+  --output "${VERIFY_ROOT}/guest-digests-summary.json"
+```
+
+Only after the artifact-only pass succeeds, run the source-closure check:
 
 ```bash
 cargo run --locked -p xtask-build-guest --bin xtask-build-guest -- all --check
@@ -697,7 +758,8 @@ Record the regression inputs and request IDs in the PR. Artifact SHA-256 equalit
 consistency establish artifact identity; they do not establish protocol compatibility or soundness.
 The proof executes the old guest constraints, regardless of newer host-side validation.
 
-Any provenance failure other than an explicitly reviewed source fingerprint mismatch is a hard stop.
+The source-drift exception is available only after the artifact-only pass above succeeds for both
+backends. Any other provenance failure is a hard stop.
 
 #### 5. Commit The Auditable Pairing
 
@@ -729,8 +791,39 @@ git fetch origin main
 test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
 
 mkdir -p target/release-image-logs
-export RELEASE_LOG
+export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG IMMUTABLE_TAGS
+IMAGE_REF="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 RELEASE_LOG="target/release-image-logs/${IMAGE_TAG}.log"
+TAG_INSPECT_LOG=$(mktemp \
+  "target/release-image-logs/tag-inspect.${IMAGE_TAG}.XXXXXXXX")
+
+# The absence preflight is advisory against operator mistakes. Registry-side immutable tags close
+# the check/push race and are mandatory for this SOP.
+IMMUTABLE_TAGS=$(gcloud artifacts repositories describe "${AR_REPOSITORY}" \
+  --project "${AR_PROJECT}" \
+  --location "${AR_LOCATION}" \
+  --format='value(dockerConfig.immutableTags)')
+test "${IMMUTABLE_TAGS,,}" = "true"
+
+if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
+  echo "image tag already exists: ${IMAGE_REF}" >&2
+  exit 1
+fi
+
+# Accept only a registry response that conclusively means the tag is absent. Authentication,
+# authorization, connectivity, rate-limit, and server failures must stop the release.
+BLOCKING_TAG_ERROR_PATTERN='authenticat|authoriz|credential|denied|forbidden|permission|reauthentication|login|service unavailable|too many requests|timeout|timed out|deadline|request canceled|connection|temporary failure|network is unreachable|no route to host|dial tcp|i/o timeout|tls handshake|certificate|unexpected eof|500 internal server error|502 bad gateway|504 gateway timeout|(^|[[:space:]:])(429|503)([[:space:]:]|$)'
+if grep -Eqi "${BLOCKING_TAG_ERROR_PATTERN}" "${TAG_INSPECT_LOG}"; then
+  cat "${TAG_INSPECT_LOG}" >&2
+  exit 1
+fi
+
+if ! grep -Eqi \
+  'manifest unknown|no such manifest|name unknown|requested entity was not found|manifest .* not found' \
+  "${TAG_INSPECT_LOG}"; then
+  cat "${TAG_INSPECT_LOG}" >&2
+  exit 1
+fi
 
 just release-image host "${IMAGE_TAG}" "${IMAGE_REPOSITORY}" \
   --skip-guest-refresh 2>&1 | tee "${RELEASE_LOG}"
@@ -738,11 +831,20 @@ just release-image host "${IMAGE_TAG}" "${IMAGE_REPOSITORY}" \
 export DIGEST_REF
 DIGEST_REF=$(sed -n 's/^\[INFO\] Image pushed: //p' "${RELEASE_LOG}")
 test -n "${DIGEST_REF}"
+
+# Resolve the mutable tag's manifest directly from the registry and compare exactly.
+export TAG_MANIFEST_DIGEST
+TAG_MANIFEST_DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}" \
+  --format '{{json .Manifest}}' | jq -er '.digest')
+test "${IMAGE_REPOSITORY}@${TAG_MANIFEST_DIGEST}" = "${DIGEST_REF}"
+
 docker buildx imagetools inspect "${DIGEST_REF}"
 ```
 
 `host` already skips guest refresh by default; the explicit flag documents the composition
-decision. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
+decision. This SOP supports the default Google Artifact Registry repository shown above. A different
+registry requires an equivalent server-side immutable-tag guarantee and a fail-closed absence
+preflight. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
 
 #### 7. Verify The Published Image
 
@@ -775,8 +877,8 @@ Image digest:       <DIGEST_REF>
 Compatibility:      source-closure match, or reviewed exception with regression evidence
 ```
 
-If revision-label or packaged-artifact verification fails after push, mark the publication invalid
-and do not hand off its tag or digest.
+If tag-to-digest, revision-label, or packaged-artifact verification fails after push, mark the
+publication invalid and do not hand off its tag or digest.
 
 ## Register Guest Digests
 

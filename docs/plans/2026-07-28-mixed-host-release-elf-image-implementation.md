@@ -30,16 +30,19 @@ from the release tag.
 Require:
 
 - release tag and GitHub Release identity;
-- tag-directory equality and published Shasta asset equality;
-- provenance/source-closure check;
-- explicit reviewed exception handling for guest-facing source drift.
+- tag-directory equality and exact published Shasta asset inventory and byte equality;
+- artifact-only provenance, per-backend inventory, hash validation, and Shasta SP1 VK recomputation;
+- source-closure check after artifact-only validation;
+- explicit source-only reviewed exception handling for guest-facing source drift.
 
 State that digest and SP1 VK checks do not prove host/guest protocol or soundness compatibility.
 
 **Step 3: Document build and post-push verification**
 
-Commit only `crates/guests/elf`, run `just release-image host ... --skip-guest-refresh`, capture the
-immutable digest, and verify the image revision label and packaged artifact hashes.
+Commit only `crates/guests/elf`, require registry-side immutable tags, fail closed unless the image
+tag is conclusively absent, run `just release-image host ... --skip-guest-refresh`, capture the
+immutable digest, and verify tag-to-digest resolution, the image revision label, and packaged
+artifact hashes.
 
 ### Task 2: Update The Agent Skill
 
@@ -53,9 +56,10 @@ existing release reliably load the skill.
 
 **Step 2: Add a concise mandatory workflow**
 
-Require the composition branch, complete artifact directory, compatibility gate, clean commit,
-host build without refresh, and immutable output report. Link the full commands to
-`docs/operations.md`.
+Require the composition branch, exact release asset set, artifact-only provenance and SP1 VK
+validation for both backends, compatibility gate, clean commit, immutable registry tags,
+fail-closed tag absence, host build without refresh, and immutable output report. Link the full
+commands to `docs/operations.md`.
 
 **Step 3: Add explicit stop conditions**
 
@@ -87,8 +91,12 @@ all RISC0/SP1 artifacts from `vX.Y.Z`, without modifying files or deploying. Con
 
 - creates a named composition branch rather than a detached-only revision;
 - restores provenance with ELF/VK files;
+- exact-set checks the GitHub Release assets and validates both provenance manifests before source
+  closure;
 - distinguishes artifact identity from compatibility;
 - stops on unresolved guest-facing drift;
+- refuses mutable repositories, existing tags, and inconclusive registry errors;
+- verifies the published tag resolves to the captured digest;
 - ends after image publication and verification.
 
 **Step 3: Run static documentation checks**

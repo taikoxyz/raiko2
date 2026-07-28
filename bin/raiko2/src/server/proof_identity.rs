@@ -25,6 +25,7 @@ pub(crate) enum ZkProofIdentity {
     Risc0 {
         proposal_image_id: B256,
         aggregation_image_id: B256,
+        allow_mock_aggregate: bool,
     },
     Sp1 {
         proposal_vkey_digest: B256,
@@ -39,6 +40,15 @@ impl ZkProofIdentity {
         Self::Risc0 {
             proposal_image_id,
             aggregation_image_id,
+            allow_mock_aggregate: false,
+        }
+    }
+
+    pub(crate) const fn risc0_mock(proposal_image_id: B256, aggregation_image_id: B256) -> Self {
+        Self::Risc0 {
+            proposal_image_id,
+            aggregation_image_id,
+            allow_mock_aggregate: true,
         }
     }
 
@@ -79,9 +89,13 @@ impl ZkProofIdentity {
             Self::Risc0 {
                 proposal_image_id,
                 aggregation_image_id,
+                allow_mock_aggregate,
             } => {
                 if risc0_image_id_from_proof(proof)? != aggregation_image_id {
                     return Ok(false);
+                }
+                if allow_mock_aggregate && is_risc0_mock_aggregate(proof, aggregation_image_id) {
+                    return Ok(true);
                 }
                 let (actual_proposal, actual_aggregation) =
                     risc0_aggregate_program_ids_from_proof(proof)?;
@@ -399,6 +413,28 @@ fn risc0_aggregate_program_ids_from_proof(proof: &Proof) -> Result<(B256, B256),
 }
 
 #[cfg(feature = "host")]
+fn is_risc0_mock_aggregate(proof: &Proof, expected_image_id: B256) -> bool {
+    let Some(metadata) = proof
+        .extra_data
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let image_id = metadata
+        .get("image_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|image_id| image_id.parse::<B256>().ok());
+    metadata.get("zkvm").and_then(serde_json::Value::as_str) == Some("risc0")
+        && metadata.get("mode").and_then(serde_json::Value::as_str) == Some("mock")
+        && metadata
+            .get("fake_receipt")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && image_id == Some(expected_image_id)
+}
+
+#[cfg(feature = "host")]
 fn sp1_aggregate_program_ids_from_proof(proof: &Proof) -> Result<(B256, B256), String> {
     let bytes = aggregate_proof_prefix(proof, "SP1")?;
     Ok((
@@ -710,6 +746,53 @@ mod tests {
             !identity
                 .matches_cached_final_aggregate(&wrong_aggregation)
                 .expect("reject aggregate with a stale RISC0 aggregation image")
+        );
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn risc0_mock_final_aggregate_requires_the_current_aggregation_image_id() {
+        let proposal_image_id = B256::repeat_byte(0x11);
+        let aggregation_image_id = B256::repeat_byte(0x22);
+        let identity = ZkProofIdentity::risc0_mock(proposal_image_id, aggregation_image_id);
+        let mock_aggregate = Proof {
+            uuid: Some(format!("{aggregation_image_id:#x}")),
+            // Fake receipts encode only the journal, so this deliberately lacks the seal suffix
+            // that carries the proposal and aggregation program identifiers.
+            proof: Some(format!("0x{}", hex::encode([0_u8; 64]))),
+            extra_data: Some(serde_json::json!({
+                "zkvm": "risc0",
+                "mode": "mock",
+                "fake_receipt": true,
+                "image_id": format!("{aggregation_image_id:#x}"),
+            })),
+            ..Proof::default()
+        };
+        let wrong_image = Proof {
+            uuid: Some(format!("{:#x}", B256::repeat_byte(0x33))),
+            extra_data: Some(serde_json::json!({
+                "zkvm": "risc0",
+                "mode": "mock",
+                "fake_receipt": true,
+                "image_id": format!("{:#x}", B256::repeat_byte(0x33)),
+            })),
+            ..mock_aggregate.clone()
+        };
+
+        assert!(
+            identity
+                .matches_cached_final_aggregate(&mock_aggregate)
+                .expect("accept the configured fake RISC0 aggregate")
+        );
+        assert!(
+            !identity
+                .matches_cached_final_aggregate(&wrong_image)
+                .expect("reject a fake aggregate from another guest image")
+        );
+        assert!(
+            !ZkProofIdentity::risc0(proposal_image_id, aggregation_image_id)
+                .matches_cached_final_aggregate(&mock_aggregate)
+                .expect("non-mock RISC0 must not accept a journal-only aggregate")
         );
     }
 

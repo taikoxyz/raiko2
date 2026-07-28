@@ -299,15 +299,19 @@ fn remote_sgx_identity(expected: Option<SgxInstanceIdentity>) -> RemoteSgxIdenti
 }
 
 #[cfg(feature = "host")]
-fn risc0_proof_identity(backend: &Risc0ShastaBackend) -> Result<ZkProofIdentity> {
+fn risc0_proof_identity(
+    backend: &Risc0ShastaBackend,
+    allow_mock_aggregate: bool,
+) -> Result<ZkProofIdentity> {
     let proposal_image_id =
         risc0_image_id_from_elf(backend.elf(ProofStage::Proposal)?).map_err(anyhow::Error::msg)?;
     let aggregation_image_id = risc0_image_id_from_elf(backend.elf(ProofStage::Aggregation)?)
         .map_err(anyhow::Error::msg)?;
-    Ok(ZkProofIdentity::risc0(
-        proposal_image_id,
-        aggregation_image_id,
-    ))
+    Ok(if allow_mock_aggregate {
+        ZkProofIdentity::risc0_mock(proposal_image_id, aggregation_image_id)
+    } else {
+        ZkProofIdentity::risc0(proposal_image_id, aggregation_image_id)
+    })
 }
 
 #[cfg(feature = "host")]
@@ -365,6 +369,7 @@ fn build_proof_identity_registry(
                         .as_ref()
                         .expect("RISC0 route requires Shasta backends")
                         .risc0,
+                    config.prover.risc0.mock,
                 )?,
             ),
             #[cfg(feature = "host")]
@@ -380,7 +385,10 @@ fn build_proof_identity_registry(
                     .boundless_backend
                     .as_ref()
                     .expect("Boundless route requires a RISC0 backend");
-                identities.insert_zk(registration.pipeline_key, risc0_proof_identity(backend)?);
+                identities.insert_zk(
+                    registration.pipeline_key,
+                    risc0_proof_identity(backend, false)?,
+                );
             }
             #[cfg(feature = "host")]
             PipelineKey::ShastaSp1 => {

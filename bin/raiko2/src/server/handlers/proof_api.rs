@@ -18,8 +18,8 @@ use raiko2_prover::sp1_config::{
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_queue::RootOwner;
 use raiko2_runtime::{
-    RunnerStatus as RuntimeRunnerStatus, RuntimeManager, RuntimeMutationOutcome, TaskRegistration,
-    TaskRegistrationOutcome,
+    ProofArtifactPrecondition, RunnerStatus as RuntimeRunnerStatus, RuntimeManager,
+    RuntimeMutationOutcome, TaskRegistration, TaskRegistrationOutcome,
 };
 use std::sync::Arc;
 use std::{
@@ -846,6 +846,18 @@ async fn register_external_aggregate_task(
     submission: &ExternalAggregateSubmission,
     aggregate: &PlannedAggregateTask,
 ) -> Result<TaskRegistrationOutcome, ApiError> {
+    let registration = build_external_aggregate_task_registration(submission, aggregate)?;
+    state
+        .runtime
+        .register_task_if_absent(registration)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+}
+
+fn build_external_aggregate_task_registration(
+    submission: &ExternalAggregateSubmission,
+    aggregate: &PlannedAggregateTask,
+) -> Result<TaskRegistration, ApiError> {
     let requested_proof_type = submission.route.proof_type();
     let requested_proof_type = requested_proof_type.to_string();
     let mut metadata = build_task_metadata(
@@ -864,25 +876,22 @@ async fn register_external_aggregate_task(
         &[],
         Some(aggregate),
     );
-    metadata.aggregate_input_artifacts = submission.input_artifacts.clone();
+    metadata
+        .aggregate_input_artifacts
+        .clone_from(&submission.input_artifacts);
     let artifact_refs = publication_proof_artifact_refs(&metadata, submission.route.pipeline_key());
 
-    state
-        .runtime
-        .register_task_if_absent(TaskRegistration {
-            task_id: submission.public_task_id.clone(),
-            pipeline_key: submission.route.pipeline_key(),
-            route: submission.route.route,
-            task_kind: "hoodi_aggregate".to_string(),
-            network_pair: submission.pair.key.clone(),
-            artifact_refs,
-            metadata: serde_json::to_value(metadata).map_err(|err| {
-                ApiError::internal(format!("failed to serialize metadata: {err}"))
-            })?,
-            request_fingerprint: submission.request_fingerprint.clone(),
-        })
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+    Ok(TaskRegistration {
+        task_id: submission.public_task_id.clone(),
+        pipeline_key: submission.route.pipeline_key(),
+        route: submission.route.route,
+        task_kind: "hoodi_aggregate".to_string(),
+        network_pair: submission.pair.key.clone(),
+        artifact_refs,
+        metadata: serde_json::to_value(metadata)
+            .map_err(|err| ApiError::internal(format!("failed to serialize metadata: {err}")))?,
+        request_fingerprint: submission.request_fingerprint.clone(),
+    })
 }
 
 const fn external_aggregate_inputs_need_persistence(outcome: &TaskRegistrationOutcome) -> bool {
@@ -1033,6 +1042,18 @@ fn execution_plan(plan: &SubmissionPlan) -> EngineExecutionPlan {
     }
 }
 
+fn external_aggregate_execution_plan(
+    submission: &ExternalAggregateSubmission,
+) -> EngineExecutionPlan {
+    EngineExecutionPlan {
+        proposals: Vec::new(),
+        aggregate: Some(EngineAggregationPlan {
+            request: submission.request.clone(),
+            inputs: submission.inputs.clone(),
+        }),
+    }
+}
+
 async fn attach_submission_plan(
     state: &AppState,
     engine: &Arc<dyn EngineHandle>,
@@ -1047,6 +1068,7 @@ async fn attach_submission_plan(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_existing_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
@@ -1078,6 +1100,13 @@ async fn handle_existing_batch_task(
         state.proof_identities.as_ref(),
     )
     .await?;
+    let stale_root_artifact = stale_completed_root_artifact_precondition(
+        state.runtime.as_ref(),
+        &existing,
+        &existing_metadata,
+        missing_completed_artifact,
+    )
+    .await?;
     telemetry::record_duplicate_request(
         &MetricContext::new(
             submission.route.route.to_string(),
@@ -1095,6 +1124,7 @@ async fn handle_existing_batch_task(
             submission,
             &existing,
             replacement_request_fingerprint,
+            stale_root_artifact.as_ref(),
         )
         .await;
     }
@@ -1129,6 +1159,7 @@ async fn handle_existing_batch_task(
                     submission,
                     &existing,
                     replacement_request_fingerprint,
+                    stale_root_artifact.as_ref(),
                 )
                 .await;
             }
@@ -1145,6 +1176,7 @@ async fn handle_existing_batch_task(
                     submission,
                     &existing,
                     replacement_request_fingerprint,
+                    stale_root_artifact.as_ref(),
                 )
                 .await;
             }
@@ -1170,6 +1202,7 @@ async fn replace_existing_batch_task(
     submission: &CanonicalBatchSubmission,
     existing: &raiko2_runtime::RuntimeTaskRecord,
     replacement_request_fingerprint: Option<&str>,
+    stale_root_artifact: Option<&ProofArtifactPrecondition>,
 ) -> Result<Response, ApiError> {
     let request_fingerprint = replacement_request_fingerprint
         .map(ToOwned::to_owned)
@@ -1186,12 +1219,25 @@ async fn replace_existing_batch_task(
     let plan = build_submission_plan(submission, &request_fingerprint)?;
     let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())?;
     let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
-    let Some(_replacement) = state
-        .lifecycle
-        .replace(existing, registration, &[], &engine, execution_plan(&plan))
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?
-    else {
+    let replacement = if let Some(stale_root_artifact) = stale_root_artifact {
+        state
+            .lifecycle
+            .replace_and_invalidate_artifact(
+                existing,
+                registration,
+                stale_root_artifact,
+                &engine,
+                execution_plan(&plan),
+            )
+            .await
+    } else {
+        state
+            .lifecycle
+            .replace(existing, registration, &[], &engine, execution_plan(&plan))
+            .await
+    }
+    .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?;
+    let Some(_replacement) = replacement else {
         let matching = state
             .runtime
             .find_task_by_request_fingerprint(&request_fingerprint)
@@ -1355,7 +1401,7 @@ fn registered_batch_response(submission: &CanonicalBatchSubmission) -> Response 
 
 async fn handle_existing_external_aggregate_task(
     state: &AppState,
-    _engine: &Arc<dyn EngineHandle>,
+    engine: &Arc<dyn EngineHandle>,
     submission: &ExternalAggregateSubmission,
     existing: raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
@@ -1382,6 +1428,13 @@ async fn handle_existing_external_aggregate_task(
         &existing,
         &existing_metadata,
         state.proof_identities.as_ref(),
+    )
+    .await?;
+    let stale_root_artifact = stale_completed_root_artifact_precondition(
+        state.runtime.as_ref(),
+        &existing,
+        &existing_metadata,
+        missing_completed_artifact,
     )
     .await?;
     telemetry::record_duplicate_request(
@@ -1418,14 +1471,70 @@ async fn handle_existing_external_aggregate_task(
                 return compatibility_response_for_task(state, &existing.task_id).await;
             }
             ExistingTaskRecovery::TaskChanged => {
-                return Err(ApiError::internal(format!(
-                    "task {} changed while recovering its missing completed artifact",
-                    existing.task_id
-                )));
+                return replace_existing_external_aggregate_task(
+                    state,
+                    engine,
+                    submission,
+                    &existing,
+                    stale_root_artifact.as_ref(),
+                )
+                .await;
             }
         }
     }
     compatibility_response_for_task(state, &existing.task_id).await
+}
+
+async fn replace_existing_external_aggregate_task(
+    state: &AppState,
+    engine: &Arc<dyn EngineHandle>,
+    submission: &ExternalAggregateSubmission,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    stale_root_artifact: Option<&ProofArtifactPrecondition>,
+) -> Result<Response, ApiError> {
+    let aggregate = planned_external_aggregate_task(state.runtime.as_ref(), submission).await?;
+    let registration = build_external_aggregate_task_registration(submission, &aggregate)?;
+    let replacement_plan = external_aggregate_execution_plan(submission);
+    let replacement = if let Some(stale_root_artifact) = stale_root_artifact {
+        state
+            .lifecycle
+            .replace_and_invalidate_artifact(
+                existing,
+                registration,
+                stale_root_artifact,
+                engine,
+                replacement_plan,
+            )
+            .await
+    } else {
+        state
+            .lifecycle
+            .replace(existing, registration, &[], engine, replacement_plan)
+            .await
+    }
+    .map_err(|err| ApiError::internal(format!("failed to replace aggregate task: {err}")))?;
+    if replacement.is_some() {
+        return Ok(registered_external_aggregate_response(submission));
+    }
+
+    let current = state
+        .runtime
+        .get_task(&submission.public_task_id)
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to load concurrent aggregate replacement: {err}"
+            ))
+        })?;
+    if let Some(current) = current
+        && current.request_fingerprint == submission.request_fingerprint
+    {
+        return compatibility_response_for_task(state, &current.task_id).await;
+    }
+    Err(ApiError::conflict(format!(
+        "task {} changed to a different request while aggregate replacement was in progress",
+        submission.public_task_id
+    )))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1819,20 +1928,14 @@ async fn handle_created_external_aggregate_task(
         .ok_or_else(|| ApiError::internal("registered runtime task disappeared"))?;
     state
         .lifecycle
-        .attach(
-            &root,
-            engine,
-            EngineExecutionPlan {
-                proposals: Vec::new(),
-                aggregate: Some(EngineAggregationPlan {
-                    request: submission.request.clone(),
-                    inputs: submission.inputs.clone(),
-                }),
-            },
-        )
+        .attach(&root, engine, external_aggregate_execution_plan(submission))
         .await
         .map_err(|err| ApiError::internal(format!("failed to attach aggregation plan: {err}")))?;
 
+    Ok(registered_external_aggregate_response(submission))
+}
+
+fn registered_external_aggregate_response(submission: &ExternalAggregateSubmission) -> Response {
     telemetry::record_request_registered(
         &MetricContext::new(
             submission.route.route.to_string(),
@@ -1843,11 +1946,11 @@ async fn handle_created_external_aggregate_task(
         true,
     );
 
-    Ok(registered_response(
+    registered_response(
         BatchProofType::from_canonical(submission.route.proof_type()),
         submission.public_task_id.clone(),
     )
-    .into_response())
+    .into_response()
 }
 
 async fn load_task_data(state: &AppState, id: &str) -> Result<TaskData, ApiError> {
@@ -3135,6 +3238,41 @@ async fn completed_root_artifact_missing(
         "completed runtime task is missing proof artifact; treating it as stale"
     );
     Ok(true)
+}
+
+async fn stale_completed_root_artifact_precondition(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+    missing_completed_artifact: bool,
+) -> Result<Option<ProofArtifactPrecondition>, ApiError> {
+    if !missing_completed_artifact {
+        return Ok(None);
+    }
+    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
+        return Ok(None);
+    };
+    let [proof_ref] = root_refs.refs.as_slice() else {
+        return Err(ApiError::internal(format!(
+            "completed task {} has an unsupported root artifact shape",
+            record.task_id
+        )));
+    };
+    runtime
+        .get_proof_artifact(
+            &record.network_pair,
+            record.pipeline_key,
+            record.route,
+            proof_ref,
+        )
+        .await
+        .map(|artifact| artifact.map(|artifact| artifact.precondition()))
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "failed to load stale root artifact for task {}: {error}",
+                record.task_id
+            ))
+        })
 }
 
 const fn duplicate_runner_status_label(
@@ -4866,6 +5004,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_duplicate_invalidates_an_active_stale_root_artifact() -> Result<()> {
+        let route = native_local_route();
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "completed-stale-root-artifact-replacement",
+        ))?);
+        let submission = canonical_submission(route, false);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &request_fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let mut existing = runtime
+            .register_task(
+                build_batch_task_registration(&submission, &plan, &request_fingerprint)
+                    .map_err(|error| anyhow!(error.message))?,
+            )
+            .await?;
+        let proof_ref = plan.proposals[0].task_ref.clone();
+        write_test_proof_artifact(
+            &runtime,
+            &submission.pair.key,
+            &proof_ref,
+            &valid_native_proof(),
+        )
+        .await?;
+        let active = runtime
+            .get_proof_artifact(
+                &submission.pair.key,
+                existing.pipeline_key,
+                existing.route,
+                &proof_ref,
+            )
+            .await?
+            .context("active root artifact")?;
+        existing.runner_status = RuntimeRunnerStatus::Completed;
+        existing.proof_uri = Some(active.proof_uri.clone());
+        runtime.upsert_task(&existing).await?;
+        runtime
+            .delete_proof_artifact(
+                &active.network_pair,
+                active.pipeline_key,
+                active.route,
+                &active.proof_ref,
+                active.generation,
+                &active.content_hash,
+            )
+            .await?;
+
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state(Arc::clone(&runtime), recorder);
+        let response = handle_existing_batch_task(&state, &submission, existing.clone(), None)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+
+        assert!(!response_is_completed(&response));
+        assert!(
+            runtime
+                .get_proof_artifact(
+                    &active.network_pair,
+                    active.pipeline_key,
+                    active.route,
+                    &active.proof_ref,
+                )
+                .await?
+                .is_none()
+        );
+        let invalidated = runtime
+            .get_proof_artifact_including_invalidated(
+                &active.network_pair,
+                active.pipeline_key,
+                active.route,
+                &active.proof_ref,
+            )
+            .await?
+            .context("invalidated stale root artifact")?;
+        assert_eq!(
+            invalidated.lifecycle,
+            raiko2_runtime::ProofArtifactLifecycle::Invalidated
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_external_aggregate_with_missing_artifact_is_replaced() -> Result<()> {
+        let route = native_local_route();
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "completed-external-aggregate-missing-artifact",
+        ))?);
+        let proof = valid_native_proof();
+        let pair = resolved_pair();
+        let request_fingerprint = "external-aggregate-missing-artifact".to_string();
+        let request = AggregationTaskRequest {
+            request_id: "aggregate-request".to_string(),
+            proposal_ids: vec![1],
+            prover_config: ProverTaskConfig::default(),
+        };
+        let prepared =
+            prepare_external_aggregate_inputs(&pair.key, route, &request_fingerprint, &[proof])
+                .map_err(|error| anyhow!(error.message))?;
+        let submission = ExternalAggregateSubmission {
+            pair,
+            route,
+            prover_type: None,
+            public_task_id: "external-aggregate-root".to_string(),
+            request,
+            inputs: prepared.inputs,
+            input_artifacts: prepared.artifacts,
+            input_bytes: prepared.bytes,
+            request_fingerprint,
+        };
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state(Arc::clone(&runtime), recorder.clone());
+        let aggregate = planned_external_aggregate_task(runtime.as_ref(), &submission)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        let mut registration = register_external_aggregate_task(&state, &submission, &aggregate)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        persist_registered_external_aggregate_inputs(&state, &submission, &mut registration)
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        let mut existing = match registration {
+            TaskRegistrationOutcome::Created(record) => record,
+            TaskRegistrationOutcome::Existing(_) => unreachable!("new external aggregate root"),
+        };
+        write_test_proof_artifact(
+            &runtime,
+            &submission.pair.key,
+            &aggregate.task_ref,
+            &valid_native_proof(),
+        )
+        .await?;
+        let active = runtime
+            .get_proof_artifact(
+                &submission.pair.key,
+                existing.pipeline_key,
+                existing.route,
+                &aggregate.task_ref,
+            )
+            .await?
+            .context("active external aggregate root artifact")?;
+        existing.runner_status = RuntimeRunnerStatus::Completed;
+        existing.proof_uri = Some(active.proof_uri.clone());
+        runtime.upsert_task(&existing).await?;
+        runtime
+            .delete_proof_artifact(
+                &active.network_pair,
+                active.pipeline_key,
+                active.route,
+                &active.proof_ref,
+                active.generation,
+                &active.content_hash,
+            )
+            .await?;
+
+        let response = handle_existing_external_aggregate_task(
+            &state,
+            &(recorder.clone() as Arc<dyn EngineHandle>),
+            &submission,
+            existing.clone(),
+        )
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+
+        assert!(!response_is_completed(&response));
+        let replacement = runtime
+            .get_task(&existing.task_id)
+            .await?
+            .context("replacement external aggregate root")?;
+        assert_ne!(replacement.incarnation_id, existing.incarnation_id);
+        assert_eq!(replacement.runner_status, RuntimeRunnerStatus::Allocated);
+        assert_eq!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &active.network_pair,
+                    active.pipeline_key,
+                    active.route,
+                    &active.proof_ref,
+                )
+                .await?
+                .context("invalidated external aggregate root artifact")?
+                .lifecycle,
+            raiko2_runtime::ProofArtifactLifecycle::Invalidated
+        );
+        assert_eq!(
+            recorder
+                .aggregate_inputs
+                .lock()
+                .expect("aggregate inputs")
+                .as_slice(),
+            submission.inputs.as_slice(),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn active_allocated_duplicate_is_not_reenqueued() -> Result<()> {
         let route = native_local_route();
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
@@ -5909,10 +6241,15 @@ mod tests {
         runtime.upsert_task(&occupying).await?;
 
         let state = test_state(Arc::clone(&runtime), Arc::new(RecordingEngine::new()));
-        let error =
-            replace_existing_batch_task(&state, &submission, &stale, Some(&request_fingerprint))
-                .await
-                .expect_err("a stale replacement must not adopt another request");
+        let error = replace_existing_batch_task(
+            &state,
+            &submission,
+            &stale,
+            Some(&request_fingerprint),
+            None,
+        )
+        .await
+        .expect_err("a stale replacement must not adopt another request");
 
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert_eq!(

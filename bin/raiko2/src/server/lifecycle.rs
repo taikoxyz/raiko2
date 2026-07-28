@@ -174,20 +174,70 @@ impl ProofLifecycle {
         replacement_engine: &Arc<dyn EngineHandle>,
         replacement_plan: EngineExecutionPlan,
     ) -> Result<Option<RuntimeTaskRecord>> {
+        self.replace_inner(
+            expected,
+            registration,
+            artifact_preconditions,
+            None,
+            replacement_engine,
+            replacement_plan,
+        )
+        .await
+    }
+
+    /// Replaces a completed root only after fencing the exact stale canonical artifact that made
+    /// the root unreadable to this host.
+    pub(crate) async fn replace_and_invalidate_artifact(
+        &self,
+        expected: &RuntimeTaskRecord,
+        registration: TaskRegistration,
+        stale_artifact: &ProofArtifactPrecondition,
+        replacement_engine: &Arc<dyn EngineHandle>,
+        replacement_plan: EngineExecutionPlan,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        self.replace_inner(
+            expected,
+            registration,
+            &[],
+            Some(stale_artifact),
+            replacement_engine,
+            replacement_plan,
+        )
+        .await
+    }
+
+    async fn replace_inner(
+        &self,
+        expected: &RuntimeTaskRecord,
+        registration: TaskRegistration,
+        artifact_preconditions: &[ProofArtifactPrecondition],
+        stale_artifact: Option<&ProofArtifactPrecondition>,
+        replacement_engine: &Arc<dyn EngineHandle>,
+        replacement_plan: EngineExecutionPlan,
+    ) -> Result<Option<RuntimeTaskRecord>> {
         let previous_engine = self
             .pipelines
             .get(&expected.network_pair, expected.pipeline_key);
         let gate = self.runtime.execution_lifecycle_gate();
         let gate_guard = gate.lock().await;
-        let Some(replacement) = self
-            .runtime
-            .replace_task_if_unchanged_with_artifact_preconditions(
-                expected,
-                registration,
-                artifact_preconditions,
-            )
-            .await?
-        else {
+        let replacement = if let Some(stale_artifact) = stale_artifact {
+            self.runtime
+                .replace_task_if_unchanged_and_invalidate_artifact(
+                    expected,
+                    registration,
+                    stale_artifact,
+                )
+                .await?
+        } else {
+            self.runtime
+                .replace_task_if_unchanged_with_artifact_preconditions(
+                    expected,
+                    registration,
+                    artifact_preconditions,
+                )
+                .await?
+        };
+        let Some(replacement) = replacement else {
             return Ok(None);
         };
 

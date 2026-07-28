@@ -1557,6 +1557,7 @@ async fn submit_submission(
                     submission,
                     &existing,
                     Some(request_fingerprint),
+                    None,
                 )
                 .await
                 .map_err(Error::from_api_error)?;

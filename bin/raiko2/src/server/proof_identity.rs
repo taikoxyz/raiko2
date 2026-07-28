@@ -94,8 +94,9 @@ impl ZkProofIdentity {
                 if risc0_image_id_from_proof(proof)? != aggregation_image_id {
                     return Ok(false);
                 }
-                if allow_mock_aggregate && is_risc0_mock_aggregate(proof, aggregation_image_id) {
-                    return Ok(true);
+                if allow_mock_aggregate && is_risc0_mock_aggregate(proof) {
+                    return Ok(risc0_mock_aggregate_program_ids(proof)
+                        == Some((proposal_image_id, aggregation_image_id)));
                 }
                 let (actual_proposal, actual_aggregation) =
                     risc0_aggregate_program_ids_from_proof(proof)?;
@@ -199,7 +200,7 @@ impl ProofIdentityRegistry {
         }
     }
 
-    /// Learns a remote identity only after the corresponding root artifact has fully finalized.
+    /// Learns a remote identity only after a canonical proof artifact has fully finalized.
     pub(crate) fn learn_remote_sgx_after_finalization(
         &self,
         pipeline_key: PipelineKey,
@@ -408,15 +409,69 @@ fn sp1_vkey_digest_from_proof(proof: &Proof) -> Result<B256, String> {
 
 #[cfg(feature = "host")]
 fn risc0_aggregate_program_ids_from_proof(proof: &Proof) -> Result<(B256, B256), String> {
-    let bytes = aggregate_proof_suffix(proof, "RISC0")?;
+    let bytes = aggregate_proof_prefix(proof, "RISC0")?;
+    let dynamic_offset = abi_word_as_usize(
+        bytes
+            .get(..32)
+            .ok_or_else(|| "invalid RISC0 aggregate proof head".to_string())?,
+        "seal offset",
+    )?;
+    if dynamic_offset != 96 {
+        return Err(format!(
+            "invalid RISC0 aggregate proof seal offset: got {dynamic_offset} expected 96"
+        ));
+    }
+    let seal_length_end = dynamic_offset
+        .checked_add(32)
+        .ok_or_else(|| "invalid RISC0 aggregate proof seal offset overflow".to_string())?;
+    let seal_length = abi_word_as_usize(
+        bytes
+            .get(dynamic_offset..seal_length_end)
+            .ok_or_else(|| "invalid RISC0 aggregate proof seal length".to_string())?,
+        "seal length",
+    )?;
+    let padded_seal_length = seal_length
+        .checked_add(31)
+        .map(|length| length / 32 * 32)
+        .ok_or_else(|| "invalid RISC0 aggregate proof seal length overflow".to_string())?;
+    let expected_length = seal_length_end
+        .checked_add(padded_seal_length)
+        .ok_or_else(|| "invalid RISC0 aggregate proof length overflow".to_string())?;
+    if bytes.len() != expected_length {
+        return Err(format!(
+            "invalid RISC0 aggregate proof length: got {} expected {expected_length}",
+            bytes.len()
+        ));
+    }
     Ok((
-        B256::from_slice(&bytes[..32]),
         B256::from_slice(&bytes[32..64]),
+        B256::from_slice(&bytes[64..96]),
     ))
 }
 
 #[cfg(feature = "host")]
-fn is_risc0_mock_aggregate(proof: &Proof, expected_image_id: B256) -> bool {
+fn abi_word_as_usize(word: &[u8], field: &str) -> Result<usize, String> {
+    if word.len() != 32 {
+        return Err(format!(
+            "invalid RISC0 aggregate proof {field}: expected a 32-byte ABI word"
+        ));
+    }
+    if word[..24].iter().any(|byte| *byte != 0) {
+        return Err(format!(
+            "invalid RISC0 aggregate proof {field}: value does not fit usize"
+        ));
+    }
+    let value = u64::from_be_bytes(
+        word[24..]
+            .try_into()
+            .expect("the final ABI word bytes always have length eight"),
+    );
+    usize::try_from(value)
+        .map_err(|_| format!("invalid RISC0 aggregate proof {field}: value does not fit usize"))
+}
+
+#[cfg(feature = "host")]
+fn is_risc0_mock_aggregate(proof: &Proof) -> bool {
     let Some(metadata) = proof
         .extra_data
         .as_ref()
@@ -424,17 +479,29 @@ fn is_risc0_mock_aggregate(proof: &Proof, expected_image_id: B256) -> bool {
     else {
         return false;
     };
-    let image_id = metadata
-        .get("image_id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|image_id| image_id.parse::<B256>().ok());
     metadata.get("zkvm").and_then(serde_json::Value::as_str) == Some("risc0")
         && metadata.get("mode").and_then(serde_json::Value::as_str) == Some("mock")
         && metadata
             .get("fake_receipt")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
-        && image_id == Some(expected_image_id)
+}
+
+#[cfg(feature = "host")]
+fn risc0_mock_aggregate_program_ids(proof: &Proof) -> Option<(B256, B256)> {
+    let metadata = proof
+        .extra_data
+        .as_ref()
+        .and_then(serde_json::Value::as_object)?;
+    let proposal_image_id = metadata
+        .get("proposal_image_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|image_id| image_id.parse::<B256>().ok())?;
+    let aggregation_image_id = metadata
+        .get("image_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|image_id| image_id.parse::<B256>().ok())?;
+    Some((proposal_image_id, aggregation_image_id))
 }
 
 #[cfg(feature = "host")]
@@ -464,12 +531,6 @@ fn aggregate_proof_prefix(proof: &Proof, backend: &str) -> Result<Vec<u8>, Strin
 }
 
 #[cfg(feature = "host")]
-fn aggregate_proof_suffix(proof: &Proof, backend: &str) -> Result<Vec<u8>, String> {
-    let bytes = aggregate_proof_prefix(proof, backend)?;
-    Ok(bytes[bytes.len() - 64..].to_vec())
-}
-
-#[cfg(feature = "host")]
 fn parse_b256_uuid(raw: Option<&str>, name: &str) -> Result<B256, String> {
     let raw = raw.ok_or_else(|| format!("proof is missing {name}"))?;
     raw.parse::<B256>()
@@ -493,6 +554,8 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::server::proof_artifact::ProofArtifactPayload;
     #[cfg(feature = "host")]
+    use alloy::sol_types::SolValue;
+    #[cfg(feature = "host")]
     use alloy_primitives::B256;
 
     fn proof(id: u32, address: Address) -> Proof {
@@ -503,6 +566,18 @@ mod tests {
             proof: Some(format!("0x{}", hex::encode(bytes))),
             ..Proof::default()
         }
+    }
+
+    #[cfg(feature = "host")]
+    fn risc0_aggregation_seal_payload(
+        seal: &[u8],
+        proposal_image_id: B256,
+        aggregation_image_id: B256,
+    ) -> String {
+        // This mirrors the RISC0 ABI payload encoder: remove the outer tuple offset, while
+        // retaining the inner dynamic-bytes head before the two program identifiers.
+        let encoded = (seal.to_vec(), proposal_image_id, aggregation_image_id).abi_encode();
+        hex::encode_prefixed(&encoded[32..])
     }
 
     #[test]
@@ -704,57 +779,56 @@ mod tests {
         let proposal_image_id = B256::repeat_byte(0x11);
         let aggregation_image_id = B256::repeat_byte(0x22);
         let identity = ZkProofIdentity::risc0(proposal_image_id, aggregation_image_id);
-        let matching = Proof {
-            uuid: Some(format!("{aggregation_image_id:#x}")),
-            proof: Some(format!(
-                "0x{}{}{}",
-                hex::encode([0x99; 32]),
-                hex::encode(proposal_image_id),
-                hex::encode(aggregation_image_id)
-            )),
-            ..Proof::default()
-        };
-        let wrong_subproof = Proof {
-            uuid: matching.uuid.clone(),
-            proof: Some(format!(
-                "0x{}{}{}",
-                hex::encode([0x99; 32]),
-                hex::encode(B256::repeat_byte(0x33)),
-                hex::encode(aggregation_image_id)
-            )),
-            ..Proof::default()
-        };
-        let wrong_aggregation = Proof {
-            uuid: matching.uuid.clone(),
-            proof: Some(format!(
-                "0x{}{}{}",
-                hex::encode([0x99; 32]),
-                hex::encode(proposal_image_id),
-                hex::encode(B256::repeat_byte(0x33))
-            )),
-            ..Proof::default()
-        };
+        for seal in [vec![0x99; 3], vec![0x99; 65]] {
+            let matching = Proof {
+                uuid: Some(format!("{aggregation_image_id:#x}")),
+                proof: Some(risc0_aggregation_seal_payload(
+                    &seal,
+                    proposal_image_id,
+                    aggregation_image_id,
+                )),
+                ..Proof::default()
+            };
+            let wrong_subproof = Proof {
+                uuid: matching.uuid.clone(),
+                proof: Some(risc0_aggregation_seal_payload(
+                    &seal,
+                    B256::repeat_byte(0x33),
+                    aggregation_image_id,
+                )),
+                ..Proof::default()
+            };
+            let wrong_aggregation = Proof {
+                uuid: matching.uuid.clone(),
+                proof: Some(risc0_aggregation_seal_payload(
+                    &seal,
+                    proposal_image_id,
+                    B256::repeat_byte(0x33),
+                )),
+                ..Proof::default()
+            };
 
-        assert!(
-            identity
-                .matches_cached_final_aggregate(&matching)
-                .expect("match current RISC0 aggregate")
-        );
-        assert!(
-            !identity
-                .matches_cached_final_aggregate(&wrong_subproof)
-                .expect("reject aggregate with a stale RISC0 subproof image")
-        );
-        assert!(
-            !identity
-                .matches_cached_final_aggregate(&wrong_aggregation)
-                .expect("reject aggregate with a stale RISC0 aggregation image")
-        );
+            assert!(
+                identity
+                    .matches_cached_final_aggregate(&matching)
+                    .expect("match current RISC0 aggregate")
+            );
+            assert!(
+                !identity
+                    .matches_cached_final_aggregate(&wrong_subproof)
+                    .expect("reject aggregate with a stale RISC0 subproof image")
+            );
+            assert!(
+                !identity
+                    .matches_cached_final_aggregate(&wrong_aggregation)
+                    .expect("reject aggregate with a stale RISC0 aggregation image")
+            );
+        }
     }
 
     #[cfg(feature = "host")]
     #[test]
-    fn risc0_mock_final_aggregate_requires_the_current_aggregation_image_id() {
+    fn risc0_mock_final_aggregate_requires_both_current_image_ids() {
         let proposal_image_id = B256::repeat_byte(0x11);
         let aggregation_image_id = B256::repeat_byte(0x22);
         let identity = ZkProofIdentity::risc0_mock(proposal_image_id, aggregation_image_id);
@@ -768,6 +842,7 @@ mod tests {
                 "mode": "mock",
                 "fake_receipt": true,
                 "image_id": format!("{aggregation_image_id:#x}"),
+                "proposal_image_id": format!("{proposal_image_id:#x}"),
             })),
             ..Proof::default()
         };
@@ -778,6 +853,17 @@ mod tests {
                 "mode": "mock",
                 "fake_receipt": true,
                 "image_id": format!("{:#x}", B256::repeat_byte(0x33)),
+                "proposal_image_id": format!("{proposal_image_id:#x}"),
+            })),
+            ..mock_aggregate.clone()
+        };
+        let wrong_subproof = Proof {
+            extra_data: Some(serde_json::json!({
+                "zkvm": "risc0",
+                "mode": "mock",
+                "fake_receipt": true,
+                "image_id": format!("{aggregation_image_id:#x}"),
+                "proposal_image_id": format!("{:#x}", B256::repeat_byte(0x33)),
             })),
             ..mock_aggregate.clone()
         };
@@ -793,9 +879,15 @@ mod tests {
                 .expect("reject a fake aggregate from another guest image")
         );
         assert!(
-            !ZkProofIdentity::risc0(proposal_image_id, aggregation_image_id)
+            !identity
+                .matches_cached_final_aggregate(&wrong_subproof)
+                .expect("reject a fake aggregate from another proposal guest image")
+        );
+        assert!(
+            ZkProofIdentity::risc0(proposal_image_id, aggregation_image_id)
                 .matches_cached_final_aggregate(&mock_aggregate)
-                .expect("non-mock RISC0 must not accept a journal-only aggregate")
+                .is_err(),
+            "non-mock RISC0 must reject a journal-only aggregate"
         );
     }
 

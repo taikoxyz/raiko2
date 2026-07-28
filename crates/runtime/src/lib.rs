@@ -1156,9 +1156,77 @@ impl RuntimeManager {
         registration: TaskRegistration,
         artifact_preconditions: &[ProofArtifactPrecondition],
     ) -> Result<Option<RuntimeTaskRecord>> {
+        self.replace_task_if_unchanged_inner(expected, registration, artifact_preconditions, None)
+            .await
+    }
+
+    /// Atomically replaces one unchanged runtime-task snapshot and invalidates one exact active
+    /// canonical artifact before its successor can execute.
+    ///
+    /// The durable lifecycle transition happens before external object deletion. A failed object
+    /// deletion leaves the artifact fenced as invalidated, so a retry or startup reconciliation
+    /// cannot reuse it as a completed-cache hit.
+    pub async fn replace_task_if_unchanged_and_invalidate_artifact(
+        &self,
+        expected: &RuntimeTaskRecord,
+        registration: TaskRegistration,
+        stale_artifact: &ProofArtifactPrecondition,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        let stale_artifact = stale_artifact.clone();
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(
+                &stale_artifact.network_pair,
+                stale_artifact.pipeline_key,
+                stale_artifact.route,
+                &stale_artifact.proof_ref,
+            )
+            .lock()
+            .await;
+        let replacement = self
+            .replace_task_if_unchanged_inner(
+                expected,
+                registration,
+                &[],
+                Some(stale_artifact.clone()),
+            )
+            .await?;
+        if replacement.is_some()
+            && let Err(error) = self
+                .finalize_proof_artifact_invalidation(&ArtifactExpectation {
+                    key: Self::artifact_key(
+                        &stale_artifact.network_pair,
+                        stale_artifact.pipeline_key,
+                        stale_artifact.route,
+                        &stale_artifact.proof_ref,
+                    ),
+                    descriptor: stale_artifact.descriptor.clone(),
+                    lifecycle: ProofArtifactLifecycle::Invalidated,
+                })
+                .await
+        {
+            tracing::warn!(
+                network_pair = %stale_artifact.network_pair,
+                pipeline = %stale_artifact.pipeline_key,
+                route = %stale_artifact.route,
+                proof_ref = %stale_artifact.proof_ref,
+                %error,
+                "stale proof artifact is fenced; deferring external cleanup after task replacement"
+            );
+        }
+        Ok(replacement)
+    }
+
+    async fn replace_task_if_unchanged_inner(
+        &self,
+        expected: &RuntimeTaskRecord,
+        registration: TaskRegistration,
+        artifact_preconditions: &[ProofArtifactPrecondition],
+        stale_artifact: Option<ProofArtifactPrecondition>,
+    ) -> Result<Option<RuntimeTaskRecord>> {
         let record = build_task_record(&registration)?;
         let expected = expected.clone();
         let artifact_preconditions = artifact_preconditions.to_vec();
+        let stale_artifact = stale_artifact.clone();
         self.mutate(move |state| {
             let Some(current) = state.tasks.get(&expected.task_id) else {
                 return Ok(None);
@@ -1167,6 +1235,9 @@ impl RuntimeManager {
                 return Ok(None);
             }
             ensure_artifact_preconditions(state, &artifact_preconditions)?;
+            if let Some(stale_artifact) = &stale_artifact {
+                invalidate_active_artifact_precondition(state, stale_artifact)?;
+            }
             anyhow::ensure!(
                 record.task_id == expected.task_id || !state.tasks.contains_key(&record.task_id),
                 "replacement task id already belongs to another task"
@@ -3183,6 +3254,31 @@ fn ensure_artifact_preconditions(
     Ok(())
 }
 
+fn invalidate_active_artifact_precondition(
+    state: &mut RuntimeState,
+    expected: &ProofArtifactPrecondition,
+) -> Result<()> {
+    let key = artifact_record_key(
+        &expected.network_pair,
+        expected.pipeline_key,
+        expected.route,
+        &expected.proof_ref,
+    );
+    let artifact = state
+        .artifacts
+        .get_mut(&key)
+        .context("cached proof artifact disappeared before stale-root replacement")?;
+    anyhow::ensure!(
+        artifact.lifecycle == ProofArtifactLifecycle::Active
+            && artifact.descriptor() == expected.descriptor,
+        "cached proof artifact changed before stale-root replacement"
+    );
+    artifact.lifecycle = ProofArtifactLifecycle::Invalidated;
+    artifact.invalidated_at.get_or_insert_with(now_ts);
+    artifact.updated_at = now_ts();
+    Ok(())
+}
+
 fn ensure_task_fingerprint_available(
     state: &RuntimeState,
     record: &RuntimeTaskRecord,
@@ -3964,6 +4060,7 @@ mod tests {
         runtime_state_write_entered: tokio::sync::Notify,
         allow_runtime_state_write: tokio::sync::Notify,
         fail_next_artifact_put: AtomicBool,
+        fail_next_artifact_invalidation: AtomicBool,
         block_next_artifact_put: AtomicBool,
         artifact_put_entered: tokio::sync::Notify,
         allow_artifact_put: tokio::sync::Notify,
@@ -3988,6 +4085,7 @@ mod tests {
                 runtime_state_write_entered: tokio::sync::Notify::new(),
                 allow_runtime_state_write: tokio::sync::Notify::new(),
                 fail_next_artifact_put: AtomicBool::new(false),
+                fail_next_artifact_invalidation: AtomicBool::new(false),
                 block_next_artifact_put: AtomicBool::new(false),
                 artifact_put_entered: tokio::sync::Notify::new(),
                 allow_artifact_put: tokio::sync::Notify::new(),
@@ -4071,6 +4169,12 @@ mod tests {
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
         ) -> Result<ExactInvalidationResult> {
+            if self
+                .fail_next_artifact_invalidation
+                .swap(false, Ordering::SeqCst)
+            {
+                anyhow::bail!("injected artifact invalidation failure before commit");
+            }
             let result = self.inner.invalidate_exact(key, descriptor).await?;
             if self
                 .block_next_artifact_delete
@@ -4951,6 +5055,144 @@ mod tests {
         let current = runtime.get_task("root").await?.expect("runtime task");
         assert_eq!(current.runner_status, RunnerStatus::Allocated);
         assert_eq!(current.proof_uri, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_invalidates_the_exact_stale_root_artifact() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".into(), "replacement-invalidates-stale-root".into())?;
+        let stale_artifact = active_artifact_precondition(&runtime, "stale-root-proof").await?;
+        let mut expected = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: stale_artifact.pipeline_key,
+                route: stale_artifact.route,
+                task_kind: "aggregate".into(),
+                network_pair: stale_artifact.network_pair.clone(),
+                artifact_refs: vec![stale_artifact.proof_ref.clone()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "stale-root".into(),
+            })
+            .await?;
+        expected.runner_status = RunnerStatus::Completed;
+        expected.proof_uri = Some(stale_artifact.descriptor.proof_uri.clone());
+        runtime.upsert_task(&expected).await?;
+
+        let replacement = runtime
+            .replace_task_if_unchanged_and_invalidate_artifact(
+                &expected,
+                TaskRegistration {
+                    task_id: expected.task_id.clone(),
+                    pipeline_key: expected.pipeline_key,
+                    route: expected.route,
+                    task_kind: expected.task_kind.clone(),
+                    network_pair: expected.network_pair.clone(),
+                    artifact_refs: expected.artifact_refs.clone(),
+                    metadata: expected.metadata.clone(),
+                    request_fingerprint: "replacement-root".into(),
+                },
+                &stale_artifact,
+            )
+            .await?
+            .context("stale root replacement")?;
+
+        assert_ne!(replacement.incarnation_id, expected.incarnation_id);
+        assert_eq!(replacement.runner_status, RunnerStatus::Allocated);
+        assert!(
+            runtime
+                .get_proof_artifact(
+                    &stale_artifact.network_pair,
+                    stale_artifact.pipeline_key,
+                    stale_artifact.route,
+                    &stale_artifact.proof_ref,
+                )
+                .await?
+                .is_none()
+        );
+        let record = runtime
+            .get_proof_artifact_including_invalidated(
+                &stale_artifact.network_pair,
+                stale_artifact.pipeline_key,
+                stale_artifact.route,
+                &stale_artifact.proof_ref,
+            )
+            .await?
+            .context("invalidated stale root artifact")?;
+        assert_eq!(record.descriptor(), stale_artifact.descriptor);
+        assert_eq!(record.lifecycle, ProofArtifactLifecycle::Invalidated);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_continues_when_stale_artifact_cleanup_is_deferred() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "replacement-deferred-stale-artifact-cleanup",
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let stale_artifact = active_artifact_precondition(&runtime, "stale-root-proof").await?;
+        let mut expected = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: stale_artifact.pipeline_key,
+                route: stale_artifact.route,
+                task_kind: "aggregate".into(),
+                network_pair: stale_artifact.network_pair.clone(),
+                artifact_refs: vec![stale_artifact.proof_ref.clone()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "stale-root".into(),
+            })
+            .await?;
+        expected.runner_status = RunnerStatus::Completed;
+        expected.proof_uri = Some(stale_artifact.descriptor.proof_uri.clone());
+        runtime.upsert_task(&expected).await?;
+
+        store
+            .fail_next_artifact_invalidation
+            .store(true, Ordering::SeqCst);
+        let replacement = runtime
+            .replace_task_if_unchanged_and_invalidate_artifact(
+                &expected,
+                TaskRegistration {
+                    task_id: expected.task_id.clone(),
+                    pipeline_key: expected.pipeline_key,
+                    route: expected.route,
+                    task_kind: expected.task_kind.clone(),
+                    network_pair: expected.network_pair.clone(),
+                    artifact_refs: expected.artifact_refs.clone(),
+                    metadata: expected.metadata.clone(),
+                    request_fingerprint: "replacement-root".into(),
+                },
+                &stale_artifact,
+            )
+            .await?
+            .context("replacement remains durable when object cleanup is deferred")?;
+
+        assert_eq!(replacement.runner_status, RunnerStatus::Allocated);
+        assert!(
+            runtime
+                .get_proof_artifact(
+                    &stale_artifact.network_pair,
+                    stale_artifact.pipeline_key,
+                    stale_artifact.route,
+                    &stale_artifact.proof_ref,
+                )
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &stale_artifact.network_pair,
+                    stale_artifact.pipeline_key,
+                    stale_artifact.route,
+                    &stale_artifact.proof_ref,
+                )
+                .await?
+                .context("fenced stale artifact")?
+                .lifecycle,
+            ProofArtifactLifecycle::Invalidated
+        );
         Ok(())
     }
 

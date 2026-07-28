@@ -101,6 +101,24 @@ impl Risc0Prover {
         alloy_primitives::hex::encode_prefixed(image_id.as_bytes())
     }
 
+    fn with_aggregation_proposal_image_id(
+        mut extra_data: Option<serde_json::Value>,
+        proposal_image_id: B256,
+    ) -> Option<serde_json::Value> {
+        if let Some(metadata) = extra_data
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            metadata.insert(
+                "proposal_image_id".to_string(),
+                serde_json::Value::String(alloy_primitives::hex::encode_prefixed(
+                    proposal_image_id.as_slice(),
+                )),
+            );
+        }
+        extra_data
+    }
+
     fn execute_real_proof(
         env: ExecutorEnv<'_>,
         elf: &[u8],
@@ -309,6 +327,7 @@ where
                 "aggregation",
                 parse_shasta_aggregation_input_hash,
             )?;
+            let extra_data = Self::with_aggregation_proposal_image_id(extra_data, block_image_id);
             prover.finalize_stage("aggregation", &receipt, image_id)?;
 
             let journal_bytes = &receipt.journal.bytes;
@@ -453,6 +472,28 @@ mod tests {
         assert_eq!(
             risc0_image_id_from_elf(elf).expect("derive RISC0 image id"),
             B256::from_slice(expected.as_bytes())
+        );
+    }
+
+    #[test]
+    fn risc0_mock_aggregation_metadata_binds_the_proposal_image_id() {
+        let proposal_image_id = B256::repeat_byte(0x11);
+        let metadata = Risc0Prover::with_aggregation_proposal_image_id(
+            Some(serde_json::json!({
+                "zkvm": "risc0",
+                "mode": "mock",
+                "fake_receipt": true,
+            })),
+            proposal_image_id,
+        )
+        .expect("mock metadata");
+
+        assert_eq!(
+            metadata
+                .as_object()
+                .and_then(|metadata| metadata.get("proposal_image_id"))
+                .and_then(serde_json::Value::as_str),
+            Some(format!("{proposal_image_id:#x}").as_str())
         );
     }
 

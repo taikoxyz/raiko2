@@ -32,6 +32,11 @@ jobs:
         with:
           toolchain: "1.94.0"
 
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Validate dispatch inputs
         env:
           INPUT_TAG: ${{ inputs.tag }}

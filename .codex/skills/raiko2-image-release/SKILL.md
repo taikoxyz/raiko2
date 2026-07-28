@@ -60,11 +60,12 @@ Default repository:
 
 For TEE-backed provider image attestation capture, use the dedicated `xtask` flow instead:
 
-- `cargo run -r -p xtask -- release-tee-providers --tag <tag>`
+- `cargo run -r -p xtask --no-default-features --features tee-provider-release -- release-tee-providers --tag <tag>`
 
-Pushed TEE provider release runs require target Artifact Registry Docker repositories with immutable
-tags enabled. Use `--no-push` for local smoke/reproduction checks that must not publish registry
-tags.
+Pushed TEE provider release runs fail closed unless destination tags are confirmed absent, and they
+verify after push that each remote tag resolves to the recorded digest. Registry-side immutable tags
+are recommended as an operator control, but the release handoff is the emitted digest manifest. Use
+`--no-push` for local smoke/reproduction checks that must not publish registry tags.
 
 That flow owns:
 
@@ -117,9 +118,9 @@ Required sequence:
    after the artifact-only checks pass for both backends.
 7. Commit only the artifact composition, record both source commits and regression evidence in the
    PR, push the composition branch, and require a clean worktree.
-8. Reconfirm the selected moving host ref still resolves to the frozen host commit. Require
-   registry-side immutable tags, then fail closed unless the selected image tag is conclusively
-   absent; authentication, network, or registry errors are not absence.
+8. Reconfirm the selected moving host ref still resolves to the frozen host commit. Fail closed
+   unless the selected image tag is conclusively absent; authentication, network, or registry errors
+   are not absence.
 9. Run `release-image host ... --skip-guest-refresh`, capture the immutable digest, prove the
    registry tag resolves to that digest, then pull the digest and verify its OCI revision label and
    packaged artifacts against the composition commit.

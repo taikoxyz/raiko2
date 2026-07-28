@@ -132,7 +132,7 @@ fn ensure_release_destination_tags_unpublished(
     tag: &str,
     providers: &BTreeMap<String, TeeProviderEntry>,
 ) -> Result<()> {
-    for image_ref in release_destination_publish_preflight_image_refs(tag, providers) {
+    for image_ref in release_destination_image_refs(tag, providers) {
         ensure_remote_image_tag_unpublished(&image_ref)?;
     }
     Ok(())
@@ -154,13 +154,6 @@ fn release_destination_image_refs(
         image_refs.insert(local_provider_image_ref(tag, &provider.repository));
     }
     image_refs
-}
-
-fn release_destination_publish_preflight_image_refs(
-    tag: &str,
-    providers: &BTreeMap<String, TeeProviderEntry>,
-) -> BTreeSet<String> {
-    release_destination_image_refs(tag, providers)
 }
 
 fn build_local_provider_entries(
@@ -204,7 +197,9 @@ fn build_local_provider_entries(
         for entry in &mut entries {
             let image_ref = local_provider_image_ref(&entry.image.tag, DEFAULT_LOCAL_REPOSITORY);
             docker_push(&image_ref)?;
-            entry.image.digest = resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
+            let digest = resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
+            ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
+            entry.image.digest = digest;
         }
         validate_local_sgx_entries(&entries, false)?;
     }
@@ -327,7 +322,9 @@ fn build_external_provider_entry(
         format!("{}:{}", provider.repository, tag)
     } else {
         docker_push(&image_ref)?;
-        resolve_repo_digest(&image_ref, &provider.repository)?
+        let digest = resolve_repo_digest(&image_ref, &provider.repository)?;
+        ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
+        digest
     };
     let attestation = read_attestation_json(&image_ref, &provider.attestation_path)?;
 
@@ -591,6 +588,53 @@ fn docker_manifest_inspect_command(image_ref: &str) -> Command {
     cmd
 }
 
+fn ensure_remote_tag_digest_matches_expected(image_ref: &str, expected_digest: &str) -> Result<()> {
+    let repository = expected_digest
+        .split_once("@sha256:")
+        .map(|(repository, _)| repository)
+        .ok_or_else(|| anyhow!("expected pushed digest is not a sha256 repository digest"))?;
+    let actual_digest = resolve_remote_tag_digest(image_ref, repository)?;
+    if actual_digest != expected_digest {
+        bail!(
+            "remote image tag digest mismatch for {image_ref}: expected {expected_digest}, got {actual_digest}",
+        );
+    }
+    Ok(())
+}
+
+fn resolve_remote_tag_digest(image_ref: &str, repository: &str) -> Result<String> {
+    let output = remote_tag_digest_inspect_command(image_ref)
+        .output()
+        .with_context(|| format!("failed to inspect remote image tag digest {image_ref}"))?;
+    if !output.status.success() {
+        let output_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        bail!(
+            "docker buildx imagetools inspect failed for {image_ref}\n{}",
+            output_text.trim_end(),
+        );
+    }
+
+    let manifest_digest = parse_remote_tag_manifest_digest(
+        std::str::from_utf8(&output.stdout).context("remote image manifest is not utf-8")?,
+    )?;
+    Ok(format!("{repository}@{manifest_digest}"))
+}
+
+fn remote_tag_digest_inspect_command(image_ref: &str) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.arg("buildx")
+        .arg("imagetools")
+        .arg("inspect")
+        .arg(image_ref)
+        .arg("--format")
+        .arg("{{json .Manifest}}");
+    cmd
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DockerManifestInspectFailure {
     Missing,
@@ -667,6 +711,23 @@ fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
         .into_iter()
         .find(|value| value.starts_with(&format!("{repository}@sha256:")))
         .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
+}
+
+fn parse_remote_tag_manifest_digest(output: &str) -> Result<String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(output).context("failed to parse remote image manifest")?;
+    let digest = manifest
+        .get("digest")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing remote manifest digest"))?;
+    if digest
+        .strip_prefix("sha256:")
+        .is_none_or(|value| value.is_empty())
+    {
+        bail!("remote manifest digest must be sha256: {digest}");
+    }
+    Ok(digest.to_string())
 }
 
 fn read_attestation_json(
@@ -886,9 +947,9 @@ mod tests {
         external_source_checkout_dir, file_sha256_hex, gcp_secret_access_command,
         local_gramine_enclave_key_path, local_provider_image_ref, local_sgx_docker_build_command,
         local_sgx_manifest_entry, local_sgx_variant_tag, parse_attestation_json,
-        release_destination_image_refs, release_destination_publish_preflight_image_refs,
-        resolve_gramine_enclave_key_from_values, validate_attestation_path,
-        validate_local_sgx_entries, validate_release_tag,
+        parse_remote_tag_manifest_digest, release_destination_image_refs,
+        remote_tag_digest_inspect_command, resolve_gramine_enclave_key_from_values,
+        validate_attestation_path, validate_local_sgx_entries, validate_release_tag,
     };
     use crate::release_tee_manifest::{TeeProviderAttestation, TeeProviderManifestEntry};
     use crate::tee_provider_lock::TeeProviderEntry;
@@ -961,22 +1022,6 @@ mod tests {
     }
 
     #[test]
-    fn release_tee_providers_publish_preflight_allows_non_artifact_registry_repositories() {
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "gaiko2".to_string(),
-            external_provider("ghcr.io/taikoxyz/gaiko2-sgxgeth"),
-        );
-
-        let refs = release_destination_publish_preflight_image_refs("v1.2.3", &providers);
-
-        assert_eq!(refs.len(), 3);
-        assert!(refs.contains("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3"));
-        assert!(refs.contains("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3-edmm"));
-        assert!(refs.contains("ghcr.io/taikoxyz/gaiko2-sgxgeth:v1.2.3"));
-    }
-
-    #[test]
     fn release_tee_providers_builds_manifest_inspect_command() {
         let command =
             docker_manifest_inspect_command("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3");
@@ -989,6 +1034,54 @@ mod tests {
                 "inspect",
                 "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
             ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_builds_remote_tag_digest_inspect_command() {
+        let command = remote_tag_digest_inspect_command(
+            "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
+        );
+
+        assert_eq!(command.get_program().to_string_lossy(), "docker");
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "buildx",
+                "imagetools",
+                "inspect",
+                "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
+                "--format",
+                "{{json .Manifest}}",
+            ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_parses_remote_tag_manifest_digest() {
+        let digest =
+            parse_remote_tag_manifest_digest(r#"{"digest":"sha256:abc123","mediaType":"x"}"#)
+                .expect("remote manifest digest should parse");
+
+        assert_eq!(digest, "sha256:abc123");
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_missing_remote_tag_manifest_digest() {
+        let err = parse_remote_tag_manifest_digest(r#"{"mediaType":"x"}"#)
+            .expect_err("missing remote manifest digest must fail");
+
+        assert!(err.to_string().contains("missing remote manifest digest"));
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_empty_remote_tag_sha256_digest() {
+        let err = parse_remote_tag_manifest_digest(r#"{"digest":"sha256:"}"#)
+            .expect_err("empty remote sha256 digest must fail");
+
+        assert!(
+            err.to_string()
+                .contains("remote manifest digest must be sha256")
         );
     }
 

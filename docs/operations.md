@@ -803,20 +803,15 @@ git fetch --no-tags origin main
 test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
 
 mkdir -p target/release-image-logs
-export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG IMMUTABLE_TAGS
+export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG
 IMAGE_REF="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 RELEASE_LOG="target/release-image-logs/${IMAGE_TAG}.log"
 TAG_INSPECT_LOG=$(mktemp \
   "target/release-image-logs/tag-inspect.${IMAGE_TAG}.XXXXXXXX")
 
-# The absence preflight is advisory against operator mistakes. Registry-side immutable tags close
-# the check/push race and are mandatory for this SOP.
-IMMUTABLE_TAGS=$(gcloud artifacts repositories describe "${AR_REPOSITORY}" \
-  --project "${AR_PROJECT}" \
-  --location "${AR_LOCATION}" \
-  --format='value(dockerConfig.immutableTags)')
-test "$(printf '%s' "${IMMUTABLE_TAGS}" | tr '[:upper:]' '[:lower:]')" = "true"
-
+# The absence preflight is fail-closed against operator mistakes. The pushed digest, not the
+# mutable tag, is the release handoff. The post-push digest check below verifies the registry tag
+# resolves to the recorded digest at publication time.
 if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
   echo "image tag already exists: ${IMAGE_REF}" >&2
   exit 1
@@ -855,8 +850,8 @@ docker buildx imagetools inspect "${DIGEST_REF}"
 
 `host` already skips guest refresh by default; the explicit flag documents the composition
 decision. This SOP supports the default Google Artifact Registry repository shown above. A different
-registry requires an equivalent server-side immutable-tag guarantee and a fail-closed absence
-preflight. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
+registry requires an equivalent fail-closed absence preflight and post-push tag digest
+reconciliation. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
 
 #### 7. Verify The Published Image
 
@@ -976,8 +971,10 @@ cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
 
 Publishing mode checks that each destination tag is currently unpublished before push. Registry-side
 tag immutability is recommended as an operator control, but the release tooling does not require it.
-The generated manifest records digest references after push; use those immutable digests as the
-release handoff, not mutable tag aliases. Use `--no-push` for local smoke verification instead.
+After each push, the command resolves the remote tag through the registry and verifies it matches the
+recorded digest. The generated manifest records digest references after push; use those immutable
+digests as the release handoff, not mutable tag aliases. Use `--no-push` for local smoke verification
+instead.
 
 The same pushed release flow is available as the `Release - TEE provider images` GitHub Actions
 workflow. Dispatch it from the protected `sgx-release-signing` environment with the release tag.
@@ -1006,7 +1003,7 @@ This flow:
   - `<tag>-edmm` is the explicitly EDMM-enabled image
 - clones and builds each pinned external TEE provider image
 - pushes provider images unless `--no-push` is set
-- records immutable image digests for pushed runs
+- records immutable image digests for pushed runs after remote tag digest reconciliation
 - reads baked attestation metadata from each image
 - emits one handoff artifact at
   `target/releases/<tag>/tee-attestation-manifest-<tag>.json`

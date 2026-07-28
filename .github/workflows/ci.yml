@@ -327,6 +327,9 @@ jobs:
       - name: test xtask register image
         run: cargo test -p xtask register_image
 
+      - name: test xtask TEE provider release
+        run: cargo test -p xtask --no-default-features --features tee-provider-release release_tee
+
       - name: test fixture server feature
         run: cargo test -p raiko2 --bin raiko2 --features fixture-server
 

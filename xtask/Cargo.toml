@@ -39,3 +39,4 @@ guest-tools = [
     "xtask-build-guest/digests",
 ]
 image-release = []
+tee-provider-release = []

@@ -1176,13 +1176,15 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
 - `runtime.reset_namespace_on_start` defaults to `false`. When set to `true`, Raiko2 clears every
-  runtime-state and proof-artifact object in the configured `(environment, namespace)` before
-  recovery, worker startup, or HTTP admission. Memory mode clears its complete in-process store;
-  GCS lists and conditionally deletes the exact `<prefix>/<environment>/<namespace>/` scope. Any
-  listing or deletion failure aborts startup. Use it only after the previous process has stopped,
-  keep it enabled until a successful reset has completed, then set it back to `false`; it never
-  affects sibling namespaces. A GCS deployment using this option needs permission to list and
-  delete objects in that scope.
+  current runtime-state and proof-artifact objects in the configured `(environment, namespace)`
+  before recovery, worker startup, or HTTP admission. Memory mode clears its complete in-process
+  store; GCS pages through and conditionally deletes the exact
+  `<prefix>/<environment>/<namespace>/` scope. Any listing or deletion failure aborts startup. Use
+  it only after the previous process has stopped. Every restart while the flag remains `true`
+  repeats the reset, so set it back to `false` after a successful reset; it never affects sibling
+  namespaces. A GCS deployment using this option needs permission to list and delete objects in
+  that scope. It removes current object generations only; noncurrent or soft-deleted GCS versions
+  remain subject to the bucket retention and lifecycle policy.
 - `runtime.store.backend` selects the backend used by both the authoritative state repository and
   proof-object repository. Use `gcs` with a non-empty `bucket` for durable deployments. `memory`
   is process-local and disposable; it is accepted outside `development`, `local`, or `test` only
@@ -1191,7 +1193,8 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   migration.
 - GCS object names start with `<prefix>/<environment>/<namespace>/`. The service intentionally has no
   distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
-  and replacement processes never overlap for one namespace.
+  and replacement processes never overlap for one namespace. Configure prefixes so one deployment
+  scope cannot be nested below another deployment's `(prefix, environment, namespace)` scope.
 - The namespace fence is global to the process but short-lived: draining closes mutation admission
   and readiness immediately, then waits only for repository commits already admitted and provider
   request-ID checkpoints covered by existing permits. It is not held across a full task,

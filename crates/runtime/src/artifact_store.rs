@@ -469,12 +469,16 @@ impl RuntimeStateStore for MemoryProofArtifactStore {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let removed = inner.manifests.len()
+        let cleared = inner.manifests.len()
             + inner.contents.len()
             + inner.invalidations.len()
             + usize::from(inner.runtime_state.is_some());
-        *inner = MemoryStoreInner::default();
-        Ok(removed)
+        let next_generation = inner.next_generation;
+        *inner = MemoryStoreInner {
+            next_generation,
+            ..MemoryStoreInner::default()
+        };
+        Ok(cleared)
     }
 }
 
@@ -717,10 +721,12 @@ mod tests {
             store.invalidate_exact(&key, &proof.descriptor()).await?,
             ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
         ));
-        assert!(matches!(
-            store.store_runtime_state(b"runtime", None).await?,
-            RuntimeStateWriteResult::Stored { .. }
-        ));
+        let RuntimeStateWriteResult::Stored {
+            generation: Some(runtime_generation),
+        } = store.store_runtime_state(b"runtime", None).await?
+        else {
+            anyhow::bail!("runtime state should receive a memory generation");
+        };
 
         assert_eq!(store.reset_namespace().await?, 3);
         assert_eq!(store.load_runtime_state().await?, None);
@@ -734,6 +740,15 @@ mod tests {
                 .contents
                 .is_empty()
         );
+        let RuntimeStateWriteResult::Stored {
+            generation: Some(next_generation),
+        } = store
+            .store_runtime_state(b"runtime-after-reset", None)
+            .await?
+        else {
+            anyhow::bail!("runtime state should receive a memory generation after reset");
+        };
+        assert!(next_generation > runtime_generation);
         Ok(())
     }
 }

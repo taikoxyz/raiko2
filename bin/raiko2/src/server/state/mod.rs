@@ -181,7 +181,14 @@ async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
 
 async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result<()> {
     if config.runtime.reset_namespace_on_start {
-        let removed = runtime
+        warn!(
+            backend = runtime.backend_name(),
+            environment = runtime.environment(),
+            namespace = runtime.namespace(),
+            store_prefix = %config.runtime.store.prefix,
+            "about to reset configured runtime namespace at startup"
+        );
+        let cleared = runtime
             .reset_namespace()
             .await
             .context("failed to reset configured runtime namespace before startup")?;
@@ -189,7 +196,8 @@ async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result
             backend = runtime.backend_name(),
             environment = runtime.environment(),
             namespace = runtime.namespace(),
-            removed,
+            store_prefix = %config.runtime.store.prefix,
+            cleared,
             "reset configured runtime namespace at startup"
         );
     }
@@ -340,7 +348,6 @@ impl AppState {
         config.validate()?;
         let pipeline_registrations = enabled_pipeline_registrations(&config)?;
         let runtime = Arc::new(build_runtime(&config).await?);
-        initialize_runtime(&config, &runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         #[cfg(any(feature = "host", feature = "local-provers"))]
@@ -356,6 +363,7 @@ impl AppState {
             &scheduler_config,
             &resources,
         )?;
+        initialize_runtime(&config, &runtime).await?;
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
         let state = Self::from_parts(config, pipelines, Arc::clone(&runtime));
@@ -762,7 +770,10 @@ fn build_remote_sgx_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raiko2_runtime::TaskRegistration;
+    use raiko2_runtime::{
+        TaskRegistration,
+        test_support::{MemoryProofArtifactStore, RuntimeStore},
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct ShutdownProbeFactory {
@@ -849,10 +860,16 @@ mod tests {
     async fn reset_namespace_on_start_discards_persisted_tasks_before_initialization() -> Result<()>
     {
         let mut config = Config::default();
+        config.runtime.environment = "test".into();
+        config.runtime.namespace = "startup-reset".into();
         config.runtime.reset_namespace_on_start = true;
-        let runtime = RuntimeManager::new_memory("test".into(), "startup-reset".into())?;
-        runtime.initialize().await?;
-        runtime
+        let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
+            config.runtime.environment.clone(),
+            config.runtime.namespace.clone(),
+        )?);
+        let previous_runtime = RuntimeManager::with_store(Arc::clone(&store));
+        previous_runtime.initialize().await?;
+        previous_runtime
             .register_task(TaskRegistration {
                 task_id: "stale-task".into(),
                 pipeline_key: PipelineKey::ShastaNative,
@@ -865,6 +882,8 @@ mod tests {
             })
             .await?;
 
+        let runtime = RuntimeManager::with_store(store);
+
         initialize_runtime(&config, &runtime).await?;
 
         assert!(runtime.list_tasks().await?.is_empty());
@@ -873,10 +892,16 @@ mod tests {
 
     #[tokio::test]
     async fn reset_namespace_on_start_is_opt_in() -> Result<()> {
-        let config = Config::default();
-        let runtime = RuntimeManager::new_memory("test".into(), "startup-no-reset".into())?;
-        runtime.initialize().await?;
-        runtime
+        let mut config = Config::default();
+        config.runtime.environment = "test".into();
+        config.runtime.namespace = "startup-no-reset".into();
+        let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
+            config.runtime.environment.clone(),
+            config.runtime.namespace.clone(),
+        )?);
+        let previous_runtime = RuntimeManager::with_store(Arc::clone(&store));
+        previous_runtime.initialize().await?;
+        previous_runtime
             .register_task(TaskRegistration {
                 task_id: "preserved-task".into(),
                 pipeline_key: PipelineKey::ShastaNative,
@@ -888,6 +913,8 @@ mod tests {
                 request_fingerprint: "preserved-task-request".into(),
             })
             .await?;
+
+        let runtime = RuntimeManager::with_store(store);
 
         initialize_runtime(&config, &runtime).await?;
 

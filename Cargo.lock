@@ -8502,6 +8502,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "futures",
  "google-cloud-storage",
  "raiko2-pipeline",
  "raiko2-primitives",
@@ -8510,6 +8511,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

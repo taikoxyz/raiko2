@@ -7,6 +7,7 @@ use super::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::{StreamExt, stream};
 use google_cloud_storage::client::{Storage, StorageControl};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -28,6 +29,15 @@ struct GcsObjectMetadata {
     generation: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GcsObjectPage {
+    objects: Vec<GcsObjectMetadata>,
+    next_page_token: Option<String>,
+}
+
+const RESET_DELETE_CONCURRENCY: usize = 16;
+const RESET_LIST_PAGE_SIZE: i32 = 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GcsCreateResult {
     Created(i64),
@@ -43,7 +53,11 @@ enum GcsWriteResult {
 #[async_trait]
 trait GcsTransport: std::fmt::Debug + Send + Sync {
     async fn read(&self, name: &str) -> Result<Option<GcsObject>>;
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<GcsObjectMetadata>>;
+    async fn list_prefix_page(
+        &self,
+        prefix: &str,
+        page_token: Option<&str>,
+    ) -> Result<GcsObjectPage>;
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult>;
     async fn write_if_generation(
         &self,
@@ -95,34 +109,41 @@ impl GcsTransport for GoogleGcsTransport {
         Ok(Some(GcsObject { bytes, generation }))
     }
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<GcsObjectMetadata>> {
-        let mut objects = Vec::new();
-        let mut page_token = String::new();
-        loop {
-            let response = self
-                .control
-                .list_objects()
-                .set_parent(&self.bucket_resource)
-                .set_prefix(prefix)
-                .set_page_size(1_000)
-                .set_page_token(&page_token)
-                .send()
-                .await
-                .context("failed to list GCS objects for runtime namespace reset")?;
-            objects.extend(
-                response
-                    .objects
-                    .into_iter()
-                    .map(|object| GcsObjectMetadata {
-                        name: object.name,
-                        generation: object.generation,
-                    }),
-            );
-            if response.next_page_token.is_empty() {
-                return Ok(objects);
-            }
-            page_token = response.next_page_token;
+    async fn list_prefix_page(
+        &self,
+        prefix: &str,
+        page_token: Option<&str>,
+    ) -> Result<GcsObjectPage> {
+        let mut request = self
+            .control
+            .list_objects()
+            .set_parent(&self.bucket_resource)
+            .set_prefix(prefix)
+            .set_page_size(RESET_LIST_PAGE_SIZE);
+        if let Some(page_token) = page_token {
+            request = request.set_page_token(page_token);
         }
+        let response = request
+            .send()
+            .await
+            .context("failed to list GCS objects for runtime namespace reset")?;
+        let objects = response
+            .objects
+            .into_iter()
+            .map(|object| GcsObjectMetadata {
+                name: object.name,
+                generation: object.generation,
+            })
+            .collect();
+        let next_page_token = if response.next_page_token.is_empty() {
+            None
+        } else {
+            Some(response.next_page_token)
+        };
+        Ok(GcsObjectPage {
+            objects,
+            next_page_token,
+        })
     }
 
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult> {
@@ -300,6 +321,96 @@ impl GcsProofArtifactStore {
 
     fn runtime_state_name(&self) -> String {
         format!("{}/work/runtime-state.runtime.json", self.scope_prefix())
+    }
+
+    fn is_manifest_object(name: &str) -> bool {
+        name.ends_with("/manifest.manifest.json")
+    }
+
+    fn validate_reset_object(scope_prefix: &str, object: &GcsObjectMetadata) -> Result<()> {
+        anyhow::ensure!(
+            object.name.starts_with(scope_prefix),
+            "GCS namespace reset list returned object outside configured scope"
+        );
+        anyhow::ensure!(
+            object.generation > 0,
+            "GCS namespace reset list returned object without a generation"
+        );
+        Ok(())
+    }
+
+    async fn delete_reset_object(
+        &self,
+        scope_prefix: &str,
+        object: GcsObjectMetadata,
+    ) -> Result<()> {
+        Self::validate_reset_object(scope_prefix, &object)?;
+        match self
+            .transport
+            .delete_if_generation(&object.name, Some(object.generation))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete GCS runtime namespace object {}",
+                    object.name
+                )
+            })? {
+            ProofArtifactDeleteResult::Removed | ProofArtifactDeleteResult::Missing => Ok(()),
+        }
+    }
+
+    async fn delete_reset_page(
+        &self,
+        scope_prefix: &str,
+        phase: &'static str,
+        objects: Vec<GcsObjectMetadata>,
+    ) -> Result<usize> {
+        if objects.is_empty() {
+            return Ok(0);
+        }
+        let mut deletions = stream::iter(objects)
+            .map(|object| self.delete_reset_object(scope_prefix, object))
+            .buffer_unordered(RESET_DELETE_CONCURRENCY);
+        let mut cleared = 0;
+        while let Some(result) = deletions.next().await {
+            result?;
+            cleared += 1;
+        }
+        tracing::info!(
+            phase,
+            cleared,
+            "cleared GCS runtime namespace reset objects"
+        );
+        Ok(cleared)
+    }
+
+    async fn clear_reset_prefix<F>(
+        &self,
+        scope_prefix: &str,
+        list_prefix: &str,
+        phase: &'static str,
+        select: F,
+    ) -> Result<usize>
+    where
+        F: Fn(&GcsObjectMetadata) -> bool,
+    {
+        let mut page_token = None;
+        let mut cleared = 0;
+        loop {
+            let page = self
+                .transport
+                .list_prefix_page(list_prefix, page_token.as_deref())
+                .await?;
+            for object in &page.objects {
+                Self::validate_reset_object(scope_prefix, object)?;
+            }
+            let objects = page.objects.into_iter().filter(&select).collect::<Vec<_>>();
+            cleared += self.delete_reset_page(scope_prefix, phase, objects).await?;
+            let Some(next_page_token) = page.next_page_token else {
+                return Ok(cleared);
+            };
+            page_token = Some(next_page_token);
+        }
     }
 
     async fn read_named(&self, name: &str, uri: String) -> Result<Option<ProofArtifactObject>> {
@@ -644,35 +755,23 @@ impl RuntimeStateStore for GcsProofArtifactStore {
 
     async fn reset_namespace(&self) -> Result<usize> {
         let scope_prefix = format!("{}/", self.scope_prefix());
-        let objects = self.transport.list_prefix(&scope_prefix).await?;
-        let mut removed = 0;
-        for object in objects {
-            anyhow::ensure!(
-                object.name.starts_with(&scope_prefix),
-                "GCS namespace reset list returned object outside configured scope"
-            );
-            anyhow::ensure!(
-                object.generation > 0,
-                "GCS namespace reset list returned object without a generation"
-            );
-            match self
-                .transport
-                .delete_if_generation(&object.name, Some(object.generation))
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to delete GCS runtime namespace object {}",
-                        object.name
-                    )
-                })? {
-                ProofArtifactDeleteResult::Removed => removed += 1,
-                ProofArtifactDeleteResult::Missing => anyhow::bail!(
-                    "GCS runtime namespace object disappeared during reset: {}",
-                    object.name
-                ),
-            }
-        }
-        Ok(removed)
+        let work_prefix = format!("{scope_prefix}work/");
+        let proofs_prefix = format!("{scope_prefix}proofs/");
+
+        // Remove the authoritative state before proof objects. If a later phase
+        // fails, no live task record can reference an object it has already removed.
+        let mut cleared = self
+            .clear_reset_prefix(&scope_prefix, &work_prefix, "runtime_state", |_| true)
+            .await?;
+        cleared += self
+            .clear_reset_prefix(&scope_prefix, &proofs_prefix, "proof_manifests", |object| {
+                Self::is_manifest_object(&object.name)
+            })
+            .await?;
+        cleared += self
+            .clear_reset_prefix(&scope_prefix, &scope_prefix, "remaining_objects", |_| true)
+            .await?;
+        Ok(cleared)
     }
 }
 

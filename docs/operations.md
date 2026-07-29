@@ -385,15 +385,38 @@ Recommended sequence:
    git rev-parse HEAD
    ```
 
-2. For the default full profile, build and validate the official Taiko-signed TEE provider images
-   before creating the release notes or GitHub Release:
+2. Start the official Taiko-signed TEE provider image workflow and the local runtime image
+   publication from the same release commit. These two publication paths can run in parallel after
+   `RELEASE_SHA` is frozen, but both must finish successfully before release notes, the git tag, or
+   the GitHub Release are created.
+
+   Start the TEE provider workflow:
 
    ```bash
    gh workflow run release-tee-providers.yml \
      --repo taikoxyz/raiko2 \
      --ref main \
      -f tag="${TAG}"
+   ```
 
+   In a separate clean checkout at `${RELEASE_SHA}`, publish the runtime image:
+
+   ```bash
+   git rev-parse HEAD
+   test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+   git status --short
+
+   just release-image all ${TAG}
+   ```
+
+   Record the immutable runtime image digest reference printed by `release-image`:
+
+   - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...`
+
+   After the TEE workflow is approved and finishes, verify it used the same release commit and
+   download the manifest:
+
+   ```bash
    # Record TEE_RUN_ID from the Actions URL printed by the command above, wait for
    # `sgx-release-signing` approval, then verify the workflow used the frozen release commit.
    export TEE_RUN_ID=<run-id-from-actions-url>
@@ -416,24 +439,14 @@ Recommended sequence:
    `mr_enclave` reproducibility with a disposable key, but it cannot produce the official Taiko
    `mr_signer`.
 
-3. Publish the runtime image from the same release commit:
-
-   ```bash
-   just release-image all ${TAG}
-   ```
-
-   Record the immutable digest references printed by `release-image`:
-
-   - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...`
-
-4. Export guest digests:
+3. Export guest digests:
 
    ```bash
    cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
      --output "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
-5. Build the release manifest:
+4. Build the release manifest:
 
    ```bash
    python3 scripts/release/write_release_manifest.py \
@@ -446,7 +459,7 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-6. Write release notes from the ZK source release template, then append the TEE Provider Release
+5. Write release notes from the ZK source release template, then append the TEE Provider Release
    Notes Template below for the default full profile. The final notes must include both reproduce
    sections.
 
@@ -486,7 +499,7 @@ See `docs/operations.md#reproduce-zk-guest-digests`.
 EOF
 ```
 
-7. Create the tag and GitHub Release:
+6. Create the tag and GitHub Release:
 
    ```bash
    git tag "${TAG}" "${RELEASE_SHA}"

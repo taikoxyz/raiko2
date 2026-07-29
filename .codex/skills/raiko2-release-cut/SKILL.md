@@ -88,21 +88,25 @@ For the default `full` profile, run the TEE provider metadata flow and upload:
 Do not create the GitHub Release before requested release paths complete:
 
 1. Freeze the release SHA from a clean `main` checkout.
-2. For the default `full` profile, before publishing the local runtime image or creating the
-   GitHub Release, run
-   the `Release - TEE provider images` GitHub Actions workflow from the frozen release commit on
-   `main`, wait for `sgx-release-signing` approval, verify the completed run's `headSha` equals the
-   release SHA, and download `tee-attestation-manifest-vX.Y.Z.json`. Official Taiko `mr_signer`
-   values are produced only by that protected workflow. Local `release-tee-providers --no-push`
-   runs are for source and `mr_enclave` reproduction with a disposable signer only.
-3. Run the source runtime build, guest digest export, and release manifest steps from
-   `docs/operations.md` -> `Source Releases` against the same release SHA.
-4. Verify requested image refs exist in registry:
+2. After the SHA is frozen, the protected TEE provider workflow and the local runtime image
+   publication may run in parallel. Both lanes must use the same release SHA and both must finish
+   successfully before guest digest export, release notes, the git tag, or the GitHub Release.
+3. TEE lane: run the `Release - TEE provider images` GitHub Actions workflow from the frozen
+   release commit on `main`, wait for `sgx-release-signing` approval, verify the completed run's
+   `headSha` equals the release SHA, and download `tee-attestation-manifest-vX.Y.Z.json`. Official
+   Taiko `mr_signer` values are produced only by that protected workflow. Local
+   `release-tee-providers --no-push` runs are for source and `mr_enclave` reproduction with a
+   disposable signer only.
+4. Runtime lane: run `just release-image all vX.Y.Z` from a clean checkout at the same release SHA,
+   then record the immutable runtime image digest reference.
+5. Export guest digests and build the release manifest from `docs/operations.md` -> `Source
+   Releases` against the same release SHA.
+6. Verify requested image refs exist in registry:
    - `us-docker.pkg.dev/evmchain/images/raiko2:vX.Y.Z`
    - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z`
    - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z-edmm`
    - every external provider repository listed in `release/providers.toml` at `:vX.Y.Z`
-5. Build one release note from the fresh runtime digest, guest digest summary, and TEE
+7. Build one release note from the fresh runtime digest, guest digest summary, and TEE
    attestation manifest. Include both reproduce sections from `docs/operations.md`.
 
 ## Artifact Reproducibility Checks

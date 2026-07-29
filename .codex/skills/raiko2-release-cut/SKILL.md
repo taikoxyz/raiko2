@@ -87,20 +87,22 @@ For the default `full` profile, run the TEE provider metadata flow and upload:
 
 Do not create the GitHub Release before requested release paths complete:
 
-1. Run the source runtime build, guest digest export, and release manifest steps from
-   `docs/operations.md` -> `Source Releases`.
-2. For the default `full` profile, before writing release notes or creating the GitHub Release, run
-   the `Release - TEE provider images` GitHub Actions workflow, or an equivalent controlled
-   `cargo run -r -p xtask --no-default-features --features tee-provider-release -- release-tee-providers --tag vX.Y.Z`
-   operation with `GCP_ENCLAVE_KEY_*` set as documented in `docs/operations.md`. Publishing must
-   fail closed unless destination tags are absent and post-push remote tag digest reconciliation
-   succeeds; use `--no-push` only for local reproduction/smoke checks.
-3. Verify requested image refs exist in registry:
+1. Freeze the release SHA from a clean `main` checkout.
+2. For the default `full` profile, before publishing the local runtime image or creating the
+   GitHub Release, run
+   the `Release - TEE provider images` GitHub Actions workflow from the frozen release commit on
+   `main`, wait for `sgx-release-signing` approval, verify the completed run's `headSha` equals the
+   release SHA, and download `tee-attestation-manifest-vX.Y.Z.json`. Official Taiko `mr_signer`
+   values are produced only by that protected workflow. Local `release-tee-providers --no-push`
+   runs are for source and `mr_enclave` reproduction with a disposable signer only.
+3. Run the source runtime build, guest digest export, and release manifest steps from
+   `docs/operations.md` -> `Source Releases` against the same release SHA.
+4. Verify requested image refs exist in registry:
    - `us-docker.pkg.dev/evmchain/images/raiko2:vX.Y.Z`
    - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z`
    - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z-edmm`
    - every external provider repository listed in `release/providers.toml` at `:vX.Y.Z`
-4. Build one release note from the fresh runtime digest, guest digest summary, and TEE
+5. Build one release note from the fresh runtime digest, guest digest summary, and TEE
    attestation manifest. Include both reproduce sections from `docs/operations.md`.
 
 ## Artifact Reproducibility Checks
@@ -113,9 +115,9 @@ Do not compare generated release JSON files byte-for-byte. `guest-digests-summar
   `guest-digests`. Compare a sorted `.digests` projection, not the whole JSON file.
 - TEE: `release-tee-providers --no-push` performs a full local rebuild without registry publication;
   it still builds local SGX images, external provider images, and local output state, and may emit
-  mutable tag refs. With the official signing key, compare a sorted `{lane, provider, source,
-  attestation}` projection. With `RAIKO2_SGX_ENCLAVE_KEY_HOST` and a disposable local key, compare
-  the same projection after deleting `attestation.mr_signer` from both manifests.
+  mutable tag refs. With `RAIKO2_SGX_ENCLAVE_KEY_HOST` and a disposable local key, compare a sorted
+  `{lane, provider, source, attestation}` projection after deleting `attestation.mr_signer` from
+  both manifests. Do not claim local output reproduces the official Taiko `mr_signer`.
 - Registry: verify published immutable image digests separately with `docker buildx imagetools
   inspect` or equivalent for every released runtime and TEE image tag, then record `@sha256:...`
   refs.

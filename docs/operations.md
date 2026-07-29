@@ -238,8 +238,10 @@ Operator notes:
 - `Dockerfile.sgx` and the local Compose stacks default to a non-EDMM enclave for compatibility
   with hosts that do not support EDMM. Set `SGX_EDMM_ENABLE=true` in the Compose env file to build
   an EDMM-enabled local image explicitly.
-- Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Release builds fetch the
-  signing key from GCP Secret Manager through `release-tee-providers`; do not commit signing keys.
+- Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Local builds must not
+  claim the Taiko release `mr_signer`; official Taiko-signed provider images are built by the
+  protected GitHub Actions release workflow, which fetches the signing key through Workload Identity
+  Federation and GCP Secret Manager. Do not commit signing keys.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
@@ -383,7 +385,38 @@ Recommended sequence:
    git rev-parse HEAD
    ```
 
-2. Publish the runtime image:
+2. For the default full profile, build and validate the official Taiko-signed TEE provider images
+   before creating the release notes or GitHub Release:
+
+   ```bash
+   gh workflow run release-tee-providers.yml \
+     --repo taikoxyz/raiko2 \
+     --ref main \
+     -f tag="${TAG}"
+
+   # Record TEE_RUN_ID from the Actions URL printed by the command above, wait for
+   # `sgx-release-signing` approval, then verify the workflow used the frozen release commit.
+   export TEE_RUN_ID=<run-id-from-actions-url>
+   gh run watch "${TEE_RUN_ID}" --repo taikoxyz/raiko2 --exit-status
+   test "$(gh run view "${TEE_RUN_ID}" --repo taikoxyz/raiko2 --json headSha --jq .headSha)" \
+     = "${RELEASE_SHA}"
+
+   gh run download "${TEE_RUN_ID}" \
+     --repo taikoxyz/raiko2 \
+     --name "tee-attestation-manifest-${TAG}" \
+     --dir "${RELEASE_DIR}"
+
+   export TEE_MANIFEST="${RELEASE_DIR}/tee-attestation-manifest-${TAG}/tee-attestation-manifest-${TAG}.json"
+   test -s "${TEE_MANIFEST}"
+   ```
+
+   This must produce a workflow artifact at `${TEE_MANIFEST}`. Record the immutable image digests
+   and attestation values from that manifest. The protected workflow validates both local SGX
+   variants before publishing their final tags. A local `release-tee-providers` run can validate
+   `mr_enclave` reproducibility with a disposable key, but it cannot produce the official Taiko
+   `mr_signer`.
+
+3. Publish the runtime image from the same release commit:
 
    ```bash
    just release-image all ${TAG}
@@ -393,14 +426,14 @@ Recommended sequence:
 
    - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...`
 
-3. Export guest digests:
+4. Export guest digests:
 
    ```bash
    cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
      --output "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
-4. Build the release manifest:
+5. Build the release manifest:
 
    ```bash
    python3 scripts/release/write_release_manifest.py \
@@ -412,21 +445,6 @@ Recommended sequence:
      --guest-digests "${RELEASE_DIR}/guest-digests-summary.json" \
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
-
-5. For the default full profile, build and validate the TEE provider images before creating the
-   release notes or GitHub Release:
-
-   ```bash
-   GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-   GCP_ENCLAVE_KEY_VERSION=latest \
-   GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
-   cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
-     release-tee-providers --tag "${TAG}"
-   ```
-
-   This must produce `target/releases/${TAG}/tee-attestation-manifest-${TAG}.json`. Record the
-   immutable image digests and attestation values from that manifest. The command validates both
-   local SGX variants before publishing their final tags.
 
 6. Write release notes from the ZK source release template, then append the TEE Provider Release
    Notes Template below for the default full profile. The final notes must include both reproduce
@@ -474,13 +492,14 @@ EOF
    git tag "${TAG}" "${RELEASE_SHA}"
    git push origin "${TAG}"
 
+   # Add `--prerelease` for release candidates such as `vX.Y.Z-rcN`.
    gh release create "${TAG}" \
      --target "${RELEASE_SHA}" \
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
      "${RELEASE_DIR}/guest-digests-summary.json" \
-     "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
+     "${TEE_MANIFEST}" \
      crates/guests/elf/risc0_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.vk.bin
@@ -942,12 +961,11 @@ alias, and existing S3/Pinata/File settings continue to work.
 
 TEE-backed remote prover images have a separate pre-release metadata flow.
 
-Use:
+Use a disposable local signing key for smoke verification without registry publication:
 
 ```bash
-GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-GCP_ENCLAVE_KEY_VERSION=latest \
-GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
+openssl genrsa -3 -out /tmp/raiko2-local-gramine-signing-key.pem 3072
+RAIKO2_SGX_ENCLAVE_KEY_HOST=/tmp/raiko2-local-gramine-signing-key.pem \
 cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
   release-tee-providers --tag release-20260514-tee-smoke --no-push
 ```
@@ -955,18 +973,16 @@ cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
 for local smoke verification without registry publication. `--no-push` still builds both local SGX
 images, clones and builds each external provider, replaces local Docker tags, and writes local output
 state. Each manifest `image.digest` field contains a mutable `repository:tag` reference rather than
-an immutable registry digest. The resulting manifest must not be used as release handoff metadata;
-run the command without `--no-push` to push the images and resolve immutable digests first.
+an immutable registry digest, and `mr_signer` will be the disposable local signer. The resulting
+manifest must not be used as release handoff metadata.
 
-For a formal pre-release export, prefer the `Release - TEE provider images` GitHub Actions
-workflow below. The raw publishing command is available for controlled operations only:
+For a formal pre-release export, use the `Release - TEE provider images` GitHub Actions workflow:
 
 ```bash
-GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-GCP_ENCLAVE_KEY_VERSION=latest \
-GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
-cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
-  release-tee-providers --tag vX.Y.Z-rc1
+gh workflow run release-tee-providers.yml \
+  --repo taikoxyz/raiko2 \
+  --ref main \
+  -f tag=vX.Y.Z-rc1
 ```
 
 Publishing mode checks that each destination tag is currently unpublished before push. Registry-side
@@ -976,9 +992,8 @@ recorded digest. The generated manifest records digest references after push; us
 digests as the release handoff, not mutable tag aliases. Use `--no-push` for local smoke verification
 instead.
 
-The same pushed release flow is available as the `Release - TEE provider images` GitHub Actions
-workflow. Dispatch it from the protected `sgx-release-signing` environment with the release tag.
-The workflow authenticates through Workload Identity Federation, fetches the enclave signing key
+The pushed release workflow runs from the protected `sgx-release-signing` environment with the
+release tag. It authenticates through Workload Identity Federation, fetches the enclave signing key
 from GCP Secret Manager, pushes provider images to Artifact Registry, and uploads the generated
 `tee-attestation-manifest-<tag>.json` as a workflow artifact. It may reuse the existing enclave
 signing Google service account when that account already has the required Secret Manager and
@@ -991,11 +1006,14 @@ Artifact Registry permissions, but its Workload Identity Provider or binding mus
 - `GCP_ENCLAVE_KEY_PROJECT`
 - `GCP_ENCLAVE_KEY_VERSION` (optional; defaults to `latest` when unset)
 
+Official Taiko `mr_signer` values are only produced by this protected workflow. Do not document or
+publish a locally built image as Taiko-signed, even if the source commit and `mr_enclave` match.
+
 This flow:
 
 - reads exact external provider pins from `release/providers.toml`
-- fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
-  `GCP_ENCLAVE_KEY_SECRET` is set
+- fetches the `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager inside the protected
+  workflow
 - verifies destination image tags are not already published for pushed runs
 - builds two local `raiko2-sgx` provider images from the same source revision and signing key, with
   the key passed as a Docker BuildKit secret:
@@ -1031,9 +1049,9 @@ Use this manifest to hand off:
 
 to whoever configures the on-chain verifier allowlists.
 
-`GCP_ENCLAVE_KEY_VERSION` defaults to `latest`. Omit `GCP_ENCLAVE_KEY_PROJECT` to use the active
-`gcloud` project. Release builds must set `GCP_ENCLAVE_KEY_SECRET`. For local non-release builds
-only, `RAIKO2_SGX_ENCLAVE_KEY_HOST` can point to a local key file.
+`GCP_ENCLAVE_KEY_VERSION` defaults to `latest` in the workflow. Local non-release builds should use
+`RAIKO2_SGX_ENCLAVE_KEY_HOST` with a local or disposable key file; local output must not be treated
+as official Taiko-signed release output.
 
 ### TEE Provider Release Notes Template
 
@@ -1071,10 +1089,9 @@ See `docs/operations.md#reproduce-tee-provider-metadata`.
 
 ### Reproduce TEE Provider Metadata
 
-Use this to regenerate TEE provider attestation metadata from the tag checkout.
-Official rebuilds need the release enclave signing key from GCP Secret Manager
-to reproduce `mr_signer`; a disposable local key can reproduce `mr_enclave` but
-will produce a different signer.
+Use this to regenerate local TEE provider attestation metadata from the tag checkout. Local
+reproduction can check source pins and `mr_enclave`, but it cannot reproduce the official Taiko
+`mr_signer`; that signer is produced only by the protected GitHub Actions workflow.
 
 ```bash
 export TAG=vX.Y.Z
@@ -1083,49 +1100,20 @@ export REPRO_DIR=target/releases/${TAG}/tee-provider-repro
 git fetch --tags origin "${TAG}"
 git checkout "${TAG}"
 
-GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-GCP_ENCLAVE_KEY_VERSION=latest \
-GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
-cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
-  release-tee-providers --tag "${TAG}" --no-push
-
 mkdir -p "${REPRO_DIR}"
-cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
-  "${REPRO_DIR}/from-source.json"
 
 gh release download "${TAG}" --repo taikoxyz/raiko2 \
   --pattern "tee-attestation-manifest-${TAG}.json" \
   --dir "${REPRO_DIR}" \
   --clobber
 
-jq -S '[.providers[]
-  | {lane, provider, source, attestation}]
-  | sort_by(.provider, .lane)' \
-  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.sorted.json"
-jq -S '[.providers[]
-  | {lane, provider, source, attestation}]
-  | sort_by(.provider, .lane)' \
-  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.sorted.json"
-diff -u "${REPRO_DIR}/release-tee.sorted.json" "${REPRO_DIR}/source-tee.sorted.json"
-```
-
-For a disposable local signing key, run the same rebuild with `RAIKO2_SGX_ENCLAVE_KEY_HOST` instead
-of `GCP_ENCLAVE_KEY_*`, then compare the same projection with `attestation.mr_signer` removed from
-both manifests:
-
-```bash
-RAIKO2_SGX_ENCLAVE_KEY_HOST=/path/to/local/gramine-signing-key.pem \
+openssl genrsa -3 -out "${REPRO_DIR}/local-gramine-signing-key.pem" 3072
+RAIKO2_SGX_ENCLAVE_KEY_HOST="${REPRO_DIR}/local-gramine-signing-key.pem" \
 cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
   release-tee-providers --tag "${TAG}" --no-push
 
-mkdir -p "${REPRO_DIR}"
 cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
   "${REPRO_DIR}/from-source.json"
-
-gh release download "${TAG}" --repo taikoxyz/raiko2 \
-  --pattern "tee-attestation-manifest-${TAG}.json" \
-  --dir "${REPRO_DIR}" \
-  --clobber
 
 jq -S '[.providers[]
   | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]

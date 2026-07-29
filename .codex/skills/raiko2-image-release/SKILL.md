@@ -58,14 +58,18 @@ Default repository:
    `[INFO] Image pushed: <repository>@sha256:...`
 5. Report the exact digest back to the user.
 
-For TEE-backed provider image attestation capture, use the dedicated `xtask` flow instead:
+For TEE-backed provider image attestation capture, use the dedicated TEE provider release flow
+instead:
 
-- `cargo run -r -p xtask --no-default-features --features tee-provider-release -- release-tee-providers --tag <tag>`
+- Official pushed releases: dispatch `Release - TEE provider images` from `main` and use the
+  uploaded `tee-attestation-manifest-<tag>.json`.
+- Local smoke/reproduction only: `RAIKO2_SGX_ENCLAVE_KEY_HOST=<local-key> cargo run -r -p xtask --no-default-features --features tee-provider-release -- release-tee-providers --tag <tag> --no-push`
 
 Pushed TEE provider release runs fail closed unless destination tags are confirmed absent, and they
 verify after push that each remote tag resolves to the recorded digest. Registry-side immutable tags
-are recommended as an operator control, but the release handoff is the emitted digest manifest. Use
-`--no-push` for local smoke/reproduction checks that must not publish registry tags.
+are recommended as an operator control, but the release handoff is the emitted digest manifest.
+Official Taiko `mr_signer` values are produced only by the protected GitHub Actions workflow; local
+`--no-push` output must not be treated as Taiko-signed release output.
 
 That flow owns:
 

@@ -144,4 +144,3 @@ Expected: PASS with no absolute paths, secret values, or unrelated changes.
 git add -A
 git commit -m "test: cover runtime namespace reset startup"
 ```
-

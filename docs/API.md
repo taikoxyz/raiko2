@@ -1175,6 +1175,14 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
+- `runtime.reset_namespace_on_start` defaults to `false`. When set to `true`, Raiko2 clears every
+  runtime-state and proof-artifact object in the configured `(environment, namespace)` before
+  recovery, worker startup, or HTTP admission. Memory mode clears its complete in-process store;
+  GCS lists and conditionally deletes the exact `<prefix>/<environment>/<namespace>/` scope. Any
+  listing or deletion failure aborts startup. Use it only after the previous process has stopped,
+  keep it enabled until a successful reset has completed, then set it back to `false`; it never
+  affects sibling namespaces. A GCS deployment using this option needs permission to list and
+  delete objects in that scope.
 - `runtime.store.backend` selects the backend used by both the authoritative state repository and
   proof-object repository. Use `gcs` with a non-empty `bucket` for durable deployments. `memory`
   is process-local and disposable; it is accepted outside `development`, `local`, or `test` only

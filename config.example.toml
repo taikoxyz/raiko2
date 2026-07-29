@@ -59,6 +59,9 @@ compute_units_per_second = 1000
 [runtime]
 environment = "development"
 namespace = "raiko2-development"
+# Destructive one-time startup reset for this environment and namespace. It clears all runtime
+# state and proof artifacts before recovery or serving begins. Set this back to false after reset.
+reset_namespace_on_start = false
 
 [runtime.store]
 # Memory is process-local and disposable. Use GCS for durable deployments.

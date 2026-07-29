@@ -229,7 +229,8 @@ Expected: partial pass for helper coverage.
 Expose:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag <tag>
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag <tag>
 ```
 
 Add optional:
@@ -314,13 +315,15 @@ Include examples for:
 - local smoke:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag <tag> --no-push
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag <tag> --no-push
 ```
 
 - formal release:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag <tag>
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag <tag>
 ```
 
 **Step 3: Update the image-release skill boundary**
@@ -367,7 +370,8 @@ Expected: pass.
 Run:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag local-smoke --no-push
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag local-smoke --no-push
 ```
 
 Expected:

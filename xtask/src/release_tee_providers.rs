@@ -45,19 +45,6 @@ const LOCAL_SGX_VARIANTS: [LocalSgxVariant; 2] = [
     },
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ArtifactRegistryRepository {
-    location: String,
-    project: String,
-    repository: String,
-}
-
-impl ArtifactRegistryRepository {
-    fn display_name(&self) -> String {
-        format!("{}/{}/{}", self.location, self.project, self.repository)
-    }
-}
-
 #[derive(Debug)]
 struct GramineSigningKey {
     path: PathBuf,
@@ -106,7 +93,6 @@ pub(crate) fn run(root: &Path, args: ReleaseTeeProvidersArgs) -> Result<()> {
 
     let provider_lock = load(&provider_lock_path(root))?;
     if !args.no_push {
-        ensure_release_destination_repositories_immutable(&provider_lock.providers)?;
         ensure_release_destination_tags_unpublished(&args.tag, &provider_lock.providers)?;
     }
     let manifest = build_manifest(root, &args.tag, args.no_push, &provider_lock.providers)?;
@@ -152,30 +138,6 @@ fn ensure_release_destination_tags_unpublished(
     Ok(())
 }
 
-fn ensure_release_destination_repositories_immutable(
-    providers: &BTreeMap<String, TeeProviderEntry>,
-) -> Result<()> {
-    for repository in release_destination_artifact_registry_repositories(providers)? {
-        ensure_artifact_registry_repository_immutable_tags(&repository)?;
-    }
-    Ok(())
-}
-
-fn release_destination_artifact_registry_repositories(
-    providers: &BTreeMap<String, TeeProviderEntry>,
-) -> Result<BTreeSet<ArtifactRegistryRepository>> {
-    let mut repositories = BTreeSet::new();
-    repositories.insert(artifact_registry_repository_from_image_repository(
-        DEFAULT_LOCAL_REPOSITORY,
-    )?);
-    for provider in providers.values() {
-        repositories.insert(artifact_registry_repository_from_image_repository(
-            &provider.repository,
-        )?);
-    }
-    Ok(repositories)
-}
-
 fn release_destination_image_refs(
     tag: &str,
     providers: &BTreeMap<String, TeeProviderEntry>,
@@ -192,39 +154,6 @@ fn release_destination_image_refs(
         image_refs.insert(local_provider_image_ref(tag, &provider.repository));
     }
     image_refs
-}
-
-fn artifact_registry_repository_from_image_repository(
-    image_repository: &str,
-) -> Result<ArtifactRegistryRepository> {
-    let parts = image_repository.split('/').collect::<Vec<_>>();
-    if parts.len() < 4 {
-        bail!(
-            "release image repository must be an Artifact Registry Docker image path \
-             LOCATION-docker.pkg.dev/PROJECT/REPOSITORY/IMAGE: {image_repository}"
-        );
-    }
-
-    let host = parts[0];
-    let location = host
-        .strip_suffix("-docker.pkg.dev")
-        .filter(|location| !location.is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "release image repository must use Artifact Registry Docker host \
-                 LOCATION-docker.pkg.dev: {image_repository}"
-            )
-        })?;
-    let project = parts[1];
-    let repository = parts[2];
-    ensure_non_empty("Artifact Registry project", project)?;
-    ensure_non_empty("Artifact Registry repository", repository)?;
-
-    Ok(ArtifactRegistryRepository {
-        location: location.to_string(),
-        project: project.to_string(),
-        repository: repository.to_string(),
-    })
 }
 
 fn build_local_provider_entries(
@@ -268,7 +197,9 @@ fn build_local_provider_entries(
         for entry in &mut entries {
             let image_ref = local_provider_image_ref(&entry.image.tag, DEFAULT_LOCAL_REPOSITORY);
             docker_push(&image_ref)?;
-            entry.image.digest = resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
+            let digest = resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
+            ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
+            entry.image.digest = digest;
         }
         validate_local_sgx_entries(&entries, false)?;
     }
@@ -391,7 +322,9 @@ fn build_external_provider_entry(
         format!("{}:{}", provider.repository, tag)
     } else {
         docker_push(&image_ref)?;
-        resolve_repo_digest(&image_ref, &provider.repository)?
+        let digest = resolve_repo_digest(&image_ref, &provider.repository)?;
+        ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
+        digest
     };
     let attestation = read_attestation_json(&image_ref, &provider.attestation_path)?;
 
@@ -649,63 +582,56 @@ fn ensure_remote_image_tag_unpublished(image_ref: &str) -> Result<()> {
     }
 }
 
-fn ensure_artifact_registry_repository_immutable_tags(
-    repository: &ArtifactRegistryRepository,
-) -> Result<()> {
-    ensure_gcloud()?;
-    let output = artifact_registry_repository_describe_command(repository)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to inspect Artifact Registry repository {}",
-                repository.display_name()
-            )
-        })?;
-    if !output.status.success() {
+fn docker_manifest_inspect_command(image_ref: &str) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.arg("manifest").arg("inspect").arg(image_ref);
+    cmd
+}
+
+fn ensure_remote_tag_digest_matches_expected(image_ref: &str, expected_digest: &str) -> Result<()> {
+    let repository = expected_digest
+        .split_once("@sha256:")
+        .map(|(repository, _)| repository)
+        .ok_or_else(|| anyhow!("expected pushed digest is not a sha256 repository digest"))?;
+    let actual_digest = resolve_remote_tag_digest(image_ref, repository)?;
+    if actual_digest != expected_digest {
         bail!(
-            "failed to inspect Artifact Registry repository {}:\n{}",
-            repository.display_name(),
-            String::from_utf8_lossy(&output.stderr).trim_end(),
-        );
-    }
-    if !artifact_registry_immutable_tags_enabled(&output.stdout)? {
-        bail!(
-            "Artifact Registry repository {} must enable immutable Docker tags before publishing \
-             TEE provider release images",
-            repository.display_name(),
+            "remote image tag digest mismatch for {image_ref}: expected {expected_digest}, got {actual_digest}",
         );
     }
     Ok(())
 }
 
-fn artifact_registry_repository_describe_command(
-    repository: &ArtifactRegistryRepository,
-) -> Command {
-    let mut cmd = Command::new("gcloud");
-    cmd.arg("artifacts")
-        .arg("repositories")
-        .arg("describe")
-        .arg(&repository.repository)
-        .arg("--project")
-        .arg(&repository.project)
-        .arg("--location")
-        .arg(&repository.location)
-        .arg("--format=json");
-    cmd
+fn resolve_remote_tag_digest(image_ref: &str, repository: &str) -> Result<String> {
+    let output = remote_tag_digest_inspect_command(image_ref)
+        .output()
+        .with_context(|| format!("failed to inspect remote image tag digest {image_ref}"))?;
+    if !output.status.success() {
+        let output_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        bail!(
+            "docker buildx imagetools inspect failed for {image_ref}\n{}",
+            output_text.trim_end(),
+        );
+    }
+
+    let manifest_digest = parse_remote_tag_manifest_digest(
+        std::str::from_utf8(&output.stdout).context("remote image manifest is not utf-8")?,
+    )?;
+    Ok(format!("{repository}@{manifest_digest}"))
 }
 
-fn artifact_registry_immutable_tags_enabled(raw: &[u8]) -> Result<bool> {
-    let value: serde_json::Value =
-        serde_json::from_slice(raw).context("parse Artifact Registry repository metadata")?;
-    Ok(value
-        .pointer("/dockerConfig/immutableTags")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false))
-}
-
-fn docker_manifest_inspect_command(image_ref: &str) -> Command {
+fn remote_tag_digest_inspect_command(image_ref: &str) -> Command {
     let mut cmd = Command::new("docker");
-    cmd.arg("manifest").arg("inspect").arg(image_ref);
+    cmd.arg("buildx")
+        .arg("imagetools")
+        .arg("inspect")
+        .arg(image_ref)
+        .arg("--format")
+        .arg("{{json .Manifest}}");
     cmd
 }
 
@@ -785,6 +711,23 @@ fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
         .into_iter()
         .find(|value| value.starts_with(&format!("{repository}@sha256:")))
         .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
+}
+
+fn parse_remote_tag_manifest_digest(output: &str) -> Result<String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(output).context("failed to parse remote image manifest")?;
+    let digest = manifest
+        .get("digest")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing remote manifest digest"))?;
+    if digest
+        .strip_prefix("sha256:")
+        .is_none_or(|value| value.is_empty())
+    {
+        bail!("remote manifest digest must be sha256: {digest}");
+    }
+    Ok(digest.to_string())
 }
 
 fn read_attestation_json(
@@ -998,16 +941,14 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        ArtifactRegistryRepository, DockerManifestInspectFailure, ENV_GCP_ENCLAVE_KEY_SECRET,
-        ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST, LOCAL_SGX_VARIANTS,
-        artifact_registry_immutable_tags_enabled, artifact_registry_repository_describe_command,
-        artifact_registry_repository_from_image_repository,
-        classify_docker_manifest_inspect_failure, docker_manifest_inspect_command,
-        external_provider_docker_build_command, external_source_checkout_dir, file_sha256_hex,
-        gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
-        local_sgx_docker_build_command, local_sgx_manifest_entry, local_sgx_variant_tag,
-        parse_attestation_json, release_destination_artifact_registry_repositories,
-        release_destination_image_refs, resolve_gramine_enclave_key_from_values,
+        DockerManifestInspectFailure, ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST,
+        LOCAL_SGX_VARIANTS, classify_docker_manifest_inspect_failure,
+        docker_manifest_inspect_command, external_provider_docker_build_command,
+        external_source_checkout_dir, file_sha256_hex, gcp_secret_access_command,
+        local_gramine_enclave_key_path, local_provider_image_ref, local_sgx_docker_build_command,
+        local_sgx_manifest_entry, local_sgx_variant_tag, parse_attestation_json,
+        parse_remote_tag_manifest_digest, release_destination_image_refs,
+        remote_tag_digest_inspect_command, resolve_gramine_enclave_key_from_values,
         validate_attestation_path, validate_local_sgx_entries, validate_release_tag,
     };
     use crate::release_tee_manifest::{TeeProviderAttestation, TeeProviderManifestEntry};
@@ -1081,94 +1022,6 @@ mod tests {
     }
 
     #[test]
-    fn release_tee_providers_parses_artifact_registry_repository_from_image_path() {
-        assert_eq!(
-            artifact_registry_repository_from_image_repository(
-                "us-docker.pkg.dev/evmchain/images/nested/raiko2-sgx"
-            )
-            .expect("parse Artifact Registry image path"),
-            ArtifactRegistryRepository {
-                location: "us".to_string(),
-                project: "evmchain".to_string(),
-                repository: "images".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn release_tee_providers_rejects_non_artifact_registry_repository() {
-        let err = artifact_registry_repository_from_image_repository("ghcr.io/taikoxyz/raiko2-sgx")
-            .expect_err("non Artifact Registry repo cannot provide enforced tag immutability");
-
-        assert!(err.to_string().contains("LOCATION-docker.pkg.dev"));
-    }
-
-    #[test]
-    fn release_tee_providers_deduplicates_destination_artifact_registry_repositories() {
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "gaiko2".to_string(),
-            external_provider("us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth"),
-        );
-
-        let repositories =
-            release_destination_artifact_registry_repositories(&providers).expect("parse repos");
-
-        assert_eq!(
-            repositories.into_iter().collect::<Vec<_>>(),
-            vec![ArtifactRegistryRepository {
-                location: "us".to_string(),
-                project: "evmchain".to_string(),
-                repository: "images".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn release_tee_providers_builds_artifact_registry_describe_command() {
-        let repository = ArtifactRegistryRepository {
-            location: "us".to_string(),
-            project: "evmchain".to_string(),
-            repository: "images".to_string(),
-        };
-        let command = artifact_registry_repository_describe_command(&repository);
-
-        assert_eq!(command.get_program().to_string_lossy(), "gcloud");
-        assert_eq!(
-            command_args(&command),
-            vec![
-                "artifacts",
-                "repositories",
-                "describe",
-                "images",
-                "--project",
-                "evmchain",
-                "--location",
-                "us",
-                "--format=json",
-            ]
-        );
-    }
-
-    #[test]
-    fn release_tee_providers_reads_artifact_registry_immutable_tag_setting() {
-        assert!(
-            artifact_registry_immutable_tags_enabled(br#"{"dockerConfig":{"immutableTags":true}}"#)
-                .expect("parse enabled immutable tag flag")
-        );
-        assert!(
-            !artifact_registry_immutable_tags_enabled(
-                br#"{"dockerConfig":{"immutableTags":false}}"#
-            )
-            .expect("parse disabled immutable tag flag")
-        );
-        assert!(
-            !artifact_registry_immutable_tags_enabled(br#"{}"#)
-                .expect("missing immutable tag flag defaults to disabled")
-        );
-    }
-
-    #[test]
     fn release_tee_providers_builds_manifest_inspect_command() {
         let command =
             docker_manifest_inspect_command("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3");
@@ -1181,6 +1034,54 @@ mod tests {
                 "inspect",
                 "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
             ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_builds_remote_tag_digest_inspect_command() {
+        let command = remote_tag_digest_inspect_command(
+            "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
+        );
+
+        assert_eq!(command.get_program().to_string_lossy(), "docker");
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "buildx",
+                "imagetools",
+                "inspect",
+                "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
+                "--format",
+                "{{json .Manifest}}",
+            ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_parses_remote_tag_manifest_digest() {
+        let digest =
+            parse_remote_tag_manifest_digest(r#"{"digest":"sha256:abc123","mediaType":"x"}"#)
+                .expect("remote manifest digest should parse");
+
+        assert_eq!(digest, "sha256:abc123");
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_missing_remote_tag_manifest_digest() {
+        let err = parse_remote_tag_manifest_digest(r#"{"mediaType":"x"}"#)
+            .expect_err("missing remote manifest digest must fail");
+
+        assert!(err.to_string().contains("missing remote manifest digest"));
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_empty_remote_tag_sha256_digest() {
+        let err = parse_remote_tag_manifest_digest(r#"{"digest":"sha256:"}"#)
+            .expect_err("empty remote sha256 digest must fail");
+
+        assert!(
+            err.to_string()
+                .contains("remote manifest digest must be sha256")
         );
     }
 

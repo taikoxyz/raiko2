@@ -22,6 +22,12 @@ struct GcsObject {
     generation: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GcsObjectMetadata {
+    name: String,
+    generation: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GcsCreateResult {
     Created(i64),
@@ -37,6 +43,7 @@ enum GcsWriteResult {
 #[async_trait]
 trait GcsTransport: std::fmt::Debug + Send + Sync {
     async fn read(&self, name: &str) -> Result<Option<GcsObject>>;
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<GcsObjectMetadata>>;
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult>;
     async fn write_if_generation(
         &self,
@@ -86,6 +93,36 @@ impl GcsTransport for GoogleGcsTransport {
             bytes.extend_from_slice(&chunk.context("failed to stream GCS object")?);
         }
         Ok(Some(GcsObject { bytes, generation }))
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<GcsObjectMetadata>> {
+        let mut objects = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let response = self
+                .control
+                .list_objects()
+                .set_parent(&self.bucket_resource)
+                .set_prefix(prefix)
+                .set_page_size(1_000)
+                .set_page_token(&page_token)
+                .send()
+                .await
+                .context("failed to list GCS objects for runtime namespace reset")?;
+            objects.extend(
+                response
+                    .objects
+                    .into_iter()
+                    .map(|object| GcsObjectMetadata {
+                        name: object.name,
+                        generation: object.generation,
+                    }),
+            );
+            if response.next_page_token.is_empty() {
+                return Ok(objects);
+            }
+            page_token = response.next_page_token;
+        }
     }
 
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult> {
@@ -603,6 +640,39 @@ impl RuntimeStateStore for GcsProofArtifactStore {
                 self.load_runtime_state().await?,
             )),
         }
+    }
+
+    async fn reset_namespace(&self) -> Result<usize> {
+        let scope_prefix = format!("{}/", self.scope_prefix());
+        let objects = self.transport.list_prefix(&scope_prefix).await?;
+        let mut removed = 0;
+        for object in objects {
+            anyhow::ensure!(
+                object.name.starts_with(&scope_prefix),
+                "GCS namespace reset list returned object outside configured scope"
+            );
+            anyhow::ensure!(
+                object.generation > 0,
+                "GCS namespace reset list returned object without a generation"
+            );
+            match self
+                .transport
+                .delete_if_generation(&object.name, Some(object.generation))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to delete GCS runtime namespace object {}",
+                        object.name
+                    )
+                })? {
+                ProofArtifactDeleteResult::Removed => removed += 1,
+                ProofArtifactDeleteResult::Missing => anyhow::bail!(
+                    "GCS runtime namespace object disappeared during reset: {}",
+                    object.name
+                ),
+            }
+        }
+        Ok(removed)
     }
 }
 

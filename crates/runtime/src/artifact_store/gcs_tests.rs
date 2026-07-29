@@ -70,6 +70,21 @@ impl GcsTransport for FakeGcsTransport {
         }))
     }
 
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<GcsObjectMetadata>> {
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?;
+        Ok(objects
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(name, object)| GcsObjectMetadata {
+                name: name.clone(),
+                generation: object.generation,
+            })
+            .collect())
+    }
+
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult> {
         let mut objects = self
             .objects
@@ -447,5 +462,65 @@ async fn runtime_state_conflict_reads_back_the_observed_generation() -> Result<(
     };
     assert_eq!(observed.bytes, b"concurrent");
     assert_ne!(observed.generation, Some(first_generation));
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_removes_only_the_configured_scope() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let proof = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    assert!(matches!(
+        store.invalidate_exact(&key, &proof.descriptor()).await?,
+        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+    ));
+    assert!(matches!(
+        store.store_runtime_state(b"runtime", None).await?,
+        RuntimeStateWriteResult::Stored { .. }
+    ));
+    let sibling = format!("{}-other/sentinel", store.scope_prefix());
+    assert!(matches!(
+        transport.create(&sibling, b"sibling").await?,
+        GcsCreateResult::Created(_)
+    ));
+
+    assert_eq!(store.reset_namespace().await?, 3);
+    assert!(!transport.contains(&store.content_name(&key, &proof.content_hash))?);
+    assert!(!transport.contains(&store.invalidation_name(
+        &key,
+        proof.generation,
+        &proof.content_hash
+    ))?);
+    assert!(!transport.contains(&store.runtime_state_name())?);
+    assert!(transport.contains(&sibling)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_reports_delete_failures() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    assert!(matches!(
+        store.store_runtime_state(b"runtime", None).await?,
+        RuntimeStateWriteResult::Stored { .. }
+    ));
+    transport.delete_failure.store(1, Ordering::SeqCst);
+
+    let error = store
+        .reset_namespace()
+        .await
+        .expect_err("namespace reset must stop on a delete failure");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to delete GCS runtime namespace object")
+    );
+    assert!(transport.contains(&store.runtime_state_name())?);
     Ok(())
 }

@@ -179,6 +179,23 @@ async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
     }
 }
 
+async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result<()> {
+    if config.runtime.reset_namespace_on_start {
+        let removed = runtime
+            .reset_namespace()
+            .await
+            .context("failed to reset configured runtime namespace before startup")?;
+        tracing::info!(
+            backend = runtime.backend_name(),
+            environment = runtime.environment(),
+            namespace = runtime.namespace(),
+            removed,
+            "reset configured runtime namespace at startup"
+        );
+    }
+    runtime.initialize().await
+}
+
 struct PipelineResources {
     #[cfg(feature = "local-provers")]
     shasta_backends: Option<ShastaBackends>,
@@ -323,6 +340,7 @@ impl AppState {
         config.validate()?;
         let pipeline_registrations = enabled_pipeline_registrations(&config)?;
         let runtime = Arc::new(build_runtime(&config).await?);
+        initialize_runtime(&config, &runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         #[cfg(any(feature = "host", feature = "local-provers"))]
@@ -330,7 +348,6 @@ impl AppState {
         #[cfg(not(any(feature = "host", feature = "local-provers")))]
         let resources = PipelineResources {};
 
-        runtime.initialize().await?;
         let factory = build_pipeline_factory(
             &config,
             &resolved_pairs,
@@ -745,6 +762,7 @@ fn build_remote_sgx_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raiko2_runtime::TaskRegistration;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct ShutdownProbeFactory {
@@ -824,6 +842,56 @@ mod tests {
         shutdown.await?;
         assert!(!runtime.accepts_mutations());
         assert!(shutdown_called.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_namespace_on_start_discards_persisted_tasks_before_initialization() -> Result<()>
+    {
+        let mut config = Config::default();
+        config.runtime.reset_namespace_on_start = true;
+        let runtime = RuntimeManager::new_memory("test".into(), "startup-reset".into())?;
+        runtime.initialize().await?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "stale-task".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "stale-task-request".into(),
+            })
+            .await?;
+
+        initialize_runtime(&config, &runtime).await?;
+
+        assert!(runtime.list_tasks().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_namespace_on_start_is_opt_in() -> Result<()> {
+        let config = Config::default();
+        let runtime = RuntimeManager::new_memory("test".into(), "startup-no-reset".into())?;
+        runtime.initialize().await?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "preserved-task".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "preserved-task-request".into(),
+            })
+            .await?;
+
+        initialize_runtime(&config, &runtime).await?;
+
+        assert_eq!(runtime.list_tasks().await?.len(), 1);
         Ok(())
     }
 

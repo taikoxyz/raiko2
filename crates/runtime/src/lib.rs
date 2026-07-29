@@ -626,6 +626,22 @@ impl RuntimeManager {
         self.reload_authoritative_state().await
     }
 
+    /// Clears the complete persistent namespace before the runtime is initialized.
+    ///
+    /// This is an explicit startup operation. Callers must uphold the deployment
+    /// invariant that no other process is active in this namespace.
+    pub async fn reset_namespace(&self) -> Result<usize> {
+        self.ensure_active()?;
+        let _commit = self.namespace_commit_fence.write().await;
+        self.ensure_active()?;
+        let _mutation = self.mutation.lock().await;
+        self.ensure_active()?;
+        let removed = self.store.reset_namespace().await?;
+        self.install_runtime_state(RuntimeState::default(), None)
+            .await?;
+        Ok(removed)
+    }
+
     #[must_use]
     pub fn environment(&self) -> &str {
         self.store.environment()

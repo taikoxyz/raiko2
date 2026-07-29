@@ -37,6 +37,8 @@ impl Default for RuntimeStoreConfig {
 pub struct RuntimeConfig {
     pub environment: String,
     pub namespace: String,
+    #[serde(default)]
+    pub reset_namespace_on_start: bool,
     pub store: RuntimeStoreConfig,
 }
 
@@ -45,6 +47,7 @@ impl Default for RuntimeConfig {
         Self {
             environment: "development".to_string(),
             namespace: "raiko2-development".to_string(),
+            reset_namespace_on_start: false,
             store: RuntimeStoreConfig::default(),
         }
     }
@@ -142,6 +145,7 @@ mod tests {
         let config = RuntimeConfig {
             environment: "devnet".into(),
             namespace: "raiko2-devnet-a".into(),
+            reset_namespace_on_start: false,
             store: RuntimeStoreConfig {
                 backend: RuntimeStoreBackend::Gcs,
                 bucket: Some("runtime-state".into()),
@@ -173,6 +177,7 @@ mod tests {
         let config = RuntimeConfig {
             environment: "hoodi".into(),
             namespace: "raiko2-hoodi-ephemeral".into(),
+            reset_namespace_on_start: false,
             store: RuntimeStoreConfig {
                 allow_ephemeral: true,
                 ..RuntimeStoreConfig::default()
@@ -182,5 +187,21 @@ mod tests {
         config
             .validate()
             .expect("explicit ephemeral storage opt-in");
+    }
+
+    #[test]
+    fn namespace_reset_on_start_defaults_to_disabled() {
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+
+                [store]
+                backend = "memory"
+            "#,
+        )
+        .expect("runtime config without reset flag parses");
+
+        assert!(!config.reset_namespace_on_start);
     }
 }

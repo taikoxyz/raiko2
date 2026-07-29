@@ -149,6 +149,17 @@ pub trait RuntimeStateStore: RuntimeStoreScope {
         bytes: &[u8],
         expected_generation: Option<i64>,
     ) -> Result<RuntimeStateWriteResult>;
+
+    /// Removes every persistent object in this store's configured namespace.
+    ///
+    /// Stores that do not implement a complete namespace reset fail closed when
+    /// an operator requests one at startup.
+    async fn reset_namespace(&self) -> Result<usize> {
+        anyhow::bail!(
+            "runtime namespace reset is not supported by {} store",
+            self.backend_name()
+        )
+    }
 }
 
 pub trait RuntimeStore: ProofObjectStore + RuntimeStateStore {}
@@ -452,6 +463,23 @@ impl RuntimeStateStore for MemoryProofArtifactStore {
             generation: Some(generation),
         })
     }
+
+    async fn reset_namespace(&self) -> Result<usize> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let cleared = inner.manifests.len()
+            + inner.contents.len()
+            + inner.invalidations.len()
+            + usize::from(inner.runtime_state.is_some());
+        let next_generation = inner.next_generation;
+        *inner = MemoryStoreInner {
+            next_generation,
+            ..MemoryStoreInner::default()
+        };
+        Ok(cleared)
+    }
 }
 
 pub fn validate_scope_component(name: &str, value: &str) -> Result<()> {
@@ -676,6 +704,51 @@ mod tests {
             .remove(&(key.clone(), first.content_hash.clone()));
 
         assert_eq!(store.get_descriptor(&key).await?, Some(first.descriptor()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn namespace_reset_removes_runtime_state_artifacts_and_invalidations() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-reset".into())?;
+        let key = key();
+        let proof = store
+            .put_if_absent(&key, b"proof")
+            .await?
+            .try_object()
+            .expect("proof publication should materialize content")
+            .clone();
+        assert!(matches!(
+            store.invalidate_exact(&key, &proof.descriptor()).await?,
+            ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+        ));
+        let RuntimeStateWriteResult::Stored {
+            generation: Some(runtime_generation),
+        } = store.store_runtime_state(b"runtime", None).await?
+        else {
+            anyhow::bail!("runtime state should receive a memory generation");
+        };
+
+        assert_eq!(store.reset_namespace().await?, 3);
+        assert_eq!(store.load_runtime_state().await?, None);
+        assert_eq!(store.get_descriptor(&key).await?, None);
+        assert!(!store.is_invalidated(&key, &proof.descriptor()).await?);
+        assert!(
+            store
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("memory store poisoned"))?
+                .contents
+                .is_empty()
+        );
+        let RuntimeStateWriteResult::Stored {
+            generation: Some(next_generation),
+        } = store
+            .store_runtime_state(b"runtime-after-reset", None)
+            .await?
+        else {
+            anyhow::bail!("runtime state should receive a memory generation after reset");
+        };
+        assert!(next_generation > runtime_generation);
         Ok(())
     }
 }

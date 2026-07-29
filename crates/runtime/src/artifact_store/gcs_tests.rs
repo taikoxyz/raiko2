@@ -4,15 +4,33 @@ use std::{
     collections::BTreeMap,
     sync::{
         Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct FakeGcsTransport {
     objects: Mutex<BTreeMap<String, GcsObject>>,
     next_generation: Mutex<i64>,
     delete_failure: AtomicU8,
+    deleted_names: Mutex<Vec<String>>,
+    remove_first_listed_object: AtomicBool,
+    list_page_size: AtomicUsize,
+    list_failure: AtomicBool,
+}
+
+impl Default for FakeGcsTransport {
+    fn default() -> Self {
+        Self {
+            objects: Mutex::new(BTreeMap::new()),
+            next_generation: Mutex::new(0),
+            delete_failure: AtomicU8::new(0),
+            deleted_names: Mutex::new(Vec::new()),
+            remove_first_listed_object: AtomicBool::new(false),
+            list_page_size: AtomicUsize::new(usize::MAX),
+            list_failure: AtomicBool::new(false),
+        }
+    }
 }
 
 impl FakeGcsTransport {
@@ -52,6 +70,28 @@ impl FakeGcsTransport {
         object.bytes = bytes.to_vec();
         Ok(())
     }
+
+    fn deleted_names(&self) -> Result<Vec<String>> {
+        Ok(self
+            .deleted_names
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake deleted-name lock poisoned"))?
+            .clone())
+    }
+
+    fn remove_first_listed_object_on_next_list(&self) {
+        self.remove_first_listed_object
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn set_list_page_size(&self, page_size: usize) {
+        self.list_page_size
+            .store(page_size.max(1), Ordering::SeqCst);
+    }
+
+    fn fail_next_list(&self) {
+        self.list_failure.store(true, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -68,6 +108,45 @@ impl GcsTransport for FakeGcsTransport {
             bytes: object.bytes.clone(),
             generation: object.generation,
         }))
+    }
+
+    async fn list_prefix_page(
+        &self,
+        prefix: &str,
+        page_token: Option<&str>,
+    ) -> Result<GcsObjectPage> {
+        if self.list_failure.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("injected GCS list failure");
+        }
+        let mut objects = self
+            .objects
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?;
+        let listed = objects
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .filter(|(name, _)| page_token.is_none_or(|token| name.as_str() > token))
+            .map(|(name, object)| GcsObjectMetadata {
+                name: name.clone(),
+                generation: object.generation,
+            })
+            .collect::<Vec<_>>();
+        let page_size = self.list_page_size.load(Ordering::SeqCst);
+        let next_page_token = listed
+            .get(page_size)
+            .map(|_| listed[page_size - 1].name.clone());
+        let listed = listed.into_iter().take(page_size).collect::<Vec<_>>();
+        if self
+            .remove_first_listed_object
+            .swap(false, Ordering::SeqCst)
+            && let Some(object) = listed.first()
+        {
+            objects.remove(&object.name);
+        }
+        Ok(GcsObjectPage {
+            objects: listed,
+            next_page_token,
+        })
     }
 
     async fn create(&self, name: &str, bytes: &[u8]) -> Result<GcsCreateResult> {
@@ -135,6 +214,11 @@ impl GcsTransport for FakeGcsTransport {
             "fake GCS generation precondition failed"
         );
         objects.remove(name);
+        drop(objects);
+        self.deleted_names
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake deleted-name lock poisoned"))?
+            .push(name.to_string());
         if failure == 2 {
             anyhow::bail!("injected GCS delete failure after commit");
         }
@@ -447,5 +531,146 @@ async fn runtime_state_conflict_reads_back_the_observed_generation() -> Result<(
     };
     assert_eq!(observed.bytes, b"concurrent");
     assert_ne!(observed.generation, Some(first_generation));
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_removes_only_the_configured_scope() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let proof = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    assert!(matches!(
+        store.invalidate_exact(&key, &proof.descriptor()).await?,
+        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
+    ));
+    assert!(matches!(
+        store.store_runtime_state(b"runtime", None).await?,
+        RuntimeStateWriteResult::Stored { .. }
+    ));
+    let live_key = ProofArtifactKey {
+        proof_ref: "proposal-live".to_string(),
+        ..key.clone()
+    };
+    let live_proof = store
+        .put_if_absent(&live_key, br#"{"proof":"0x02"}"#)
+        .await?
+        .try_object()
+        .expect("live proof publication should materialize content")
+        .clone();
+    let sibling = format!("{}-other/sentinel", store.scope_prefix());
+    assert!(matches!(
+        transport.create(&sibling, b"sibling").await?,
+        GcsCreateResult::Created(_)
+    ));
+
+    assert_eq!(store.reset_namespace().await?, 5);
+    assert!(!transport.contains(&store.content_name(&key, &proof.content_hash))?);
+    assert!(!transport.contains(&store.invalidation_name(
+        &key,
+        proof.generation,
+        &proof.content_hash
+    ))?);
+    assert!(!transport.contains(&store.runtime_state_name())?);
+    assert!(!transport.contains(&store.content_name(&live_key, &live_proof.content_hash))?);
+    assert!(!transport.contains(&store.manifest_name(&live_key))?);
+    assert!(transport.contains(&sibling)?);
+
+    let deleted = transport.deleted_names()?;
+    let runtime_state_index = deleted
+        .iter()
+        .position(|name| name == &store.runtime_state_name())
+        .expect("runtime state must be deleted");
+    let manifest_index = deleted
+        .iter()
+        .position(|name| name == &store.manifest_name(&live_key))
+        .expect("live manifest must be deleted");
+    let content_index = deleted
+        .iter()
+        .position(|name| name == &store.content_name(&live_key, &live_proof.content_hash))
+        .expect("live content must be deleted");
+    assert!(runtime_state_index < manifest_index);
+    assert!(manifest_index < content_index);
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_accepts_objects_removed_after_listing() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    assert!(matches!(
+        store.store_runtime_state(b"runtime", None).await?,
+        RuntimeStateWriteResult::Stored { .. }
+    ));
+    transport.remove_first_listed_object_on_next_list();
+
+    assert_eq!(store.reset_namespace().await?, 1);
+    assert!(!transport.contains(&store.runtime_state_name())?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_paginates_current_objects() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    transport.set_list_page_size(1);
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let proof = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    assert!(matches!(
+        store.store_runtime_state(b"runtime", None).await?,
+        RuntimeStateWriteResult::Stored { .. }
+    ));
+
+    assert_eq!(store.reset_namespace().await?, 3);
+    assert!(!transport.contains(&store.runtime_state_name())?);
+    assert!(!transport.contains(&store.manifest_name(&key))?);
+    assert!(!transport.contains(&store.content_name(&key, &proof.content_hash))?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_reports_list_failures() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    transport.fail_next_list();
+
+    let error = store
+        .reset_namespace()
+        .await
+        .expect_err("namespace reset must stop on a list failure");
+    assert!(error.to_string().contains("injected GCS list failure"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn namespace_reset_reports_delete_failures() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    assert!(matches!(
+        store.store_runtime_state(b"runtime", None).await?,
+        RuntimeStateWriteResult::Stored { .. }
+    ));
+    transport.delete_failure.store(1, Ordering::SeqCst);
+
+    let error = store
+        .reset_namespace()
+        .await
+        .expect_err("namespace reset must stop on a delete failure");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to delete GCS runtime namespace object")
+    );
+    assert!(transport.contains(&store.runtime_state_name())?);
     Ok(())
 }

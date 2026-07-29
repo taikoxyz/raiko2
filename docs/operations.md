@@ -1188,6 +1188,15 @@ Operator notes:
   publication saga to finish; restart reconciliation resumes durable work. Namespace changes are hard
   cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
   from GCS rather than Redis.
+- `runtime.reset_namespace_on_start = true` is an explicit destructive startup operation for the
+  current `(runtime.environment, runtime.namespace)`. It runs only after the old process has
+  exited, before recovery, workers, or HTTP admission. GCS reset pages through the current objects
+  in the exact configured scope and requires `storage.objects.list` and `storage.objects.delete`.
+  A list or delete failure aborts startup; do not disable the flag after a failed attempt. Every
+  restart while it remains true repeats the reset, so set it back to false only after the reset has
+  succeeded. Current object generations are deleted; bucket versioning, soft delete, retention, and
+  lifecycle policies continue to govern historical generations. Keep prefixes non-overlapping so a
+  configured scope cannot be nested beneath another deployment scope.
 - Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
   complete lifecycle operation. A process-local lifecycle transition gate serializes one short
   active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,

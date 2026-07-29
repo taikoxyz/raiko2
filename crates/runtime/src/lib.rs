@@ -188,6 +188,7 @@ pub struct RuntimeManager {
     execution_lifecycle_gate: Arc<Mutex<()>>,
     namespace_commit_fence: RwLock<()>,
     submission_checkpoints: Arc<SubmissionCheckpointAdmission>,
+    initialized: AtomicBool,
     active: AtomicBool,
     draining: AtomicBool,
     state_coherence: AtomicU8,
@@ -452,6 +453,7 @@ impl RuntimeManager {
             execution_lifecycle_gate: Arc::new(Mutex::new(())),
             namespace_commit_fence: RwLock::new(()),
             submission_checkpoints: Arc::new(SubmissionCheckpointAdmission::default()),
+            initialized: AtomicBool::new(false),
             active: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             state_coherence: AtomicU8::new(StateCoherence::Coherent as u8),
@@ -623,7 +625,33 @@ impl RuntimeManager {
 
     pub async fn initialize(&self) -> Result<()> {
         let _mutation = self.mutation.lock().await;
-        self.reload_authoritative_state().await
+        anyhow::ensure!(
+            !self.initialized.load(Ordering::Acquire),
+            "runtime is already initialized"
+        );
+        self.reload_authoritative_state().await?;
+        self.initialized.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Clears the complete persistent namespace before the runtime is initialized.
+    ///
+    /// This is an explicit startup operation. Callers must uphold the deployment
+    /// invariant that no other process is active in this namespace.
+    pub async fn reset_namespace(&self) -> Result<usize> {
+        self.ensure_active()?;
+        let _commit = self.namespace_commit_fence.write().await;
+        self.ensure_active()?;
+        let _mutation = self.mutation.lock().await;
+        self.ensure_active()?;
+        anyhow::ensure!(
+            !self.initialized.load(Ordering::Acquire),
+            "runtime namespace reset is only valid before initialization"
+        );
+        let cleared = self.store.reset_namespace().await?;
+        self.install_runtime_state(RuntimeState::default(), None)
+            .await?;
+        Ok(cleared)
     }
 
     #[must_use]
@@ -3400,6 +3428,19 @@ mod tests {
             RuntimeMutationOutcome::Blocked
         );
         assert!(runtime.get_task("root").await?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn namespace_reset_is_rejected_after_initialization() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "reset-live-runtime".into())?;
+        runtime.initialize().await?;
+
+        let error = runtime
+            .reset_namespace()
+            .await
+            .expect_err("initialized runtime must reject namespace reset");
+        assert!(error.to_string().contains("before initialization"));
         Ok(())
     }
 

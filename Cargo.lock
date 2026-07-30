@@ -8301,6 +8301,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-trie 0.9.5",
  "async-trait",
+ "bincode",
  "futures",
  "raiko2-guests",
  "raiko2-primitives",

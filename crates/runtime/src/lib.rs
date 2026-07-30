@@ -10,7 +10,8 @@ mod publication;
 
 pub use artifact_store::{
     ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
-    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, validate_scope_component,
+    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, StartupCleanupMask,
+    StartupCleanupReport, StartupCleanupScope, StartupCleanupScopeReport, validate_scope_component,
 };
 pub use publication::ProofArtifactPublicationInvalidated;
 
@@ -20,6 +21,7 @@ pub mod test_support {
     pub use crate::artifact_store::{
         ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
         RuntimeStateStore, RuntimeStateWriteResult, RuntimeStore, RuntimeStoreScope,
+        StartupCleanupMask, StartupCleanupReport, StartupCleanupScope, StartupCleanupScopeReport,
     };
     pub use crate::{
         ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
@@ -748,6 +750,28 @@ impl RuntimeManager {
         self.install_runtime_state(RuntimeState::default(), None)
             .await?;
         Ok(cleared)
+    }
+
+    /// Invalidates selected active cache manifests before runtime initialization.
+    pub async fn cleanup_before_start(
+        &self,
+        scopes: StartupCleanupMask,
+    ) -> Result<StartupCleanupReport> {
+        self.ensure_active()?;
+        let _commit = self.namespace_commit_fence.write().await;
+        self.ensure_active()?;
+        let _mutation = self.mutation.lock().await;
+        self.ensure_active()?;
+        anyhow::ensure!(
+            !self.initialized.load(Ordering::Acquire),
+            "startup cleanup is only valid before initialization"
+        );
+        let report = self.store.cleanup_before_start(scopes).await?;
+        if scopes.contains(StartupCleanupMask::PROOF) {
+            self.install_runtime_state(RuntimeState::default(), None)
+                .await?;
+        }
+        Ok(report)
     }
 
     #[must_use]

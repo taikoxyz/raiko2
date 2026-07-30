@@ -22,7 +22,7 @@ use raiko2_primitives::ProofType;
 use raiko2_prover::{gaiko2::Gaiko2Prover, native::NativeProver};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
-use raiko2_runtime::RuntimeManager;
+use raiko2_runtime::{RuntimeManager, StartupCleanupMask};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -58,7 +58,9 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 use super::lifecycle::ProofLifecycle;
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::telemetry::PreflightCacheMetricsObserver;
+use super::telemetry::{
+    PreflightCacheMetricsObserver, record_startup_cleanup_failure, record_startup_cleanup_report,
+};
 
 /// In-memory sliding-window limiter for ACL-protected endpoints.
 /// Buckets use config indexes so each configured ACL entry gets an independent quota.
@@ -184,26 +186,41 @@ async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
 }
 
 async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result<()> {
-    if config.runtime.reset_namespace_on_start {
+    let cleanup = config.runtime.startup_cleanup_mask()?;
+    for scope in cleanup.ordered_scopes() {
+        let scope_mask = StartupCleanupMask::from(scope);
         warn!(
             backend = runtime.backend_name(),
             environment = runtime.environment(),
             namespace = runtime.namespace(),
             store_prefix = %config.runtime.store.prefix,
-            "about to reset configured runtime namespace at startup"
+            scope = scope.as_str(),
+            "about to run scoped startup cleanup"
         );
-        let cleared = runtime
-            .reset_namespace()
-            .await
-            .context("failed to reset configured runtime namespace before startup")?;
-        tracing::info!(
-            backend = runtime.backend_name(),
-            environment = runtime.environment(),
-            namespace = runtime.namespace(),
-            store_prefix = %config.runtime.store.prefix,
-            cleared,
-            "reset configured runtime namespace at startup"
-        );
+        let report = match runtime.cleanup_before_start(scope_mask).await {
+            Ok(report) => report,
+            Err(error) => {
+                record_startup_cleanup_failure(scope);
+                return Err(error).with_context(|| {
+                    format!("failed {scope:?} startup cleanup before runtime initialization")
+                });
+            }
+        };
+        record_startup_cleanup_report(&report);
+        for entry in &report.scopes {
+            tracing::info!(
+                backend = runtime.backend_name(),
+                environment = runtime.environment(),
+                namespace = runtime.namespace(),
+                store_prefix = %config.runtime.store.prefix,
+                scope = entry.scope.as_str(),
+                matched = entry.matched,
+                removed = entry.removed,
+                failed = entry.failed,
+                elapsed_ms = entry.duration.as_millis(),
+                "completed scoped startup cleanup"
+            );
+        }
     }
     runtime.initialize().await
 }
@@ -888,12 +905,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_namespace_on_start_discards_persisted_tasks_before_initialization() -> Result<()>
-    {
+    async fn proof_startup_cleanup_discards_persisted_tasks_before_initialization() -> Result<()> {
         let mut config = Config::default();
         config.runtime.environment = "test".into();
-        config.runtime.namespace = "startup-reset".into();
-        config.runtime.reset_namespace_on_start = true;
+        config.runtime.namespace = "startup-proof-cleanup".into();
+        config.runtime.startup_cleanup = vec![crate::config::StartupCleanupScope::Proof];
         let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
             config.runtime.environment.clone(),
             config.runtime.namespace.clone(),
@@ -922,10 +938,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_namespace_on_start_is_opt_in() -> Result<()> {
+    async fn startup_cleanup_is_opt_in() -> Result<()> {
         let mut config = Config::default();
         config.runtime.environment = "test".into();
-        config.runtime.namespace = "startup-no-reset".into();
+        config.runtime.namespace = "startup-no-cleanup".into();
         let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
             config.runtime.environment.clone(),
             config.runtime.namespace.clone(),

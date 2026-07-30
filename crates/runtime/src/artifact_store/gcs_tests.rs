@@ -23,6 +23,8 @@ struct FakeGcsTransport {
     remove_first_listed_object: AtomicBool,
     list_page_size: AtomicUsize,
     list_failure: AtomicBool,
+    active_deletes: AtomicUsize,
+    max_active_deletes: AtomicUsize,
 }
 
 impl Default for FakeGcsTransport {
@@ -35,6 +37,8 @@ impl Default for FakeGcsTransport {
             remove_first_listed_object: AtomicBool::new(false),
             list_page_size: AtomicUsize::new(usize::MAX),
             list_failure: AtomicBool::new(false),
+            active_deletes: AtomicUsize::new(0),
+            max_active_deletes: AtomicUsize::new(0),
         }
     }
 }
@@ -97,6 +101,18 @@ impl FakeGcsTransport {
 
     fn fail_next_list(&self) {
         self.list_failure.store(true, Ordering::SeqCst);
+    }
+
+    fn max_active_deletes(&self) -> usize {
+        self.max_active_deletes.load(Ordering::SeqCst)
+    }
+}
+
+struct ActiveDeleteGuard<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveDeleteGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -204,6 +220,10 @@ impl GcsTransport for FakeGcsTransport {
         name: &str,
         generation: Option<i64>,
     ) -> Result<ProofArtifactDeleteResult> {
+        let active = self.active_deletes.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active_deletes.fetch_max(active, Ordering::SeqCst);
+        let _active = ActiveDeleteGuard(&self.active_deletes);
+        tokio::task::yield_now().await;
         let failure = self.delete_failure.swap(0, Ordering::SeqCst);
         if failure == 1 {
             anyhow::bail!("injected GCS delete failure before commit");
@@ -756,6 +776,233 @@ async fn runtime_state_conflict_reads_back_the_observed_generation() -> Result<(
     };
     assert_eq!(observed.bytes, b"concurrent");
     assert_ne!(observed.generation, Some(first_generation));
+    Ok(())
+}
+
+#[tokio::test]
+async fn proof_startup_cleanup_keeps_preflight_and_immutable_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let proof_key = key();
+    let proof = store
+        .put_if_absent(&proof_key, b"proof")
+        .await?
+        .try_object()
+        .expect("proof publication")
+        .clone();
+    let preflight_key = canonical_preflight_key();
+    let preflight = store
+        .put_canonical_preflight_if_absent(&preflight_key, b"preflight")
+        .await?
+        .try_object()
+        .expect("preflight publication")
+        .clone();
+    store.store_runtime_state(b"runtime", None).await?;
+
+    let report = store
+        .cleanup_before_start(StartupCleanupMask::PROOF)
+        .await?;
+
+    let proof_report = report
+        .scope(StartupCleanupScope::Proof)
+        .expect("proof cleanup report");
+    assert_eq!(
+        (
+            proof_report.matched,
+            proof_report.removed,
+            proof_report.failed
+        ),
+        (2, 2, 0)
+    );
+    assert!(store.load_runtime_state().await?.is_none());
+    assert!(store.get_descriptor(&proof_key).await?.is_none());
+    assert!(
+        store
+            .get_canonical_preflight(&preflight_key)
+            .await?
+            .is_some()
+    );
+    assert!(transport.contains(&store.content_name(&proof_key, &proof.content_hash))?);
+    assert!(transport.contains(
+        &store.canonical_preflight_content_name(&preflight_key, &preflight.content_hash)?
+    )?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn preflight_startup_cleanup_keeps_runtime_and_proof() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let proof_key = key();
+    let proof = store
+        .put_if_absent(&proof_key, b"proof")
+        .await?
+        .try_object()
+        .expect("proof publication")
+        .clone();
+    let preflight_key = canonical_preflight_key();
+    let preflight = store
+        .put_canonical_preflight_if_absent(&preflight_key, b"preflight")
+        .await?
+        .try_object()
+        .expect("preflight publication")
+        .clone();
+    store.store_runtime_state(b"runtime", None).await?;
+
+    let report = store
+        .cleanup_before_start(StartupCleanupMask::PREFLIGHT)
+        .await?;
+
+    let preflight_report = report
+        .scope(StartupCleanupScope::Preflight)
+        .expect("preflight cleanup report");
+    assert_eq!(
+        (
+            preflight_report.matched,
+            preflight_report.removed,
+            preflight_report.failed
+        ),
+        (1, 1, 0)
+    );
+    assert!(store.load_runtime_state().await?.is_some());
+    assert_eq!(
+        store.get_descriptor(&proof_key).await?,
+        Some(proof.descriptor())
+    );
+    assert!(
+        store
+            .get_canonical_preflight(&preflight_key)
+            .await?
+            .is_none()
+    );
+    assert!(transport.contains(
+        &store.canonical_preflight_content_name(&preflight_key, &preflight.content_hash)?
+    )?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_cleanup_paginates_and_bounds_manifest_deletes() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    transport.set_list_page_size(70);
+    let store = store(Arc::clone(&transport))?;
+    let proofs_prefix = format!("{}/proofs/", store.scope_prefix());
+    for index in 0..130 {
+        let name = format!("{proofs_prefix}lane/pair/proposal-{index}/manifest.manifest.json");
+        assert!(matches!(
+            transport.create(&name, b"manifest").await?,
+            GcsCreateResult::Created(_)
+        ));
+    }
+    let content = format!("{proofs_prefix}lane/pair/proposal-0/content/proof.json");
+    assert!(matches!(
+        transport.create(&content, b"proof").await?,
+        GcsCreateResult::Created(_)
+    ));
+
+    let report = store
+        .cleanup_before_start(StartupCleanupMask::PROOF)
+        .await?;
+
+    let proof_report = report
+        .scope(StartupCleanupScope::Proof)
+        .expect("proof cleanup report");
+    assert_eq!((proof_report.matched, proof_report.removed), (130, 130));
+    assert!(transport.max_active_deletes() > 1);
+    assert!(
+        transport.max_active_deletes() <= STARTUP_CLEANUP_DELETE_CONCURRENCY,
+        "delete concurrency exceeded configured bound"
+    );
+    assert!(transport.contains(&content)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn proof_startup_cleanup_stops_before_manifests_when_runtime_delete_fails() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let proof_key = key();
+    store.put_if_absent(&proof_key, b"proof").await?;
+    store.store_runtime_state(b"runtime", None).await?;
+    transport.delete_failure.store(1, Ordering::SeqCst);
+
+    let error = store
+        .cleanup_before_start(StartupCleanupMask::PROOF)
+        .await
+        .expect_err("runtime-state deletion failure must abort cleanup");
+
+    assert!(error.to_string().contains("failed to delete runtime state"));
+    assert!(transport.contains(&store.runtime_state_name())?);
+    assert!(transport.contains(&store.manifest_name(&proof_key))?);
+
+    let report = store
+        .cleanup_before_start(StartupCleanupMask::PROOF)
+        .await?;
+    assert_eq!(
+        report
+            .scope(StartupCleanupScope::Proof)
+            .expect("proof report")
+            .removed,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_cleanup_retry_is_idempotent_after_unknown_delete_outcome() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let proof_key = key();
+    let proof = store
+        .put_if_absent(&proof_key, b"proof")
+        .await?
+        .try_object()
+        .expect("proof publication")
+        .clone();
+    transport.delete_failure.store(2, Ordering::SeqCst);
+
+    store
+        .cleanup_before_start(StartupCleanupMask::PROOF)
+        .await
+        .expect_err("unknown manifest delete outcome must abort cleanup");
+    assert!(!transport.contains(&store.manifest_name(&proof_key))?);
+    assert!(transport.contains(&store.content_name(&proof_key, &proof.content_hash))?);
+
+    let report = store
+        .cleanup_before_start(StartupCleanupMask::PROOF)
+        .await?;
+    let proof_report = report
+        .scope(StartupCleanupScope::Proof)
+        .expect("proof cleanup report");
+    assert_eq!((proof_report.matched, proof_report.removed), (0, 0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn all_startup_cleanup_removes_both_manifest_scopes_in_order() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let proof_key = key();
+    store.put_if_absent(&proof_key, b"proof").await?;
+    let preflight_key = canonical_preflight_key();
+    store
+        .put_canonical_preflight_if_absent(&preflight_key, b"preflight")
+        .await?;
+    store.store_runtime_state(b"runtime", None).await?;
+
+    let report = store.cleanup_before_start(StartupCleanupMask::ALL).await?;
+
+    assert_eq!(
+        report
+            .scopes
+            .iter()
+            .map(|entry| entry.scope)
+            .collect::<Vec<_>>(),
+        vec![StartupCleanupScope::Proof, StartupCleanupScope::Preflight]
+    );
+    assert!(!transport.contains(&store.runtime_state_name())?);
+    assert!(!transport.contains(&store.manifest_name(&proof_key))?);
+    assert!(!transport.contains(&store.canonical_preflight_manifest_name(&preflight_key)?)?);
     Ok(())
 }
 

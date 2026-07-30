@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
-use raiko2_runtime::validate_scope_component;
-use serde::{Deserialize, Serialize};
+use raiko2_runtime::{StartupCleanupMask, validate_scope_component};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -8,6 +9,13 @@ pub enum RuntimeStoreBackend {
     #[default]
     Memory,
     Gcs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupCleanupScope {
+    Proof,
+    Preflight,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,8 +45,8 @@ impl Default for RuntimeStoreConfig {
 pub struct RuntimeConfig {
     pub environment: String,
     pub namespace: String,
-    #[serde(default)]
-    pub reset_namespace_on_start: bool,
+    #[serde(default, deserialize_with = "deserialize_startup_cleanup")]
+    pub startup_cleanup: Vec<StartupCleanupScope>,
     pub store: RuntimeStoreConfig,
 }
 
@@ -47,7 +55,7 @@ impl Default for RuntimeConfig {
         Self {
             environment: "development".to_string(),
             namespace: "raiko2-development".to_string(),
-            reset_namespace_on_start: false,
+            startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig::default(),
         }
     }
@@ -57,6 +65,7 @@ impl RuntimeConfig {
     pub fn validate(&self) -> Result<()> {
         validate_scope_component("runtime.environment", &self.environment)?;
         validate_scope_component("runtime.namespace", &self.namespace)?;
+        self.startup_cleanup_mask()?;
         match self.store.backend {
             RuntimeStoreBackend::Memory => {
                 if self.store.bucket.is_some() {
@@ -91,6 +100,40 @@ impl RuntimeConfig {
         }
         Ok(())
     }
+
+    pub fn startup_cleanup_mask(&self) -> Result<StartupCleanupMask> {
+        let mut seen = HashSet::new();
+        let mut mask = StartupCleanupMask::NONE;
+        for scope in &self.startup_cleanup {
+            if !seen.insert(*scope) {
+                bail!("runtime.startup_cleanup contains duplicate scope {scope:?}");
+            }
+            mask = mask
+                | match scope {
+                    StartupCleanupScope::Proof => StartupCleanupMask::PROOF,
+                    StartupCleanupScope::Preflight => StartupCleanupMask::PREFLIGHT,
+                };
+        }
+        Ok(mask)
+    }
+}
+
+fn deserialize_startup_cleanup<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<StartupCleanupScope>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let scopes = Vec::<StartupCleanupScope>::deserialize(deserializer)?;
+    let mut seen = HashSet::new();
+    for scope in &scopes {
+        if !seen.insert(*scope) {
+            return Err(D::Error::custom(format!(
+                "runtime.startup_cleanup contains duplicate scope {scope:?}"
+            )));
+        }
+    }
+    Ok(scopes)
 }
 
 fn default_prefix() -> String {
@@ -145,7 +188,7 @@ mod tests {
         let config = RuntimeConfig {
             environment: "devnet".into(),
             namespace: "raiko2-devnet-a".into(),
-            reset_namespace_on_start: false,
+            startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig {
                 backend: RuntimeStoreBackend::Gcs,
                 bucket: Some("runtime-state".into()),
@@ -177,7 +220,7 @@ mod tests {
         let config = RuntimeConfig {
             environment: "hoodi".into(),
             namespace: "raiko2-hoodi-ephemeral".into(),
-            reset_namespace_on_start: false,
+            startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig {
                 allow_ephemeral: true,
                 ..RuntimeStoreConfig::default()
@@ -190,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_reset_on_start_defaults_to_disabled() {
+    fn startup_cleanup_defaults_to_empty() {
         let config: RuntimeConfig = toml::from_str(
             r#"
                 environment = "development"
@@ -200,8 +243,63 @@ mod tests {
                 backend = "memory"
             "#,
         )
-        .expect("runtime config without reset flag parses");
+        .expect("runtime config without startup cleanup parses");
 
-        assert!(!config.reset_namespace_on_start);
+        assert!(config.startup_cleanup.is_empty());
+        assert_eq!(
+            config.startup_cleanup_mask().expect("cleanup mask"),
+            StartupCleanupMask::NONE
+        );
+    }
+
+    #[test]
+    fn startup_cleanup_parses_exact_scopes_and_serializes_lowercase() {
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                startup_cleanup = ["proof", "preflight"]
+
+                [store]
+                backend = "memory"
+            "#,
+        )
+        .expect("startup cleanup scopes parse");
+
+        assert_eq!(
+            config.startup_cleanup_mask().expect("cleanup mask"),
+            StartupCleanupMask::ALL
+        );
+        let encoded = toml::to_string(&config).expect("serialize runtime config");
+        assert!(encoded.contains("startup_cleanup = [\"proof\", \"preflight\"]"));
+    }
+
+    #[test]
+    fn startup_cleanup_rejects_duplicate_unknown_and_removed_fields() {
+        for input in [
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                startup_cleanup = ["proof", "proof"]
+                [store]
+                backend = "memory"
+            "#,
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                startup_cleanup = ["input"]
+                [store]
+                backend = "memory"
+            "#,
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                reset_namespace_on_start = true
+                [store]
+                backend = "memory"
+            "#,
+        ] {
+            assert!(toml::from_str::<RuntimeConfig>(input).is_err());
+        }
     }
 }

@@ -3,7 +3,9 @@ use super::host_l2_chain_spec_from_context;
 use super::manifest::ShastaManifestBuilder;
 use super::preflight_cache::{
     CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalPreflightLocatorKeyV1,
-    CanonicalPreflightLocatorV1, PreflightCoordinator,
+    CanonicalPreflightLocatorV1, CanonicalShastaManifestV1, CanonicalShastaPreflightV1,
+    CanonicalStatelessInputV1, PreflightCoordinator, chain_rules_fingerprint,
+    proposal_event_digest,
 };
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
@@ -24,9 +26,7 @@ use raiko2_primitives::{
     shasta_checkpoint_storage_slots, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
-    AnchorSourceSpan, CanonicalShastaManifestV1, CanonicalShastaPreflightV1,
-    CanonicalStatelessInputV1, GuestInput, build_proof_carry_data_with_chain_spec,
-    build_proof_carry_data_with_verifier, chain_rules_fingerprint, proposal_event_digest,
+    AnchorSourceSpan, GuestInput, build_proof_carry_data_with_chain_spec,
     should_bypass_stalled_anchor_linkage, validate_anchor_progression,
     validate_source_aware_anchor_progression, verify_proposal_mode_blob_usage,
 };
@@ -2086,7 +2086,8 @@ pub(crate) fn validate_canonical_preflight(
         proposal_state_nodes: core.proposal_state_nodes.clone(),
     };
     input.proof_carry_data =
-        build_proof_carry_data_with_verifier(&input, chain_spec.chain_id, Address::ZERO)?;
+        build_proof_carry_data_with_chain_spec(&input, ProofType::Native, chain_spec)?;
+    input.proof_carry_data.verifier = Address::ZERO;
     validate_materialized_canonical_data(&input, chain_spec)
 }
 

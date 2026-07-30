@@ -4,7 +4,13 @@
 
 **Goal:** Share one validated Shasta preflight result across all proof lanes and replace full startup namespace deletion with exact `proof` and `preflight` cleanup scopes.
 
-**Architecture:** Add a versioned, lane-independent canonical preflight core and deterministic key in `raiko2-primitives-shasta`; split Shasta preflight into locator, core construction, canonical validation, and request-specific materialization; provide memory and GCS manifest/content stores through the runtime; inject one local single-flight coordinator per network pair into every `ShastaSpec`; and migrate startup cleanup from a boolean full reset to an exact scope list.
+**Architecture:** Add a versioned, lane-independent canonical preflight core and deterministic key
+to the host-only Shasta pipeline; split Shasta preflight into locator, core construction, canonical
+validation, and request-specific materialization; provide memory and GCS manifest/content stores
+through the runtime; inject one local single-flight coordinator per network pair into every
+`ShastaSpec`; and migrate startup cleanup from a boolean full reset to an exact scope list. Cache
+types must stay outside the guest dependency closure so this host optimization cannot change guest
+ELF provenance.
 
 **Tech Stack:** Rust, Tokio, async traits, serde/bincode, SHA-256, Google Cloud Storage generation preconditions, Prometheus, TOML configuration, and existing Shasta stateless validation.
 
@@ -24,10 +30,10 @@
 
 **Files:**
 
-- Create: `crates/primitives-shasta/src/preflight_cache.rs`
-- Modify: `crates/primitives-shasta/src/lib.rs`
-- Modify: `crates/primitives-shasta/Cargo.toml`
-- Test: `crates/primitives-shasta/src/preflight_cache.rs`
+- Create: `crates/pipeline/src/forks/shasta/preflight_cache/types.rs`
+- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Modify: `crates/pipeline/Cargo.toml`
+- Test: `crates/pipeline/src/forks/shasta/preflight_cache/types.rs`
 
 ### Step 1: Write failing key-boundary tests
 
@@ -44,7 +50,7 @@ Add unit tests for:
 Run:
 
 ```bash
-cargo test -p raiko2-primitives-shasta preflight_cache
+cargo test -p raiko2-pipeline preflight_cache
 ```
 
 Expected: fail because the canonical types and functions do not exist.
@@ -112,15 +118,16 @@ configured pair name into the persistent key.
 
 ```bash
 cargo fmt --all
-cargo test -p raiko2-primitives-shasta preflight_cache
+cargo test -p raiko2-pipeline preflight_cache
+cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check
 ```
 
-Expected: pass.
+Expected: pass, with both guest backends reported current.
 
 ### Step 5: Commit
 
 ```bash
-git add crates/primitives-shasta
+git add crates/pipeline
 git commit -m "feat(preflight): define canonical cache identity"
 ```
 
@@ -128,7 +135,7 @@ git commit -m "feat(preflight): define canonical cache identity"
 
 **Files:**
 
-- Create: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
 - Modify: `crates/pipeline/src/forks/shasta/mod.rs`
 - Modify: `crates/pipeline/src/forks/shasta/spec.rs`
 - Modify: `crates/pipeline/src/forks/shasta/manifest.rs`

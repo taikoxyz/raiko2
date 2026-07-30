@@ -1,3 +1,5 @@
+//! Host-only canonical Shasta preflight cache data model.
+
 use alloy_consensus::{Header, TrieAccount};
 use alloy_primitives::{B256, map::AddressMap};
 use anyhow::{Context, Result};

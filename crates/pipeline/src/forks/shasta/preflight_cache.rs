@@ -1,9 +1,15 @@
+mod types;
+
+pub use types::{
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalShastaManifestV1,
+    CanonicalShastaPreflightV1, CanonicalStatelessInputV1, chain_rules_fingerprint,
+    proposal_event_digest,
+};
+
 use alloy_primitives::B256;
 use anyhow::Result;
 use async_trait::async_trait;
 use raiko2_primitives::{L2BlockRange, RaikoError, RaikoResult, ShastaCheckpoint};
-use raiko2_primitives_shasta::CanonicalShastaPreflightV1;
-pub use raiko2_primitives_shasta::{CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use std::{
     collections::HashMap,
@@ -777,13 +783,12 @@ mod tests {
     use super::{
         CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDescriptor,
         CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1, CanonicalPreflightObject,
-        CanonicalPreflightPutResult, CanonicalPreflightStore, PreflightCacheResult,
-        PreflightCoordinator, PreflightObserver, SingleFlight,
+        CanonicalPreflightPutResult, CanonicalPreflightStore, CanonicalShastaPreflightV1,
+        PreflightCacheResult, PreflightCoordinator, PreflightObserver, SingleFlight,
     };
     use alloy_primitives::B256;
     use anyhow::Result;
     use raiko2_primitives::{L2BlockRange, RaikoError};
-    use raiko2_primitives_shasta::CanonicalShastaPreflightV1;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},

@@ -2,6 +2,7 @@
 
 use crate::GuestInput;
 use crate::instance::SHASTA_PROPOSAL_ID_MAX;
+use alloy_primitives::Address;
 use raiko2_primitives::{ChainSpec, Proof, ProofType, RaikoError, RaikoResult};
 use raiko2_protocol_shasta::libhash::hash_proposal;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -116,16 +117,6 @@ pub fn build_proof_carry_data_with_chain_spec(
             "cannot build Shasta proof carry data without witnesses".to_string(),
         )
     })?;
-    let last_witness = input.witnesses.last().ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
-            "cannot build Shasta proof carry data without witnesses".to_string(),
-        )
-    })?;
-    if chain_spec.chain_id == 0 {
-        return Err(RaikoError::InvalidRequestConfig(
-            "trusted chain_spec.chain_id must be non-zero".to_string(),
-        ));
-    }
     let chain_id = chain_spec.chain_id;
     let verifier_proof_type = match proof_type {
         ProofType::Native => ProofType::Sgx,
@@ -142,6 +133,40 @@ pub fn build_proof_carry_data_with_chain_spec(
                 "failed to resolve verifier address for proof type {verifier_proof_type}: {err}"
             ))
         })?;
+    build_proof_carry_data_with_verifier(input, chain_id, verifier)
+}
+
+/// Build `ProofCarryData` with an explicitly supplied chain ID and verifier address.
+///
+/// This is used by proof-independent host validation where the verifier is an opaque public-input
+/// field and resolving a lane-specific address would introduce an unnecessary configuration
+/// dependency.
+///
+/// # Errors
+///
+/// Returns an error if the input is missing witnesses, the chain ID is zero, a block number does
+/// not fit the protocol checkpoint type, or the embedded prover checkpoint does not match the
+/// canonical witness checkpoint.
+pub fn build_proof_carry_data_with_verifier(
+    input: &GuestInput,
+    chain_id: u64,
+    verifier: Address,
+) -> RaikoResult<ProofCarryData> {
+    let first_witness = input.witnesses.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build Shasta proof carry data without witnesses".to_string(),
+        )
+    })?;
+    let last_witness = input.witnesses.last().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build Shasta proof carry data without witnesses".to_string(),
+        )
+    })?;
+    if chain_id == 0 {
+        return Err(RaikoError::InvalidRequestConfig(
+            "chain_id must be non-zero".to_string(),
+        ));
+    }
     let proposal = &input.taiko.proposal_event.proposal;
     let proposal_event_id = proposal.id.to::<u64>();
     if input.taiko.proposal_id > SHASTA_PROPOSAL_ID_MAX {
@@ -193,7 +218,10 @@ pub fn build_proof_carry_data_with_chain_spec(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_proof_carry_data_from_witness_spec, build_proof_carry_data_with_chain_spec};
+    use super::{
+        build_proof_carry_data_from_witness_spec, build_proof_carry_data_with_chain_spec,
+        build_proof_carry_data_with_verifier,
+    };
     use crate::GuestInput;
     use alloy_primitives::{Address, B256};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
@@ -311,5 +339,21 @@ mod tests {
         assert_eq!(carry_from_witness.verifier, Address::from([0x99; 20]));
         assert_ne!(carry_from_trusted.verifier, carry_from_witness.verifier);
         assert_eq!(carry_from_trusted.chain_id, trusted_spec.chain_id);
+    }
+
+    #[test]
+    fn explicit_verifier_builder_does_not_require_a_lane_configuration() {
+        let mut input = GuestInput::default();
+        input.taiko.proposal_id = 7;
+        input.taiko.proposal_event.proposal.id = 7u64.try_into().expect("fits in uint48");
+        input
+            .witnesses
+            .push(raiko2_primitives::StatelessInput::default());
+
+        let carry = build_proof_carry_data_with_verifier(&input, 167_000, Address::ZERO)
+            .expect("build proof-independent carry");
+
+        assert_eq!(carry.chain_id, 167_000);
+        assert_eq!(carry.verifier, Address::ZERO);
     }
 }

@@ -34,7 +34,14 @@ use artifact_store::{
 };
 #[cfg(test)]
 use artifact_store::{ProofObjectStore, RuntimeStateStore, RuntimeStoreScope};
-use raiko2_pipeline::{PipelineKey, PipelineRoute};
+#[cfg(any(test, feature = "test-utils"))]
+use raiko2_pipeline::forks::shasta::preflight_cache::{
+    CanonicalPreflightDescriptor, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
+    CanonicalPreflightObject, CanonicalPreflightPutResult,
+};
+use raiko2_pipeline::{
+    PipelineKey, PipelineRoute, forks::shasta::preflight_cache::CanonicalPreflightStore,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -180,6 +187,7 @@ impl Drop for RuntimeSubmissionCheckpointPermit {
 #[derive(Debug)]
 pub struct RuntimeManager {
     store: Arc<dyn RuntimeStore>,
+    canonical_preflight_store: Arc<dyn CanonicalPreflightStore>,
     state: RwLock<RuntimeState>,
     generation: StdMutex<Option<i64>>,
     lifecycle_commit: StdMutex<()>,
@@ -192,6 +200,37 @@ pub struct RuntimeManager {
     active: AtomicBool,
     draining: AtomicBool,
     state_coherence: AtomicU8,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug)]
+struct DisabledCanonicalPreflightStore;
+
+#[cfg(any(test, feature = "test-utils"))]
+#[async_trait::async_trait]
+impl CanonicalPreflightStore for DisabledCanonicalPreflightStore {
+    async fn get_canonical_preflight(
+        &self,
+        _key: &CanonicalPreflightKeyV1,
+    ) -> Result<Option<CanonicalPreflightObject>> {
+        Ok(None)
+    }
+
+    async fn put_canonical_preflight_if_absent(
+        &self,
+        _key: &CanonicalPreflightKeyV1,
+        _bytes: &[u8],
+    ) -> Result<CanonicalPreflightPutResult> {
+        anyhow::bail!("canonical preflight persistence is disabled for this runtime")
+    }
+
+    async fn invalidate_canonical_preflight_exact(
+        &self,
+        _key: &CanonicalPreflightKeyV1,
+        _descriptor: &CanonicalPreflightDescriptor,
+    ) -> Result<CanonicalPreflightInvalidateResult> {
+        Ok(CanonicalPreflightInvalidateResult::Missing)
+    }
 }
 
 const ARTIFACT_LIFECYCLE_LOCK_SHARDS: usize = 64;
@@ -339,6 +378,10 @@ impl ProofArtifactRecord {
 }
 
 impl RuntimeManager {
+    pub fn canonical_preflight_store(&self) -> Arc<dyn CanonicalPreflightStore> {
+        Arc::clone(&self.canonical_preflight_store)
+    }
+
     pub async fn tasks_referencing(&self, task_ref: &str) -> Vec<RuntimeTaskRecord> {
         let mut records = self
             .state
@@ -425,12 +468,12 @@ impl RuntimeManager {
             "local".to_string(),
             namespace,
         )?);
-        Ok(Self::from_store(store))
+        Ok(Self::from_shared_store(store))
     }
 
     pub fn new_memory(environment: String, namespace: String) -> Result<Self> {
         let store = Arc::new(MemoryProofArtifactStore::new(environment, namespace)?);
-        Ok(Self::from_store(store))
+        Ok(Self::from_shared_store(store))
     }
 
     #[cfg_attr(
@@ -442,9 +485,27 @@ impl RuntimeManager {
         Self::from_store(store)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     fn from_store(store: Arc<dyn RuntimeStore>) -> Self {
+        Self::from_stores(store, Arc::new(DisabledCanonicalPreflightStore))
+    }
+
+    fn from_shared_store<S>(store: Arc<S>) -> Self
+    where
+        S: RuntimeStore + CanonicalPreflightStore + 'static,
+    {
+        let runtime_store: Arc<dyn RuntimeStore> = store.clone();
+        let canonical_preflight_store: Arc<dyn CanonicalPreflightStore> = store;
+        Self::from_stores(runtime_store, canonical_preflight_store)
+    }
+
+    fn from_stores(
+        store: Arc<dyn RuntimeStore>,
+        canonical_preflight_store: Arc<dyn CanonicalPreflightStore>,
+    ) -> Self {
         Self {
             store,
+            canonical_preflight_store,
             state: RwLock::new(RuntimeState::default()),
             generation: StdMutex::new(None),
             lifecycle_commit: StdMutex::new(()),
@@ -468,7 +529,7 @@ impl RuntimeManager {
     ) -> Result<Self> {
         let store =
             Arc::new(GcsProofArtifactStore::new(environment, namespace, bucket_id, prefix).await?);
-        Ok(Self::from_store(store))
+        Ok(Self::from_shared_store(store))
     }
 
     pub async fn begin_draining(&self) {

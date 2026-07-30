@@ -35,6 +35,6 @@ pub use preflight_cache::{
 };
 pub use proof::{
     build_proof_carry_data_from_witness_spec, build_proof_carry_data_with_chain_spec,
-    decode_proof_carry_data, decode_proof_carry_data_opt, encode_proof_carry_data,
-    proof_carry_from_proof,
+    build_proof_carry_data_with_verifier, decode_proof_carry_data, decode_proof_carry_data_opt,
+    encode_proof_carry_data, proof_carry_from_proof,
 };

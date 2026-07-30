@@ -29,6 +29,11 @@ pub struct CanonicalPreflightKeyV1 {
 }
 
 impl CanonicalPreflightKeyV1 {
+    /// Returns the deterministic digest used to locate this full cache key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key cannot be serialized.
     pub fn digest(&self) -> Result<B256> {
         sha256_serialized(self, "canonical preflight key")
     }
@@ -63,6 +68,11 @@ pub struct CanonicalShastaPreflightV1 {
     pub proposal_state_nodes: Vec<WitnessStateNode>,
 }
 
+/// Returns a deterministic digest of the normalized Shasta proposal event.
+///
+/// # Errors
+///
+/// Returns an error when the event cannot be serialized.
 pub fn proposal_event_digest(event: &ShastaEventData) -> Result<B256> {
     sha256_serialized(event, "Shasta proposal event")
 }
@@ -70,6 +80,10 @@ pub fn proposal_event_digest(event: &ShastaEventData) -> Result<B256> {
 /// Hashes only chain rules that can affect Shasta discovery, derivation, or execution.
 ///
 /// Verifier maps, RPC endpoints, beacon endpoints, and display names are deliberately excluded.
+///
+/// # Errors
+///
+/// Returns an error when a fingerprinted chain-rule field cannot be serialized.
 pub fn chain_rules_fingerprint(l1: &ChainSpec, l2: &ChainSpec) -> Result<B256> {
     let mut hasher = Sha256::new();
     update_rule_field(&mut hasher, "l1.chain_id", &l1.chain_id)?;
@@ -132,7 +146,7 @@ mod header_bincode_compat {
         if serializer.is_human_readable() {
             return header.serialize(serializer);
         }
-        Vec::<u8>::from(alloy_rlp::encode(header)).serialize(serializer)
+        alloy_rlp::encode(header).serialize(serializer)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Header, D::Error>
@@ -161,7 +175,7 @@ mod header_vec_bincode_compat {
         }
         headers
             .iter()
-            .map(|header| Vec::<u8>::from(alloy_rlp::encode(header)))
+            .map(alloy_rlp::encode)
             .collect::<Vec<_>>()
             .serialize(serializer)
     }
@@ -251,6 +265,32 @@ mod tests {
 
         changed = key.clone();
         changed.checkpoint.as_mut().expect("checkpoint").state_root = B256::repeat_byte(0x99);
+        assert_ne!(
+            key.digest().expect("digest"),
+            changed.digest().expect("digest")
+        );
+    }
+
+    #[test]
+    fn canonical_key_digest_tracks_l1_identity_and_event() {
+        let key = cache_key();
+
+        let mut changed = key.clone();
+        changed.l1_inclusion_hash = B256::repeat_byte(0x99);
+        assert_ne!(
+            key.digest().expect("digest"),
+            changed.digest().expect("digest")
+        );
+
+        changed = key.clone();
+        changed.proposal_event_digest = B256::repeat_byte(0x99);
+        assert_ne!(
+            key.digest().expect("digest"),
+            changed.digest().expect("digest")
+        );
+
+        changed = key.clone();
+        changed.l2_block_range.end += 1;
         assert_ne!(
             key.digest().expect("digest"),
             changed.digest().expect("digest")

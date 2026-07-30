@@ -3571,13 +3571,18 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus 2.0.4",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-sol-types",
  "anyhow",
+ "bincode",
  "raiko2-primitives",
  "raiko2-protocol",
  "raiko2-protocol-shasta",
+ "reth-ethereum-primitives",
  "serde",
  "serde_json",
+ "serde_with",
+ "sha2 0.10.9",
 ]
 
 [[package]]

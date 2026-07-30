@@ -9,6 +9,7 @@ mod blob;
 mod fixture;
 mod input;
 pub mod instance;
+mod preflight_cache;
 mod proof;
 
 pub use anchor::{
@@ -26,6 +27,11 @@ pub use input::{
     ANCESTOR_HEADER_WINDOW_LIMIT, GuestInput, ShastaRawAggregationGuestInput,
     ShastaRisc0AggregationGuestInput, ShastaZkAggregationGuestInput,
     roll_proposal_ancestor_headers, roll_proposal_ancestor_headers_in_place,
+};
+pub use preflight_cache::{
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalShastaManifestV1,
+    CanonicalShastaPreflightV1, CanonicalStatelessInputV1, chain_rules_fingerprint,
+    proposal_event_digest,
 };
 pub use proof::{
     build_proof_carry_data_from_witness_spec, build_proof_carry_data_with_chain_spec,

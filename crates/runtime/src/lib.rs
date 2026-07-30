@@ -34,7 +34,8 @@ use artifact_store::{
 };
 #[cfg(test)]
 use artifact_store::{ProofObjectStore, RuntimeStateStore, RuntimeStoreScope};
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
+use raiko2_pipeline::forks::shasta::preflight_cache::CANONICAL_PREFLIGHT_SCHEMA_V1;
 use raiko2_pipeline::forks::shasta::preflight_cache::{
     CanonicalPreflightDescriptor, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
     CanonicalPreflightObject, CanonicalPreflightPutResult,
@@ -233,6 +234,40 @@ impl CanonicalPreflightStore for DisabledCanonicalPreflightStore {
     }
 }
 
+#[async_trait::async_trait]
+impl CanonicalPreflightStore for RuntimeManager {
+    async fn get_canonical_preflight(
+        &self,
+        key: &CanonicalPreflightKeyV1,
+    ) -> Result<Option<CanonicalPreflightObject>> {
+        self.canonical_preflight_store
+            .get_canonical_preflight(key)
+            .await
+    }
+
+    async fn put_canonical_preflight_if_absent(
+        &self,
+        key: &CanonicalPreflightKeyV1,
+        bytes: &[u8],
+    ) -> Result<CanonicalPreflightPutResult> {
+        let _commit = self.begin_object_commit()?;
+        self.canonical_preflight_store
+            .put_canonical_preflight_if_absent(key, bytes)
+            .await
+    }
+
+    async fn invalidate_canonical_preflight_exact(
+        &self,
+        key: &CanonicalPreflightKeyV1,
+        descriptor: &CanonicalPreflightDescriptor,
+    ) -> Result<CanonicalPreflightInvalidateResult> {
+        let _commit = self.begin_object_commit()?;
+        self.canonical_preflight_store
+            .invalidate_canonical_preflight_exact(key, descriptor)
+            .await
+    }
+}
+
 const ARTIFACT_LIFECYCLE_LOCK_SHARDS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,8 +413,8 @@ impl ProofArtifactRecord {
 }
 
 impl RuntimeManager {
-    pub fn canonical_preflight_store(&self) -> Arc<dyn CanonicalPreflightStore> {
-        Arc::clone(&self.canonical_preflight_store)
+    pub fn canonical_preflight_store(self: &Arc<Self>) -> Arc<dyn CanonicalPreflightStore> {
+        self.clone()
     }
 
     pub async fn tasks_referencing(&self, task_ref: &str) -> Vec<RuntimeTaskRecord> {
@@ -3442,6 +3477,25 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
+    fn canonical_preflight_test_key(proposal_id: u64) -> CanonicalPreflightKeyV1 {
+        CanonicalPreflightKeyV1 {
+            schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            l1_chain_id: 1,
+            l2_chain_id: 167_001,
+            proposal_id,
+            l2_block_range: raiko2_primitives::L2BlockRange {
+                start: proposal_id,
+                end: proposal_id,
+            },
+            l1_inclusion_block_number: proposal_id,
+            last_anchor_block_number: proposal_id.saturating_sub(1),
+            checkpoint: None,
+            l1_inclusion_hash: [0x11; 32].into(),
+            proposal_event_digest: [0x22; 32].into(),
+            chain_rules_fingerprint: [0x33; 32].into(),
+        }
+    }
+
     async fn current_test_task(
         runtime: &RuntimeManager,
         task_id: &str,
@@ -3502,6 +3556,44 @@ mod tests {
             .await
             .expect_err("initialized runtime must reject namespace reset");
         assert!(error.to_string().contains("before initialization"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_fences_canonical_preflight_manifest_mutations() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            "preflight-drain-fence".into(),
+        )?);
+        runtime.initialize().await?;
+        let store = runtime.canonical_preflight_store();
+        let existing_key = canonical_preflight_test_key(1);
+        let existing = store
+            .put_canonical_preflight_if_absent(&existing_key, b"existing")
+            .await?
+            .try_object()
+            .context("expected canonical preflight object")?
+            .clone();
+
+        runtime.start_draining();
+
+        let put_error = store
+            .put_canonical_preflight_if_absent(&canonical_preflight_test_key(2), b"new")
+            .await
+            .expect_err("draining runtime must reject canonical preflight publication");
+        assert!(put_error.to_string().contains("runtime is draining"));
+
+        let invalidate_error = store
+            .invalidate_canonical_preflight_exact(&existing_key, &existing.descriptor())
+            .await
+            .expect_err("draining runtime must reject canonical preflight invalidation");
+        assert!(invalidate_error.to_string().contains("runtime is draining"));
+        assert!(
+            store
+                .get_canonical_preflight(&existing_key)
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 

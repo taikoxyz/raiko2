@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use raiko2_pipeline::{
     PipelineKey, PipelineRoute,
     forks::shasta::preflight_cache::{
-        CanonicalPreflightDescriptor, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
-        CanonicalPreflightObject, CanonicalPreflightPutResult, CanonicalPreflightStore,
+        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDescriptor,
+        CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1, CanonicalPreflightObject,
+        CanonicalPreflightPutResult, CanonicalPreflightStore,
     },
 };
 use sha2::{Digest, Sha256};

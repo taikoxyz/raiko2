@@ -1,5 +1,11 @@
 use super::*;
+use alloy_primitives::B256;
 use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::forks::shasta::preflight_cache::{
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
+    CanonicalPreflightPutResult, CanonicalPreflightStore,
+};
+use raiko2_primitives::{L2BlockRange, ShastaCheckpoint};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -235,6 +241,29 @@ fn key() -> ProofArtifactKey {
     }
 }
 
+fn canonical_preflight_key() -> CanonicalPreflightKeyV1 {
+    CanonicalPreflightKeyV1 {
+        schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+        l1_chain_id: 32_382,
+        l2_chain_id: 167_001,
+        proposal_id: 42,
+        l2_block_range: L2BlockRange {
+            start: 100,
+            end: 102,
+        },
+        l1_inclusion_block_number: 77,
+        last_anchor_block_number: 99,
+        checkpoint: Some(ShastaCheckpoint {
+            block_number: 102,
+            block_hash: B256::repeat_byte(0x11),
+            state_root: B256::repeat_byte(0x22),
+        }),
+        l1_inclusion_hash: B256::repeat_byte(0x33),
+        proposal_event_digest: B256::repeat_byte(0x44),
+        chain_rules_fingerprint: B256::repeat_byte(0x55),
+    }
+}
+
 fn store(transport: Arc<FakeGcsTransport>) -> Result<GcsProofArtifactStore> {
     GcsProofArtifactStore::with_transport(
         "test".to_string(),
@@ -243,6 +272,202 @@ fn store(transport: Arc<FakeGcsTransport>) -> Result<GcsProofArtifactStore> {
         "runtime",
         transport,
     )
+}
+
+#[tokio::test]
+async fn canonical_preflight_publication_roundtrips_and_reuses_identical_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let bytes = b"canonical-preflight";
+
+    let first = store.put_canonical_preflight_if_absent(&key, bytes).await?;
+    let second = store.put_canonical_preflight_if_absent(&key, bytes).await?;
+
+    assert!(matches!(first, CanonicalPreflightPutResult::Created(_)));
+    assert!(matches!(
+        second,
+        CanonicalPreflightPutResult::AlreadyExists(_)
+    ));
+    assert_eq!(
+        store
+            .get_canonical_preflight(&key)
+            .await?
+            .expect("canonical preflight")
+            .bytes,
+        bytes
+    );
+    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
+    assert!(manifest_name.contains("/preflights/v1/"));
+    let object = first
+        .try_object()
+        .expect("created canonical preflight object");
+    assert!(
+        transport.contains(&store.canonical_preflight_content_name(&key, &object.content_hash)?)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_manifest_is_first_write_wins() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(transport)?;
+    let key = canonical_preflight_key();
+    let first = store
+        .put_canonical_preflight_if_absent(&key, b"first")
+        .await?
+        .try_object()
+        .expect("first publication")
+        .clone();
+
+    let conflict = store
+        .put_canonical_preflight_if_absent(&key, b"second")
+        .await?;
+
+    let CanonicalPreflightPutResult::Conflict(descriptor) = conflict else {
+        anyhow::bail!("different canonical content did not conflict");
+    };
+    assert_eq!(descriptor, first.descriptor());
+    assert_eq!(
+        store
+            .get_canonical_preflight(&key)
+            .await?
+            .expect("winning canonical preflight")
+            .bytes,
+        b"first"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let first = store
+        .put_canonical_preflight_if_absent(&key, b"first")
+        .await?
+        .try_object()
+        .expect("first publication")
+        .clone();
+
+    assert_eq!(
+        store
+            .invalidate_canonical_preflight_exact(&key, &first.descriptor())
+            .await?,
+        CanonicalPreflightInvalidateResult::Invalidated
+    );
+    assert!(
+        transport.contains(&store.canonical_preflight_content_name(&key, &first.content_hash)?)?
+    );
+    let second = store
+        .put_canonical_preflight_if_absent(&key, b"second")
+        .await?
+        .try_object()
+        .expect("replacement publication")
+        .clone();
+
+    assert_ne!(first.generation, second.generation);
+    assert_eq!(
+        store
+            .invalidate_canonical_preflight_exact(&key, &first.descriptor())
+            .await?,
+        CanonicalPreflightInvalidateResult::Stale
+    );
+    assert_eq!(
+        store
+            .get_canonical_preflight(&key)
+            .await?
+            .expect("replacement canonical preflight")
+            .bytes,
+        b"second"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_read_cas_removes_malformed_manifest() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    store
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?;
+    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
+    transport.replace_bytes(&manifest_name, b"{not-json")?;
+
+    let error = store
+        .get_canonical_preflight(&key)
+        .await
+        .expect_err("malformed manifest must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid canonical preflight manifest")
+    );
+    assert!(!transport.contains(&manifest_name)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_read_cas_removes_manifest_for_corrupt_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let object = store
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?
+        .try_object()
+        .expect("canonical preflight object")
+        .clone();
+    let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
+    transport.replace_bytes(&content_name, b"corrupt")?;
+
+    let error = store
+        .get_canonical_preflight(&key)
+        .await
+        .expect_err("corrupt canonical content must be rejected");
+
+    assert!(error.to_string().contains("content hash mismatch"));
+    assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
+    assert!(transport.contains(&content_name)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    store
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?;
+    let mut manifest: serde_json::Value = serde_json::from_slice(
+        &transport
+            .read(&store.canonical_preflight_manifest_name(&key)?)
+            .await?
+            .expect("canonical manifest")
+            .bytes,
+    )?;
+    manifest["key"]["proposal_id"] = serde_json::json!(key.proposal_id + 1);
+    transport.replace_bytes(
+        &store.canonical_preflight_manifest_name(&key)?,
+        &serde_json::to_vec(&manifest)?,
+    )?;
+
+    let error = store
+        .get_canonical_preflight(&key)
+        .await
+        .expect_err("full-key mismatch must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("canonical preflight key mismatch")
+    );
+    assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
+    Ok(())
 }
 
 #[tokio::test]

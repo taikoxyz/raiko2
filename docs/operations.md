@@ -1197,7 +1197,10 @@ Operator notes:
   recovery, workers, or HTTP admission. GCS requires `storage.objects.list` and
   `storage.objects.delete`, uses generation-protected manifest deletion with bounded concurrency,
   and aborts startup on failure. Immutable proof/preflight content and invalidation records remain
-  for lifecycle TTL. Keep prefixes non-overlapping so one deployment scope cannot contain another.
+  for lifecycle TTL. Treat this as a one-shot cutover setting and remove `startup_cleanup` after the
+  replacement starts successfully; otherwise every routine restart repeats the cleanup and can
+  discard fresh task state and proof manifests. Keep prefixes non-overlapping so one deployment
+  scope cannot contain another.
 - Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
   complete lifecycle operation. A process-local lifecycle transition gate serializes one short
   active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,

@@ -1184,8 +1184,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   listed generations with bounded concurrency; immutable proof/preflight content and invalidation
   records remain unreachable until bucket lifecycle TTL removes them. Any listing or deletion failure
   aborts startup. Cleanup runs before recovery, workers, or HTTP admission and only after the previous
-  process has stopped. A missing list means no cleanup; duplicate scopes, unknown scopes, and the
-  removed reset boolean fail schema validation. Sibling namespaces are never affected.
+  process has stopped. Configured scopes run again on every restart, so remove `startup_cleanup`
+  immediately after the cutover succeeds; leaving it configured can discard fresh task state and
+  proof manifests during a routine restart. A missing list means no cleanup; duplicate scopes,
+  unknown scopes, and the removed reset boolean fail schema validation. Sibling namespaces are never
+  affected.
 - `runtime.store.backend` selects the backend used by both the authoritative state repository and
   proof-object repository. Use `gcs` with a non-empty `bucket` for durable deployments. `memory`
   is process-local and disposable; it is accepted outside `development`, `local`, or `test` only

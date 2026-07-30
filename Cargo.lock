@@ -8300,6 +8300,7 @@ dependencies = [
  "alloy-rpc-types-eth 2.0.1",
  "alloy-sol-types",
  "alloy-trie 0.9.5",
+ "anyhow",
  "async-trait",
  "bincode",
  "futures",
@@ -8504,6 +8505,7 @@ dependencies = [
 name = "raiko2-runtime"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "async-trait",
  "bytes",

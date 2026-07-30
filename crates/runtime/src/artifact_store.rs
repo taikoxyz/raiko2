@@ -1,6 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use raiko2_pipeline::{PipelineKey, PipelineRoute};
+use raiko2_pipeline::{
+    PipelineKey, PipelineRoute,
+    forks::shasta::preflight_cache::{
+        CanonicalPreflightDescriptor, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
+        CanonicalPreflightObject, CanonicalPreflightPutResult, CanonicalPreflightStore,
+    },
+};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -179,11 +185,21 @@ struct MemoryStoreInner {
     manifests: HashMap<ProofArtifactKey, MemoryManifest>,
     contents: HashMap<(ProofArtifactKey, String), Vec<u8>>,
     invalidations: HashSet<(ProofArtifactKey, Option<i64>, String)>,
+    preflight_manifests: HashMap<alloy_primitives::B256, MemoryPreflightManifest>,
+    preflight_contents: HashMap<(alloy_primitives::B256, String), Vec<u8>>,
+    preflight_invalidations: HashSet<(alloy_primitives::B256, Option<i64>, String)>,
     runtime_state: Option<RuntimeStateObject>,
 }
 
 #[derive(Clone, Debug)]
 struct MemoryManifest {
+    content_hash: String,
+    generation: i64,
+}
+
+#[derive(Clone, Debug)]
+struct MemoryPreflightManifest {
+    key: CanonicalPreflightKeyV1,
     content_hash: String,
     generation: i64,
 }
@@ -229,6 +245,142 @@ impl RuntimeStoreScope for MemoryProofArtifactStore {
 
     fn backend_name(&self) -> &'static str {
         "memory"
+    }
+}
+
+#[async_trait]
+impl CanonicalPreflightStore for MemoryProofArtifactStore {
+    async fn get_canonical_preflight(
+        &self,
+        key: &CanonicalPreflightKeyV1,
+    ) -> Result<Option<CanonicalPreflightObject>> {
+        let key_digest = key.digest()?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let Some(manifest) = inner.preflight_manifests.get(&key_digest) else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            manifest.key == *key,
+            "canonical preflight manifest key does not match requested full key"
+        );
+        let bytes = inner
+            .preflight_contents
+            .get(&(key_digest, manifest.content_hash.clone()))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("canonical preflight manifest references missing content")
+            })?;
+        anyhow::ensure!(
+            content_hash(&bytes) == manifest.content_hash,
+            "canonical preflight content hash mismatch"
+        );
+        Ok(Some(CanonicalPreflightObject {
+            key_digest,
+            content_hash: manifest.content_hash.clone(),
+            generation: Some(manifest.generation),
+            bytes,
+        }))
+    }
+
+    async fn put_canonical_preflight_if_absent(
+        &self,
+        key: &CanonicalPreflightKeyV1,
+        bytes: &[u8],
+    ) -> Result<CanonicalPreflightPutResult> {
+        let key_digest = key.digest()?;
+        let hash = content_hash(bytes);
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        if let Some(existing) = inner.preflight_manifests.get(&key_digest).cloned() {
+            anyhow::ensure!(
+                existing.key == *key,
+                "canonical preflight key digest collision"
+            );
+            if existing.content_hash == hash {
+                inner
+                    .preflight_contents
+                    .entry((key_digest, hash.clone()))
+                    .or_insert_with(|| bytes.to_vec());
+                return Ok(CanonicalPreflightPutResult::AlreadyExists(
+                    CanonicalPreflightObject {
+                        key_digest,
+                        content_hash: hash,
+                        generation: Some(existing.generation),
+                        bytes: bytes.to_vec(),
+                    },
+                ));
+            }
+            return Ok(CanonicalPreflightPutResult::Conflict(
+                CanonicalPreflightDescriptor {
+                    key_digest,
+                    content_hash: existing.content_hash,
+                    generation: Some(existing.generation),
+                },
+            ));
+        }
+
+        inner
+            .preflight_contents
+            .entry((key_digest, hash.clone()))
+            .or_insert_with(|| bytes.to_vec());
+        let generation = Self::next_generation(&mut inner);
+        inner.preflight_manifests.insert(
+            key_digest,
+            MemoryPreflightManifest {
+                key: key.clone(),
+                content_hash: hash.clone(),
+                generation,
+            },
+        );
+        Ok(CanonicalPreflightPutResult::Created(
+            CanonicalPreflightObject {
+                key_digest,
+                content_hash: hash,
+                generation: Some(generation),
+                bytes: bytes.to_vec(),
+            },
+        ))
+    }
+
+    async fn invalidate_canonical_preflight_exact(
+        &self,
+        key: &CanonicalPreflightKeyV1,
+        descriptor: &CanonicalPreflightDescriptor,
+    ) -> Result<CanonicalPreflightInvalidateResult> {
+        let key_digest = key.digest()?;
+        if descriptor.key_digest != key_digest {
+            return Ok(CanonicalPreflightInvalidateResult::Stale);
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
+        let invalidation = (
+            key_digest,
+            descriptor.generation,
+            descriptor.content_hash.clone(),
+        );
+        let Some(current) = inner.preflight_manifests.get(&key_digest) else {
+            return Ok(if inner.preflight_invalidations.contains(&invalidation) {
+                CanonicalPreflightInvalidateResult::AlreadyInvalidated
+            } else {
+                CanonicalPreflightInvalidateResult::Missing
+            });
+        };
+        if current.key != *key
+            || Some(current.generation) != descriptor.generation
+            || current.content_hash != descriptor.content_hash
+        {
+            return Ok(CanonicalPreflightInvalidateResult::Stale);
+        }
+        inner.preflight_invalidations.insert(invalidation);
+        inner.preflight_manifests.remove(&key_digest);
+        Ok(CanonicalPreflightInvalidateResult::Invalidated)
     }
 }
 
@@ -472,6 +624,9 @@ impl RuntimeStateStore for MemoryProofArtifactStore {
         let cleared = inner.manifests.len()
             + inner.contents.len()
             + inner.invalidations.len()
+            + inner.preflight_manifests.len()
+            + inner.preflight_contents.len()
+            + inner.preflight_invalidations.len()
             + usize::from(inner.runtime_state.is_some());
         let next_generation = inner.next_generation;
         *inner = MemoryStoreInner {
@@ -523,7 +678,14 @@ pub fn encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raiko2_pipeline::PipelineKey;
+    use raiko2_pipeline::{
+        PipelineKey,
+        forks::shasta::preflight_cache::{
+            CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightInvalidateResult,
+            CanonicalPreflightKeyV1, CanonicalPreflightPutResult, CanonicalPreflightStore,
+        },
+    };
+    use raiko2_primitives::{L2BlockRange, ShastaCheckpoint};
 
     fn key() -> ProofArtifactKey {
         let pipeline_key = PipelineKey::ShastaSp1;
@@ -533,6 +695,160 @@ mod tests {
             route: pipeline_key.route(),
             proof_ref: "proposal-1".to_string(),
         }
+    }
+
+    fn preflight_key() -> CanonicalPreflightKeyV1 {
+        CanonicalPreflightKeyV1 {
+            schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            l1_chain_id: 32_382,
+            l2_chain_id: 167_001,
+            proposal_id: 42,
+            l2_block_range: L2BlockRange {
+                start: 100,
+                end: 101,
+            },
+            l1_inclusion_block_number: 77,
+            last_anchor_block_number: 99,
+            checkpoint: Some(ShastaCheckpoint {
+                block_number: 101,
+                block_hash: [0x11; 32].into(),
+                state_root: [0x22; 32].into(),
+            }),
+            l1_inclusion_hash: [0x33; 32].into(),
+            proposal_event_digest: [0x44; 32].into(),
+            chain_rules_fingerprint: [0x55; 32].into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_preflight_put_get_and_identical_reuse() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "preflight-a".into())?;
+        let key = preflight_key();
+
+        let CanonicalPreflightPutResult::Created(first) =
+            CanonicalPreflightStore::put_canonical_preflight_if_absent(
+                &store,
+                &key,
+                b"canonical-a",
+            )
+            .await?
+        else {
+            anyhow::bail!("first preflight put should create");
+        };
+        let CanonicalPreflightPutResult::AlreadyExists(second) =
+            CanonicalPreflightStore::put_canonical_preflight_if_absent(
+                &store,
+                &key,
+                b"canonical-a",
+            )
+            .await?
+        else {
+            anyhow::bail!("identical preflight put should reuse");
+        };
+
+        assert_eq!(first.descriptor(), second.descriptor());
+        assert_eq!(
+            CanonicalPreflightStore::get_canonical_preflight(&store, &key)
+                .await?
+                .expect("cached preflight")
+                .bytes,
+            b"canonical-a"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_preflight_conflict_is_first_write_wins() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "preflight-b".into())?;
+        let key = preflight_key();
+        let first = CanonicalPreflightStore::put_canonical_preflight_if_absent(
+            &store,
+            &key,
+            b"canonical-a",
+        )
+        .await?
+        .try_object()
+        .expect("created object")
+        .clone();
+
+        let CanonicalPreflightPutResult::Conflict(conflict) =
+            CanonicalPreflightStore::put_canonical_preflight_if_absent(
+                &store,
+                &key,
+                b"canonical-b",
+            )
+            .await?
+        else {
+            anyhow::bail!("different preflight content should conflict");
+        };
+
+        assert_eq!(conflict, first.descriptor());
+        assert_eq!(
+            CanonicalPreflightStore::get_canonical_preflight(&store, &key)
+                .await?
+                .expect("cached preflight")
+                .bytes,
+            b"canonical-a"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "preflight-c".into())?;
+        let key = preflight_key();
+        let first = CanonicalPreflightStore::put_canonical_preflight_if_absent(
+            &store,
+            &key,
+            b"canonical-a",
+        )
+        .await?
+        .try_object()
+        .expect("created object")
+        .clone();
+
+        assert_eq!(
+            CanonicalPreflightStore::invalidate_canonical_preflight_exact(
+                &store,
+                &key,
+                &first.descriptor(),
+            )
+            .await?,
+            CanonicalPreflightInvalidateResult::Invalidated
+        );
+        assert!(
+            CanonicalPreflightStore::get_canonical_preflight(&store, &key)
+                .await?
+                .is_none()
+        );
+
+        let second = CanonicalPreflightStore::put_canonical_preflight_if_absent(
+            &store,
+            &key,
+            b"canonical-b",
+        )
+        .await?
+        .try_object()
+        .expect("replacement object")
+        .clone();
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(
+            CanonicalPreflightStore::invalidate_canonical_preflight_exact(
+                &store,
+                &key,
+                &first.descriptor(),
+            )
+            .await?,
+            CanonicalPreflightInvalidateResult::Stale
+        );
+        assert_eq!(
+            CanonicalPreflightStore::get_canonical_preflight(&store, &key)
+                .await?
+                .expect("replacement remains")
+                .bytes,
+            b"canonical-b"
+        );
+        Ok(())
     }
 
     #[test]

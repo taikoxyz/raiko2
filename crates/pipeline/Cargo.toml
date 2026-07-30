@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 raiko2-primitives = { workspace = true, default-features = false }
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol.workspace = true

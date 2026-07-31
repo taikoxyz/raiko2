@@ -59,10 +59,12 @@ compute_units_per_second = 1000
 [runtime]
 environment = "development"
 namespace = "raiko2-development"
-# Destructive startup reset for this environment and namespace. It clears all runtime
-# state and proof artifacts before recovery or serving begins. Every restart while true repeats it;
-# set this back to false after a successful reset.
-reset_namespace_on_start = false
+# Optional active-cache invalidation before recovery or serving begins.
+# Guest, image, or verifier upgrades normally need only "proof". Add "preflight" when derivation,
+# fork, or witness-generation rules changed. Immutable content remains for the bucket lifecycle TTL.
+# Cleanup repeats on every startup while configured; remove this setting after a successful cutover.
+# startup_cleanup = ["proof"]
+# startup_cleanup = ["proof", "preflight"]
 
 [runtime.store]
 # Memory is process-local and disposable. Use GCS for durable deployments.

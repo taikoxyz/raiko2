@@ -9,6 +9,7 @@ use raiko2_pipeline::forks::shasta::preflight_cache::{
     PreflightSingleFlightPhase,
 };
 use raiko2_primitives::ProofType;
+use raiko2_runtime::{StartupCleanupReport, StartupCleanupScope};
 use std::{sync::LazyLock, time::Duration};
 
 static REQUEST_REGISTRATIONS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
@@ -181,6 +182,27 @@ static PREFLIGHT_SINGLEFLIGHT_WAITERS: LazyLock<IntGaugeVec> = LazyLock::new(|| 
     .expect("register raiko2_preflight_singleflight_waiters")
 });
 
+static STARTUP_CLEANUP_OBJECTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_startup_cleanup_objects_total",
+        "Startup cleanup objects grouped by bounded scope and outcome",
+        &["scope", "outcome"]
+    )
+    .expect("register raiko2_startup_cleanup_objects_total")
+});
+
+static STARTUP_CLEANUP_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_startup_cleanup_duration_seconds",
+            "Startup cleanup duration in seconds",
+            vec![0.01, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0]
+        ),
+        &["scope"]
+    )
+    .expect("register raiko2_startup_cleanup_duration_seconds")
+});
+
 #[derive(Debug)]
 pub(crate) struct PreflightCacheMetricsObserver {
     pair: String,
@@ -239,6 +261,30 @@ impl PreflightObserver for PreflightCacheMetricsObserver {
             }
         }
     }
+}
+
+pub(crate) fn record_startup_cleanup_report(report: &StartupCleanupReport) {
+    for entry in &report.scopes {
+        let scope = entry.scope.as_str();
+        for (outcome, value) in [
+            ("matched", entry.matched),
+            ("removed", entry.removed),
+            ("failed", entry.failed),
+        ] {
+            STARTUP_CLEANUP_OBJECTS_TOTAL
+                .with_label_values(&[scope, outcome])
+                .inc_by(u64::try_from(value).unwrap_or(u64::MAX));
+        }
+        STARTUP_CLEANUP_DURATION_SECONDS
+            .with_label_values(&[scope])
+            .observe(entry.duration.as_secs_f64());
+    }
+}
+
+pub(crate) fn record_startup_cleanup_failure(scope: StartupCleanupScope) {
+    STARTUP_CLEANUP_OBJECTS_TOTAL
+        .with_label_values(&[scope.as_str(), "failed"])
+        .inc();
 }
 
 #[derive(Debug, Clone)]
@@ -514,5 +560,32 @@ mod tests {
         assert!(!metrics.contains("proposal_id="));
         assert!(!metrics.contains("key_hash="));
         assert!(!metrics.contains("verifier="));
+    }
+
+    #[test]
+    fn startup_cleanup_metrics_use_scope_and_outcome_only() {
+        let report = StartupCleanupReport {
+            scopes: vec![raiko2_runtime::StartupCleanupScopeReport {
+                scope: StartupCleanupScope::Proof,
+                matched: 3,
+                removed: 2,
+                failed: 1,
+                duration: Duration::from_millis(25),
+            }],
+        };
+        record_startup_cleanup_report(&report);
+        record_startup_cleanup_failure(StartupCleanupScope::Preflight);
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        for outcome in ["matched", "removed", "failed"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_startup_cleanup_objects_total{{outcome=\"{outcome}\",scope=\"proof\"}}"
+            )));
+        }
+        assert!(metrics.contains(
+            "raiko2_startup_cleanup_objects_total{outcome=\"failed\",scope=\"preflight\"}"
+        ));
+        assert!(metrics.contains("raiko2_startup_cleanup_duration_seconds_count{scope=\"proof\"}"));
     }
 }

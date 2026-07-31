@@ -5,6 +5,7 @@ use super::{
     ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
     ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, ProofObjectStore,
     RuntimeStateObject, RuntimeStateStore, RuntimeStateWriteResult, RuntimeStoreScope,
+    StartupCleanupMask, StartupCleanupReport, StartupCleanupScope, StartupCleanupScopeReport,
     content_hash, encode_component, validate_scope_component,
 };
 use anyhow::{Context, Result};
@@ -13,6 +14,7 @@ use futures::{StreamExt, stream};
 use google_cloud_storage::client::{Storage, StorageControl};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProofManifest {
@@ -48,6 +50,7 @@ struct GcsObjectPage {
 
 const RESET_DELETE_CONCURRENCY: usize = 16;
 const RESET_LIST_PAGE_SIZE: i32 = 1_000;
+const STARTUP_CLEANUP_DELETE_CONCURRENCY: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GcsCreateResult {
@@ -471,6 +474,55 @@ impl GcsProofArtifactStore {
             cleared += self.delete_reset_page(scope_prefix, phase, objects).await?;
             let Some(next_page_token) = page.next_page_token else {
                 return Ok(cleared);
+            };
+            page_token = Some(next_page_token);
+        }
+    }
+
+    async fn delete_cleanup_object(
+        &self,
+        scope_prefix: &str,
+        object: GcsObjectMetadata,
+    ) -> Result<ProofArtifactDeleteResult> {
+        Self::validate_reset_object(scope_prefix, &object)?;
+        self.transport
+            .delete_if_generation(&object.name, Some(object.generation))
+            .await
+            .with_context(|| format!("failed to delete startup cleanup object {}", object.name))
+    }
+
+    async fn clear_cleanup_prefix<F>(
+        &self,
+        scope_prefix: &str,
+        list_prefix: &str,
+        select: F,
+    ) -> Result<(usize, usize)>
+    where
+        F: Fn(&GcsObjectMetadata) -> bool,
+    {
+        let mut page_token = None;
+        let mut matched = 0;
+        let mut removed = 0;
+        loop {
+            let page = self
+                .transport
+                .list_prefix_page(list_prefix, page_token.as_deref())
+                .await?;
+            for object in &page.objects {
+                Self::validate_reset_object(scope_prefix, object)?;
+            }
+            let objects = page.objects.into_iter().filter(&select).collect::<Vec<_>>();
+            matched += objects.len();
+            let mut deletions = stream::iter(objects)
+                .map(|object| self.delete_cleanup_object(scope_prefix, object))
+                .buffer_unordered(STARTUP_CLEANUP_DELETE_CONCURRENCY);
+            while let Some(result) = deletions.next().await {
+                if result? == ProofArtifactDeleteResult::Removed {
+                    removed += 1;
+                }
+            }
+            let Some(next_page_token) = page.next_page_token else {
+                return Ok((matched, removed));
             };
             page_token = Some(next_page_token);
         }
@@ -1080,6 +1132,64 @@ impl RuntimeStateStore for GcsProofArtifactStore {
                 self.load_runtime_state().await?,
             )),
         }
+    }
+
+    async fn cleanup_before_start(
+        &self,
+        scopes: StartupCleanupMask,
+    ) -> Result<StartupCleanupReport> {
+        let scope_prefix = format!("{}/", self.scope_prefix());
+        let mut report = StartupCleanupReport::default();
+        if scopes.contains(StartupCleanupMask::PROOF) {
+            let started_at = Instant::now();
+            let mut matched = 0;
+            let mut removed = 0;
+            let runtime_state_name = self.runtime_state_name();
+            if let Some(runtime_state) = self.transport.read(&runtime_state_name).await? {
+                matched += 1;
+                if self
+                    .transport
+                    .delete_if_generation(&runtime_state_name, Some(runtime_state.generation))
+                    .await
+                    .context("failed to delete runtime state during proof startup cleanup")?
+                    == ProofArtifactDeleteResult::Removed
+                {
+                    removed += 1;
+                }
+            }
+            let proofs_prefix = format!("{scope_prefix}proofs/");
+            let (manifest_matched, manifest_removed) = self
+                .clear_cleanup_prefix(&scope_prefix, &proofs_prefix, |object| {
+                    Self::is_manifest_object(&object.name)
+                })
+                .await?;
+            matched += manifest_matched;
+            removed += manifest_removed;
+            report.scopes.push(StartupCleanupScopeReport {
+                scope: StartupCleanupScope::Proof,
+                matched,
+                removed,
+                failed: 0,
+                duration: started_at.elapsed(),
+            });
+        }
+        if scopes.contains(StartupCleanupMask::PREFLIGHT) {
+            let started_at = Instant::now();
+            let preflights_prefix = format!("{scope_prefix}preflights/");
+            let (matched, removed) = self
+                .clear_cleanup_prefix(&scope_prefix, &preflights_prefix, |object| {
+                    Self::is_manifest_object(&object.name)
+                })
+                .await?;
+            report.scopes.push(StartupCleanupScopeReport {
+                scope: StartupCleanupScope::Preflight,
+                matched,
+                removed,
+                failed: 0,
+                duration: started_at.elapsed(),
+            });
+        }
+        Ok(report)
     }
 
     async fn reset_namespace(&self) -> Result<usize> {

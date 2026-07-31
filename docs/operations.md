@@ -1189,15 +1189,18 @@ Operator notes:
   publication saga to finish; restart reconciliation resumes durable work. Namespace changes are hard
   cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
   from GCS rather than Redis.
-- `runtime.reset_namespace_on_start = true` is an explicit destructive startup operation for the
-  current `(runtime.environment, runtime.namespace)`. It runs only after the old process has
-  exited, before recovery, workers, or HTTP admission. GCS reset pages through the current objects
-  in the exact configured scope and requires `storage.objects.list` and `storage.objects.delete`.
-  A list or delete failure aborts startup; do not disable the flag after a failed attempt. Every
-  restart while it remains true repeats the reset, so set it back to false only after the reset has
-  succeeded. Current object generations are deleted; bucket versioning, soft delete, retention, and
-  lifecycle policies continue to govern historical generations. Keep prefixes non-overlapping so a
-  configured scope cannot be nested beneath another deployment scope.
+- `runtime.startup_cleanup = ["proof"]` is the normal cutover for SGX/ZK guest, image, verifier, or
+  proving-key upgrades. It removes authoritative runtime task state before active proof manifests,
+  so stale completed tasks cannot resolve removed proofs. Add `"preflight"` only when derivation,
+  fork, or witness-generation rules changed; that scope deletes active canonical preflight
+  manifests and does not touch proof state. Cleanup runs after the old process exits and before
+  recovery, workers, or HTTP admission. GCS requires `storage.objects.list` and
+  `storage.objects.delete`, uses generation-protected manifest deletion with bounded concurrency,
+  and aborts startup on failure. Immutable proof/preflight content and invalidation records remain
+  for lifecycle TTL. Treat this as a one-shot cutover setting and remove `startup_cleanup` after the
+  replacement starts successfully; otherwise every routine restart repeats the cleanup and can
+  discard fresh task state and proof manifests. Keep prefixes non-overlapping so one deployment
+  scope cannot contain another.
 - Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
   complete lifecycle operation. A process-local lifecycle transition gate serializes one short
   active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
@@ -1250,10 +1253,11 @@ Operator notes:
   are not reconstructed from older snapshots. Deploy with a new empty namespace (or explicitly
   delete the old runtime snapshot after the old instance exits);
   there is no compatibility migration or fail-open recovery for legacy checkpoint state.
-- Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active
-  proof manifests must not have an age-based GCS lifecycle rule, and immutable proof content must
-  remain available until every manifest that references it is gone. Generation-scoped invalidation
-  markers and unreferenced content use a minimum 30-day retention window.
+- Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for seven days. Active proof
+  and canonical preflight manifests must not have an age-based GCS lifecycle rule. Immutable content
+  must remain available until every manifest that references it is gone. Generation-scoped
+  invalidation markers and unreferenced proof/preflight content use a minimum 30-day retention
+  window.
 - Proposal requests are sized by `prover.risc0.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`

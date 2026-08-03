@@ -242,6 +242,7 @@ impl CanonicalPreflightStore for RuntimeManager {
         &self,
         key: &CanonicalPreflightKeyV1,
     ) -> Result<Option<CanonicalPreflightObject>> {
+        let _commit = self.begin_object_commit()?;
         self.canonical_preflight_store
             .get_canonical_preflight(key)
             .await
@@ -3585,10 +3586,13 @@ mod tests {
 
     #[tokio::test]
     async fn draining_fences_canonical_preflight_manifest_mutations() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new_memory(
+        let backing_store = Arc::new(MemoryProofArtifactStore::new(
             "test".into(),
             "preflight-drain-fence".into(),
         )?);
+        let runtime = Arc::new(RuntimeManager::from_shared_store(Arc::clone(
+            &backing_store,
+        )));
         runtime.initialize().await?;
         let store = runtime.canonical_preflight_store();
         let existing_key = canonical_preflight_test_key(1);
@@ -3613,7 +3617,7 @@ mod tests {
             .expect_err("draining runtime must reject canonical preflight invalidation");
         assert!(invalidate_error.to_string().contains("runtime is draining"));
         assert!(
-            store
+            backing_store
                 .get_canonical_preflight(&existing_key)
                 .await?
                 .is_some()

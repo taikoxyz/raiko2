@@ -13,6 +13,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
 };
+use tokio::sync::Notify;
 
 #[derive(Debug)]
 struct FakeGcsTransport {
@@ -25,6 +26,9 @@ struct FakeGcsTransport {
     list_failure: AtomicBool,
     active_deletes: AtomicUsize,
     max_active_deletes: AtomicUsize,
+    block_next_delete: AtomicBool,
+    delete_entered: Notify,
+    allow_delete: Notify,
 }
 
 impl Default for FakeGcsTransport {
@@ -39,6 +43,9 @@ impl Default for FakeGcsTransport {
             list_failure: AtomicBool::new(false),
             active_deletes: AtomicUsize::new(0),
             max_active_deletes: AtomicUsize::new(0),
+            block_next_delete: AtomicBool::new(false),
+            delete_entered: Notify::new(),
+            allow_delete: Notify::new(),
         }
     }
 }
@@ -105,6 +112,10 @@ impl FakeGcsTransport {
 
     fn max_active_deletes(&self) -> usize {
         self.max_active_deletes.load(Ordering::SeqCst)
+    }
+
+    fn block_next_delete(&self) {
+        self.block_next_delete.store(true, Ordering::SeqCst);
     }
 }
 
@@ -223,6 +234,10 @@ impl GcsTransport for FakeGcsTransport {
         let active = self.active_deletes.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active_deletes.fetch_max(active, Ordering::SeqCst);
         let _active = ActiveDeleteGuard(&self.active_deletes);
+        if self.block_next_delete.swap(false, Ordering::SeqCst) {
+            self.delete_entered.notify_one();
+            self.allow_delete.notified().await;
+        }
         tokio::task::yield_now().await;
         let failure = self.delete_failure.swap(0, Ordering::SeqCst);
         if failure == 1 {
@@ -487,6 +502,77 @@ async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Re
             .contains("canonical preflight key mismatch")
     );
     assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_drain_waits_for_admitted_gcs_preflight_read_repair() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = Arc::new(store(Arc::clone(&transport))?);
+    let runtime = Arc::new(crate::RuntimeManager::from_shared_store(Arc::clone(&store)));
+    let key = canonical_preflight_key();
+    runtime
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?;
+    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
+    transport.replace_bytes(&manifest_name, b"{not-json")?;
+    transport.block_next_delete();
+
+    let read = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let key = key.clone();
+        async move { runtime.get_canonical_preflight(&key).await }
+    });
+    transport.delete_entered.notified().await;
+
+    let mut draining = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move { runtime.begin_draining().await }
+    });
+    let drained_early =
+        match tokio::time::timeout(std::time::Duration::from_millis(20), &mut draining).await {
+            Ok(result) => {
+                result?;
+                true
+            }
+            Err(_) => false,
+        };
+
+    transport.allow_delete.notify_one();
+    read.await?
+        .expect_err("malformed manifest must be rejected after fenced repair");
+    if !drained_early {
+        draining.await?;
+    }
+
+    assert!(
+        !drained_early,
+        "draining completed while an admitted GCS repair delete was in flight"
+    );
+    assert!(!transport.contains(&manifest_name)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gcs_preflight_read_repair_is_rejected_after_draining_starts() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = Arc::new(store(Arc::clone(&transport))?);
+    let runtime = crate::RuntimeManager::from_shared_store(Arc::clone(&store));
+    let key = canonical_preflight_key();
+    runtime
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?;
+    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
+    transport.replace_bytes(&manifest_name, b"{not-json")?;
+
+    runtime.start_draining();
+    let error = runtime
+        .get_canonical_preflight(&key)
+        .await
+        .expect_err("read-triggered repair must be rejected while draining");
+
+    assert!(error.to_string().contains("runtime is draining"));
+    assert!(transport.contains(&manifest_name)?);
     Ok(())
 }
 

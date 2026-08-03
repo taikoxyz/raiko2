@@ -21,7 +21,7 @@ pub use raiko2_pipeline::{GuestSystem, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 #[cfg(test)]
 pub use runtime::StartupCleanupScope;
-pub use runtime::{RuntimeConfig, RuntimeStoreBackend};
+pub use runtime::{PreflightCacheMode, RuntimeConfig, RuntimeStoreBackend};
 #[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};

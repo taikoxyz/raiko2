@@ -10,6 +10,7 @@ use alloy_primitives::B256;
 use anyhow::Result;
 use async_trait::async_trait;
 use raiko2_primitives::{L2BlockRange, RaikoError, RaikoResult, ShastaCheckpoint};
+use raiko2_protocol::BlobProofType;
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use std::{
     collections::HashMap,
@@ -173,6 +174,7 @@ impl PreflightObserver for NoopPreflightObserver {}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CanonicalPreflightLocatorKeyV1 {
     pub schema: u16,
+    pub blob_proof_type: BlobProofType,
     pub l1_chain_id: u64,
     pub l2_chain_id: u64,
     pub proposal_id: u64,
@@ -248,10 +250,15 @@ impl PreflightCoordinator {
         BuildFuture: Future<Output = RaikoResult<CanonicalPreflightLocatorV1>> + Send,
     {
         self.locator_flights
-            .run_observed(key, build, |event| {
-                self.observer
-                    .record_single_flight(PreflightSingleFlightPhase::Locator, event);
-            })
+            .run_observed(
+                key,
+                build,
+                |event| {
+                    self.observer
+                        .record_single_flight(PreflightSingleFlightPhase::Locator, event);
+                },
+                shared_preflight_failure,
+            )
             .await
     }
 
@@ -280,6 +287,7 @@ impl PreflightCoordinator {
                     self.observer
                         .record_single_flight(PreflightSingleFlightPhase::Core, event);
                 },
+                shared_preflight_failure,
             )
             .await
     }
@@ -564,24 +572,33 @@ where
     K: Clone + Eq + Hash,
 {
     #[cfg(test)]
-    async fn run<F, Fut, E>(&self, key: K, operation: F) -> std::result::Result<Arc<V>, E>
+    async fn run<F, Fut>(&self, key: K, operation: F) -> std::result::Result<Arc<V>, anyhow::Error>
     where
         F: Fn() -> Fut + Send + Sync,
-        Fut: Future<Output = std::result::Result<V, E>> + Send,
+        Fut: Future<Output = std::result::Result<V, anyhow::Error>> + Send,
     {
-        self.run_observed(key, operation, |_| {}).await
+        self.run_observed(
+            key,
+            operation,
+            |_| {},
+            |message| anyhow::anyhow!(message.to_string()),
+        )
+        .await
     }
 
-    async fn run_observed<F, Fut, E, Observe>(
+    async fn run_observed<F, Fut, E, Observe, SharedError>(
         &self,
         key: K,
         operation: F,
         observe: Observe,
+        shared_error: SharedError,
     ) -> std::result::Result<Arc<V>, E>
     where
         F: Fn() -> Fut + Send + Sync,
         Fut: Future<Output = std::result::Result<V, E>> + Send,
+        E: std::fmt::Display,
         Observe: Fn(PreflightSingleFlightEvent) + Send + Sync,
+        SharedError: Fn(&str) -> E + Send + Sync,
     {
         loop {
             match self.elect(key.clone()) {
@@ -594,7 +611,7 @@ where
                             Ok(value)
                         }
                         Err(error) => {
-                            leader.finish(FlightState::Failed);
+                            leader.finish(FlightState::Failed(Arc::from(error.to_string())));
                             Err(error)
                         }
                     };
@@ -606,6 +623,7 @@ where
                     drop(waiter);
                     match result {
                         FlightWait::Succeeded(value) => return Ok(value),
+                        FlightWait::Failed(message) => return Err(shared_error(&message)),
                         FlightWait::Retry => {}
                     }
                 }
@@ -715,7 +733,8 @@ impl<V> Flight<V> {
                 match &*state {
                     FlightState::Running => FlightSnapshot::Wait,
                     FlightState::Succeeded(value) => FlightSnapshot::Succeeded(Arc::clone(value)),
-                    FlightState::Failed | FlightState::Cancelled => FlightSnapshot::Retry,
+                    FlightState::Failed(message) => FlightSnapshot::Failed(Arc::clone(message)),
+                    FlightState::Cancelled => FlightSnapshot::Retry,
                 }
             };
             match snapshot {
@@ -723,6 +742,7 @@ impl<V> Flight<V> {
                 FlightSnapshot::Succeeded(value) => {
                     return FlightWait::Succeeded(value);
                 }
+                FlightSnapshot::Failed(message) => return FlightWait::Failed(message),
                 FlightSnapshot::Retry => return FlightWait::Retry,
             }
         }
@@ -732,19 +752,25 @@ impl<V> Flight<V> {
 enum FlightState<V> {
     Running,
     Succeeded(Arc<V>),
-    Failed,
+    Failed(Arc<str>),
     Cancelled,
 }
 
 enum FlightWait<V> {
     Succeeded(Arc<V>),
+    Failed(Arc<str>),
     Retry,
 }
 
 enum FlightSnapshot<V> {
     Wait,
     Succeeded(Arc<V>),
+    Failed(Arc<str>),
     Retry,
+}
+
+fn shared_preflight_failure(message: &str) -> RaikoError {
+    RaikoError::Preflight(format!("shared preflight leader failed: {message}"))
 }
 
 struct SingleFlightWaiterObservation<'a, Observe>
@@ -782,17 +808,21 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::{
         CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDescriptor,
-        CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1, CanonicalPreflightObject,
+        CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
+        CanonicalPreflightLocatorKeyV1, CanonicalPreflightLocatorV1, CanonicalPreflightObject,
         CanonicalPreflightPutResult, CanonicalPreflightStore, CanonicalShastaPreflightV1,
         PreflightCacheResult, PreflightCoordinator, PreflightObserver, SingleFlight,
     };
     use alloy_primitives::B256;
     use anyhow::Result;
     use raiko2_primitives::{L2BlockRange, RaikoError};
+    use raiko2_protocol::BlobProofType;
+    use raiko2_protocol_shasta::shasta::ShastaEventData;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
     use tokio::sync::{Barrier, Notify};
 
     #[derive(Debug, Default)]
@@ -864,6 +894,7 @@ mod tests {
     fn canonical_key() -> CanonicalPreflightKeyV1 {
         CanonicalPreflightKeyV1 {
             schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            blob_proof_type: BlobProofType::ProofOfEquivalence,
             l1_chain_id: 32_382,
             l2_chain_id: 167_001,
             proposal_id: 42,
@@ -878,6 +909,63 @@ mod tests {
             proposal_event_digest: B256::repeat_byte(0x44),
             chain_rules_fingerprint: B256::repeat_byte(0x55),
         }
+    }
+
+    fn locator_key() -> CanonicalPreflightLocatorKeyV1 {
+        let key = canonical_key();
+        CanonicalPreflightLocatorKeyV1 {
+            schema: key.schema,
+            blob_proof_type: key.blob_proof_type,
+            l1_chain_id: key.l1_chain_id,
+            l2_chain_id: key.l2_chain_id,
+            proposal_id: key.proposal_id,
+            l2_block_range: key.l2_block_range,
+            l1_inclusion_block_number: key.l1_inclusion_block_number,
+            last_anchor_block_number: key.last_anchor_block_number,
+            checkpoint: key.checkpoint,
+            chain_rules_fingerprint: key.chain_rules_fingerprint,
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_coalesces_concurrent_locator_builds() -> Result<()> {
+        let coordinator = Arc::new(PreflightCoordinator::disabled());
+        let key = locator_key();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(7));
+        let mut requests = Vec::new();
+        for _ in 0..6 {
+            let coordinator = Arc::clone(&coordinator);
+            let request_key = key.clone();
+            let calls = Arc::clone(&calls);
+            let barrier = Arc::clone(&barrier);
+            requests.push(tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator
+                    .locate(request_key.clone(), || {
+                        let calls = Arc::clone(&calls);
+                        let request_key = request_key.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Ok(CanonicalPreflightLocatorV1 {
+                                key: canonical_key(),
+                                block_numbers: vec![100, 101],
+                                expected_proposal_id: request_key.proposal_id,
+                                proposal_event: ShastaEventData::default(),
+                            })
+                        }
+                    })
+                    .await
+            }));
+        }
+        barrier.wait().await;
+
+        for request in requests {
+            assert_eq!(request.await??.expected_proposal_id, key.proposal_id);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 
     #[test]
@@ -1013,6 +1101,61 @@ mod tests {
         assert_eq!(*value, 42);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(single_flight.in_flight_len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_waiters_share_failure_before_a_later_request_retries() -> Result<()> {
+        let single_flight = Arc::new(SingleFlight::<u64, usize>::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(7));
+        let release_leader = Arc::new(Notify::new());
+        let mut tasks = Vec::new();
+
+        for _ in 0..6 {
+            let single_flight = Arc::clone(&single_flight);
+            let calls = Arc::clone(&calls);
+            let start = Arc::clone(&start);
+            let release_leader = Arc::clone(&release_leader);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                single_flight
+                    .run(7, || {
+                        let call = calls.fetch_add(1, Ordering::SeqCst);
+                        let release_leader = Arc::clone(&release_leader);
+                        async move {
+                            if call == 0 {
+                                release_leader.notified().await;
+                            }
+                            Err::<usize, _>(anyhow::anyhow!("injected shared failure"))
+                        }
+                    })
+                    .await
+            }));
+        }
+
+        start.wait().await;
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        release_leader.notify_waiters();
+
+        for task in tasks {
+            let error = task.await?.expect_err("shared build must fail");
+            assert!(error.to_string().contains("injected shared failure"));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(single_flight.in_flight_len(), 0);
+
+        let value = single_flight
+            .run(7, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, anyhow::Error>(42)
+            })
+            .await?;
+        assert_eq!(*value, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         Ok(())
     }
 

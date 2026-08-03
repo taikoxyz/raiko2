@@ -59,6 +59,9 @@ compute_units_per_second = 1000
 [runtime]
 environment = "development"
 namespace = "raiko2-development"
+# Shared canonical preflight caching is enabled by default. Set this to "off" only as an
+# incident-response bypass; it disables both persistent cache access and local singleflight.
+preflight_cache = "shared"
 # Optional active-cache invalidation before recovery or serving begins.
 # Guest, image, or verifier upgrades normally need only "proof". Add "preflight" when derivation,
 # fork, or witness-generation rules changed. Immutable content remains for the bucket lifecycle TTL.

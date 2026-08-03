@@ -18,6 +18,7 @@ pub const CANONICAL_PREFLIGHT_SCHEMA_V1: u16 = 1;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalPreflightKeyV1 {
     pub schema: u16,
+    pub blob_proof_type: BlobProofType,
     pub l1_chain_id: u64,
     pub l2_chain_id: u64,
     pub proposal_id: u64,
@@ -207,10 +208,12 @@ mod tests {
         ChainSpec, L2BlockRange, ProofType, ShastaCheckpoint,
         chain_spec::{ForkId, TaikoFork},
     };
+    use raiko2_protocol::BlobProofType;
 
     fn cache_key() -> CanonicalPreflightKeyV1 {
         CanonicalPreflightKeyV1 {
             schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            blob_proof_type: BlobProofType::ProofOfEquivalence,
             l1_chain_id: 1,
             l2_chain_id: 167_001,
             proposal_id: 42,

@@ -11,7 +11,9 @@ pub use factory::{PipelineFactory, StaticPipelineFactory};
 pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};
 
-use crate::config::{Config, GuestSystem, ResolvedNetworkPair, RunnerKind, RuntimeStoreBackend};
+use crate::config::{
+    Config, GuestSystem, PreflightCacheMode, ResolvedNetworkPair, RunnerKind, RuntimeStoreBackend,
+};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{
@@ -341,10 +343,7 @@ fn build_pipeline_factory(
 ) -> Result<StaticPipelineFactory> {
     let mut factory = StaticPipelineFactory::default();
     for pair in pairs {
-        let preflight_coordinator = Arc::new(PreflightCoordinator::with_observer(
-            runtime.canonical_preflight_store(),
-            Arc::new(PreflightCacheMetricsObserver::new(pair.key.clone())),
-        ));
+        let preflight_coordinator = preflight_coordinator(config, runtime, pair);
         let registration = PairPipelineRegistration {
             config,
             pair,
@@ -366,6 +365,20 @@ fn build_pipeline_factory(
         register_pair_pipelines(&mut factory, &registration)?;
     }
     Ok(factory)
+}
+
+fn preflight_coordinator(
+    config: &Config,
+    runtime: &Arc<RuntimeManager>,
+    pair: &ResolvedNetworkPair,
+) -> Option<Arc<PreflightCoordinator>> {
+    match config.runtime.preflight_cache {
+        PreflightCacheMode::Shared => Some(Arc::new(PreflightCoordinator::with_observer(
+            runtime.canonical_preflight_store(),
+            Arc::new(PreflightCacheMetricsObserver::new(pair.key.clone())),
+        ))),
+        PreflightCacheMode::Off => None,
+    }
 }
 
 impl AppState {
@@ -498,7 +511,7 @@ struct PairPipelineRegistration<'a> {
     pair: &'a ResolvedNetworkPair,
     pipelines: &'a [PipelineRegistration],
     runtime: Arc<RuntimeManager>,
-    preflight_coordinator: Arc<PreflightCoordinator>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
     /// Balance gate shared across all pairs by `PipelineResources`.
     #[cfg(feature = "host")]
     boundless_balance_gate: Option<BoundlessBalanceGate>,
@@ -538,7 +551,7 @@ fn register_pair_pipelines(
                             .clone(),
                         registration.scheduler_config.clone(),
                         observer,
-                        Arc::clone(&registration.preflight_coordinator),
+                        registration.preflight_coordinator.clone(),
                     )?;
                     factory.insert(
                         registration.pair.key.clone(),
@@ -573,7 +586,7 @@ fn register_pair_pipelines(
                             .boundless_balance_gate
                             .clone()
                             .expect("RISC0 network route requires Boundless balance gate"),
-                        Arc::clone(&registration.preflight_coordinator),
+                        registration.preflight_coordinator.clone(),
                     )?;
                     factory.insert(
                         registration.pair.key.clone(),
@@ -608,7 +621,7 @@ fn register_pair_pipelines(
                         backend,
                         setup::sp1_scheduler_config(registration.config),
                         observer,
-                        Arc::clone(&registration.preflight_coordinator),
+                        registration.preflight_coordinator.clone(),
                     )?;
                     factory.insert(
                         registration.pair.key.clone(),
@@ -625,7 +638,7 @@ fn register_pair_pipelines(
                     registration.pair,
                     registration.scheduler_config.clone(),
                     observer,
-                    Arc::clone(&registration.preflight_coordinator),
+                    registration.preflight_coordinator.clone(),
                 )?;
                 factory.insert(
                     registration.pair.key.clone(),
@@ -647,7 +660,7 @@ fn register_pair_pipelines(
                             .clone()
                             .expect("remote SGX route requires a selected URL"),
                     },
-                    Arc::clone(&registration.preflight_coordinator),
+                    registration.preflight_coordinator.clone(),
                 )?;
                 factory.insert(
                     registration.pair.key.clone(),
@@ -668,7 +681,7 @@ fn build_risc0_engine(
     backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
-    preflight_coordinator: Arc<PreflightCoordinator>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Risc0Spec>> {
     let risc0_config = setup::risc0_prover_config(config);
 
@@ -680,7 +693,7 @@ fn build_risc0_engine(
         backend,
         provider,
     )
-    .with_preflight_coordinator(preflight_coordinator);
+    .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -700,12 +713,12 @@ fn build_sp1_engine(
     backend: Sp1ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
-    preflight_coordinator: Arc<PreflightCoordinator>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Sp1Spec>> {
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Sp1)?;
     let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider)
-        .with_preflight_coordinator(preflight_coordinator);
+        .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -722,7 +735,7 @@ fn build_native_engine(
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
-    preflight_coordinator: Arc<PreflightCoordinator>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<NativeSpec>> {
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Native)?;
@@ -732,7 +745,7 @@ fn build_native_engine(
         NativeBackend,
         provider,
     )
-    .with_preflight_coordinator(preflight_coordinator);
+    .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -752,7 +765,7 @@ fn build_boundless_engine(
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     balance_gate: BoundlessBalanceGate,
-    preflight_coordinator: Arc<PreflightCoordinator>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<BoundlessSpec>> {
     let agent_config = setup::boundless_prover_config(config, pair);
 
@@ -764,7 +777,7 @@ fn build_boundless_engine(
         backend,
         provider,
     )
-    .with_preflight_coordinator(preflight_coordinator);
+    .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -788,7 +801,7 @@ fn build_remote_sgx_engine(
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     lane: RemoteSgxLane,
-    preflight_coordinator: Arc<PreflightCoordinator>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Gaiko2Spec>> {
     let timeout_ms = match lane.proof_type {
         ProofType::Sgx => config.prover.sgx.timeout_ms,
@@ -803,7 +816,7 @@ fn build_remote_sgx_engine(
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, lane.proof_type)?;
     let spec = ShastaSpec::new(lane.pipeline_key, gaiko2_prover, NativeBackend, provider)
-        .with_preflight_coordinator(preflight_coordinator);
+        .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -818,6 +831,9 @@ fn build_remote_sgx_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BoundlessPairConfig;
+    use raiko2_primitives::ChainSpec;
+    use raiko2_provider::L2ProviderKind;
     use raiko2_runtime::{
         TaskRegistration,
         test_support::{MemoryProofArtifactStore, RuntimeStore},
@@ -826,6 +842,37 @@ mod tests {
 
     struct ShutdownProbeFactory {
         shutdown_called: Arc<AtomicBool>,
+    }
+
+    fn preflight_cache_test_pair() -> ResolvedNetworkPair {
+        ResolvedNetworkPair {
+            key: "sample_l2/sample_l1".to_string(),
+            network: "sample_l2".to_string(),
+            l1_network: "sample_l1".to_string(),
+            l1_rpc: "http://l1.example.invalid".to_string(),
+            l2_rpc: "http://l2.example.invalid".to_string(),
+            l2_provider: L2ProviderKind::Reth,
+            l2_witness_rpc: "http://l2.example.invalid".to_string(),
+            sp1_verifier_rpc_url: None,
+            sp1_verifier_address: None,
+            boundless: BoundlessPairConfig::default(),
+            l1_spec: ChainSpec::default(),
+            l2_spec: ChainSpec::default(),
+        }
+    }
+
+    #[test]
+    fn preflight_cache_mode_controls_coordinator_wiring() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "preflight-cache-mode",
+        ))?);
+        let pair = preflight_cache_test_pair();
+        let mut config = Config::default();
+
+        assert!(preflight_coordinator(&config, &runtime, &pair).is_some());
+        config.runtime.preflight_cache = PreflightCacheMode::Off;
+        assert!(preflight_coordinator(&config, &runtime, &pair).is_none());
+        Ok(())
     }
 
     impl PipelineFactory for ShutdownProbeFactory {

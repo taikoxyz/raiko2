@@ -469,10 +469,16 @@ This is a breaking configuration migration only for operators currently setting
 - Cache canonical fetched/derived data, not a placeholder `GuestInput`.
 - Persist no standalone input artifact.
 - Share one cache across proof lanes.
-- Keep proof type, verifier, guest identity, prover, and graffiti out of the cache key.
+- Keep proof lane, verifier, guest identity, prover, and graffiti out of the cache key; include the
+  blob proof scheme because it changes canonical manifest semantics.
 - Keep checkpoint and last anchor in the key.
 - Bind the key to canonical L1 inclusion identity to survive reorgs safely.
 - Validate every cache hit and publish only after canonical validation.
+- A leader failure is returned to every waiter in that flight. The failed flight is removed, so a
+  later request elects a new leader and retries; leader cancellation instead lets an existing
+  waiter re-elect immediately.
+- `runtime.preflight_cache = "off"` bypasses persistent cache access and local singleflight as an
+  incident-response control.
 - Use host-trusted chain spec materialization and carry construction.
 - Use local single-flight only.
 - Delete active manifests at startup and let lifecycle TTL remove immutable content.

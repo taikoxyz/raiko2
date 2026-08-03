@@ -1201,6 +1201,16 @@ Operator notes:
   replacement starts successfully; otherwise every routine restart repeats the cleanup and can
   discard fresh task state and proof manifests. Keep prefixes non-overlapping so one deployment
   scope cannot contain another.
+- For a preflight-cache incident, set `runtime.preflight_cache = "off"` and restart using the same
+  environment and namespace. This bypasses both GCS preflight reads/writes and process-local
+  singleflight without deleting runtime state or proof manifests. Restore `"shared"` after the
+  incident is understood. This switch is not a replacement for `startup_cleanup = ["preflight"]`
+  when cached preflight data is known to be semantically stale.
+- Before deploying this config schema, remove the former `runtime.reset_namespace_on_start` key
+  from every environment and namespace. The service intentionally rejects that removed field.
+  Configure the exact one-shot `startup_cleanup` scopes needed for the cutover, start the
+  replacement only after the previous process exits, verify recovery and admission, then remove
+  `startup_cleanup` so routine restarts do not repeat deletion.
 - Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
   complete lifecycle operation. A process-local lifecycle transition gate serializes one short
   active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,

@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
 };
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 
 #[derive(Debug)]
 struct FakeGcsTransport {
@@ -279,6 +279,7 @@ fn key() -> ProofArtifactKey {
 fn canonical_preflight_key() -> CanonicalPreflightKeyV1 {
     CanonicalPreflightKeyV1 {
         schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+        blob_proof_type: Default::default(),
         l1_chain_id: 32_382,
         l2_chain_id: 167_001,
         proposal_id: 42,
@@ -370,6 +371,54 @@ async fn canonical_preflight_manifest_is_first_write_wins() -> Result<()> {
             .expect("winning canonical preflight")
             .bytes,
         b"first"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_canonical_preflight_publication_has_one_winner() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = Arc::new(store(transport)?);
+    let key = canonical_preflight_key();
+    let barrier = Arc::new(Barrier::new(3));
+    let mut attempts = Vec::new();
+    for bytes in [b"canonical-a".as_slice(), b"canonical-b".as_slice()] {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let barrier = Arc::clone(&barrier);
+        let bytes = bytes.to_vec();
+        attempts.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let result = store
+                .put_canonical_preflight_if_absent(&key, &bytes)
+                .await?;
+            Ok::<_, anyhow::Error>((bytes, result))
+        }));
+    }
+    barrier.wait().await;
+
+    let mut winner = None;
+    let mut conflicts = 0;
+    for attempt in attempts {
+        let (bytes, result) = attempt.await??;
+        match result {
+            CanonicalPreflightPutResult::Created(_) => winner = Some(bytes),
+            CanonicalPreflightPutResult::Conflict(_) => conflicts += 1,
+            CanonicalPreflightPutResult::AlreadyExists(_) => {
+                anyhow::bail!("different concurrent payloads cannot be identical")
+            }
+        }
+    }
+
+    let winner = winner.expect("one concurrent publisher wins");
+    assert_eq!(conflicts, 1);
+    assert_eq!(
+        store
+            .get_canonical_preflight(&key)
+            .await?
+            .expect("winning canonical preflight")
+            .bytes,
+        winner
     );
     Ok(())
 }

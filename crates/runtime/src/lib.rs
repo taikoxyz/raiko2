@@ -3505,6 +3505,7 @@ mod tests {
     fn canonical_preflight_test_key(proposal_id: u64) -> CanonicalPreflightKeyV1 {
         CanonicalPreflightKeyV1 {
             schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            blob_proof_type: Default::default(),
             l1_chain_id: 1,
             l2_chain_id: 167_001,
             proposal_id,

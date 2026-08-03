@@ -319,6 +319,15 @@ impl MemoryProofArtifactStore {
         inner.next_generation
     }
 
+    fn validate_canonical_preflight_key(key: &CanonicalPreflightKeyV1) -> Result<()> {
+        anyhow::ensure!(
+            key.schema == CANONICAL_PREFLIGHT_SCHEMA_V1,
+            "unsupported canonical preflight key schema {}",
+            key.schema
+        );
+        Ok(())
+    }
+
     fn content_uri(&self, key: &ProofArtifactKey, hash: &str) -> String {
         format!(
             "memory://{}/{}/proofs/{}/{}/{}/{}/{}.json",
@@ -353,6 +362,7 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
         &self,
         key: &CanonicalPreflightKeyV1,
     ) -> Result<Option<CanonicalPreflightObject>> {
+        Self::validate_canonical_preflight_key(key)?;
         let key_digest = key.digest()?;
         let inner = self
             .inner
@@ -389,6 +399,7 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
         key: &CanonicalPreflightKeyV1,
         bytes: &[u8],
     ) -> Result<CanonicalPreflightPutResult> {
+        Self::validate_canonical_preflight_key(key)?;
         let key_digest = key.digest()?;
         let hash = content_hash(bytes);
         let mut inner = self
@@ -451,6 +462,7 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
         key: &CanonicalPreflightKeyV1,
         descriptor: &CanonicalPreflightDescriptor,
     ) -> Result<CanonicalPreflightInvalidateResult> {
+        Self::validate_canonical_preflight_key(key)?;
         let key_digest = key.digest()?;
         if descriptor.key_digest != key_digest {
             return Ok(CanonicalPreflightInvalidateResult::Stale);
@@ -836,6 +848,7 @@ mod tests {
     fn preflight_key() -> CanonicalPreflightKeyV1 {
         CanonicalPreflightKeyV1 {
             schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            blob_proof_type: Default::default(),
             l1_chain_id: 32_382,
             l2_chain_id: 167_001,
             proposal_id: 42,
@@ -926,6 +939,42 @@ mod tests {
                 .bytes,
             b"canonical-a"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_canonical_preflight_rejects_unknown_schema() -> Result<()> {
+        let store = MemoryProofArtifactStore::new("devnet".into(), "preflight-schema".into())?;
+        let mut key = preflight_key();
+        key.schema = CANONICAL_PREFLIGHT_SCHEMA_V1 + 1;
+        let descriptor = CanonicalPreflightDescriptor {
+            key_digest: key.digest()?,
+            content_hash: content_hash(b"canonical"),
+            generation: Some(1),
+        };
+
+        let get_error = CanonicalPreflightStore::get_canonical_preflight(&store, &key)
+            .await
+            .expect_err("unknown schema get must fail");
+        let put_error =
+            CanonicalPreflightStore::put_canonical_preflight_if_absent(&store, &key, b"canonical")
+                .await
+                .expect_err("unknown schema put must fail");
+        let invalidate_error = CanonicalPreflightStore::invalidate_canonical_preflight_exact(
+            &store,
+            &key,
+            &descriptor,
+        )
+        .await
+        .expect_err("unknown schema invalidation must fail");
+
+        for error in [get_error, put_error, invalidate_error] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported canonical preflight key schema")
+            );
+        }
         Ok(())
     }
 

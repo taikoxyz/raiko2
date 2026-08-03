@@ -27,12 +27,14 @@ use raiko2_primitives::{
 };
 use raiko2_primitives_shasta::{
     AnchorSourceSpan, GuestInput, build_proof_carry_data_with_chain_spec,
-    should_bypass_stalled_anchor_linkage, validate_anchor_progression,
-    validate_source_aware_anchor_progression, verify_proposal_mode_blob_usage,
+    instance::SHASTA_PROPOSAL_ID_MAX, should_bypass_stalled_anchor_linkage,
+    validate_anchor_progression, validate_source_aware_anchor_progression,
+    verify_proposal_mode_blob_usage,
 };
 use raiko2_protocol::ManifestChainSpec;
 use raiko2_protocol_shasta::shasta::{
-    ParentBlockContext, ProposalMetadata, ShastaEventData,
+    ParentBlockContext, ProofCarryData, ProposalMetadata, ShastaEventData, ShastaTransitionInput,
+    TransitionInputData,
     constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
     decode_proposal_id_from_extra_data,
     manifest::BlockManifest,
@@ -118,6 +120,15 @@ impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
         preflight_coordinator: Arc<PreflightCoordinator>,
     ) -> Self {
         self.preflight_coordinator = Some(preflight_coordinator);
+        self
+    }
+
+    #[must_use]
+    pub fn with_optional_preflight_coordinator(
+        mut self,
+        preflight_coordinator: Option<Arc<PreflightCoordinator>>,
+    ) -> Self {
+        self.preflight_coordinator = preflight_coordinator;
         self
     }
 }
@@ -233,6 +244,7 @@ fn canonical_preflight_locator_key(
     l2_chain_spec: &ChainSpec,
 ) -> RaikoResult<CanonicalPreflightLocatorKeyV1> {
     extract_block_range(ctx, l2_chain_spec)?;
+    let blob_proof_type = ShastaManifestBuilder::resolve_blob_proof_type(ctx)?;
     let l2_block_range = ctx.request.l2_block_range.ok_or_else(|| {
         RaikoError::InvalidRequestConfig(
             "request l2_block_range is required for Shasta preflight".to_string(),
@@ -247,6 +259,7 @@ fn canonical_preflight_locator_key(
         .map_err(|error| RaikoError::Serialization(error.to_string()))?;
     Ok(CanonicalPreflightLocatorKeyV1 {
         schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+        blob_proof_type,
         l1_chain_id: ctx.request.l1_chain_id,
         l2_chain_id: ctx.request.l2_chain_id,
         proposal_id: ctx.request.proposal_id,
@@ -294,6 +307,7 @@ async fn resolve_canonical_preflight_locator<P: Provider>(
     Ok(CanonicalPreflightLocatorV1 {
         key: CanonicalPreflightKeyV1 {
             schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            blob_proof_type: locator_key.blob_proof_type,
             l1_chain_id: locator_key.l1_chain_id,
             l2_chain_id: locator_key.l2_chain_id,
             proposal_id: locator_key.proposal_id,
@@ -2085,10 +2099,80 @@ pub(crate) fn validate_canonical_preflight(
         proposal_ancestor_headers: core.proposal_ancestor_headers.clone(),
         proposal_state_nodes: core.proposal_state_nodes.clone(),
     };
-    input.proof_carry_data =
-        build_proof_carry_data_with_chain_spec(&input, ProofType::Native, chain_spec)?;
-    input.proof_carry_data.verifier = Address::ZERO;
+    input.proof_carry_data = build_verifier_neutral_canonical_carry(&input, chain_spec)?;
     validate_materialized_canonical_data(&input, chain_spec)
+}
+
+fn build_verifier_neutral_canonical_carry(
+    input: &GuestInput,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<ProofCarryData> {
+    let first_witness = input.witnesses.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build canonical Shasta carry data without witnesses".to_string(),
+        )
+    })?;
+    let last_witness = input.witnesses.last().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build canonical Shasta carry data without witnesses".to_string(),
+        )
+    })?;
+    if chain_spec.chain_id == 0 {
+        return Err(RaikoError::InvalidRequestConfig(
+            "trusted chain_spec.chain_id must be non-zero".to_string(),
+        ));
+    }
+
+    let proposal = &input.taiko.proposal_event.proposal;
+    let proposal_event_id = proposal.id.to::<u64>();
+    if input.taiko.proposal_id > SHASTA_PROPOSAL_ID_MAX {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "proposal_id does not fit in uint48: {}",
+            input.taiko.proposal_id
+        )));
+    }
+    if input.taiko.proposal_id != proposal_event_id {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "proposal_id mismatch: expected {proposal_event_id}, got {}",
+            input.taiko.proposal_id
+        )));
+    }
+
+    let checkpoint = raiko2_protocol_shasta::shasta::Checkpoint {
+        blockNumber: last_witness.block.header.number.try_into().map_err(|_| {
+            RaikoError::InvalidRequestConfig(
+                "last witness block number does not fit in uint48".to_string(),
+            )
+        })?,
+        blockHash: last_witness.block.header.hash_slow(),
+        stateRoot: last_witness.block.header.state_root,
+    };
+    if let Some(expected_checkpoint) = input.taiko.prover_data.checkpoint.as_ref()
+        && expected_checkpoint != &checkpoint
+    {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "prover checkpoint mismatch: expected {expected_checkpoint:?}, got {checkpoint:?}"
+        )));
+    }
+
+    Ok(ProofCarryData {
+        chain_id: chain_spec.chain_id,
+        // The canonical cache is lane-neutral. Materialization resolves and validates the
+        // verifier for the requested proof lane before proving.
+        verifier: Address::ZERO,
+        transition_input: TransitionInputData {
+            proposal_id: input.taiko.proposal_id,
+            proposal_hash: raiko2_protocol_shasta::libhash::hash_proposal(proposal),
+            parent_proposal_hash: proposal.parentProposalHash,
+            parent_block_hash: first_witness.block.header.parent_hash,
+            actual_prover: input.taiko.prover_data.actual_prover,
+            transition: ShastaTransitionInput {
+                proposer: proposal.proposer,
+                timestamp: proposal.timestamp.to::<u64>(),
+            },
+            checkpoint,
+        },
+    })
 }
 
 fn validate_canonical_preflight_key_binding(
@@ -2112,6 +2196,12 @@ fn validate_canonical_preflight_key_binding(
         return Err(RaikoError::Preflight(format!(
             "canonical preflight proposal mismatch: key={} core={}",
             key.proposal_id, core.manifest.proposal_id
+        )));
+    }
+    if core.manifest.blob_proof_type != key.blob_proof_type {
+        return Err(RaikoError::Preflight(format!(
+            "canonical preflight blob proof type mismatch: key={:?} core={:?}",
+            key.blob_proof_type, core.manifest.blob_proof_type
         )));
     }
     let event_digest = proposal_event_digest(&core.manifest.proposal_event)
@@ -2296,6 +2386,7 @@ mod tests {
         let last = core.witnesses.last().expect("canonical witness");
         CanonicalPreflightKeyV1 {
             schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
+            blob_proof_type: core.manifest.blob_proof_type,
             l1_chain_id: 32_382,
             l2_chain_id: chain_spec.chain_id,
             proposal_id: core.manifest.proposal_id,
@@ -3126,6 +3217,22 @@ mod tests {
             bincode::serialize(&input).expect("encode original"),
             bincode::serialize(&materialized).expect("encode materialized")
         );
+    }
+
+    #[test]
+    fn canonical_carry_does_not_require_a_verifier_mapping() {
+        let mut chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_013)
+            .expect("supported Hoodi chain spec");
+        chain_spec.verifier_address_forks.clear();
+        let input = guest_input_for_proof_carry(chain_spec.clone());
+
+        let carry = super::build_verifier_neutral_canonical_carry(&input, &chain_spec)
+            .expect("canonical carry must be verifier-neutral");
+
+        assert_eq!(carry.chain_id, chain_spec.chain_id);
+        assert_eq!(carry.verifier, Address::ZERO);
+        assert_eq!(carry.transition_input.proposal_id, input.taiko.proposal_id);
     }
 
     #[tokio::test]

@@ -31,6 +31,20 @@ impl ProverType {
     }
 }
 
+pub(crate) fn format_proposal_ids(proposal_ids: &[u64]) -> String {
+    match proposal_ids {
+        [] => "none".to_string(),
+        [single] => single.to_string(),
+        ids if ids
+            .windows(2)
+            .all(|window| window[0].checked_add(1) == Some(window[1])) =>
+        {
+            format!("{}..{}", ids[0], ids[ids.len() - 1])
+        }
+        ids => ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TaskMetadata {

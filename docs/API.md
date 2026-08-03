@@ -1175,6 +1175,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
+- `runtime.preflight_cache` accepts `"shared"` (default) or `"off"`. Shared mode enables the
+  persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
+  bypasses both layers and rebuilds preflight independently for each request; use it only as an
+  incident-response control while preserving proof storage and runtime state.
 - `runtime.startup_cleanup` defaults to an empty list. `["proof"]` clears authoritative runtime task
   state first and then deletes active proposal and aggregate proof manifests. Use it for SGX/ZK guest,
   image, verifier, or proving-key changes. `["preflight"]` deletes only active canonical preflight

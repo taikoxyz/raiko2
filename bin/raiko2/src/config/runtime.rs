@@ -18,6 +18,14 @@ pub enum StartupCleanupScope {
     Preflight,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightCacheMode {
+    #[default]
+    Shared,
+    Off,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeStoreConfig {
@@ -45,6 +53,8 @@ impl Default for RuntimeStoreConfig {
 pub struct RuntimeConfig {
     pub environment: String,
     pub namespace: String,
+    #[serde(default)]
+    pub preflight_cache: PreflightCacheMode,
     #[serde(default, deserialize_with = "deserialize_startup_cleanup")]
     pub startup_cleanup: Vec<StartupCleanupScope>,
     pub store: RuntimeStoreConfig,
@@ -55,6 +65,7 @@ impl Default for RuntimeConfig {
         Self {
             environment: "development".to_string(),
             namespace: "raiko2-development".to_string(),
+            preflight_cache: PreflightCacheMode::Shared,
             startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig::default(),
         }
@@ -188,6 +199,7 @@ mod tests {
         let config = RuntimeConfig {
             environment: "devnet".into(),
             namespace: "raiko2-devnet-a".into(),
+            preflight_cache: PreflightCacheMode::Shared,
             startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig {
                 backend: RuntimeStoreBackend::Gcs,
@@ -220,6 +232,7 @@ mod tests {
         let config = RuntimeConfig {
             environment: "hoodi".into(),
             namespace: "raiko2-hoodi-ephemeral".into(),
+            preflight_cache: PreflightCacheMode::Shared,
             startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig {
                 allow_ephemeral: true,
@@ -272,6 +285,30 @@ mod tests {
         );
         let encoded = toml::to_string(&config).expect("serialize runtime config");
         assert!(encoded.contains("startup_cleanup = [\"proof\", \"preflight\"]"));
+    }
+
+    #[test]
+    fn preflight_cache_defaults_to_shared_and_accepts_off() {
+        assert_eq!(
+            RuntimeConfig::default().preflight_cache,
+            PreflightCacheMode::Shared
+        );
+
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                preflight_cache = "off"
+
+                [store]
+                backend = "memory"
+            "#,
+        )
+        .expect("off preflight cache mode parses");
+
+        assert_eq!(config.preflight_cache, PreflightCacheMode::Off);
+        let encoded = toml::to_string(&config).expect("serialize runtime config");
+        assert!(encoded.contains("preflight_cache = \"off\""));
     }
 
     #[test]

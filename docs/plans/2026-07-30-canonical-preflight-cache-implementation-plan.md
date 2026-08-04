@@ -1,7 +1,5 @@
 # Canonical Preflight Cache Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Share one validated Shasta preflight result across all proof lanes and replace full startup namespace deletion with exact `proof` and `preflight` cleanup scopes.
 
 **Architecture:** Add a versioned, lane-independent canonical preflight core and deterministic key

@@ -1327,13 +1327,15 @@ fn registered_batch_response(submission: &CanonicalBatchSubmission) -> Response 
         .iter()
         .map(|proposal| proposal.proposal_id)
         .collect::<Vec<_>>();
+    let log_context = registered_task_log_context(submission);
     info!(
         task_id = %submission.public_task_id,
         aggregate = submission.aggregate_requested,
         proposal_ids = %format_proposal_ids(&proposal_ids),
         proposal_count = proposal_ids.len(),
         route = %submission.route.route,
-        proof_type = submission.requested_proof_type.as_str(),
+        proof_type = %log_context.proof_type,
+        requested_proof_type = log_context.requested_proof_type.as_str(),
         prover_type = submission.prover_type.map_or("none", ProverType::as_str),
         network_pair = %submission.pair.key,
         "registered shasta proof task"
@@ -1344,6 +1346,21 @@ fn registered_batch_response(submission: &CanonicalBatchSubmission) -> Response 
         submission.public_task_id.clone(),
     )
     .into_response()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegisteredTaskLogContext {
+    proof_type: ProofType,
+    requested_proof_type: BatchProofType,
+}
+
+const fn registered_task_log_context(
+    submission: &CanonicalBatchSubmission,
+) -> RegisteredTaskLogContext {
+    RegisteredTaskLogContext {
+        proof_type: submission.route.proof_type(),
+        requested_proof_type: submission.requested_proof_type,
+    }
 }
 
 async fn handle_existing_external_aggregate_task(
@@ -3748,6 +3765,21 @@ mod tests {
             PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
             PipelineKey::ShastaSgxGeth,
         )
+    }
+
+    #[test]
+    fn registered_task_log_context_distinguishes_selected_lane_from_request() {
+        let route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
+            PipelineKey::ShastaSp1,
+        );
+        let mut submission = canonical_submission(route, false);
+        submission.requested_proof_type = BatchProofType::ZkAny;
+
+        let context = registered_task_log_context(&submission);
+
+        assert_eq!(context.proof_type, ProofType::Sp1);
+        assert_eq!(context.requested_proof_type, BatchProofType::ZkAny);
     }
 
     fn legacy_sgxgeth_record(

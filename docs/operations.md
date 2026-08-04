@@ -1206,6 +1206,11 @@ Operator notes:
   singleflight without deleting runtime state or proof manifests. Restore `"shared"` after the
   incident is understood. This switch is not a replacement for `startup_cleanup = ["preflight"]`
   when cached preflight data is known to be semantically stale.
+- Correlate `registered shasta proof task` and `completed shasta proof task` logs by `task_id`.
+  `proof_type` is the resolved proof lane, while `requested_proof_type` on registration preserves
+  the raw request such as `zk_any`. Completion logging is at-least-once because idempotent proof
+  publication may be observed again; deduplicate accounting and SLO inputs by `task_id` plus
+  `content_hash`.
 - Before deploying this config schema, remove the former `runtime.reset_namespace_on_start` key
   from every environment and namespace. The service intentionally rejects that removed field.
   Configure the exact one-shot `startup_cleanup` scopes needed for the cutover, start the

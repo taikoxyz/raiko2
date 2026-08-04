@@ -3235,6 +3235,26 @@ mod tests {
         assert_eq!(carry.transition_input.proposal_id, input.taiko.proposal_id);
     }
 
+    #[test]
+    fn canonical_carry_matches_trusted_builder_except_for_verifier() {
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_013)
+            .expect("supported Hoodi chain spec");
+        let input = guest_input_for_proof_carry(chain_spec.clone());
+        let mut expected = raiko2_primitives_shasta::build_proof_carry_data_with_chain_spec(
+            &input,
+            ProofType::Native,
+            &chain_spec,
+        )
+        .expect("build trusted carry");
+        expected.verifier = Address::ZERO;
+
+        let actual = super::build_verifier_neutral_canonical_carry(&input, &chain_spec)
+            .expect("build canonical carry");
+
+        assert_eq!(actual, expected);
+    }
+
     #[tokio::test]
     async fn materialization_injects_request_fields_without_changing_the_core() {
         let provider = sample_provider();

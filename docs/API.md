@@ -1175,16 +1175,24 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
-- `runtime.reset_namespace_on_start` defaults to `false`. When set to `true`, Raiko2 clears every
-  current runtime-state and proof-artifact objects in the configured `(environment, namespace)`
-  before recovery, worker startup, or HTTP admission. Memory mode clears its complete in-process
-  store; GCS pages through and conditionally deletes the exact
-  `<prefix>/<environment>/<namespace>/` scope. Any listing or deletion failure aborts startup. Use
-  it only after the previous process has stopped. Every restart while the flag remains `true`
-  repeats the reset, so set it back to `false` after a successful reset; it never affects sibling
-  namespaces. A GCS deployment using this option needs permission to list and delete objects in
-  that scope. It removes current object generations only; noncurrent or soft-deleted GCS versions
-  remain subject to the bucket retention and lifecycle policy.
+- `runtime.preflight_cache` accepts `"shared"` (default) or `"off"`. Shared mode enables the
+  persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
+  bypasses both layers and rebuilds preflight independently for each request; use it only as an
+  incident-response control while preserving proof storage and runtime state.
+- `runtime.startup_cleanup` defaults to an empty list. `["proof"]` clears authoritative runtime task
+  state first and then deletes active proposal and aggregate proof manifests. Use it for SGX/ZK guest,
+  image, verifier, or proving-key changes. `["preflight"]` deletes only active canonical preflight
+  manifests. Use `["proof", "preflight"]` when derivation, fork, or witness-generation rules changed.
+  The scopes are exact: neither implies the other, and there is no `input` scope because materialized
+  `GuestInput` values are not persisted. GCS pages through matching manifest objects and deletes their
+  listed generations with bounded concurrency; immutable proof/preflight content and invalidation
+  records remain unreachable until bucket lifecycle TTL removes them. Any listing or deletion failure
+  aborts startup. Cleanup runs before recovery, workers, or HTTP admission and only after the previous
+  process has stopped. Configured scopes run again on every restart, so remove `startup_cleanup`
+  immediately after the cutover succeeds; leaving it configured can discard fresh task state and
+  proof manifests during a routine restart. A missing list means no cleanup; duplicate scopes,
+  unknown scopes, and the removed reset boolean fail schema validation. Sibling namespaces are never
+  affected.
 - `runtime.store.backend` selects the backend used by both the authoritative state repository and
   proof-object repository. Use `gcs` with a non-empty `bucket` for durable deployments. `memory`
   is process-local and disposable; it is accepted outside `development`, `local`, or `test` only
@@ -1195,6 +1203,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
   and replacement processes never overlap for one namespace. Configure prefixes so one deployment
   scope cannot be nested below another deployment's `(prefix, environment, namespace)` scope.
+- Canonical Shasta preflight cores are keyed by chain/range/proposal/L1 inclusion and effective rule
+  identity, then shared across all proof lanes in one process. Proof type, verifier addresses,
+  request presentation fields, and RPC endpoints are not part of that cache identity. Cache hits are
+  revalidated with guest-equivalent Shasta semantics before lane-specific `GuestInput` materialization.
 - The namespace fence is global to the process but short-lived: draining closes mutation admission
   and readiness immediately, then waits only for repository commits already admitted and provider
   request-ID checkpoints covered by existing permits. It is not held across a full task,

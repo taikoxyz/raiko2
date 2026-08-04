@@ -19,7 +19,9 @@ pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::QueueConfig;
 pub use raiko2_pipeline::{GuestSystem, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
-pub use runtime::{RuntimeConfig, RuntimeStoreBackend};
+#[cfg(test)]
+pub use runtime::StartupCleanupScope;
+pub use runtime::{PreflightCacheMode, RuntimeConfig, RuntimeStoreBackend};
 #[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};

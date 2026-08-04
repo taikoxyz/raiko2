@@ -12,6 +12,7 @@ test-utils = []
 
 [dependencies]
 anyhow.workspace = true
+alloy-primitives.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true

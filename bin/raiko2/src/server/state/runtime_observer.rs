@@ -26,8 +26,8 @@ use crate::server::proof_artifact::ProofArtifactPayload;
 #[cfg(test)]
 use crate::server::task_metadata::publication_proof_artifact_refs;
 use crate::server::task_metadata::{
-    RemoteSubmissionConflict, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
-    stage_task_ref_for_stage,
+    RemoteSubmissionConflict, TaskMetadata, TaskRuntimeMetadata, format_proposal_ids,
+    proposal_task_ref, stage_task_ref_for_stage,
 };
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
@@ -74,8 +74,26 @@ struct PublishedProofCommit {
     descriptor: ProofArtifactDescriptor,
 }
 
+struct ProofTaskLogContext {
+    aggregate: bool,
+    proposal_ids: Vec<u64>,
+}
+
+fn proof_task_log_context(id: &EngineTaskId) -> ProofTaskLogContext {
+    match &id.0 {
+        EngineTaskKey::Proposal { request, .. } => ProofTaskLogContext {
+            aggregate: false,
+            proposal_ids: vec![request.proposal_id],
+        },
+        EngineTaskKey::Aggregate { request, .. } => ProofTaskLogContext {
+            aggregate: true,
+            proposal_ids: request.proposal_ids.clone(),
+        },
+    }
+}
+
 enum ProofCommitAttempt {
-    Committed,
+    Committed(PublishedProofCommit),
     Retryable(anyhow::Error),
     Invalidated {
         error: anyhow::Error,
@@ -154,6 +172,40 @@ impl RuntimeObserver {
             EngineTaskKey::Aggregate { pipeline, request } => {
                 crate::server::task_metadata::aggregate_task_ref(*pipeline, request)
             }
+        }
+    }
+
+    fn log_completed_proof_tasks(
+        &self,
+        id: &EngineTaskId,
+        stage: &'static str,
+        publication: &PublishedProofCommit,
+    ) {
+        let context = proof_task_log_context(id);
+        let proposal_count = context.proposal_ids.len();
+        let proposal_ids = format_proposal_ids(&context.proposal_ids);
+        let pipeline_key = id.0.pipeline_key();
+        let mut root_task_ids = publication
+            .synchronized_roots
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        root_task_ids.sort_unstable();
+        for task_id in root_task_ids {
+            tracing::info!(
+                task_id,
+                aggregate = context.aggregate,
+                proposal_ids,
+                proposal_count,
+                stage,
+                route = %self.route,
+                proof_type = %pipeline_key.proof_type(),
+                network_pair = %self.network_pair,
+                proof_ref = %publication.root_ref,
+                proof_uri = %publication.proof_uri,
+                content_hash = %publication.descriptor.content_hash,
+                "completed shasta proof task"
+            );
         }
     }
 
@@ -665,7 +717,7 @@ impl RuntimeObserver {
         _task: &EngineTask,
         stage: &str,
         proof: &raiko2_primitives::Proof,
-    ) -> Result<Option<PublishedProofCommit>> {
+    ) -> Result<PublishedProofCommit> {
         let root_ref = Self::root_task_ref(id);
         let records = self.find_root_records(id).await;
         // Reconciliation may complete a root after the canonical artifact commit but before this
@@ -723,12 +775,12 @@ impl RuntimeObserver {
                 "discarding late proof because a different canonical artifact already exists"
             );
         }
-        Ok(Some(PublishedProofCommit {
+        Ok(PublishedProofCommit {
             proof_uri: artifact.proof_uri.clone(),
             synchronized_roots: HashSet::new(),
             root_ref,
             descriptor: artifact.descriptor(),
-        }))
+        })
     }
 
     async fn mark_proof_publication_failed(
@@ -888,7 +940,7 @@ impl RuntimeObserver {
                 .commit_proof_attempt(id, task, stage, proof, completion_owners)
                 .await
             {
-                ProofCommitAttempt::Committed => {
+                ProofCommitAttempt::Committed(publication) => {
                     self.observe_stage_terminal_metrics(
                         id,
                         &task_id,
@@ -898,6 +950,7 @@ impl RuntimeObserver {
                         None,
                     )
                     .await;
+                    self.log_completed_proof_tasks(id, stage, &publication);
                     return Ok(());
                 }
                 ProofCommitAttempt::Invalidated { error, publication } => {
@@ -975,8 +1028,7 @@ impl RuntimeObserver {
             .publish_final_proof_artifact(id, task, stage, proof)
             .await
         {
-            Ok(Some(publication)) => publication,
-            Ok(None) => return ProofCommitAttempt::Committed,
+            Ok(publication) => publication,
             Err(error) if error.downcast_ref::<ProofInvalidatedError>().is_some() => {
                 return ProofCommitAttempt::Invalidated {
                     error,
@@ -1089,7 +1141,7 @@ impl RuntimeObserver {
             .await
             .context("failed to fence completed proof against invalidation")
         {
-            Ok(false) => ProofCommitAttempt::Committed,
+            Ok(false) => ProofCommitAttempt::Committed(publication),
             Ok(true) => ProofCommitAttempt::Invalidated {
                 error: anyhow::anyhow!(
                     "canonical proof artifact {} was invalidated during completion",
@@ -2125,6 +2177,29 @@ mod tests {
         ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, TaskRegistration,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn proof_task_log_context_uses_public_proposal_shape() {
+        let proposal = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaSgx,
+            request: proposal_request_with_id(42),
+        });
+        let proposal_context = proof_task_log_context(&proposal);
+        assert!(!proposal_context.aggregate);
+        assert_eq!(proposal_context.proposal_ids, vec![42]);
+
+        let aggregate = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline: PipelineKey::ShastaSgx,
+            request: AggregationTaskRequest {
+                request_id: "sample-request".to_string(),
+                proposal_ids: vec![42, 43, 44],
+                prover_config: ProverTaskConfig::default(),
+            },
+        });
+        let aggregate_context = proof_task_log_context(&aggregate);
+        assert!(aggregate_context.aggregate);
+        assert_eq!(aggregate_context.proposal_ids, vec![42, 43, 44]);
+    }
 
     async fn engine_execution_permit(
         observer: &RuntimeObserver,

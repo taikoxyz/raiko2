@@ -11,15 +11,20 @@ pub use factory::{PipelineFactory, StaticPipelineFactory};
 pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};
 
-use crate::config::{Config, GuestSystem, ResolvedNetworkPair, RunnerKind, RuntimeStoreBackend};
+use crate::config::{
+    Config, GuestSystem, PreflightCacheMode, ResolvedNetworkPair, RunnerKind, RuntimeStoreBackend,
+};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
-use raiko2_pipeline::{NativeBackend, PipelineKey, PipelineRoute, forks::shasta::ShastaSpec};
+use raiko2_pipeline::{
+    NativeBackend, PipelineKey, PipelineRoute,
+    forks::shasta::{ShastaSpec, preflight_cache::PreflightCoordinator},
+};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{gaiko2::Gaiko2Prover, native::NativeProver};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
-use raiko2_runtime::RuntimeManager;
+use raiko2_runtime::{RuntimeManager, StartupCleanupMask};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,6 +60,9 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 use super::lifecycle::ProofLifecycle;
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
+use super::telemetry::{
+    PreflightCacheMetricsObserver, record_startup_cleanup_failure, record_startup_cleanup_report,
+};
 
 /// In-memory sliding-window limiter for ACL-protected endpoints.
 /// Buckets use config indexes so each configured ACL entry gets an independent quota.
@@ -180,26 +188,41 @@ async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
 }
 
 async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result<()> {
-    if config.runtime.reset_namespace_on_start {
+    let cleanup = config.runtime.startup_cleanup_mask()?;
+    for scope in cleanup.ordered_scopes() {
+        let scope_mask = StartupCleanupMask::from(scope);
         warn!(
             backend = runtime.backend_name(),
             environment = runtime.environment(),
             namespace = runtime.namespace(),
             store_prefix = %config.runtime.store.prefix,
-            "about to reset configured runtime namespace at startup"
+            scope = scope.as_str(),
+            "about to run scoped startup cleanup"
         );
-        let cleared = runtime
-            .reset_namespace()
-            .await
-            .context("failed to reset configured runtime namespace before startup")?;
-        tracing::info!(
-            backend = runtime.backend_name(),
-            environment = runtime.environment(),
-            namespace = runtime.namespace(),
-            store_prefix = %config.runtime.store.prefix,
-            cleared,
-            "reset configured runtime namespace at startup"
-        );
+        let report = match runtime.cleanup_before_start(scope_mask).await {
+            Ok(report) => report,
+            Err(error) => {
+                record_startup_cleanup_failure(scope);
+                return Err(error).with_context(|| {
+                    format!("failed {scope:?} startup cleanup before runtime initialization")
+                });
+            }
+        };
+        record_startup_cleanup_report(&report);
+        for entry in &report.scopes {
+            tracing::info!(
+                backend = runtime.backend_name(),
+                environment = runtime.environment(),
+                namespace = runtime.namespace(),
+                store_prefix = %config.runtime.store.prefix,
+                scope = entry.scope.as_str(),
+                matched = entry.matched,
+                removed = entry.removed,
+                failed = entry.failed,
+                elapsed_ms = entry.duration.as_millis(),
+                "completed scoped startup cleanup"
+            );
+        }
     }
     runtime.initialize().await
 }
@@ -320,11 +343,13 @@ fn build_pipeline_factory(
 ) -> Result<StaticPipelineFactory> {
     let mut factory = StaticPipelineFactory::default();
     for pair in pairs {
+        let preflight_coordinator = preflight_coordinator(config, runtime, pair);
         let registration = PairPipelineRegistration {
             config,
             pair,
             pipelines,
             runtime: Arc::clone(runtime),
+            preflight_coordinator,
             #[cfg(feature = "host")]
             boundless_balance_gate: resources.boundless_balance_gate.clone(),
             #[cfg(feature = "local-provers")]
@@ -340,6 +365,20 @@ fn build_pipeline_factory(
         register_pair_pipelines(&mut factory, &registration)?;
     }
     Ok(factory)
+}
+
+fn preflight_coordinator(
+    config: &Config,
+    runtime: &Arc<RuntimeManager>,
+    pair: &ResolvedNetworkPair,
+) -> Option<Arc<PreflightCoordinator>> {
+    match config.runtime.preflight_cache {
+        PreflightCacheMode::Shared => Some(Arc::new(PreflightCoordinator::with_observer(
+            runtime.canonical_preflight_store(),
+            Arc::new(PreflightCacheMetricsObserver::new(pair.key.clone())),
+        ))),
+        PreflightCacheMode::Off => None,
+    }
 }
 
 impl AppState {
@@ -472,6 +511,7 @@ struct PairPipelineRegistration<'a> {
     pair: &'a ResolvedNetworkPair,
     pipelines: &'a [PipelineRegistration],
     runtime: Arc<RuntimeManager>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
     /// Balance gate shared across all pairs by `PipelineResources`.
     #[cfg(feature = "host")]
     boundless_balance_gate: Option<BoundlessBalanceGate>,
@@ -511,6 +551,7 @@ fn register_pair_pipelines(
                             .clone(),
                         registration.scheduler_config.clone(),
                         observer,
+                        registration.preflight_coordinator.clone(),
                     )?;
                     factory.insert(
                         registration.pair.key.clone(),
@@ -545,6 +586,7 @@ fn register_pair_pipelines(
                             .boundless_balance_gate
                             .clone()
                             .expect("RISC0 network route requires Boundless balance gate"),
+                        registration.preflight_coordinator.clone(),
                     )?;
                     factory.insert(
                         registration.pair.key.clone(),
@@ -579,6 +621,7 @@ fn register_pair_pipelines(
                         backend,
                         setup::sp1_scheduler_config(registration.config),
                         observer,
+                        registration.preflight_coordinator.clone(),
                     )?;
                     factory.insert(
                         registration.pair.key.clone(),
@@ -595,6 +638,7 @@ fn register_pair_pipelines(
                     registration.pair,
                     registration.scheduler_config.clone(),
                     observer,
+                    registration.preflight_coordinator.clone(),
                 )?;
                 factory.insert(
                     registration.pair.key.clone(),
@@ -608,12 +652,15 @@ fn register_pair_pipelines(
                     registration.pair,
                     registration.scheduler_config.clone(),
                     observer,
-                    pipeline.pipeline_key,
-                    pipeline.proof_type,
-                    pipeline
-                        .remote_url
-                        .clone()
-                        .expect("remote SGX route requires a selected URL"),
+                    RemoteSgxLane {
+                        pipeline_key: pipeline.pipeline_key,
+                        proof_type: pipeline.proof_type,
+                        base_url: pipeline
+                            .remote_url
+                            .clone()
+                            .expect("remote SGX route requires a selected URL"),
+                    },
+                    registration.preflight_coordinator.clone(),
                 )?;
                 factory.insert(
                     registration.pair.key.clone(),
@@ -634,6 +681,7 @@ fn build_risc0_engine(
     backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Risc0Spec>> {
     let risc0_config = setup::risc0_prover_config(config);
 
@@ -644,7 +692,8 @@ fn build_risc0_engine(
         Risc0Prover::new(risc0_config),
         backend,
         provider,
-    );
+    )
+    .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -664,10 +713,12 @@ fn build_sp1_engine(
     backend: Sp1ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Sp1Spec>> {
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Sp1)?;
-    let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider);
+    let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider)
+        .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -684,6 +735,7 @@ fn build_native_engine(
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<NativeSpec>> {
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Native)?;
@@ -692,7 +744,8 @@ fn build_native_engine(
         NativeProver,
         NativeBackend,
         provider,
-    );
+    )
+    .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -712,6 +765,7 @@ fn build_boundless_engine(
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     balance_gate: BoundlessBalanceGate,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<BoundlessSpec>> {
     let agent_config = setup::boundless_prover_config(config, pair);
 
@@ -722,7 +776,8 @@ fn build_boundless_engine(
         BoundlessProver::with_balance_gate(agent_config, balance_gate),
         backend,
         provider,
-    );
+    )
+    .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -734,28 +789,34 @@ fn build_boundless_engine(
     Ok(engine)
 }
 
+struct RemoteSgxLane {
+    pipeline_key: PipelineKey,
+    proof_type: ProofType,
+    base_url: String,
+}
+
 fn build_remote_sgx_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
-    pipeline_key: PipelineKey,
-    proof_type: ProofType,
-    base_url: String,
+    lane: RemoteSgxLane,
+    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Gaiko2Spec>> {
-    let timeout_ms = match proof_type {
+    let timeout_ms = match lane.proof_type {
         ProofType::Sgx => config.prover.sgx.timeout_ms,
         ProofType::SgxGeth => config.prover.sgxgeth.timeout_ms,
         ProofType::Risc0 | ProofType::Sp1 | ProofType::Native => {
             unreachable!("remote SGX engine requires an SGX proof type")
         }
     };
-    let gaiko2_config = setup::remote_sgx_prover_config(base_url, timeout_ms);
-    let gaiko2_prover = Gaiko2Prover::new_for_proof_type(&gaiko2_config, proof_type)?;
+    let gaiko2_config = setup::remote_sgx_prover_config(lane.base_url, timeout_ms);
+    let gaiko2_prover = Gaiko2Prover::new_for_proof_type(&gaiko2_config, lane.proof_type)?;
 
     let provider = setup::build_provider(config, pair)?;
-    let context = setup::build_context(config, pair, proof_type)?;
-    let spec = ShastaSpec::new(pipeline_key, gaiko2_prover, NativeBackend, provider);
+    let context = setup::build_context(config, pair, lane.proof_type)?;
+    let spec = ShastaSpec::new(lane.pipeline_key, gaiko2_prover, NativeBackend, provider)
+        .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
         context,
@@ -770,6 +831,9 @@ fn build_remote_sgx_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BoundlessPairConfig;
+    use raiko2_primitives::ChainSpec;
+    use raiko2_provider::L2ProviderKind;
     use raiko2_runtime::{
         TaskRegistration,
         test_support::{MemoryProofArtifactStore, RuntimeStore},
@@ -778,6 +842,37 @@ mod tests {
 
     struct ShutdownProbeFactory {
         shutdown_called: Arc<AtomicBool>,
+    }
+
+    fn preflight_cache_test_pair() -> ResolvedNetworkPair {
+        ResolvedNetworkPair {
+            key: "sample_l2/sample_l1".to_string(),
+            network: "sample_l2".to_string(),
+            l1_network: "sample_l1".to_string(),
+            l1_rpc: "http://l1.example.invalid".to_string(),
+            l2_rpc: "http://l2.example.invalid".to_string(),
+            l2_provider: L2ProviderKind::Reth,
+            l2_witness_rpc: "http://l2.example.invalid".to_string(),
+            sp1_verifier_rpc_url: None,
+            sp1_verifier_address: None,
+            boundless: BoundlessPairConfig::default(),
+            l1_spec: ChainSpec::default(),
+            l2_spec: ChainSpec::default(),
+        }
+    }
+
+    #[test]
+    fn preflight_cache_mode_controls_coordinator_wiring() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "preflight-cache-mode",
+        ))?);
+        let pair = preflight_cache_test_pair();
+        let mut config = Config::default();
+
+        assert!(preflight_coordinator(&config, &runtime, &pair).is_some());
+        config.runtime.preflight_cache = PreflightCacheMode::Off;
+        assert!(preflight_coordinator(&config, &runtime, &pair).is_none());
+        Ok(())
     }
 
     impl PipelineFactory for ShutdownProbeFactory {
@@ -857,12 +952,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_namespace_on_start_discards_persisted_tasks_before_initialization() -> Result<()>
-    {
+    async fn proof_startup_cleanup_discards_persisted_tasks_before_initialization() -> Result<()> {
         let mut config = Config::default();
         config.runtime.environment = "test".into();
-        config.runtime.namespace = "startup-reset".into();
-        config.runtime.reset_namespace_on_start = true;
+        config.runtime.namespace = "startup-proof-cleanup".into();
+        config.runtime.startup_cleanup = vec![crate::config::StartupCleanupScope::Proof];
         let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
             config.runtime.environment.clone(),
             config.runtime.namespace.clone(),
@@ -891,10 +985,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_namespace_on_start_is_opt_in() -> Result<()> {
+    async fn startup_cleanup_is_opt_in() -> Result<()> {
         let mut config = Config::default();
         config.runtime.environment = "test".into();
-        config.runtime.namespace = "startup-no-reset".into();
+        config.runtime.namespace = "startup-no-cleanup".into();
         let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
             config.runtime.environment.clone(),
             config.runtime.namespace.clone(),

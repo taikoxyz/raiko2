@@ -8300,8 +8300,11 @@ dependencies = [
  "alloy-rpc-types-eth 2.0.1",
  "alloy-sol-types",
  "alloy-trie 0.9.5",
+ "anyhow",
  "async-trait",
+ "bincode",
  "futures",
+ "raiko2-guest-common",
  "raiko2-guests",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
@@ -8313,6 +8316,8 @@ dependencies = [
  "risc0-ethereum-trie",
  "serde",
  "serde_json",
+ "serde_with",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "url",
@@ -8499,6 +8504,7 @@ dependencies = [
 name = "raiko2-runtime"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "async-trait",
  "bytes",

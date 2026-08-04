@@ -4,8 +4,13 @@ use prometheus::{
     Encoder, HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder, histogram_opts,
     register_histogram_vec, register_int_counter_vec, register_int_gauge_vec,
 };
+use raiko2_pipeline::forks::shasta::preflight_cache::{
+    PreflightCacheResult, PreflightCacheStage, PreflightObserver, PreflightSingleFlightEvent,
+    PreflightSingleFlightPhase,
+};
 use raiko2_primitives::ProofType;
-use std::sync::LazyLock;
+use raiko2_runtime::{StartupCleanupReport, StartupCleanupScope};
+use std::{sync::LazyLock, time::Duration};
 
 static REQUEST_REGISTRATIONS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
@@ -112,6 +117,175 @@ static DUPLICATE_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .expect("register raiko2_duplicate_requests_total")
 });
+
+static PREFLIGHT_CACHE_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_preflight_cache_requests_total",
+        "Total canonical preflight cache outcomes",
+        &["pair", "result"]
+    )
+    .expect("register raiko2_preflight_cache_requests_total")
+});
+
+static PREFLIGHT_CACHE_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_preflight_cache_duration_seconds",
+            "Canonical preflight cache stage durations in seconds",
+            vec![
+                0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 300.0
+            ]
+        ),
+        &["pair", "stage"]
+    )
+    .expect("register raiko2_preflight_cache_duration_seconds")
+});
+
+static PREFLIGHT_CACHE_SERIALIZED_BYTES: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_preflight_cache_serialized_bytes",
+            "Serialized canonical preflight core size in bytes",
+            vec![
+                1_024.0,
+                16_384.0,
+                65_536.0,
+                262_144.0,
+                1_048_576.0,
+                4_194_304.0,
+                16_777_216.0,
+                67_108_864.0,
+                268_435_456.0,
+                1_073_741_824.0,
+            ]
+        ),
+        &["pair"]
+    )
+    .expect("register raiko2_preflight_cache_serialized_bytes")
+});
+
+static PREFLIGHT_SINGLEFLIGHT_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_preflight_singleflight_total",
+        "Total canonical preflight single-flight leaders and waiters",
+        &["pair", "phase", "role"]
+    )
+    .expect("register raiko2_preflight_singleflight_total")
+});
+
+static PREFLIGHT_SINGLEFLIGHT_WAITERS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "raiko2_preflight_singleflight_waiters",
+        "Current canonical preflight single-flight waiters",
+        &["pair", "phase"]
+    )
+    .expect("register raiko2_preflight_singleflight_waiters")
+});
+
+static STARTUP_CLEANUP_OBJECTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_startup_cleanup_objects_total",
+        "Startup cleanup objects grouped by bounded scope and outcome",
+        &["scope", "outcome"]
+    )
+    .expect("register raiko2_startup_cleanup_objects_total")
+});
+
+static STARTUP_CLEANUP_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_startup_cleanup_duration_seconds",
+            "Startup cleanup duration in seconds",
+            vec![0.01, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0]
+        ),
+        &["scope"]
+    )
+    .expect("register raiko2_startup_cleanup_duration_seconds")
+});
+
+#[derive(Debug)]
+pub(crate) struct PreflightCacheMetricsObserver {
+    pair: String,
+}
+
+impl PreflightCacheMetricsObserver {
+    pub(crate) const fn new(pair: String) -> Self {
+        Self { pair }
+    }
+}
+
+impl PreflightObserver for PreflightCacheMetricsObserver {
+    fn record_cache_result(&self, result: PreflightCacheResult) {
+        PREFLIGHT_CACHE_REQUESTS_TOTAL
+            .with_label_values(&[self.pair.as_str(), result.as_str()])
+            .inc();
+    }
+
+    fn record_stage_duration(&self, stage: PreflightCacheStage, duration: Duration) {
+        PREFLIGHT_CACHE_DURATION_SECONDS
+            .with_label_values(&[self.pair.as_str(), stage.as_str()])
+            .observe(duration.as_secs_f64());
+    }
+
+    fn record_serialized_size(&self, bytes: usize) {
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+        PREFLIGHT_CACHE_SERIALIZED_BYTES
+            .with_label_values(&[self.pair.as_str()])
+            .observe(f64::from(bytes));
+    }
+
+    fn record_single_flight(
+        &self,
+        phase: PreflightSingleFlightPhase,
+        event: PreflightSingleFlightEvent,
+    ) {
+        let phase = phase.as_str();
+        match event {
+            PreflightSingleFlightEvent::LeaderStarted => {
+                PREFLIGHT_SINGLEFLIGHT_TOTAL
+                    .with_label_values(&[self.pair.as_str(), phase, "leader"])
+                    .inc();
+            }
+            PreflightSingleFlightEvent::WaiterStarted => {
+                PREFLIGHT_SINGLEFLIGHT_TOTAL
+                    .with_label_values(&[self.pair.as_str(), phase, "waiter"])
+                    .inc();
+                PREFLIGHT_SINGLEFLIGHT_WAITERS
+                    .with_label_values(&[self.pair.as_str(), phase])
+                    .inc();
+            }
+            PreflightSingleFlightEvent::WaiterFinished => {
+                PREFLIGHT_SINGLEFLIGHT_WAITERS
+                    .with_label_values(&[self.pair.as_str(), phase])
+                    .dec();
+            }
+        }
+    }
+}
+
+pub(crate) fn record_startup_cleanup_report(report: &StartupCleanupReport) {
+    for entry in &report.scopes {
+        let scope = entry.scope.as_str();
+        for (outcome, value) in [
+            ("matched", entry.matched),
+            ("removed", entry.removed),
+            ("failed", entry.failed),
+        ] {
+            STARTUP_CLEANUP_OBJECTS_TOTAL
+                .with_label_values(&[scope, outcome])
+                .inc_by(u64::try_from(value).unwrap_or(u64::MAX));
+        }
+        STARTUP_CLEANUP_DURATION_SECONDS
+            .with_label_values(&[scope])
+            .observe(entry.duration.as_secs_f64());
+    }
+}
+
+pub(crate) fn record_startup_cleanup_failure(scope: StartupCleanupScope) {
+    STARTUP_CLEANUP_OBJECTS_TOTAL
+        .with_label_values(&[scope.as_str(), "failed"])
+        .inc();
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct MetricContext {
@@ -330,4 +504,88 @@ pub(crate) fn render() -> Result<(String, Vec<u8>), prometheus::Error> {
     let mut buffer = Vec::new();
     encoder.encode(&metrics, &mut buffer)?;
     Ok((encoder.format_type().to_string(), buffer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preflight_metrics_use_only_bounded_dimensions() {
+        let observer = PreflightCacheMetricsObserver::new("metrics_test/l1".to_string());
+        for result in [
+            PreflightCacheResult::Hit,
+            PreflightCacheResult::Miss,
+            PreflightCacheResult::Bypass,
+            PreflightCacheResult::Error,
+        ] {
+            observer.record_cache_result(result);
+        }
+        for stage in [
+            PreflightCacheStage::Load,
+            PreflightCacheStage::Build,
+            PreflightCacheStage::Validate,
+        ] {
+            observer.record_stage_duration(stage, Duration::from_millis(5));
+        }
+        observer.record_serialized_size(4_096);
+        observer.record_single_flight(
+            PreflightSingleFlightPhase::Core,
+            PreflightSingleFlightEvent::LeaderStarted,
+        );
+        observer.record_single_flight(
+            PreflightSingleFlightPhase::Core,
+            PreflightSingleFlightEvent::WaiterStarted,
+        );
+        observer.record_single_flight(
+            PreflightSingleFlightPhase::Core,
+            PreflightSingleFlightEvent::WaiterFinished,
+        );
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        for result in ["hit", "miss", "bypass", "error"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_preflight_cache_requests_total{{pair=\"metrics_test/l1\",result=\"{result}\"}}"
+            )));
+        }
+        for stage in ["load", "build", "validate"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_preflight_cache_duration_seconds_count{{pair=\"metrics_test/l1\",stage=\"{stage}\"}}"
+            )));
+        }
+        assert!(metrics.contains(
+            "raiko2_preflight_singleflight_waiters{pair=\"metrics_test/l1\",phase=\"core\"} 0"
+        ));
+        assert!(!metrics.contains("proposal_id="));
+        assert!(!metrics.contains("key_hash="));
+        assert!(!metrics.contains("verifier="));
+    }
+
+    #[test]
+    fn startup_cleanup_metrics_use_scope_and_outcome_only() {
+        let report = StartupCleanupReport {
+            scopes: vec![raiko2_runtime::StartupCleanupScopeReport {
+                scope: StartupCleanupScope::Proof,
+                matched: 3,
+                removed: 2,
+                failed: 1,
+                duration: Duration::from_millis(25),
+            }],
+        };
+        record_startup_cleanup_report(&report);
+        record_startup_cleanup_failure(StartupCleanupScope::Preflight);
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        for outcome in ["matched", "removed", "failed"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_startup_cleanup_objects_total{{outcome=\"{outcome}\",scope=\"proof\"}}"
+            )));
+        }
+        assert!(metrics.contains(
+            "raiko2_startup_cleanup_objects_total{outcome=\"failed\",scope=\"preflight\"}"
+        ));
+        assert!(metrics.contains("raiko2_startup_cleanup_duration_seconds_count{scope=\"proof\"}"));
+    }
 }

@@ -26,7 +26,7 @@ acquired concurrently, drops the first permit, and verifies the second acquisiti
 Run:
 
 ```bash
-cargo test -p raiko2-prover boundless_submission_gate_serializes_callers -- --exact
+cargo test -p raiko2-prover boundless_submission_gate_serializes_callers --lib
 ```
 
 Expected: FAIL because the gate has no independent submission permit.
@@ -73,7 +73,7 @@ Add tests proving that:
 Run:
 
 ```bash
-cargo test -p raiko2-prover boundless_receipt_ -- --nocapture
+cargo test -p raiko2-prover boundless_receipt_ --lib -- --nocapture
 ```
 
 Expected: FAIL because receipt reconciliation is not implemented.

@@ -32,11 +32,11 @@ For request B:
 1. Acquire the shared account submission permit.
 2. Fetch the complete indexer snapshot and aligned on-chain market balance.
 3. Calculate B's attached value using indexed outstanding requests plus the local overlay.
-4. Record B as submitted-but-unlocked in the local overlay.
-5. Persist B's request identifier, broadcast the transaction with a 30-second timeout, and persist
-   its transaction hash when available.
-6. After a successful broadcast, wait up to 10 seconds for its receipt while retaining the permit.
-7. Release the permit. The next request then observes either B's confirmed balance contribution or
+4. Persist B's request identifier so a task cannot broadcast before its recovery identity is durable.
+5. Record B as submitted-but-unlocked in the local overlay.
+6. Broadcast the transaction with a 30-second timeout and persist its transaction hash when available.
+7. After a successful broadcast, wait up to 10 seconds for its receipt while retaining the permit.
+8. Release the permit. The next request then observes either B's confirmed balance contribution or
    the conservative local unlocked reservation.
 
 A successful reverted receipt removes B from the local overlay because neither its request nor its

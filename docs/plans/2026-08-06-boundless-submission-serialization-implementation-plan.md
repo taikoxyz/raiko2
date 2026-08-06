@@ -2,180 +2,270 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Serialize every Boundless market submission made by one Raiko2 process, while retaining conservative funding reservations across uncertain transaction outcomes.
+**Goal:** Make every in-process Boundless on-chain submission use one recoverable account order, three-confirmation receipts, and bounded external waits without allowing checkpoint storage to extend the account critical section.
 
-**Architecture:** Split `BoundlessBalanceGate` into a process-wide submission semaphore and a short-lived funding-state mutex. Hold the semaphore from the aligned indexer/balance reads through broadcast and a bounded receipt wait, but never hold the state mutex across network I/O. Reconcile only a confirmed reverted receipt by removing its reservation; all uncertain outcomes retain it.
+**Architecture:** `BoundlessBalanceGate` remains the process-wide account controller. Its semaphore serializes one on-chain submission through three-confirmation receipt observation, while its short-lived state mutex stores funding reservations, a nonce high-water mark, and at most one uncertain signed submission. Required request-id persistence happens before the account permit; optional transaction-hash persistence happens after it and is bounded.
 
-**Tech Stack:** Rust, Tokio synchronization/timeouts, Alloy transaction receipts, Boundless Market SDK.
+**Tech Stack:** Rust, Tokio synchronization and timeouts, Alloy provider and transaction APIs, Boundless Market SDK.
 
 ---
 
-### Task 1: Split Submission Serialization From Funding State
+### Task 1: Model Explicit Nonce Allocation And Uncertain Recovery
 
 **Files:**
-- Modify: `crates/prover/src/boundless/mod.rs:1595-1717`
-- Test: `crates/prover/src/boundless/mod.rs` unit test module
-
-**Step 1: Write the failing test**
-
-Add an async test that acquires the gate's submission permit, verifies a second permit cannot be
-acquired concurrently, drops the first permit, and verifies the second acquisition succeeds.
-
-**Step 2: Run the test to verify it fails**
-
-Run:
-
-```bash
-cargo test -p raiko2-prover boundless_submission_gate_serializes_callers --lib
-```
-
-Expected: FAIL because the gate has no independent submission permit.
-
-**Step 3: Write the minimal implementation**
-
-Replace the tuple gate with a cloneable structure containing:
-
-```rust
-submission: Arc<tokio::sync::Semaphore>,
-state: Arc<tokio::sync::Mutex<BoundlessFundingState>>,
-```
-
-Add `acquire_submission` and `lock_state` helpers. Keep the semaphore capacity at one and keep
-`BoundlessFundingState` private.
-
-**Step 4: Run the test to verify it passes**
-
-Run the same focused command. Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add crates/prover/src/boundless/mod.rs
-git commit -m "refactor(boundless): serialize account submissions"
-```
-
-### Task 2: Reconcile Confirmed Receipt Outcomes
-
-**Files:**
-- Modify: `crates/prover/src/boundless/mod.rs:1606-1695`
+- Modify: `crates/prover/src/boundless/mod.rs:1630-1800`
 - Test: `crates/prover/src/boundless/mod.rs` unit test module
 
 **Step 1: Write the failing tests**
 
-Add tests proving that:
+Add pure state tests proving that:
 
-- a confirmed reverted transaction removes only its matching request digest;
-- a confirmed successful transaction retains the reservation until indexer reconciliation;
-- an uncertain outcome retains the reservation.
+- nonce allocation uses `max(latest, pending, local_high_water)`;
+- allocating nonce `n` advances the local high-water mark to `n + 1`;
+- an uncertain submission blocks allocation for a different request;
+- reconciliation that observes a chain nonce greater than `n` clears the uncertain submission;
+- unresolved reconciliation retains the exact request digest, signature, value, and nonce.
 
-**Step 2: Run the tests to verify they fail**
+Use neutral fixture names and in-memory values only.
 
-Run:
-
-```bash
-cargo test -p raiko2-prover boundless_receipt_ --lib -- --nocapture
-```
-
-Expected: FAIL because receipt reconciliation is not implemented.
-
-**Step 3: Write the minimal implementation**
-
-Add a private receipt-outcome enum and a `BoundlessFundingState` reconciliation method. Remove the
-matching digest only for the confirmed-reverted outcome, removing the request-id entry when its
-digest map becomes empty. Leave successful and uncertain outcomes unchanged.
-
-**Step 4: Run the tests to verify they pass**
-
-Run the same focused command. Expected: PASS.
-
-**Step 5: Commit**
+**Step 2: Run the focused tests to verify they fail**
 
 ```bash
-git add crates/prover/src/boundless/mod.rs
-git commit -m "fix(boundless): reconcile reverted submissions"
+cargo test -p raiko2-prover boundless_nonce_ --lib -- --nocapture
 ```
 
-### Task 3: Bound Broadcast And Receipt Waiting
+Expected: FAIL because funding state has no explicit nonce controller or uncertain-submission model.
+
+**Step 3: Add the minimal state model**
+
+Extend `BoundlessFundingState` with a local high-water mark and one uncertain submission. Keep the
+network-independent transitions in methods that can be unit tested without an RPC client:
+
+```rust
+struct BoundlessUncertainSubmission {
+    request: ProofRequest,
+    signature: Bytes,
+    request_digest: B256,
+    value: U256,
+    nonce: u64,
+}
+
+fn allocate_nonce(&mut self, latest: u64, pending: u64) -> RaikoResult<u64>;
+fn record_uncertain(&mut self, submission: BoundlessUncertainSubmission);
+fn reconcile_consumed_nonce(&mut self, chain_nonce: u64) -> bool;
+```
+
+Reject a fresh allocation while an uncertain submission remains. Do not hold the state mutex while
+querying chain state or sending a transaction.
+
+**Step 4: Run the focused tests**
+
+Run the command from Step 2. Expected: PASS.
+
+### Task 2: Bound Indexer, Balance, Nonce, And Checkpoint Waits
 
 **Files:**
-- Modify: `crates/prover/src/boundless/mod.rs:2200-2275`
-- Test: `crates/prover/src/boundless/mod.rs` existing and new unit tests
+- Modify: `crates/prover/src/boundless/mod.rs:65-75`
+- Modify: `crates/prover/src/boundless/mod.rs:1190-1225`
+- Modify: `crates/prover/src/boundless/mod.rs:1580-1630`
+- Modify: `crates/prover/src/boundless/mod.rs:1890-1970`
+- Test: `crates/prover/src/boundless/mod.rs` unit test module
 
-**Step 1: Write the failing structural test**
+**Step 1: Write failing timeout tests**
 
-Add focused tests for the pure receipt reconciliation path from Task 2, then use compilation and the
-submission-gate test as the integration boundary for the SDK transaction type. Full market calls are
-not mocked because the SDK client is concrete and a mock would duplicate its transaction behavior.
+Add paused-time or injected-future tests showing that:
 
-**Step 2: Implement the submission sequence**
+- the full indexer retry loop stops at one outer total timeout;
+- RPC head and `balanceOf` calls cannot wait forever inside one retry attempt;
+- optional transaction-hash persistence returns after its total timeout;
+- a timed-out optional checkpoint does not retain the account submission permit.
 
-In the Boundless submit path:
-
-1. Acquire the shared submission permit.
-2. Fetch the indexer snapshot and market balance without the funding-state mutex.
-3. Lock funding state only to calculate the deposit, then release it.
-4. Persist request identity, record the local reservation under a short state lock, and broadcast
-   under a 30-second Tokio timeout.
-5. Persist the transaction hash immediately after broadcast.
-6. Wait up to 10 seconds for the receipt while retaining the submission permit.
-7. Remove the reservation only when the receipt is confirmed reverted; retain it on success,
-   broadcast error/timeout, or receipt error/timeout.
-
-**Step 3: Run focused tests and compilation**
-
-Run:
+**Step 2: Run the timeout tests to verify they fail**
 
 ```bash
-cargo test -p raiko2-prover boundless_ --lib
+cargo test -p raiko2-prover boundless_ --lib -- --nocapture
+```
+
+Expected: at least the new timeout tests FAIL because current timeouts cover individual attempts or
+are absent.
+
+**Step 3: Implement nested timeout boundaries**
+
+Wrap each external attempt where useful, then wrap `retry_external(...)` itself in a total timeout.
+Apply this pattern to indexer snapshots, RPC head and market balance reads, latest and pending nonce
+reads, and optional checkpoint persistence:
+
+```rust
+tokio::time::timeout(TOTAL_TIMEOUT, retry_external(label, || async {
+    tokio::time::timeout(ATTEMPT_TIMEOUT, operation()).await
+        .map_err(|_| timeout_error())?
+}))
+.await
+.map_err(|_| total_timeout_error())?
+```
+
+Keep fail-closed behavior: a balance or nonce timeout aborts the submission; an optional tx-hash
+checkpoint timeout only logs a warning.
+
+**Step 4: Run the timeout tests**
+
+Run the command from Step 2. Expected: PASS.
+
+### Task 3: Move Checkpoints Outside The Account Critical Section
+
+**Files:**
+- Modify: `crates/prover/src/boundless/mod.rs:1160-1225`
+- Modify: `crates/prover/src/boundless/mod.rs:2300-2420`
+- Test: `crates/prover/src/boundless/mod.rs` unit test module
+
+**Step 1: Write a failing sequencing test**
+
+Extract or instrument the sequencing boundary so a test proves:
+
+- the required request-id checkpoint completes before `acquire_submission()`;
+- the lifecycle `SubmissionCheckpointPermit` is dropped after that checkpoint;
+- the optional transaction-hash checkpoint starts only after the account submission permit is
+  dropped.
+
+**Step 2: Run the sequencing test to verify it fails**
+
+```bash
+cargo test -p raiko2-prover boundless_checkpoint_does_not_hold_account_permit --lib -- --nocapture
+```
+
+Expected: FAIL because both checkpoints currently run while the account permit is held.
+
+**Step 3: Reorder submission setup**
+
+Create `Submission` and persist its request identity after signing but before taking the account
+permit. After broadcast and receipt observation, explicitly drop the account permit before invoking
+the bounded best-effort tx-hash checkpoint. Keep the required checkpoint fail-closed and the optional
+checkpoint fail-open.
+
+**Step 4: Run the sequencing test**
+
+Run the command from Step 2. Expected: PASS.
+
+### Task 4: Send And Recover At An Explicit Nonce
+
+**Files:**
+- Modify: `crates/prover/src/boundless/mod.rs:2250-2430`
+- Test: `crates/prover/src/boundless/mod.rs` unit test module
+
+**Step 1: Write failing recovery tests**
+
+Add focused tests around extracted recovery decisions proving that:
+
+- a send timeout first checks latest and pending nonces and the known request digest;
+- if nonce `n` is not consumed, recovery retries the same request, signature, value, and explicit
+  nonce `n`;
+- `already known`, `replacement transaction underpriced`, and `nonce too low` trigger state
+  reconciliation instead of a blind fresh submission;
+- the next request cannot allocate `n + 1` while `n` remains unresolved.
+
+**Step 2: Run the recovery tests to verify they fail**
+
+```bash
+cargo test -p raiko2-prover boundless_nonce_recovery_ --lib -- --nocapture
+```
+
+Expected: FAIL because the SDK currently chooses the nonce during each send and timeout drops the
+request identity needed for same-nonce recovery.
+
+**Step 3: Implement explicit nonce submission and bounded recovery**
+
+Before broadcast, query latest and pending transaction counts for the signer and allocate a nonce
+under the short state lock. Build `submitRequest` with `.nonce(nonce)`, record the uncertain payload,
+and send it under the existing broadcast timeout. On an ambiguous result, reconcile chain nonce and
+request visibility; if still absent, rebuild the identical call with `.nonce(nonce)` and retry within
+the recovery deadline. Do not construct a different request at that nonce.
+
+An accepted send or a chain nonce greater than `nonce` clears the uncertain slot. An unresolved
+result retains it and returns the existing submission for polling; the next account-permit holder
+must recover it before sending fresh work.
+
+**Step 4: Run the recovery tests and compile the SDK integration**
+
+```bash
+cargo test -p raiko2-prover boundless_nonce_ --lib -- --nocapture
 cargo check -p raiko2-prover
 ```
 
 Expected: PASS.
 
-**Step 4: Commit**
+### Task 5: Use One Three-Confirmation Receipt Outcome
+
+**Files:**
+- Modify: `crates/prover/src/boundless/mod.rs:1630-1695`
+- Modify: `crates/prover/src/boundless/mod.rs:2250-2305`
+- Test: `crates/prover/src/boundless/mod.rs` unit test module
+
+**Step 1: Write failing finality tests**
+
+Add tests proving the receipt builder is configured for three confirmations and the only outcomes
+after that wait are:
+
+- `status = true`: retain the funding reservation until indexer catch-up;
+- `status = false`: remove only the matching digest reservation;
+- timeout or watcher error: retain funding and nonce uncertainty.
+
+**Step 2: Run the receipt tests to verify they fail**
 
 ```bash
-git add crates/prover/src/boundless/mod.rs
-git commit -m "fix(boundless): bound serialized submission waits"
+cargo test -p raiko2-prover boundless_receipt_ --lib -- --nocapture
 ```
 
-### Task 4: Verify And Update PR 218
+Expected: FAIL because the pending transaction currently uses Alloy's one-confirmation default.
+
+**Step 3: Configure one bounded three-confirmation wait**
+
+Call `with_required_confirmations(3)` before `get_receipt()` and increase the outer receipt timeout
+to cover those blocks. Do not inspect or react to a one-confirmation intermediate receipt. A returned
+revert is therefore removed immediately; only an error or total timeout remains uncertain.
+
+**Step 4: Run the receipt tests**
+
+Run the command from Step 2. Expected: PASS.
+
+### Task 6: Verify And Update PR 218
 
 **Files:**
 - Verify: `crates/prover/src/boundless/mod.rs`
 - Verify: `docs/plans/2026-08-06-boundless-submission-serialization-design.md`
 - Verify: `docs/plans/2026-08-06-boundless-submission-serialization-implementation-plan.md`
 
-**Step 1: Run formatting**
+**Step 1: Run formatting and focused tests**
 
 ```bash
 cargo fmt --all -- --check
+cargo test -p raiko2-prover boundless_ --lib
 ```
 
 Expected: PASS.
 
-**Step 2: Run the full prover tests**
+**Step 2: Run package verification**
 
 ```bash
 cargo test -p raiko2-prover
-```
-
-Expected: PASS.
-
-**Step 3: Run prover clippy**
-
-```bash
 cargo clippy -p raiko2-prover --all-targets -- -D warnings
 ```
 
 Expected: PASS.
 
+**Step 3: Run workspace verification required for cross-path prover changes**
+
+```bash
+cargo clippy --workspace -- -D warnings
+```
+
+Run the applicable test lanes from `.github/workflows/ci.yml`. Expected: PASS.
+
 **Step 4: Check path hygiene and diff**
 
-Inspect the complete PR diff for hardcoded local paths, personal names, generated ELF changes, and
-unrelated modifications.
+Inspect every added line for hardcoded absolute paths, user-specific directories, human-identifying
+fixture names, generated ELF changes, and unrelated modifications. Run `git diff --check`.
 
-**Step 5: Push and report**
+**Step 5: Commit, push, and answer the review threads**
 
-Push `fix/boundless-outstanding-funding`, update PR 218 with the concurrency/timeout behavior and
-exact verification commands, then re-read current review comments and checks.
+Use Conventional Commits. Push `fix/boundless-outstanding-funding`, reply to each inline PR 218
+review thread with the concrete fix and verification command, then re-read current comments and CI.

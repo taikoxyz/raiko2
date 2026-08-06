@@ -1691,17 +1691,21 @@ impl BoundlessFundingState {
     }
 }
 
-/// Serialization point for on-chain submissions sharing one Boundless market account. The guarded
-/// state retains requests sent by this process until the indexer observes them, covering indexer lag
-/// while each new submission reconstructs the durable outstanding set from the indexer.
+/// Serialization point for on-chain submissions sharing one Boundless market account. The
+/// submission permit orders every transaction from the shared signer, while the separately guarded
+/// state retains requests sent by this process until the indexer observes them.
 #[derive(Clone)]
-pub struct BoundlessBalanceGate(Arc<tokio::sync::Mutex<BoundlessFundingState>>);
+pub struct BoundlessBalanceGate {
+    submission: Arc<tokio::sync::Semaphore>,
+    state: Arc<tokio::sync::Mutex<BoundlessFundingState>>,
+}
 
 impl Default for BoundlessBalanceGate {
     fn default() -> Self {
-        Self(Arc::new(tokio::sync::Mutex::new(
-            BoundlessFundingState::default(),
-        )))
+        Self {
+            submission: Arc::new(tokio::sync::Semaphore::new(1)),
+            state: Arc::new(tokio::sync::Mutex::new(BoundlessFundingState::default())),
+        }
     }
 }
 
@@ -1711,8 +1715,16 @@ impl BoundlessBalanceGate {
         Self::default()
     }
 
-    async fn lock(&self) -> tokio::sync::MutexGuard<'_, BoundlessFundingState> {
-        self.0.lock().await
+    async fn acquire_submission(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.submission
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("Boundless submission semaphore is never closed")
+    }
+
+    async fn lock_state(&self) -> tokio::sync::MutexGuard<'_, BoundlessFundingState> {
+        self.state.lock().await
     }
 }
 
@@ -2211,7 +2223,7 @@ impl BoundlessProver {
         // Serialize the funding read/submit sequence for this signer. The indexer reconstructs all
         // submitted-but-unlocked liabilities across process restarts; the gate adds requests sent by
         // this process until the indexer observes them, closing its ingestion-lag window.
-        let mut funding_state = self.balance_gate.lock().await;
+        let mut funding_state = self.balance_gate.lock_state().await;
         let snapshot = self.funding_snapshot(request.client_address()).await?;
         let balance = Self::funding_balance(
             client,
@@ -4505,6 +4517,24 @@ mod tests {
 
     fn test_digest(value: u64) -> B256 {
         format!("0x{value:064x}").parse().expect("test digest")
+    }
+
+    #[tokio::test]
+    async fn boundless_submission_gate_serializes_callers() {
+        let gate = super::BoundlessBalanceGate::new();
+        let first = gate.acquire_submission().await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), gate.acquire_submission())
+                .await
+                .is_err()
+        );
+
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), gate.acquire_submission())
+            .await
+            .expect("second caller acquires the released submission permit");
+        drop(second);
     }
 
     fn indexer_request(

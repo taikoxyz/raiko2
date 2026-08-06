@@ -67,6 +67,8 @@ const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const BOUNDLESS_INDEXER_PAGE_DELAY: Duration = Duration::from_millis(100);
 const BOUNDLESS_INDEXER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_INDEXER_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const BOUNDLESS_SUBMIT_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -2249,10 +2251,9 @@ impl BoundlessProver {
             .await
             .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
 
-        // Serialize the funding read/submit sequence for this signer. The indexer reconstructs all
-        // submitted-but-unlocked liabilities across process restarts; the gate adds requests sent by
-        // this process until the indexer observes them, closing its ingestion-lag window.
-        let mut funding_state = self.balance_gate.lock_state().await;
+        // Serialize every account operation through receipt observation so each later request sees
+        // either the preceding transaction's balance effect or its conservative local reservation.
+        let _submission_permit = self.balance_gate.acquire_submission().await;
         let snapshot = self.funding_snapshot(request.client_address()).await?;
         let balance = Self::funding_balance(
             client,
@@ -2260,8 +2261,13 @@ impl BoundlessProver {
             snapshot.required_rpc_block,
         )
         .await?;
-        let value =
-            funding_state.required_deposit(&snapshot, request.id, max_price, balance, now_secs());
+        let value = self.balance_gate.lock_state().await.required_deposit(
+            &snapshot,
+            request.id,
+            max_price,
+            balance,
+            now_secs(),
+        );
 
         let call = client
             .boundless_market
@@ -2286,17 +2292,16 @@ impl BoundlessProver {
 
         // From this point the request may reach the market even if the future is cancelled or the
         // RPC response is uncertain, so retain it in the local overlay before awaiting the send.
-        funding_state.record_recent(
+        self.balance_gate.lock_state().await.record_recent(
             request.id,
             max_price,
             submission.lock_expires_at,
             request_digest,
         );
-        drop(funding_state);
-        let send_result = call.send().await;
+        let send_result = tokio::time::timeout(BOUNDLESS_SUBMIT_SEND_TIMEOUT, call.send()).await;
 
         match send_result {
-            Ok(pending_tx) => {
+            Ok(Ok(pending_tx)) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
                 match crate::acquire_submission_checkpoint_permit(observer).await {
                     Ok(tx_hash_permit) => {
@@ -2324,12 +2329,61 @@ impl BoundlessProver {
                         "Boundless request id is durable but transaction-hash checkpoint admission is closed"
                     ),
                 }
+
+                let receipt_outcome = match tokio::time::timeout(
+                    BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT,
+                    pending_tx.get_receipt(),
+                )
+                .await
+                {
+                    Ok(Ok(receipt)) if receipt.status() => {
+                        BoundlessReceiptOutcome::ConfirmedSuccess
+                    }
+                    Ok(Ok(_)) => {
+                        tracing::warn!(
+                            provider_request_id = %submission.provider_request_id,
+                            remote_tx_hash = ?submission.remote_tx_hash,
+                            "Boundless submitRequest transaction reverted; removing its local funding reservation"
+                        );
+                        BoundlessReceiptOutcome::ConfirmedRevert
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            provider_request_id = %submission.provider_request_id,
+                            remote_tx_hash = ?submission.remote_tx_hash,
+                            error = %error,
+                            "Boundless submitRequest receipt is uncertain; retaining its local funding reservation"
+                        );
+                        BoundlessReceiptOutcome::Uncertain
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            provider_request_id = %submission.provider_request_id,
+                            remote_tx_hash = ?submission.remote_tx_hash,
+                            timeout_secs = BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT.as_secs(),
+                            "Timed out waiting for Boundless submitRequest receipt; retaining its local funding reservation"
+                        );
+                        BoundlessReceiptOutcome::Uncertain
+                    }
+                };
+                self.balance_gate.lock_state().await.reconcile_receipt(
+                    request.id,
+                    request_digest,
+                    receipt_outcome,
+                );
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::warn!(
                     provider_request_id = %submission.provider_request_id,
                     error = %error,
                     "Boundless submitRequest returned an uncertain error; polling reserved request id"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    timeout_secs = BOUNDLESS_SUBMIT_SEND_TIMEOUT.as_secs(),
+                    "Timed out broadcasting Boundless submitRequest; retaining its local funding reservation"
                 );
             }
         }
@@ -4581,7 +4635,10 @@ mod tests {
             super::BoundlessReceiptOutcome::ConfirmedRevert,
         );
 
-        let remaining = state.recent.get(&request_id).expect("rebid remains reserved");
+        let remaining = state
+            .recent
+            .get(&request_id)
+            .expect("rebid remains reserved");
         assert!(!remaining.contains_key(&reverted_digest));
         assert!(remaining.contains_key(&rebid_digest));
     }

@@ -1595,12 +1595,11 @@ async fn fetch_boundless_funding_snapshot(
 struct RecentFundingRequest {
     max_price: U256,
     lock_expires_at: u64,
-    request_digest: B256,
 }
 
 #[derive(Debug, Default)]
 struct BoundlessFundingState {
-    recent: HashMap<U256, RecentFundingRequest>,
+    recent: HashMap<U256, HashMap<B256, RecentFundingRequest>>,
     indexer_caught_up: bool,
 }
 
@@ -1615,16 +1614,14 @@ impl BoundlessFundingState {
         let recent = RecentFundingRequest {
             max_price,
             lock_expires_at,
-            request_digest,
         };
         self.recent
             .entry(request_id)
+            .or_default()
+            .entry(request_digest)
             .and_modify(|existing| {
+                existing.max_price = existing.max_price.max(max_price);
                 existing.lock_expires_at = existing.lock_expires_at.max(lock_expires_at);
-                if max_price >= existing.max_price {
-                    existing.max_price = max_price;
-                    existing.request_digest = request_digest;
-                }
             })
             .or_insert(recent);
     }
@@ -1637,19 +1634,21 @@ impl BoundlessFundingState {
         on_chain_balance: U256,
         now: u64,
     ) -> U256 {
-        if self.recent.values().any(|recent| {
-            snapshot
-                .indexed_onchain_digests
-                .contains(&recent.request_digest)
+        if self.recent.values().any(|recent_by_digest| {
+            recent_by_digest
+                .keys()
+                .any(|digest| snapshot.indexed_onchain_digests.contains(digest))
         }) {
             self.indexer_caught_up = true;
         }
-        self.recent.retain(|request_id, recent| {
-            now <= recent.lock_expires_at
-                && !snapshot.terminal_onchain_ids.contains(request_id)
-                && !snapshot
-                    .indexed_onchain_digests
-                    .contains(&recent.request_digest)
+        self.recent.retain(|request_id, recent_by_digest| {
+            if snapshot.terminal_onchain_ids.contains(request_id) {
+                return false;
+            }
+            recent_by_digest.retain(|digest, recent| {
+                now <= recent.lock_expires_at && !snapshot.indexed_onchain_digests.contains(digest)
+            });
+            !recent_by_digest.is_empty()
         });
 
         let mut required_by_id = snapshot.outstanding.clone();
@@ -1668,11 +1667,17 @@ impl BoundlessFundingState {
                 .fold(U256::ZERO, U256::saturating_add);
         }
 
-        for (&request_id, recent) in &self.recent {
-            required_by_id
-                .entry(request_id)
-                .and_modify(|price| *price = (*price).max(recent.max_price))
-                .or_insert(recent.max_price);
+        for (&request_id, recent_by_digest) in &self.recent {
+            if let Some(max_price) = recent_by_digest
+                .values()
+                .map(|recent| recent.max_price)
+                .max()
+            {
+                required_by_id
+                    .entry(request_id)
+                    .and_modify(|price| *price = (*price).max(max_price))
+                    .or_insert(max_price);
+            }
         }
         required_by_id
             .entry(current_request_id)
@@ -4572,6 +4577,43 @@ mod tests {
 
         assert_eq!(value, U256::from(100u64));
         assert!(state.recent.contains_key(&U256::from(1u64)));
+    }
+
+    #[test]
+    fn funding_state_keeps_cheaper_rebid_when_older_digest_is_indexed_first() {
+        let older_snapshot =
+            super::BoundlessFundingSnapshot::from_indexer_requests(vec![indexer_request(
+                1,
+                11,
+                "submitted",
+                "onchain",
+                "100",
+            )])
+            .expect("older snapshot");
+        let mut state = super::BoundlessFundingState::default();
+        state.record_recent(U256::from(1u64), U256::from(100u64), 200, test_digest(11));
+        state.record_recent(U256::from(1u64), U256::from(80u64), 200, test_digest(12));
+
+        assert_eq!(
+            state.required_deposit(
+                &older_snapshot,
+                U256::from(2u64),
+                U256::from(50u64),
+                U256::from(150u64),
+                100,
+            ),
+            U256::ZERO
+        );
+        assert_eq!(
+            state.required_deposit(
+                &super::BoundlessFundingSnapshot::default(),
+                U256::from(3u64),
+                U256::from(50u64),
+                U256::ZERO,
+                100,
+            ),
+            U256::from(130u64)
+        );
     }
 
     #[test]

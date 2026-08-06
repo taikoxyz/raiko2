@@ -64,7 +64,6 @@ const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-const BOUNDLESS_INDEXER_MAX_PAGES: usize = 10_000;
 const BOUNDLESS_INDEXER_PAGE_DELAY: Duration = Duration::from_millis(100);
 const BOUNDLESS_INDEXER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_INDEXER_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1552,15 +1551,8 @@ async fn fetch_boundless_funding_snapshot(
     let mut requests = Vec::new();
     let mut cursor = None;
     let mut seen_cursors = HashSet::new();
-    let mut page_count = 0_usize;
 
     loop {
-        page_count = page_count.saturating_add(1);
-        if page_count > BOUNDLESS_INDEXER_MAX_PAGES {
-            return Err(format!(
-                "requestor indexer exceeded {BOUNDLESS_INDEXER_MAX_PAGES} pages"
-            ));
-        }
         let mut url = endpoint.clone();
         if let Some(cursor) = cursor.as_deref() {
             url.query_pairs_mut().append_pair("cursor", cursor);
@@ -1660,15 +1652,22 @@ impl BoundlessFundingState {
                     .contains(&recent.request_digest)
         });
 
+        let mut required_by_id = snapshot.outstanding.clone();
+
         // Until the indexer has observed a request sent by this process, a restart may have erased
-        // newer local liabilities that are still in its ingestion window. Funding the current bid
-        // in full prevents it from borrowing that unknown balance. Once caught up, switch to the
-        // exact combined-liability top-up.
+        // newer local liabilities that are still in its ingestion window. Fully funding every known
+        // indexed liability plus the current bid avoids borrowing balance that an unknown request
+        // may already need. Once caught up, switch to the exact combined-liability top-up.
         if !self.indexer_caught_up {
-            return current_max_price;
+            required_by_id
+                .entry(current_request_id)
+                .and_modify(|price| *price = (*price).max(current_max_price))
+                .or_insert(current_max_price);
+            return required_by_id
+                .into_values()
+                .fold(U256::ZERO, U256::saturating_add);
         }
 
-        let mut required_by_id = snapshot.outstanding.clone();
         for (&request_id, recent) in &self.recent {
             required_by_id
                 .entry(request_id)
@@ -2247,8 +2246,8 @@ impl BoundlessProver {
             submission.lock_expires_at,
             request_digest,
         );
-        let send_result = call.send().await;
         drop(funding_state);
+        let send_result = call.send().await;
 
         match send_result {
             Ok(pending_tx) => {
@@ -4623,6 +4622,31 @@ mod tests {
             U256::ZERO
         );
         assert!(state.indexer_caught_up);
+    }
+
+    #[test]
+    fn funding_state_cold_start_full_funds_indexed_liabilities_and_current_request() {
+        let snapshot =
+            super::BoundlessFundingSnapshot::from_indexer_requests(vec![indexer_request(
+                1,
+                11,
+                "submitted",
+                "onchain",
+                "100",
+            )])
+            .expect("snapshot");
+        let mut state = super::BoundlessFundingState::default();
+
+        assert_eq!(
+            state.required_deposit(
+                &snapshot,
+                U256::from(2u64),
+                U256::from(50u64),
+                U256::from(100u64),
+                100,
+            ),
+            U256::from(150u64)
+        );
     }
 
     #[test]

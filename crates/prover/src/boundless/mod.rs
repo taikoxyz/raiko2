@@ -1597,6 +1597,13 @@ struct RecentFundingRequest {
     lock_expires_at: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundlessReceiptOutcome {
+    ConfirmedSuccess,
+    ConfirmedRevert,
+    Uncertain,
+}
+
 #[derive(Debug, Default)]
 struct BoundlessFundingState {
     recent: HashMap<U256, HashMap<B256, RecentFundingRequest>>,
@@ -1624,6 +1631,28 @@ impl BoundlessFundingState {
                 existing.lock_expires_at = existing.lock_expires_at.max(lock_expires_at);
             })
             .or_insert(recent);
+    }
+
+    fn reconcile_receipt(
+        &mut self,
+        request_id: U256,
+        request_digest: B256,
+        outcome: BoundlessReceiptOutcome,
+    ) {
+        if outcome != BoundlessReceiptOutcome::ConfirmedRevert {
+            return;
+        }
+
+        let remove_request_id = self
+            .recent
+            .get_mut(&request_id)
+            .is_some_and(|recent_by_digest| {
+                recent_by_digest.remove(&request_digest);
+                recent_by_digest.is_empty()
+            });
+        if remove_request_id {
+            self.recent.remove(&request_id);
+        }
     }
 
     fn required_deposit(
@@ -4535,6 +4564,58 @@ mod tests {
             .await
             .expect("second caller acquires the released submission permit");
         drop(second);
+    }
+
+    #[test]
+    fn boundless_receipt_revert_removes_only_matching_reservation() {
+        let request_id = U256::from(1u64);
+        let reverted_digest = test_digest(11);
+        let rebid_digest = test_digest(12);
+        let mut state = super::BoundlessFundingState::default();
+        state.record_recent(request_id, U256::from(100u64), 200, reverted_digest);
+        state.record_recent(request_id, U256::from(120u64), 200, rebid_digest);
+
+        state.reconcile_receipt(
+            request_id,
+            reverted_digest,
+            super::BoundlessReceiptOutcome::ConfirmedRevert,
+        );
+
+        let remaining = state.recent.get(&request_id).expect("rebid remains reserved");
+        assert!(!remaining.contains_key(&reverted_digest));
+        assert!(remaining.contains_key(&rebid_digest));
+    }
+
+    #[test]
+    fn boundless_receipt_success_retains_reservation() {
+        let request_id = U256::from(1u64);
+        let request_digest = test_digest(11);
+        let mut state = super::BoundlessFundingState::default();
+        state.record_recent(request_id, U256::from(100u64), 200, request_digest);
+
+        state.reconcile_receipt(
+            request_id,
+            request_digest,
+            super::BoundlessReceiptOutcome::ConfirmedSuccess,
+        );
+
+        assert!(state.recent[&request_id].contains_key(&request_digest));
+    }
+
+    #[test]
+    fn boundless_receipt_uncertain_retains_reservation() {
+        let request_id = U256::from(1u64);
+        let request_digest = test_digest(11);
+        let mut state = super::BoundlessFundingState::default();
+        state.record_recent(request_id, U256::from(100u64), 200, request_digest);
+
+        state.reconcile_receipt(
+            request_id,
+            request_digest,
+            super::BoundlessReceiptOutcome::Uncertain,
+        );
+
+        assert!(state.recent[&request_id].contains_key(&request_digest));
     }
 
     fn indexer_request(

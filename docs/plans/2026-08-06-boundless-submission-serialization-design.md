@@ -59,9 +59,11 @@ funding overlay and the uncertain-nonce slot. The current call may return for po
 submission must resolve that slot before allocating another nonce. This may over-deposit, but cannot
 replace B with a different request or create an underfunded request set.
 
-Every indexer, RPC, checkpoint, send, and receipt operation has an individual timeout where useful
-and an outer total timeout covering all retries. Timeout paths fail closed for funding and nonce
-allocation rather than holding either permit indefinitely.
+Every indexer, RPC, send, receipt, and optional checkpoint operation has an individual timeout where
+useful and an outer total timeout covering all retries. The required request-id checkpoint instead
+retries until it is durable or the lifecycle closes, but it never holds the account submission
+permit. Timeout paths fail closed for funding and nonce allocation rather than holding either permit
+indefinitely.
 
 ## Restart Behavior
 
@@ -86,5 +88,6 @@ available.
 - Every receipt outcome is evaluated only after three confirmations.
 - A successful receipt retains B until indexer catch-up; a reverted receipt removes B.
 - A timed-out broadcast cannot let the next request reuse or skip B's nonce.
-- Indexer, balance, nonce, checkpoint, send, and receipt waits all have bounded total duration.
+- Indexer, balance, nonce, optional checkpoint, send, and receipt waits all have bounded total
+  duration.
 - Existing cold-start, rebid digest, indexer pagination, and funding calculations continue to pass.

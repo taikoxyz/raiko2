@@ -68,8 +68,14 @@ const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const BOUNDLESS_INDEXER_PAGE_DELAY: Duration = Duration::from_millis(100);
 const BOUNDLESS_INDEXER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_INDEXER_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const BOUNDLESS_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const BOUNDLESS_RPC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDLESS_SUBMIT_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
+const BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS: u64 = 3;
+const BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const BOUNDLESS_NONCE_RECOVERY_POLL_DELAY: Duration = Duration::from_secs(1);
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -103,6 +109,25 @@ where
             Err(err) => return Err(err),
         }
     }
+}
+
+async fn retry_external_bounded<T, F, Fut>(
+    operation: &str,
+    total_timeout: Duration,
+    run: F,
+) -> RaikoResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = RaikoResult<T>>,
+{
+    tokio::time::timeout(total_timeout, retry_external(operation, run))
+        .await
+        .map_err(|_| {
+            RaikoError::Guest(format!(
+                "Boundless {operation} timed out after {} seconds",
+                total_timeout.as_secs_f64()
+            ))
+        })?
 }
 
 async fn compute_boundless_image_id(elf: Vec<u8>, stage: &str) -> RaikoResult<Digest> {
@@ -1083,7 +1108,7 @@ fn presigned_refresh_at(url: &Url) -> SystemTime {
     SystemTime::now() + Duration::from_secs(expires_secs.saturating_sub(120).max(60))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Submission {
     market_request_id: U256,
     provider_request_id: String,
@@ -1194,30 +1219,30 @@ async fn checkpoint_boundless_tx_hash(
     deployment: &str,
     mcycles_count: (u32, u32),
 ) {
-    match crate::acquire_submission_checkpoint_permit(observer).await {
-        Ok(tx_hash_permit) => {
-            if let Err(error) = publish_boundless_progress(
-                observer,
-                &tx_hash_permit,
-                submission,
-                image_ref,
-                deployment,
-                false,
-                mcycles_count,
-            )
-            .await
-            {
-                tracing::warn!(
-                    provider_request_id = %submission.provider_request_id,
-                    error = %error,
-                    "Boundless request id is durable but its optional transaction hash was not checkpointed"
-                );
-            }
-        }
-        Err(error) => tracing::warn!(
+    let checkpoint = async {
+        let tx_hash_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
+        publish_boundless_progress(
+            observer,
+            &tx_hash_permit,
+            submission,
+            image_ref,
+            deployment,
+            false,
+            mcycles_count,
+        )
+        .await
+    };
+    match tokio::time::timeout(BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT, checkpoint).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(
             provider_request_id = %submission.provider_request_id,
             error = %error,
-            "Boundless request id is durable but transaction-hash checkpoint admission is closed"
+            "Boundless request id is durable but its optional transaction hash was not checkpointed"
+        ),
+        Err(_) => tracing::warn!(
+            provider_request_id = %submission.provider_request_id,
+            timeout_secs = BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT.as_secs(),
+            "Timed out persisting optional Boundless transaction hash"
         ),
     }
 }
@@ -1635,6 +1660,33 @@ struct RecentFundingRequest {
     lock_expires_at: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundlessUncertainSubmission {
+    submission: Submission,
+    request: ProofRequest,
+    signature: Bytes,
+    request_digest: B256,
+    value: U256,
+    nonce: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundlessNonceStatus {
+    Mined,
+    Pending,
+    Available,
+}
+
+const fn classify_boundless_nonce(nonce: u64, latest: u64, pending: u64) -> BoundlessNonceStatus {
+    if latest > nonce {
+        BoundlessNonceStatus::Mined
+    } else if pending > nonce {
+        BoundlessNonceStatus::Pending
+    } else {
+        BoundlessNonceStatus::Available
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BoundlessReceiptOutcome {
     ConfirmedSuccess,
@@ -1646,9 +1698,65 @@ enum BoundlessReceiptOutcome {
 struct BoundlessFundingState {
     recent: HashMap<U256, HashMap<B256, RecentFundingRequest>>,
     indexer_caught_up: bool,
+    next_nonce: Option<u64>,
+    uncertain: Option<BoundlessUncertainSubmission>,
 }
 
 impl BoundlessFundingState {
+    fn allocate_nonce(&mut self, latest: u64, pending: u64) -> RaikoResult<u64> {
+        if let Some(uncertain) = &self.uncertain {
+            return Err(RaikoError::Guest(format!(
+                "Boundless account nonce {} is still uncertain",
+                uncertain.nonce
+            )));
+        }
+        let nonce = latest.max(pending).max(self.next_nonce.unwrap_or_default());
+        self.next_nonce = Some(nonce.checked_add(1).ok_or_else(|| {
+            RaikoError::Guest("Boundless account nonce exhausted u64".to_string())
+        })?);
+        Ok(nonce)
+    }
+
+    fn record_uncertain(&mut self, submission: BoundlessUncertainSubmission) -> RaikoResult<()> {
+        match self.uncertain.as_ref() {
+            None => {
+                self.uncertain = Some(submission);
+                Ok(())
+            }
+            Some(existing) if existing == &submission => Ok(()),
+            Some(existing) => Err(RaikoError::Guest(format!(
+                "Boundless account nonce {} is unresolved before nonce {} can be recorded",
+                existing.nonce, submission.nonce
+            ))),
+        }
+    }
+
+    const fn uncertain_submission(&self) -> Option<&BoundlessUncertainSubmission> {
+        self.uncertain.as_ref()
+    }
+
+    fn clear_uncertain(&mut self, nonce: u64, request_digest: B256) -> bool {
+        let matches = self.uncertain.as_ref().is_some_and(|submission| {
+            submission.nonce == nonce && submission.request_digest == request_digest
+        });
+        if matches {
+            self.uncertain = None;
+        }
+        matches
+    }
+
+    fn reconcile_consumed_nonce(&mut self, chain_nonce: u64) -> bool {
+        let consumed = self
+            .uncertain
+            .as_ref()
+            .is_some_and(|submission| chain_nonce > submission.nonce);
+        if consumed {
+            self.uncertain = None;
+            self.next_nonce = Some(self.next_nonce.unwrap_or_default().max(chain_nonce));
+        }
+        consumed
+    }
+
     fn record_recent(
         &mut self,
         request_id: U256,
@@ -1795,6 +1903,18 @@ impl BoundlessBalanceGate {
     }
 }
 
+async fn run_after_submission_permit<T, F, Fut>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    run: F,
+) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    drop(permit);
+    run().await
+}
+
 pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
@@ -1910,26 +2030,24 @@ impl BoundlessProver {
             )
         })?;
 
-        retry_external("query boundless outstanding requests", || async {
-            tokio::time::timeout(
-                BOUNDLESS_INDEXER_TOTAL_TIMEOUT,
+        retry_external_bounded(
+            "query boundless outstanding requests",
+            BOUNDLESS_INDEXER_TOTAL_TIMEOUT,
+            || async {
                 fetch_boundless_funding_snapshot(
                     &self.indexer_http,
                     &indexer_url,
                     requestor,
                     expected_chain_id,
-                ),
-            )
-            .await
-            .map_err(|_| {
-                RaikoError::Guest("Boundless outstanding request query timed out".to_string())
-            })?
-            .map_err(|err| {
-                RaikoError::Guest(format!(
-                    "Failed to query Boundless outstanding requests: {err}"
-                ))
-            })
-        })
+                )
+                .await
+                .map_err(|err| {
+                    RaikoError::Guest(format!(
+                        "Failed to query Boundless outstanding requests: {err}"
+                    ))
+                })
+            },
+        )
         .await
     }
 
@@ -1939,21 +2057,72 @@ impl BoundlessProver {
         required_rpc_block: Option<u64>,
     ) -> RaikoResult<U256> {
         let provider = client.provider();
-        retry_external("query boundless balance", || async {
-            let rpc_head = provider.get_block_number().await.map_err(|e| {
-                RaikoError::Guest(format!("Failed to query Boundless RPC head: {e}"))
-            })?;
-            let balance_block = ensure_rpc_head_covers_snapshot(required_rpc_block, rpc_head)
-                .map_err(RaikoError::Guest)?;
-            client
-                .boundless_market
-                .instance()
-                .balanceOf(requestor)
-                .block(BlockId::number(balance_block))
-                .call()
+        retry_external_bounded(
+            "query boundless balance",
+            BOUNDLESS_RPC_TOTAL_TIMEOUT,
+            || async {
+                let rpc_head = tokio::time::timeout(
+                    BOUNDLESS_RPC_REQUEST_TIMEOUT,
+                    provider.get_block_number(),
+                )
                 .await
+                .map_err(|_| RaikoError::Guest("Boundless RPC head query timed out".to_string()))?
+                .map_err(|e| {
+                    RaikoError::Guest(format!("Failed to query Boundless RPC head: {e}"))
+                })?;
+                let balance_block = ensure_rpc_head_covers_snapshot(required_rpc_block, rpc_head)
+                    .map_err(RaikoError::Guest)?;
+                tokio::time::timeout(
+                    BOUNDLESS_RPC_REQUEST_TIMEOUT,
+                    client
+                        .boundless_market
+                        .instance()
+                        .balanceOf(requestor)
+                        .block(BlockId::number(balance_block))
+                        .call(),
+                )
+                .await
+                .map_err(|_| {
+                    RaikoError::Guest("Boundless market balance query timed out".to_string())
+                })?
                 .map_err(|e| RaikoError::Guest(format!("Failed to query boundless balance: {e}")))
-        })
+            },
+        )
+        .await
+    }
+
+    async fn account_nonces(client: &BoundlessClient) -> RaikoResult<(u64, u64)> {
+        let provider = client.provider();
+        let requestor = client.boundless_market.caller();
+        retry_external_bounded(
+            "query boundless account nonces",
+            BOUNDLESS_RPC_TOTAL_TIMEOUT,
+            || async {
+                let latest = tokio::time::timeout(
+                    BOUNDLESS_RPC_REQUEST_TIMEOUT,
+                    provider.get_transaction_count(requestor).latest(),
+                )
+                .await
+                .map_err(|_| {
+                    RaikoError::Guest("Boundless latest nonce query timed out".to_string())
+                })?
+                .map_err(|error| {
+                    RaikoError::Guest(format!("Failed to query Boundless latest nonce: {error}"))
+                })?;
+                let pending = tokio::time::timeout(
+                    BOUNDLESS_RPC_REQUEST_TIMEOUT,
+                    provider.get_transaction_count(requestor).pending(),
+                )
+                .await
+                .map_err(|_| {
+                    RaikoError::Guest("Boundless pending nonce query timed out".to_string())
+                })?
+                .map_err(|error| {
+                    RaikoError::Guest(format!("Failed to query Boundless pending nonce: {error}"))
+                })?;
+                Ok((latest, pending))
+            },
+        )
         .await
     }
 
@@ -2249,16 +2418,227 @@ impl BoundlessProver {
         .await
     }
 
+    async fn sign_onchain_request(
+        client: &BoundlessClient,
+        request: &ProofRequest,
+    ) -> RaikoResult<(B256, Bytes)> {
+        let signer = client.signer.as_ref().ok_or_else(|| {
+            RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
+        })?;
+        let chain_id = retry_external_bounded(
+            "query boundless chain id",
+            BOUNDLESS_RPC_TOTAL_TIMEOUT,
+            || async {
+                tokio::time::timeout(
+                    BOUNDLESS_RPC_REQUEST_TIMEOUT,
+                    client.boundless_market.get_chain_id(),
+                )
+                .await
+                .map_err(|_| RaikoError::Guest("Boundless chain id query timed out".to_string()))?
+                .map_err(|error| {
+                    RaikoError::Guest(format!("Failed to query boundless chain id: {error}"))
+                })
+            },
+        )
+        .await?;
+        let market_addr = *client.boundless_market.instance().address();
+        let request_digest = request
+            .signing_hash(market_addr, chain_id)
+            .map_err(|error| {
+                RaikoError::Guest(format!("Failed to hash Boundless request: {error}"))
+            })?;
+        let signature = request
+            .sign_request(signer, market_addr, chain_id)
+            .await
+            .map_err(|error| {
+                RaikoError::Guest(format!("Failed to sign Boundless request: {error}"))
+            })?;
+        Ok((request_digest, signature.as_bytes().into()))
+    }
+
+    async fn broadcast_uncertain_submission(
+        client: &BoundlessClient,
+        uncertain: &BoundlessUncertainSubmission,
+    ) -> RaikoResult<PendingTransactionBuilder<Ethereum>> {
+        let call = client
+            .boundless_market
+            .instance()
+            .submitRequest(uncertain.request.clone(), uncertain.signature.clone())
+            .from(client.boundless_market.caller())
+            .value(uncertain.value)
+            .nonce(uncertain.nonce);
+
+        tokio::time::timeout(BOUNDLESS_SUBMIT_SEND_TIMEOUT, call.send())
+            .await
+            .map_err(|_| {
+                RaikoError::Guest(format!(
+                    "Timed out broadcasting Boundless submitRequest at nonce {}",
+                    uncertain.nonce
+                ))
+            })?
+            .map_err(|error| {
+                RaikoError::Guest(format!(
+                    "Boundless submitRequest at nonce {} returned an uncertain error: {error}",
+                    uncertain.nonce
+                ))
+            })
+    }
+
+    async fn confirm_consumed_nonce(
+        &self,
+        client: &BoundlessClient,
+        nonce: u64,
+    ) -> RaikoResult<bool> {
+        let provider = client.provider();
+        let confirmation_wait = async {
+            let observed_head =
+                tokio::time::timeout(BOUNDLESS_RPC_REQUEST_TIMEOUT, provider.get_block_number())
+                    .await
+                    .map_err(|_| {
+                        RaikoError::Guest("Boundless confirmation head query timed out".to_string())
+                    })?
+                    .map_err(|error| {
+                        RaikoError::Guest(format!(
+                            "Failed to query Boundless confirmation head: {error}"
+                        ))
+                    })?;
+            let target_head = observed_head
+                .saturating_add(BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS.saturating_sub(1));
+
+            loop {
+                let head = tokio::time::timeout(
+                    BOUNDLESS_RPC_REQUEST_TIMEOUT,
+                    provider.get_block_number(),
+                )
+                .await
+                .map_err(|_| {
+                    RaikoError::Guest("Boundless confirmation head query timed out".to_string())
+                })?
+                .map_err(|error| {
+                    RaikoError::Guest(format!(
+                        "Failed to query Boundless confirmation head: {error}"
+                    ))
+                })?;
+                if head >= target_head {
+                    let (latest, _) = Self::account_nonces(client).await?;
+                    return Ok(latest > nonce);
+                }
+                tokio::time::sleep(BOUNDLESS_NONCE_RECOVERY_POLL_DELAY).await;
+            }
+        };
+
+        tokio::time::timeout(BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT, confirmation_wait)
+            .await
+            .map_err(|_| {
+                RaikoError::Guest(format!(
+                    "Timed out confirming consumed Boundless nonce {nonce}"
+                ))
+            })?
+    }
+
+    async fn resolve_uncertain_submission(
+        &self,
+        client: &BoundlessClient,
+    ) -> RaikoResult<Option<String>> {
+        let uncertain = self
+            .balance_gate
+            .lock_state()
+            .await
+            .uncertain_submission()
+            .cloned()
+            .ok_or_else(|| {
+                RaikoError::Guest(
+                    "Boundless nonce recovery requested without an uncertain submission"
+                        .to_string(),
+                )
+            })?;
+
+        let recovery = async {
+            loop {
+                match Self::broadcast_uncertain_submission(client, &uncertain).await {
+                    Ok(pending_tx) => {
+                        let remote_tx_hash = format!("0x{:x}", pending_tx.tx_hash());
+                        let mut observed_submission = uncertain.submission.clone();
+                        observed_submission.remote_tx_hash = Some(remote_tx_hash.clone());
+                        let outcome = self
+                            .observe_onchain_receipt(
+                                pending_tx,
+                                &observed_submission,
+                                uncertain.request.id,
+                                uncertain.request_digest,
+                            )
+                            .await;
+                        if outcome == BoundlessReceiptOutcome::Uncertain {
+                            return Err(RaikoError::Guest(format!(
+                                "Boundless submitRequest at nonce {} has an uncertain receipt",
+                                uncertain.nonce
+                            )));
+                        }
+                        self.balance_gate
+                            .lock_state()
+                            .await
+                            .clear_uncertain(uncertain.nonce, uncertain.request_digest);
+                        return Ok(Some(remote_tx_hash));
+                    }
+                    Err(error) => {
+                        let (latest, pending) = Self::account_nonces(client).await?;
+                        match classify_boundless_nonce(uncertain.nonce, latest, pending) {
+                            BoundlessNonceStatus::Mined => {
+                                if self.confirm_consumed_nonce(client, uncertain.nonce).await? {
+                                    self.balance_gate
+                                        .lock_state()
+                                        .await
+                                        .reconcile_consumed_nonce(latest);
+                                    tracing::warn!(
+                                        provider_request_id = %uncertain.submission.provider_request_id,
+                                        nonce = uncertain.nonce,
+                                        error = %error,
+                                        "Recovered Boundless submission from its consumed nonce without a transaction hash"
+                                    );
+                                    return Ok(None);
+                                }
+                            }
+                            BoundlessNonceStatus::Pending => tracing::warn!(
+                                provider_request_id = %uncertain.submission.provider_request_id,
+                                nonce = uncertain.nonce,
+                                error = %error,
+                                "Boundless submission is pending without an acknowledged transaction hash; retrying the same request and nonce"
+                            ),
+                            BoundlessNonceStatus::Available => tracing::warn!(
+                                provider_request_id = %uncertain.submission.provider_request_id,
+                                nonce = uncertain.nonce,
+                                error = %error,
+                                "Boundless submission nonce remains available; retrying the same request and nonce"
+                            ),
+                        }
+                        tokio::time::sleep(BOUNDLESS_NONCE_RECOVERY_POLL_DELAY).await;
+                    }
+                }
+            }
+        };
+
+        tokio::time::timeout(BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT, recovery)
+            .await
+            .map_err(|_| {
+                RaikoError::Guest(format!(
+                    "Timed out recovering Boundless submitRequest at nonce {}",
+                    uncertain.nonce
+                ))
+            })?
+    }
+
     async fn observe_onchain_receipt(
         &self,
         pending_tx: PendingTransactionBuilder<Ethereum>,
         submission: &Submission,
         request_id: U256,
         request_digest: B256,
-    ) {
+    ) -> BoundlessReceiptOutcome {
         let outcome = match tokio::time::timeout(
             BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT,
-            pending_tx.get_receipt(),
+            pending_tx
+                .with_required_confirmations(BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS)
+                .get_receipt(),
         )
         .await
         {
@@ -2294,6 +2674,7 @@ impl BoundlessProver {
             .lock_state()
             .await
             .reconcile_receipt(request_id, request_digest, outcome);
+        outcome
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2308,56 +2689,12 @@ impl BoundlessProver {
         evaluated_mcycles_count: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
-        let signer = client.signer.as_ref().ok_or_else(|| {
-            RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
-        })?;
         let max_price = U256::from(request.offer.maxPrice);
         // Sign the request before reserving on the balance gate: signing is independent of the
-        // deposit value, so there's no reason to hold a reservation across it. The chain id query
-        // and signing both retry transient RPC errors, so a hiccup here does not abort the reused-id
-        // submission. `get_chain_id` caches the value inside the SDK's
-        // market service after the first fetch, and the `Client` is reused across proofs, so this
-        // is effectively a single query per process despite the per-submission call.
-        let chain_id =
-            retry_external("query boundless chain id", || async {
-                client.boundless_market.get_chain_id().await.map_err(|e| {
-                    RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
-                })
-            })
-            .await?;
-        let market_addr = *client.boundless_market.instance().address();
-        let request_digest = request
-            .signing_hash(market_addr, chain_id)
-            .map_err(|e| RaikoError::Guest(format!("Failed to hash Boundless request: {e}")))?;
-        let client_sig = request
-            .sign_request(signer, market_addr, chain_id)
-            .await
-            .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
-
-        // Serialize every account operation through receipt observation so each later request sees
-        // either the preceding transaction's balance effect or its conservative local reservation.
-        let _submission_permit = self.balance_gate.acquire_submission().await;
-        let snapshot = self.funding_snapshot(request.client_address()).await?;
-        let balance = Self::funding_balance(
-            client,
-            request.client_address(),
-            snapshot.required_rpc_block,
-        )
-        .await?;
-        let value = self.balance_gate.lock_state().await.required_deposit(
-            &snapshot,
-            request.id,
-            max_price,
-            balance,
-            now_secs(),
-        );
-
-        let call = client
-            .boundless_market
-            .instance()
-            .submitRequest(request.clone(), client_sig.as_bytes().into())
-            .from(client.boundless_market.caller())
-            .value(value);
+        // deposit value, so there's no reason to hold a reservation across it. The bounded chain id
+        // query retries transient RPC errors. `get_chain_id` caches the value inside the SDK's
+        // market service after the first fetch, and the `Client` is reused across proofs.
+        let (request_digest, signature) = Self::sign_onchain_request(client, request).await?;
 
         let mut submission = self.make_submission(request, attempt)?;
         let checkpoint_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
@@ -2373,19 +2710,67 @@ impl BoundlessProver {
         .await?;
         drop(checkpoint_permit);
 
+        // Serialize every account operation through receipt observation so each later request sees
+        // either the preceding transaction's balance effect or its conservative local reservation.
+        let submission_permit = self.balance_gate.acquire_submission().await;
+        if self
+            .balance_gate
+            .lock_state()
+            .await
+            .uncertain_submission()
+            .is_some()
+        {
+            self.resolve_uncertain_submission(client).await?;
+        }
+        let snapshot = self.funding_snapshot(request.client_address()).await?;
+        let balance = Self::funding_balance(
+            client,
+            request.client_address(),
+            snapshot.required_rpc_block,
+        )
+        .await?;
+        let (latest_nonce, pending_nonce) = Self::account_nonces(client).await?;
+        let (value, nonce) = {
+            let mut state = self.balance_gate.lock_state().await;
+            let value =
+                state.required_deposit(&snapshot, request.id, max_price, balance, now_secs());
+            let nonce = state.allocate_nonce(latest_nonce, pending_nonce)?;
+            (value, nonce)
+        };
+
         // From this point the request may reach the market even if the future is cancelled or the
         // RPC response is uncertain, so retain it in the local overlay before awaiting the send.
-        self.balance_gate.lock_state().await.record_recent(
-            request.id,
-            max_price,
-            submission.lock_expires_at,
+        let uncertain = BoundlessUncertainSubmission {
+            submission: submission.clone(),
+            request: request.clone(),
+            signature,
             request_digest,
-        );
-        let send_result = tokio::time::timeout(BOUNDLESS_SUBMIT_SEND_TIMEOUT, call.send()).await;
+            value,
+            nonce,
+        };
+        {
+            let mut state = self.balance_gate.lock_state().await;
+            state.record_uncertain(uncertain)?;
+            state.record_recent(
+                request.id,
+                max_price,
+                submission.lock_expires_at,
+                request_digest,
+            );
+        }
 
-        match send_result {
-            Ok(Ok(pending_tx)) => {
-                submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
+        match self.resolve_uncertain_submission(client).await {
+            Ok(remote_tx_hash) => submission.remote_tx_hash = remote_tx_hash,
+            Err(error) => tracing::warn!(
+                provider_request_id = %submission.provider_request_id,
+                nonce,
+                error = %error,
+                "Boundless submitRequest remains uncertain; retaining its nonce and funding reservation"
+            ),
+        }
+
+        run_after_submission_permit(submission_permit, || async {
+            if submission.remote_tx_hash.is_some() {
                 checkpoint_boundless_tx_hash(
                     observer,
                     &submission,
@@ -2394,24 +2779,9 @@ impl BoundlessProver {
                     (quoted_mcycles_count, evaluated_mcycles_count),
                 )
                 .await;
-                self.observe_onchain_receipt(pending_tx, &submission, request.id, request_digest)
-                    .await;
             }
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    provider_request_id = %submission.provider_request_id,
-                    error = %error,
-                    "Boundless submitRequest returned an uncertain error; polling reserved request id"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    provider_request_id = %submission.provider_request_id,
-                    timeout_secs = BOUNDLESS_SUBMIT_SEND_TIMEOUT.as_secs(),
-                    "Timed out broadcasting Boundless submitRequest; retaining its local funding reservation"
-                );
-            }
-        }
+        })
+        .await;
 
         Ok(submission)
     }
@@ -3366,22 +3736,25 @@ fn validate_offer_params(
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
-        BoundlessStatusSource, BoundlessStorageDownloader, BoundlessSubmissionMetadata,
-        BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
-        DeploymentConfig, DeploymentType, ElfType, JsonRpcError, JsonRpcResponse,
-        MIN_REBID_TIMEOUT_MS, Submission, TimeoutPolicy, boundless_poll_error_statuses,
-        classify_boundless_status, dispatch_offchain_after_checkpoint,
-        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline,
-        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
-        publish_boundless_progress, quote_batch_mcycles, should_defer_boundless_poll_timeout,
-        should_initialize_s3_downloader, should_rebid_unlocked_request,
-        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
-        validate_resume_context,
+        BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessConfig, BoundlessFundingState,
+        BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver, BoundlessStatusSource,
+        BoundlessStorageDownloader, BoundlessSubmissionMetadata, BoundlessSubmissionState,
+        BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
+        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, Submission, TimeoutPolicy,
+        boundless_poll_error_statuses, classify_boundless_nonce, classify_boundless_status,
+        dispatch_offchain_after_checkpoint, escalate_and_cap_market_prices,
+        exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
+        parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
+        quote_batch_mcycles, retry_external_bounded, run_after_submission_permit,
+        should_defer_boundless_poll_timeout, should_initialize_s3_downloader,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
+        validate_offer_params, validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
-    use alloy_primitives::{B256, U256, address, utils::parse_ether};
+    use alloy_primitives::{B256, Bytes, U256, address, utils::parse_ether};
     use boundless_market::{
+        ProofRequest, RequestId,
+        contracts::{Offer, Predicate, RequestInput, Requirements},
         price_oracle::{Amount, Asset},
         storage::{StorageUploaderConfig, StorageUploaderType},
     };
@@ -3488,6 +3861,105 @@ mod tests {
         }
     }
 
+    fn test_proof_request() -> ProofRequest {
+        ProofRequest::new(
+            RequestId::new(address!("1000000000000000000000000000000000000001"), 1),
+            Requirements::new(Predicate::prefix_match(
+                risc0_zkvm::Digest::default(),
+                Bytes::new(),
+            )),
+            "https://example.invalid/program",
+            RequestInput::inline(Bytes::new()),
+            Offer {
+                minPrice: U256::from(1),
+                maxPrice: U256::from(2),
+                rampUpStart: 1,
+                timeout: 10,
+                rampUpPeriod: 1,
+                lockCollateral: U256::ZERO,
+                lockTimeout: 5,
+            },
+        )
+    }
+
+    #[test]
+    fn boundless_nonce_allocation_uses_chain_and_local_high_water() {
+        let mut state = BoundlessFundingState::default();
+
+        assert_eq!(state.allocate_nonce(5, 7).expect("first nonce"), 7);
+        assert_eq!(state.allocate_nonce(5, 7).expect("second nonce"), 8);
+        assert_eq!(state.allocate_nonce(11, 9).expect("latest nonce"), 11);
+    }
+
+    #[test]
+    fn boundless_nonce_uncertainty_blocks_fresh_allocation_until_consumed() {
+        let mut state = BoundlessFundingState::default();
+        let uncertain = super::BoundlessUncertainSubmission {
+            submission: test_submission(),
+            request: test_proof_request(),
+            signature: Bytes::from_static(b"fixture_signature"),
+            request_digest: B256::repeat_byte(0x11),
+            value: U256::from(7),
+            nonce: 4,
+        };
+
+        state
+            .record_uncertain(uncertain.clone())
+            .expect("record uncertain submission");
+        assert!(state.allocate_nonce(4, 4).is_err());
+        assert_eq!(
+            state.uncertain_submission().expect("uncertain submission"),
+            &uncertain
+        );
+
+        assert!(!state.reconcile_consumed_nonce(4));
+        assert!(state.reconcile_consumed_nonce(5));
+        assert!(state.uncertain_submission().is_none());
+        assert_eq!(state.allocate_nonce(5, 5).expect("next nonce"), 5);
+    }
+
+    #[test]
+    fn boundless_nonce_clear_requires_matching_identity() {
+        let mut state = BoundlessFundingState::default();
+        let uncertain = super::BoundlessUncertainSubmission {
+            submission: test_submission(),
+            request: test_proof_request(),
+            signature: Bytes::from_static(b"fixture_signature"),
+            request_digest: B256::repeat_byte(0x11),
+            value: U256::from(7),
+            nonce: 4,
+        };
+        state
+            .record_uncertain(uncertain)
+            .expect("record uncertain submission");
+
+        assert!(!state.clear_uncertain(4, B256::repeat_byte(0x22)));
+        assert!(state.uncertain_submission().is_some());
+        assert!(state.clear_uncertain(4, B256::repeat_byte(0x11)));
+        assert!(state.uncertain_submission().is_none());
+    }
+
+    #[test]
+    fn boundless_nonce_recovery_distinguishes_mined_pending_and_available() {
+        assert_eq!(
+            classify_boundless_nonce(7, 8, 8),
+            super::BoundlessNonceStatus::Mined
+        );
+        assert_eq!(
+            classify_boundless_nonce(7, 7, 8),
+            super::BoundlessNonceStatus::Pending
+        );
+        assert_eq!(
+            classify_boundless_nonce(7, 7, 7),
+            super::BoundlessNonceStatus::Available
+        );
+    }
+
+    #[test]
+    fn boundless_receipt_wait_requires_three_confirmations() {
+        assert_eq!(BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, 3);
+    }
+
     #[tokio::test]
     async fn boundless_checkpoint_retries_the_accepted_submission_in_place() {
         let observer = Arc::new(FlakyProgressObserver {
@@ -3521,6 +3993,21 @@ mod tests {
         .expect("checkpoint eventually persists");
 
         assert_eq!(observer.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn boundless_retry_total_timeout_stops_pending_operation() {
+        let started = Instant::now();
+        let error = retry_external_bounded(
+            "pending fixture operation",
+            Duration::from_millis(10),
+            || async { std::future::pending::<Result<(), RaikoError>>().await },
+        )
+        .await
+        .expect_err("outer timeout must stop a pending attempt");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[tokio::test]
@@ -4643,6 +5130,21 @@ mod tests {
             .await
             .expect("second caller acquires the released submission permit");
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn boundless_checkpoint_does_not_hold_account_permit() {
+        let gate = super::BoundlessBalanceGate::new();
+        let permit = gate.acquire_submission().await;
+
+        let acquired = run_after_submission_permit(permit, || async {
+            tokio::time::timeout(Duration::from_secs(1), gate.acquire_submission())
+                .await
+                .is_ok()
+        })
+        .await;
+
+        assert!(acquired);
     }
 
     #[test]

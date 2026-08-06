@@ -20,7 +20,8 @@ use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
     alloy::{
-        providers::{DynProvider, Provider},
+        network::Ethereum,
+        providers::{DynProvider, PendingTransactionBuilder, Provider},
         rpc::types::BlockId,
     },
     contracts::RequestId,
@@ -1186,6 +1187,41 @@ async fn publish_boundless_progress(
     crate::persist_prover_progress(observer, &progress, "boundless_submission", permit).await
 }
 
+async fn checkpoint_boundless_tx_hash(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    submission: &Submission,
+    image_ref: &str,
+    deployment: &str,
+    mcycles_count: (u32, u32),
+) {
+    match crate::acquire_submission_checkpoint_permit(observer).await {
+        Ok(tx_hash_permit) => {
+            if let Err(error) = publish_boundless_progress(
+                observer,
+                &tx_hash_permit,
+                submission,
+                image_ref,
+                deployment,
+                false,
+                mcycles_count,
+            )
+            .await
+            {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    error = %error,
+                    "Boundless request id is durable but its optional transaction hash was not checkpointed"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            provider_request_id = %submission.provider_request_id,
+            error = %error,
+            "Boundless request id is durable but transaction-hash checkpoint admission is closed"
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_offchain_after_checkpoint<F, Fut>(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
@@ -2213,6 +2249,53 @@ impl BoundlessProver {
         .await
     }
 
+    async fn observe_onchain_receipt(
+        &self,
+        pending_tx: PendingTransactionBuilder<Ethereum>,
+        submission: &Submission,
+        request_id: U256,
+        request_digest: B256,
+    ) {
+        let outcome = match tokio::time::timeout(
+            BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT,
+            pending_tx.get_receipt(),
+        )
+        .await
+        {
+            Ok(Ok(receipt)) if receipt.status() => BoundlessReceiptOutcome::ConfirmedSuccess,
+            Ok(Ok(_)) => {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    remote_tx_hash = ?submission.remote_tx_hash,
+                    "Boundless submitRequest transaction reverted; removing its local funding reservation"
+                );
+                BoundlessReceiptOutcome::ConfirmedRevert
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    remote_tx_hash = ?submission.remote_tx_hash,
+                    error = %error,
+                    "Boundless submitRequest receipt is uncertain; retaining its local funding reservation"
+                );
+                BoundlessReceiptOutcome::Uncertain
+            }
+            Err(_) => {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    remote_tx_hash = ?submission.remote_tx_hash,
+                    timeout_secs = BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT.as_secs(),
+                    "Timed out waiting for Boundless submitRequest receipt; retaining its local funding reservation"
+                );
+                BoundlessReceiptOutcome::Uncertain
+            }
+        };
+        self.balance_gate
+            .lock_state()
+            .await
+            .reconcile_receipt(request_id, request_digest, outcome);
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn submit_request_onchain(
         &self,
@@ -2303,74 +2386,16 @@ impl BoundlessProver {
         match send_result {
             Ok(Ok(pending_tx)) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
-                match crate::acquire_submission_checkpoint_permit(observer).await {
-                    Ok(tx_hash_permit) => {
-                        if let Err(error) = publish_boundless_progress(
-                            observer,
-                            &tx_hash_permit,
-                            &submission,
-                            image_ref,
-                            deployment,
-                            false,
-                            (quoted_mcycles_count, evaluated_mcycles_count),
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                provider_request_id = %submission.provider_request_id,
-                                error = %error,
-                                "Boundless request id is durable but its optional transaction hash was not checkpointed"
-                            );
-                        }
-                    }
-                    Err(error) => tracing::warn!(
-                        provider_request_id = %submission.provider_request_id,
-                        error = %error,
-                        "Boundless request id is durable but transaction-hash checkpoint admission is closed"
-                    ),
-                }
-
-                let receipt_outcome = match tokio::time::timeout(
-                    BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT,
-                    pending_tx.get_receipt(),
+                checkpoint_boundless_tx_hash(
+                    observer,
+                    &submission,
+                    image_ref,
+                    deployment,
+                    (quoted_mcycles_count, evaluated_mcycles_count),
                 )
-                .await
-                {
-                    Ok(Ok(receipt)) if receipt.status() => {
-                        BoundlessReceiptOutcome::ConfirmedSuccess
-                    }
-                    Ok(Ok(_)) => {
-                        tracing::warn!(
-                            provider_request_id = %submission.provider_request_id,
-                            remote_tx_hash = ?submission.remote_tx_hash,
-                            "Boundless submitRequest transaction reverted; removing its local funding reservation"
-                        );
-                        BoundlessReceiptOutcome::ConfirmedRevert
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            provider_request_id = %submission.provider_request_id,
-                            remote_tx_hash = ?submission.remote_tx_hash,
-                            error = %error,
-                            "Boundless submitRequest receipt is uncertain; retaining its local funding reservation"
-                        );
-                        BoundlessReceiptOutcome::Uncertain
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            provider_request_id = %submission.provider_request_id,
-                            remote_tx_hash = ?submission.remote_tx_hash,
-                            timeout_secs = BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT.as_secs(),
-                            "Timed out waiting for Boundless submitRequest receipt; retaining its local funding reservation"
-                        );
-                        BoundlessReceiptOutcome::Uncertain
-                    }
-                };
-                self.balance_gate.lock_state().await.reconcile_receipt(
-                    request.id,
-                    request_digest,
-                    receipt_outcome,
-                );
+                .await;
+                self.observe_onchain_receipt(pending_tx, &submission, request.id, request_digest)
+                    .await;
             }
             Ok(Err(error)) => {
                 tracing::warn!(

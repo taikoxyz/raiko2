@@ -8419,6 +8419,7 @@ dependencies = [
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
  "raiko2-remote-poller",
+ "raiko2-runtime",
  "reqwest 0.12.28",
  "reth-ethereum-primitives",
  "risc0-binfmt",

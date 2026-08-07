@@ -4,7 +4,7 @@
 
 **Goal:** Make every in-process Boundless on-chain submission use one recoverable account order, three-confirmation receipts, and bounded external waits without allowing checkpoint storage to extend the account critical section.
 
-**Architecture:** `BoundlessBalanceGate` remains the process-wide account controller. Its semaphore serializes one on-chain submission through three-confirmation receipt observation, while its short-lived state mutex stores funding reservations, a nonce high-water mark, and at most one uncertain signed submission. Required request-id persistence happens before the account permit; optional transaction-hash persistence happens after it and is bounded.
+**Architecture:** `BoundlessBalanceGate` remains the process-wide account controller. Its semaphore serializes one on-chain submission through three-confirmation receipt observation, while its short-lived state mutex stores funding reservations, a nonce high-water mark, and at most one uncertain signed submission. Required request-id persistence happens before the account permit; after account admission the path reacquires a lifecycle permit through the bounded broadcast outcome; optional transaction-hash persistence happens after both permits and is bounded.
 
 **Tech Stack:** Rust, Tokio synchronization and timeouts, Alloy provider and transaction APIs, Boundless Market SDK.
 
@@ -138,9 +138,13 @@ Expected: FAIL because both checkpoints currently run while the account permit i
 **Step 3: Reorder submission setup**
 
 Create `Submission` and persist its request identity after signing but before taking the account
-permit. After broadcast and receipt observation, explicitly drop the account permit before invoking
-the bounded best-effort tx-hash checkpoint. Keep the required checkpoint fail-closed and the optional
-checkpoint fail-open.
+permit. An uncertain predecessor obtains a fresh lifecycle permit only around its bounded recovery
+and possible rebroadcast. For the new request, complete read-only funding and nonce queries under the
+account permit, then acquire a fresh lifecycle permit immediately before funding reservation or
+broadcast. This rejects a task whose runtime began draining while it waited for the account or
+completed read-only RPCs. Retain that permit through the bounded send and receipt result. Afterward,
+explicitly drop the lifecycle and account permits before invoking the bounded best-effort tx-hash
+checkpoint. Keep the required checkpoint fail-closed and the optional checkpoint fail-open.
 
 **Step 4: Run the sequencing test**
 
@@ -220,8 +224,10 @@ Expected: FAIL because the pending transaction currently uses Alloy's one-confir
 **Step 3: Configure one bounded three-confirmation wait**
 
 Call `with_required_confirmations(3)` before `get_receipt()` and increase the outer receipt timeout
-to cover those blocks. Do not inspect or react to a one-confirmation intermediate receipt. A returned
-revert is therefore removed immediately; only an error or total timeout remains uncertain.
+to 90 seconds so Alloy polling and three-confirmation Sepolia progression fit. Increase nonce
+recovery's outer budget to 180 seconds so it cannot truncate the receipt wait. Do not inspect or
+react to a one-confirmation intermediate receipt. A returned revert is therefore removed
+immediately; only an error or total timeout remains uncertain.
 
 **Step 4: Run the receipt tests**
 

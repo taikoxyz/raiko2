@@ -17,8 +17,9 @@ does not enter funding state.
 
 The submission path uses three independent controls:
 
-- A lifecycle `SubmissionCheckpointPermit` prevents the engine from cancelling or replacing a task
-  between remote submission acceptance and durable progress persistence. It is not the account lock.
+- Lifecycle `SubmissionCheckpointPermit`s fence two distinct intervals: the required request-ID
+  checkpoint, and the bounded on-chain broadcast interval after account admission. They are not the
+  account lock.
 - An account-level submission permit serializes reconciliation of an uncertain predecessor, snapshot
   reads, balance and nonce reads, funding calculation, local reservation, transaction broadcast, and
   receipt observation across every configured Boundless network pair.
@@ -36,23 +37,27 @@ For request B:
 
 1. Sign B and persist its request identifier before acquiring the account submission permit. The
    lifecycle checkpoint permit is released as soon as this required checkpoint is durable.
-2. Acquire the shared account submission permit.
-3. If an earlier nonce has an uncertain broadcast outcome, reconcile or retry that exact signed
-   request at its original nonce. Do not send B until the predecessor is accepted or its nonce is
-   otherwise consumed.
-4. Fetch the complete indexer snapshot and aligned on-chain market balance. Query latest and pending
+2. Acquire the shared account submission permit. If an earlier nonce has an uncertain broadcast
+   outcome, acquire a fresh lifecycle permit and reconcile or retry that exact signed request at its
+   original nonce. Do not send B until the predecessor is accepted or its nonce is otherwise
+   consumed; release this recovery permit after its bounded outcome.
+3. Fetch the complete indexer snapshot and aligned on-chain market balance. Query latest and pending
    account nonces and select the maximum of those values and the local high-water mark.
-5. Calculate B's attached value using indexed outstanding requests plus the local overlay. Record B's
-   funding reservation and explicit nonce before broadcast.
-6. Broadcast B with a 30-second timeout. On timeout or an ambiguous RPC error, reconcile chain nonce,
+4. Calculate B's attached value using indexed outstanding requests plus the local overlay. Then
+   acquire a fresh lifecycle permit immediately before recording B's funding reservation and
+   explicit nonce. If draining started while B waited for the account or completed read-only RPCs,
+   lifecycle admission fails before any reservation or broadcast.
+5. Broadcast B with a 30-second timeout. On timeout or an ambiguous RPC error, reconcile chain nonce,
    indexer state, and the request digest; if necessary, retry B with the same request, signature,
    value, and nonce.
-7. Once broadcast is accepted, wait for one receipt that has three canonical confirmations. Receipt
-   observation has a bounded total timeout and retains the account submission permit.
-8. A three-confirmation success keeps B's funding reservation until the indexer observes it. A
+6. Once broadcast is accepted, wait for one receipt that has three canonical confirmations. Receipt
+   observation has a 90-second total timeout, sized for Sepolia block progression and Alloy HTTP
+   polling, and retains both the account and broadcast lifecycle permits. Nonce recovery has a
+   180-second outer budget so it cannot truncate this wait.
+7. A three-confirmation success keeps B's funding reservation until the indexer observes it. A
    three-confirmation revert removes B's reservation because the attached value did not take effect.
-9. Release the account submission permit. An optional transaction-hash checkpoint runs outside this
-   critical section with its own total timeout.
+8. Release the lifecycle and account submission permits. An optional transaction-hash checkpoint
+   runs outside this critical section with its own total timeout.
 
 A broadcast or receipt result that remains uncertain after bounded recovery keeps B in both the
 funding overlay and the uncertain-nonce slot. The current call may return for polling, but the next
@@ -85,6 +90,8 @@ available.
 - Funding-state access does not retain a mutex guard across network waits.
 - Required request-id persistence and optional transaction-hash persistence do not hold the account
   submission permit.
+- A task that waited for the account permit must reacquire lifecycle admission before reservation or
+  broadcast, and runtime draining waits for an admitted bounded broadcast interval.
 - Every receipt outcome is evaluated only after three confirmations.
 - A successful receipt retains B until indexer catch-up; a reverted receipt removes B.
 - A timed-out broadcast cannot let the next request reuse or skip B's nonce.

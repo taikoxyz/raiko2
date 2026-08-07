@@ -72,9 +72,10 @@ const BOUNDLESS_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_RPC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 const BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDLESS_SUBMIT_SEND_TIMEOUT: Duration = Duration::from_secs(30);
-const BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
+// Covers three confirmations on Sepolia, including Alloy's HTTP polling interval and RPC latency.
+const BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 const BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS: u64 = 3;
-const BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
 const BOUNDLESS_NONCE_RECOVERY_POLL_DELAY: Duration = Duration::from_secs(1);
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
@@ -1890,12 +1891,15 @@ impl BoundlessBalanceGate {
         Self::default()
     }
 
-    async fn acquire_submission(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.submission
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("Boundless submission semaphore is never closed")
+    async fn acquire_submission(&self) -> BoundlessSubmissionPermit {
+        BoundlessSubmissionPermit {
+            permit: self
+                .submission
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Boundless submission semaphore is never closed"),
+        }
     }
 
     async fn lock_state(&self) -> tokio::sync::MutexGuard<'_, BoundlessFundingState> {
@@ -1903,14 +1907,25 @@ impl BoundlessBalanceGate {
     }
 }
 
-async fn run_after_submission_permit<T, F, Fut>(
+struct BoundlessSubmissionPermit {
     permit: tokio::sync::OwnedSemaphorePermit,
-    run: F,
-) -> T
+}
+
+impl BoundlessSubmissionPermit {
+    async fn acquire_broadcast_permit(
+        &self,
+        observer: Option<&Arc<dyn ProverProgressObserver>>,
+    ) -> RaikoResult<crate::SubmissionCheckpointPermit> {
+        crate::acquire_submission_checkpoint_permit(observer).await
+    }
+}
+
+async fn run_after_submission_permit<T, F, Fut>(permit: BoundlessSubmissionPermit, run: F) -> T
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
+    let BoundlessSubmissionPermit { permit } = permit;
     drop(permit);
     run().await
 }
@@ -2720,7 +2735,10 @@ impl BoundlessProver {
             .uncertain_submission()
             .is_some()
         {
-            self.resolve_uncertain_submission(client).await?;
+            let recovery_permit = submission_permit.acquire_broadcast_permit(observer).await?;
+            let recovery = self.resolve_uncertain_submission(client).await;
+            drop(recovery_permit);
+            recovery?;
         }
         let snapshot = self.funding_snapshot(request.client_address()).await?;
         let balance = Self::funding_balance(
@@ -2730,6 +2748,9 @@ impl BoundlessProver {
         )
         .await?;
         let (latest_nonce, pending_nonce) = Self::account_nonces(client).await?;
+        // Recheck runtime admission after the read-only account work and before nonce reservation:
+        // draining may have started while this task waited for the account permit or RPCs.
+        let broadcast_permit = submission_permit.acquire_broadcast_permit(observer).await?;
         let (value, nonce) = {
             let mut state = self.balance_gate.lock_state().await;
             let value =
@@ -2768,6 +2789,7 @@ impl BoundlessProver {
                 "Boundless submitRequest remains uncertain; retaining its nonce and funding reservation"
             ),
         }
+        drop(broadcast_permit);
 
         run_after_submission_permit(submission_permit, || async {
             if submission.remote_tx_hash.is_some() {
@@ -3751,9 +3773,16 @@ mod tests {
         validate_offer_params, validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
-    use alloy_primitives::{B256, Bytes, U256, address, utils::parse_ether};
+    use alloy_primitives::{Address, B256, Bloom, Bytes, U256, address, utils::parse_ether};
     use boundless_market::{
         ProofRequest, RequestId,
+        alloy::{
+            consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom},
+            network::Ethereum,
+            providers::{PendingTransactionBuilder, Provider, ProviderBuilder},
+            rpc::types::{Block, Log, Transaction, TransactionReceipt},
+            transports::mock::Asserter,
+        },
         contracts::{Offer, Predicate, RequestInput, Requirements},
         price_oracle::{Amount, Asset},
         storage::{StorageUploaderConfig, StorageUploaderType},
@@ -3761,6 +3790,7 @@ mod tests {
     use httpmock::{Method::GET, MockServer};
     use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmission, RemoteSubmissionId};
+    use raiko2_runtime::RuntimeManager;
     use std::{
         collections::HashMap,
         env,
@@ -3788,6 +3818,10 @@ mod tests {
 
     struct RecordingProgressObserver {
         persisted: Arc<AtomicBool>,
+    }
+
+    struct RuntimeLifecycleProgressObserver {
+        runtime: Arc<RuntimeManager>,
     }
 
     struct PermitDropSignal(Arc<AtomicBool>);
@@ -3843,6 +3877,26 @@ mod tests {
             _permit: &crate::SubmissionCheckpointPermit,
         ) -> Result<(), crate::ProgressPersistenceError> {
             self.persisted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for RuntimeLifecycleProgressObserver {
+        async fn acquire_submission_checkpoint_permit(
+            &self,
+        ) -> Result<crate::SubmissionCheckpointPermit, crate::ProgressPersistenceError> {
+            self.runtime
+                .acquire_submission_checkpoint_permit()
+                .map(crate::SubmissionCheckpointPermit::tracked)
+                .map_err(|error| crate::ProgressPersistenceError::Permanent(error.to_string()))
+        }
+
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
             Ok(())
         }
     }
@@ -3958,6 +4012,66 @@ mod tests {
     #[test]
     fn boundless_receipt_wait_requires_three_confirmations() {
         assert_eq!(BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, 3);
+    }
+
+    #[tokio::test]
+    async fn boundless_receipt_budget_allows_three_sepolia_confirmations() {
+        let tx_hash = B256::repeat_byte(0x11);
+        let block_hash = B256::repeat_byte(0x22);
+        let receipt = TransactionReceipt {
+            inner: ReceiptEnvelope::Legacy(ReceiptWithBloom {
+                receipt: Receipt {
+                    status: true.into(),
+                    cumulative_gas_used: 21_000,
+                    logs: Vec::<Log>::new(),
+                },
+                logs_bloom: Bloom::default(),
+            }),
+            transaction_hash: tx_hash,
+            transaction_index: Some(0),
+            block_hash: Some(block_hash),
+            block_number: Some(100),
+            gas_used: 21_000,
+            effective_gas_price: 1,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::default(),
+            to: Some(Address::default()),
+            contract_address: None,
+        };
+        let asserter = Asserter::new();
+        asserter.push_success(&Some(receipt.clone()));
+        asserter.push_success(&100_u64);
+        for number in 99..=100 {
+            let mut block = Block::<Transaction>::default();
+            block.header.inner.number = number;
+            asserter.push_success(&Some(block));
+        }
+        asserter.push_success(&101_u64);
+        let mut block = Block::<Transaction>::default();
+        block.header.inner.number = 101;
+        asserter.push_success(&Some(block));
+        asserter.push_success(&102_u64);
+        let mut block = Block::<Transaction>::default();
+        block.header.inner.number = 102;
+        asserter.push_success(&Some(block));
+        asserter.push_success(&Some(receipt));
+
+        let provider = ProviderBuilder::<_, _, Ethereum>::default().connect_mocked_client(asserter);
+        provider.client().set_poll_interval(Duration::from_secs(6));
+        let pending = PendingTransactionBuilder::new(provider.root().clone(), tx_hash);
+        let prover = BoundlessProver::new(BoundlessConfig::default());
+
+        let outcome = prover
+            .observe_onchain_receipt(
+                pending,
+                &test_submission(),
+                U256::from(1),
+                B256::repeat_byte(0x33),
+            )
+            .await;
+
+        assert_eq!(outcome, super::BoundlessReceiptOutcome::ConfirmedSuccess);
     }
 
     #[tokio::test]
@@ -5130,6 +5244,48 @@ mod tests {
             .await
             .expect("second caller acquires the released submission permit");
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn boundless_account_wait_rechecks_the_runtime_lifecycle_before_broadcast() {
+        let runtime = Arc::new(
+            RuntimeManager::new_memory("test".to_string(), "boundless-lifecycle".to_string())
+                .expect("runtime"),
+        );
+        let observer: Arc<dyn crate::ProverProgressObserver> =
+            Arc::new(RuntimeLifecycleProgressObserver {
+                runtime: Arc::clone(&runtime),
+            });
+        let gate = super::BoundlessBalanceGate::new();
+        let blocker = gate.acquire_submission().await;
+        let mut waiting = tokio::spawn({
+            let gate = gate.clone();
+            let observer = Arc::clone(&observer);
+            async move {
+                let account_permit = gate.acquire_submission().await;
+                account_permit
+                    .acquire_broadcast_permit(Some(&observer))
+                    .await
+            }
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err(),
+            "the candidate must still be waiting for the account permit"
+        );
+        runtime.start_draining();
+        drop(blocker);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("candidate finishes after account release")
+            .expect("candidate task");
+        let Err(error) = result else {
+            panic!("draining must reject lifecycle admission before broadcast");
+        };
+        assert!(error.to_string().contains("runtime is draining"));
     }
 
     #[tokio::test]

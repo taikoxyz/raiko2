@@ -38,7 +38,8 @@ serde_with.workspace = true
 # RISC0 dependencies (optional)
 risc0-zkvm = { workspace = true, optional = true }
 risc0-ethereum-contracts-boundless = { workspace = true, optional = true }
-boundless-market = { workspace = true, optional = true }
+# Keep this host-only feature policy outside the root manifest, which is part of guest provenance.
+boundless-market = { version = "=2.0.0", optional = true, default-features = false, features = ["gcs"] }
 
 # SP1 dependencies (optional)
 sp1-sdk = { workspace = true, optional = true }

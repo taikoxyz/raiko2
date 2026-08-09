@@ -968,7 +968,9 @@ Authentication uses Google ADC from the active environment
 application-default credentials). Inline service account JSON through
 `GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
 supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
-alias, and existing S3/Pinata/File settings continue to work.
+alias. Pinata and File remain available in default builds. S3 requires a host built
+with the non-default `boundless-s3` feature; a default build rejects
+`BOUNDLESS_STORAGE_UPLOADER=s3` with a configuration error.
 
 ## Release TEE Provider Metadata
 

@@ -132,8 +132,9 @@ The runtime is governed by these invariants:
     artifacts it consumes. Cancellation and terminal failure
     first persist the exact root transition, then remove its owner before another root can reuse the
     stage. A terminal worker error remains queue-retryable until that runtime transition is durable.
-    Runtime state remains authoritative if projection removal fails, and reconciliation rebuilds the
-    projection instead of rolling state back. Recovery, destructive retirement, and root
+    Runtime state remains authoritative if projection removal fails, and a matching client request
+    rebuilds an inactive projection instead of rolling state back. Startup restores persisted state
+    without attaching proof work. Recovery, destructive retirement, and root
     replacement compare the complete observed runtime-task snapshot; a stale request performs no
     queue effect, and replacement commits one successor before swapping its owner projection.
     Publication checkpoints persist their typed owner/hash intent before materializing the pending

@@ -971,8 +971,11 @@ supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibilit
 alias. Pinata and File remain available in default builds. S3 requires a host built
 with the non-default `boundless-s3` feature; a default build rejects an explicit
 `BOUNDLESS_STORAGE_UPLOADER=s3` selection during startup. Without an explicit selector,
-GCS, Pinata, and File settings take precedence over S3 inference. A default build ignores
-an otherwise unused `S3_BUCKET`, so a stale S3 secret cannot override GCS selection.
+GCS, Pinata, and File settings take precedence over S3 inference, so a stale `S3_BUCKET` cannot
+override one of those configured uploaders. If `S3_BUCKET` is the only implicit uploader setting,
+a default build fails startup and requires the `boundless-s3` feature. A Boundless network route
+also fails startup when no storage uploader is selected, because raiko2 always uploads both the
+program and guest input before creating a market request.
 
 ## Boundless Funding Operations
 

@@ -1511,8 +1511,16 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
         None if env_var("GCS_BUCKET").is_some() => StorageUploaderType::Gcs,
         None if env_var("PINATA_JWT").is_some() => StorageUploaderType::Pinata,
         None if env_var("FILE_PATH").is_some() => StorageUploaderType::File,
-        #[cfg(feature = "boundless-s3")]
-        None if env_var("S3_BUCKET").is_some() => StorageUploaderType::S3,
+        None if env_var("S3_BUCKET").is_some() => {
+            #[cfg(feature = "boundless-s3")]
+            {
+                StorageUploaderType::S3
+            }
+            #[cfg(not(feature = "boundless-s3"))]
+            {
+                return Err(s3_feature_disabled_error());
+            }
+        }
         None => StorageUploaderType::None,
     };
     #[cfg(feature = "boundless-s3")]
@@ -1880,7 +1888,13 @@ impl BoundlessProver {
     /// Returns an error when uploader environment variables are invalid or request a storage
     /// backend that was not compiled into this build.
     pub fn validate_storage_configuration() -> RaikoResult<()> {
-        storage_uploader_config_from_env().map(drop)
+        let config = storage_uploader_config_from_env()?;
+        if config.storage_uploader == StorageUploaderType::None {
+            return Err(RaikoError::InvalidRequestConfig(
+                "Boundless proving requires a storage uploader".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Build a prover with its own private balance gate. Use [`BoundlessProver::with_balance_gate`]
@@ -5221,6 +5235,8 @@ mod tests {
         let request_digest = test_digest(11);
         let submission = test_submission();
         let gate_during_broadcast = gate.clone();
+        let dispatch_entered = Arc::new(AtomicBool::new(false));
+        let dispatch_entered_from_closure = Arc::clone(&dispatch_entered);
         let cancelled = tokio::time::timeout(
             Duration::from_millis(20),
             reserve_boundless_funding_before_dispatch(
@@ -5234,6 +5250,7 @@ mod tests {
                 1,
                 10,
                 || async move {
+                    dispatch_entered_from_closure.store(true, Ordering::SeqCst);
                     let state = gate_during_broadcast.lock_state().await;
                     assert!(state.uncertain_submission().is_some());
                     assert!(state.recent[&request_id].contains_key(&request_digest));
@@ -5247,6 +5264,10 @@ mod tests {
         assert!(
             cancelled.is_err(),
             "the simulated broadcast must be cancelled"
+        );
+        assert!(
+            dispatch_entered.load(Ordering::SeqCst),
+            "dispatch must start before the timeout cancels it"
         );
         let state = gate.lock_state().await;
         assert!(state.uncertain_submission().is_some());
@@ -5536,6 +5557,16 @@ mod tests {
     }
 
     #[test]
+    fn storage_validation_rejects_missing_boundless_uploader() {
+        let _guard = StorageEnvGuard::new(&[]);
+
+        let error = BoundlessProver::validate_storage_configuration()
+            .expect_err("Boundless requires a storage uploader");
+
+        assert!(error.to_string().contains("storage uploader"), "{error}");
+    }
+
+    #[test]
     fn storage_uploader_config_prefers_implicit_gcs_over_stale_s3_bucket() {
         let _guard = StorageEnvGuard::new(&[
             ("GCS_BUCKET", "raiko-boundless"),
@@ -5550,12 +5581,13 @@ mod tests {
 
     #[cfg(not(feature = "boundless-s3"))]
     #[test]
-    fn storage_uploader_config_ignores_implicit_s3_without_compiled_support() {
+    fn storage_uploader_config_rejects_implicit_s3_without_compiled_support() {
         let _guard = StorageEnvGuard::new(&[("S3_BUCKET", "stale-s3-bucket")]);
 
-        let config = storage_uploader_config_from_env().expect("unconfigured storage");
+        let error = BoundlessProver::validate_storage_configuration()
+            .expect_err("implicit S3 must require the optional boundless-s3 feature");
 
-        assert_eq!(config.storage_uploader, StorageUploaderType::None);
+        assert!(error.to_string().contains("boundless-s3"), "{error}");
     }
 
     #[cfg(not(feature = "boundless-s3"))]
@@ -5602,6 +5634,17 @@ mod tests {
         assert_eq!(config.aws_region.as_deref(), Some("us-east-1"));
         assert_eq!(config.s3_presigned, Some(true));
         assert_eq!(config.s3_public_url, Some(false));
+    }
+
+    #[cfg(feature = "boundless-s3")]
+    #[test]
+    fn storage_uploader_config_selects_implicit_s3_when_compiled() {
+        let _guard = StorageEnvGuard::new(&[("S3_BUCKET", "raiko-boundless")]);
+
+        let config = storage_uploader_config_from_env().expect("implicit S3 storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::S3);
+        assert_eq!(config.s3_bucket.as_deref(), Some("raiko-boundless"));
     }
 
     #[cfg(feature = "boundless-s3")]

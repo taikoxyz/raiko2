@@ -116,8 +116,10 @@ Keep the S3 change in the same PR as a separate commit:
 - Compile S3 imports, fields, configuration, and tests only with `boundless-s3`.
 - A default build receiving an explicit `BOUNDLESS_STORAGE_UPLOADER=s3` must fail during startup
   with a clear configuration error explaining that the S3 feature is not compiled. Implicit
-  selection prefers GCS, Pinata, and File, and a default build ignores an otherwise stale
-  `S3_BUCKET`.
+  selection prefers GCS, Pinata, and File over `S3_BUCKET`; an S3-only implicit configuration must
+  also fail startup in a default build.
+- A Boundless network route must fail startup if storage resolves to `none`, because both program
+  and guest-input publication require an uploader.
 - GCS, Pinata, file, and none retain their current behavior.
 
 SP1 may still carry its own AWS signer dependency. Acceptance here is narrower: constructing and

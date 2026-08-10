@@ -968,7 +968,33 @@ Authentication uses Google ADC from the active environment
 application-default credentials). Inline service account JSON through
 `GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
 supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
-alias, and existing S3/Pinata/File settings continue to work.
+alias. Pinata and File remain available in default builds. S3 requires a host built
+with the non-default `boundless-s3` feature; a default build rejects an explicit
+`BOUNDLESS_STORAGE_UPLOADER=s3` selection during startup. Without an explicit selector,
+GCS, Pinata, and File settings take precedence over S3 inference, so a stale `S3_BUCKET` cannot
+override one of those configured uploaders. If `S3_BUCKET` is the only implicit uploader setting,
+a default build fails startup and requires the `boundless-s3` feature. A Boundless network route
+also fails startup when no storage uploader is selected, because raiko2 always uploads both the
+program and guest input before creating a market request.
+
+## Boundless Funding Operations
+
+On-chain Boundless submissions use a process-local reservation ledger together with
+`BoundlessMarket.balanceOf(requestor)`. Operate exactly one active raiko2 writer for each Boundless
+signer. Multiple processes or namespaces sharing one signer are unsupported: their local
+reservations and nonce allocators cannot coordinate.
+
+The configured Boundless market RPC must provide a monotonic `latest` view. If the endpoint is a
+load balancer, remove nodes that lag the previously served head; a stale balance can temporarily
+understate the required top-up. Local reservations remain for 60 seconds after `lock_expires_at` so
+small local-clock and chain-time differences stay conservative.
+
+Keep the signer wallet funded for the peak `attached_value` plus transaction gas. Monitor the
+structured `Prepared Boundless funding decision` event (`reserved_count`, `market_balance`,
+`required_total`, and `attached_value`) and alert before the required top-up approaches available
+wallet funds. A restart intentionally does not reconstruct old reservations. An old request may
+therefore consume market balance before a rebuilt request locks; the existing no-lock timeout and
+rebid path recovers it at the accepted cost of retrying at most the active worker set.
 
 ## Release TEE Provider Metadata
 

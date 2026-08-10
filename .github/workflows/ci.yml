@@ -285,6 +285,16 @@ jobs:
       - name: test prover
         run: cargo test -p raiko2-prover --lib
 
+      - name: test optional Boundless S3 support
+        run: cargo test -p raiko2-prover --lib --features boundless-s3
+
+      - name: verify default host excludes Boundless S3 SDK
+        run: |
+          if cargo tree -p raiko2 -i aws-sdk-s3; then
+            echo "::error::default raiko2 dependency graph unexpectedly includes aws-sdk-s3"
+            exit 1
+          fi
+
   rust-test-xtask:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'

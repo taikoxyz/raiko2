@@ -1336,7 +1336,8 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - Queue tasks use a renewable lease for worker ownership but no global wall-clock timeout. RISC0
   network routes own retry/rebid behavior in the Boundless prover. SP1 network routes retry failed
   root tasks up to twenty times with a fixed five-minute delay.
-- Boundless storage upload is environment-driven. Set `BOUNDLESS_STORAGE_UPLOADER=gcs`,
+- Boundless storage upload is environment-driven and required whenever a Boundless network route
+  is enabled. Set `BOUNDLESS_STORAGE_UPLOADER=gcs`,
   `GCS_BUCKET=<your-gcs-bucket>`, and
   `GCS_PUBLIC_URL=false` to use a private GCS bucket. The GCP
   project is selected by gcloud/ADC, for example `<your-gcp-project>`, and is
@@ -1345,6 +1346,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   for publicly readable buckets. `STORAGE_UPLOADER` remains accepted for
   compatibility. Optional `GCS_URL` supports custom endpoints, and
   `GCS_CREDENTIALS_JSON` can provide service account JSON when ADC is not used.
+  S3 support is excluded from default host builds; build `raiko2` with the
+  non-default `boundless-s3` feature before selecting `BOUNDLESS_STORAGE_UPLOADER=s3`.
+  An explicit unsupported S3 selection fails during host startup. When no uploader is explicitly
+  selected, GCS, Pinata, and File settings take precedence over `S3_BUCKET`. An S3-only implicit
+  configuration still fails startup in a default build and requires the `boundless-s3` feature.
 - `rpc.pairs[*].l2_witness_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
 - `l2_provider = "reth"` expects `debug_executionWitness` headers as RLP-encoded bytes.

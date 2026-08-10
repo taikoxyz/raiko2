@@ -433,11 +433,11 @@ impl AppState {
                 "removed unowned pending proof publications after runtime restart"
             );
         }
-        let recovered = crate::server::handlers::recover_pending_runtime_tasks(&self).await?;
-        if recovered > 0 {
+        let restored = crate::server::handlers::restore_pending_runtime_state(&self).await?;
+        if restored > 0 {
             tracing::info!(
-                recovered,
-                "recovered pending runtime tasks into the memory queue"
+                restored,
+                "restored pending runtime state without execution attachment"
             );
         }
         self.pipelines.start_workers(

@@ -175,8 +175,8 @@ carries dependencies on the pending proposal proof artifact references it consum
 prover result that cannot yet be published is converted into a durable publication-retry payload, so
 publication retries reuse the computed proof and do not pay to prove again.
 Cached proposal artifacts short-circuit proposal execution through the observer; they never remove a
-proposal node or change an aggregate input from dependent to independent. Initial admission and every
-recovery therefore reconstruct the same task set, payloads, and dependency edges.
+proposal node or change an aggregate input from dependent to independent. Initial admission and each
+client-triggered recovery therefore reconstruct the same task set, payloads, and dependency edges.
 
 Artifact payload policy follows the canonical engine task kind, not the current root-owner set. A
 proposal task accepts a normal proof payload; `ShastaSp1` proposal tasks additionally accept a
@@ -203,10 +203,12 @@ Execution ownership is derived from canonical proposal or aggregate task members
 aggregate inputs so storage cleanup can protect live consumers; consuming a proposal artifact does
 not authorize proposal-stage callbacks to mutate the aggregate root.
 
-Terminal engine state is not authoritative by itself. If terminal synchronization fails, API and
-startup recovery inspect the exact `RootOwner(task_id, incarnation_id)` projection. Only an active
-task (`Pending`, `Ready`, `Retrying`, or `Running`) in that projection blocks re-enqueue; a shared
-task owned by another root or a terminal engine record cannot strand a non-terminal runtime root.
+Terminal engine state is not authoritative by itself. If terminal synchronization fails, a matching
+API request inspects the exact `RootOwner(task_id, incarnation_id)` projection. Only an active task
+(`Pending`, `Ready`, `Retrying`, or `Running`) in that projection blocks re-enqueue; a shared task
+owned by another root or a terminal engine record cannot strand a non-terminal runtime root. Startup
+restores and validates persisted runtime state without attaching an execution projection, so process
+restart alone cannot submit or rebid paid proof work.
 
 Recovery, invalidation, cleanup, and replacement use snapshot-conditional runtime commands. A
 recovery attempt can reopen only the exact record whose metadata it used to build the recovery plan;

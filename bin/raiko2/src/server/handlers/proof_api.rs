@@ -1110,6 +1110,9 @@ async fn handle_existing_batch_task(
                 .await;
             }
             Err(err) => {
+                if existing_metadata.has_remote_submission_progress() {
+                    return Err(checkpointed_recovery_error(&existing, submission, err));
+                }
                 warn!(
                     task_id = existing.task_id,
                     existing_pipeline = %existing.pipeline_key,
@@ -1128,6 +1131,21 @@ async fn handle_existing_batch_task(
         }
     }
     compatibility_response_for_task(state, &existing.task_id).await
+}
+
+fn checkpointed_recovery_error(
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    submission: &CanonicalBatchSubmission,
+    error: ApiError,
+) -> ApiError {
+    warn!(
+        task_id = existing.task_id,
+        existing_pipeline = %existing.pipeline_key,
+        requested_pipeline = %submission.route.pipeline_key(),
+        error = %error.message,
+        "failed to recover checkpointed task; preserving existing runtime root"
+    );
+    error
 }
 
 async fn readable_completed_response(
@@ -1200,6 +1218,7 @@ async fn replace_existing_batch_task(
     Ok(registered_batch_response(submission))
 }
 
+#[cfg(test)]
 async fn reenqueue_existing_batch_task(
     state: &AppState,
     existing: &raiko2_runtime::RuntimeTaskRecord,
@@ -1487,27 +1506,6 @@ async fn reset_runtime_task_to_allocated(
     })
 }
 
-async fn reenqueue_existing_external_aggregate_task(
-    state: &AppState,
-    engine: &Arc<dyn EngineHandle>,
-    fallback_inputs: Option<&[AggregateProofInput]>,
-    existing: &raiko2_runtime::RuntimeTaskRecord,
-    existing_metadata: &TaskMetadata,
-) -> Result<(), ApiError> {
-    let recovery_plan =
-        external_aggregate_recovery_execution_plan(fallback_inputs, existing, existing_metadata)?;
-    state
-        .lifecycle
-        .attach(existing, engine, recovery_plan)
-        .await
-        .map_err(|err| {
-            ApiError::internal(format!(
-                "failed to recover dormant aggregate task {}: {err}",
-                existing.task_id
-            ))
-        })
-}
-
 fn external_aggregate_recovery_execution_plan(
     fallback_inputs: Option<&[AggregateProofInput]>,
     existing: &raiko2_runtime::RuntimeTaskRecord,
@@ -1567,13 +1565,13 @@ fn validate_legacy_sgxgeth_cancellation(
     Ok(())
 }
 
-pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::Result<usize> {
+pub(crate) async fn restore_pending_runtime_state(state: &AppState) -> anyhow::Result<usize> {
     let records = state.runtime.list_tasks().await?;
-    let mut recovered = 0;
+    let mut restored = 0;
     for record in records {
-        let metadata = TaskMetadata::decode_for_record(&record).map_err(|error| {
+        TaskMetadata::decode_for_record(&record).map_err(|error| {
             anyhow::anyhow!(
-                "runtime task {} has invalid canonical metadata during recovery: {error}",
+                "runtime task {} has invalid canonical metadata during restoration: {error}",
                 record.task_id
             )
         })?;
@@ -1614,76 +1612,14 @@ pub(crate) async fn recover_pending_runtime_tasks(state: &AppState) -> anyhow::R
         ) {
             continue;
         }
-        if record.runner_status == RuntimeRunnerStatus::Failed
-            && !failed_stage_is_reenqueueable(&record, &metadata)
-        {
-            continue;
-        }
-
-        let Some(recovery_record) = state
-            .runtime
-            .prepare_task_for_recovery_if_unchanged(&record)
-            .await?
-        else {
-            warn!(
-                task_id = record.task_id,
-                "runtime root changed before startup recovery preparation"
-            );
-            continue;
-        };
-
-        let external_aggregate =
-            metadata.proposals.is_empty() && metadata.aggregate_request.is_some();
-        let result = if external_aggregate {
-            recover_external_aggregate_runtime_task(state, &recovery_record, &metadata).await
-        } else {
-            reenqueue_existing_batch_task(state, &recovery_record, &metadata).await
-        };
-        match result {
-            Ok(()) => {
-                recovered += 1;
-            }
-            Err(error) => {
-                record_recovery_failure_if_unchanged(
-                    state,
-                    &recovery_record,
-                    format!("runtime recovery failed: {}", error.message),
-                )
-                .await?;
-            }
+        if matches!(
+            record.runner_status,
+            RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+        ) {
+            restored += 1;
         }
     }
-    Ok(recovered)
-}
-
-async fn record_recovery_failure_if_unchanged(
-    state: &AppState,
-    expected: &raiko2_runtime::RuntimeTaskRecord,
-    error: String,
-) -> anyhow::Result<()> {
-    match state
-        .runtime
-        .fail_task_if_unchanged(expected, error)
-        .await?
-    {
-        RuntimeMutationOutcome::Applied | RuntimeMutationOutcome::AlreadyApplied => {}
-        outcome => warn!(
-            task_id = expected.task_id,
-            outcome = ?outcome,
-            "runtime root changed before startup recovery failure was recorded"
-        ),
-    }
-    Ok(())
-}
-
-async fn recover_external_aggregate_runtime_task(
-    state: &AppState,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &TaskMetadata,
-) -> Result<(), ApiError> {
-    recover_external_aggregate_input_artifacts(state.runtime.as_ref(), record, metadata).await?;
-    let engine = resolve_engine(state, &record.network_pair, record.pipeline_key)?;
-    reenqueue_existing_external_aggregate_task(state, &engine, None, record, metadata).await
+    Ok(restored)
 }
 
 fn aggregate_inputs_from_artifacts(
@@ -1705,6 +1641,7 @@ fn aggregate_inputs_from_artifacts(
         .collect()
 }
 
+#[cfg(test)]
 async fn recover_external_aggregate_input_artifacts(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
@@ -2971,12 +2908,6 @@ fn should_reenqueue_existing_submission(
         return false;
     }
 
-    // Remote submission ownership is durable and must never be recovered by a duplicate poll.
-    // Keep this guard before the lifecycle transition resolves or inspects an engine.
-    if metadata.has_remote_submission_progress() {
-        return false;
-    }
-
     // Exact-owner activity is evaluated atomically with recovery and attachment by
     // `ProofLifecycle::recover_if_inactive`.
     true
@@ -3383,56 +3314,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct FailingInspectionEngine {
-        inspections: AtomicUsize,
-    }
-
-    impl EngineHandle for FailingInspectionEngine {
-        fn get_status(
-            &self,
-            _id: EngineTaskId,
-        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn get_task_state(
-            &self,
-            _id: EngineTaskId,
-        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn has_active_execution(
-            &self,
-            _owner: raiko2_queue::RootOwner,
-        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
-            self.inspections.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async {
-                Err(TaskStoreError::backend(std::io::Error::other(
-                    "inspection failed",
-                )))
-            })
-        }
-
-        fn attach_execution_plan(
-            &self,
-            _owner: raiko2_queue::RootOwner,
-            _plan: EngineExecutionPlan,
-        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected execution attachment") })
-        }
-
-        fn detach_execution(
-            &self,
-            _owner: raiko2_queue::RootOwner,
-            mode: raiko2_queue::DetachMode,
-        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
-        {
-            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
-        }
-    }
-
     struct CancelFailEngine;
 
     impl EngineHandle for CancelFailEngine {
@@ -3476,6 +3357,59 @@ mod tests {
                     "detach failed",
                 )))
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailFirstAttachEngine {
+        attempts: AtomicUsize,
+    }
+
+    impl EngineHandle for FailFirstAttachEngine {
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn has_active_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+        ) -> BoxFuture<'_, Result<bool, TaskStoreError>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn attach_execution_plan(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            _plan: EngineExecutionPlan,
+        ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                if attempt == 0 {
+                    return Err(TaskStoreError::backend(std::io::Error::other(
+                        "attach failed",
+                    )));
+                }
+                Ok(raiko2_queue::AttachOutcome::Attached)
+            })
+        }
+
+        fn detach_execution(
+            &self,
+            _owner: raiko2_queue::RootOwner,
+            mode: raiko2_queue::DetachMode,
+        ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
+        {
+            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
         }
     }
 
@@ -3554,7 +3488,6 @@ mod tests {
     }
 
     struct RecordingEngine {
-        runtime_on_attach: Option<Arc<RuntimeManager>>,
         proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
         aggregate_inputs: Mutex<Vec<AggregateProofInput>>,
         attached: Mutex<Vec<raiko2_queue::RootOwner>>,
@@ -3564,18 +3497,10 @@ mod tests {
     impl RecordingEngine {
         const fn new() -> Self {
             Self {
-                runtime_on_attach: None,
                 proposals: Mutex::new(Vec::new()),
                 aggregate_inputs: Mutex::new(Vec::new()),
                 attached: Mutex::new(Vec::new()),
                 detached: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn progressing(runtime: Arc<RuntimeManager>) -> Self {
-            Self {
-                runtime_on_attach: Some(runtime),
-                ..Self::new()
             }
         }
     }
@@ -3587,26 +3512,6 @@ mod tests {
             plan: EngineExecutionPlan,
         ) -> BoxFuture<'_, Result<raiko2_queue::AttachOutcome, TaskStoreError>> {
             Box::pin(async move {
-                if let Some(runtime) = &self.runtime_on_attach {
-                    let task_id = owner.task_id.clone();
-                    let incarnation_id = owner.incarnation_id;
-                    runtime
-                        .update_tasks_by_ref(&task_id, |records| {
-                            let record = records
-                                .iter_mut()
-                                .find(|record| record.incarnation_id == incarnation_id)
-                                .ok_or_else(|| {
-                                    anyhow!("attached root incarnation is no longer current")
-                                })?;
-                            record.runner_status = RuntimeRunnerStatus::Running;
-                            record.error = None;
-                            Ok(())
-                        })
-                        .await
-                        .map_err(|error| {
-                            TaskStoreError::backend(std::io::Error::other(error.to_string()))
-                        })?;
-                }
                 self.attached
                     .lock()
                     .expect("attached owners mutex")
@@ -4651,24 +4556,17 @@ mod tests {
     }
 
     #[test]
-    fn running_submission_with_remote_progress_is_not_reenqueueable() {
+    fn running_submission_with_remote_progress_defers_recovery_to_lifecycle() {
         let mut metadata = task_metadata_with_stage(Some("prove"));
-        set_test_proposal_runtime(
-            &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xsp1".to_string()),
-                sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
-                ..TaskRuntimeMetadata::default()
-            },
-        );
+        set_test_proposal_runtime(&mut metadata, test_sp1_runtime("0xsp1", 1, 7_200));
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.pipeline_key = PipelineKey::ShastaSp1;
 
-        assert!(!should_reenqueue_existing_submission(&record, &metadata));
+        assert!(should_reenqueue_existing_submission(&record, &metadata));
     }
 
     #[tokio::test]
-    async fn remote_progress_duplicate_skips_failing_execution_inspection() -> Result<()> {
+    async fn remote_progress_duplicate_recovers_inactive_execution() -> Result<()> {
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
             PipelineKey::ShastaSp1,
@@ -4698,7 +4596,7 @@ mod tests {
         runtime.upsert_task(&record).await?;
         submission.public_task_id.clone_from(&record.task_id);
 
-        let engine = Arc::new(FailingInspectionEngine::default());
+        let engine = Arc::new(RecordingEngine::new());
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
@@ -4711,12 +4609,54 @@ mod tests {
             .map_err(|error| anyhow!(error.message))?;
 
         assert!(!response_is_completed(&response));
-        assert_eq!(engine.inspections.load(Ordering::Relaxed), 0);
+        assert_eq!(engine.attached.lock().expect("attached owners").len(), 1);
         assert_eq!(
             runtime
                 .get_task(&record.task_id)
                 .await?
-                .expect("runtime task"),
+                .expect("runtime task")
+                .runner_status,
+            RuntimeRunnerStatus::Allocated
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_progress_recovery_failure_preserves_checkpointed_root() -> Result<()> {
+        let pipeline = PipelineKey::ShastaRisc0Network;
+        let route = CanonicalProofRoute::new(pipeline.route(), pipeline);
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "remote-progress-recovery-failure",
+        ))?);
+        let mut submission = canonical_submission(route, false);
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        set_test_proposal_runtime(
+            &mut metadata,
+            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        align_runtime_record_identity(&mut record, &mut metadata, pipeline, pipeline.route());
+        record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        runtime.upsert_task(&record).await?;
+        submission.public_task_id.clone_from(&record.task_id);
+
+        let engine = Arc::new(FailFirstAttachEngine::default());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(pipeline, engine.clone() as Arc<dyn EngineHandle>)],
+        );
+        let error = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .expect_err("checkpointed recovery failure must not replace the root");
+
+        assert!(error.message.contains("attach failed"));
+        assert_eq!(engine.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            runtime
+                .get_task(&record.task_id)
+                .await?
+                .expect("checkpointed runtime task"),
             record
         );
         Ok(())
@@ -5102,7 +5042,7 @@ mod tests {
                 )],
             );
 
-            assert_eq!(recover_pending_runtime_tasks(&state).await?, 0);
+            assert_eq!(restore_pending_runtime_state(&state).await?, 0);
             assert!(
                 recorder
                     .proposals
@@ -5150,7 +5090,7 @@ mod tests {
                 )],
             );
 
-            assert_eq!(recover_pending_runtime_tasks(&state).await?, 0);
+            assert_eq!(restore_pending_runtime_state(&state).await?, 0);
             assert!(
                 recorder
                     .proposals
@@ -6078,7 +6018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_recovery_requeues_pending_runtime_task() -> Result<()> {
+    async fn startup_recovery_restores_pending_runtime_task_without_attachment() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "startup-pending-recovery",
         ))?);
@@ -6096,14 +6036,14 @@ mod tests {
 
         let recorder = Arc::new(RecordingEngine::new());
         let state = test_state(runtime.clone(), recorder.clone());
-        assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
-        assert_eq!(
+        assert_eq!(restore_pending_runtime_state(&state).await?, 1);
+        assert!(
             recorder
-                .proposals
+                .attached
                 .lock()
-                .expect("proposal submissions")
-                .len(),
-            1
+                .expect("attached owners")
+                .is_empty(),
+            "startup must not attach proof work"
         );
         assert_eq!(
             runtime
@@ -6111,7 +6051,7 @@ mod tests {
                 .await?
                 .expect("runtime task")
                 .runner_status,
-            RuntimeRunnerStatus::Allocated
+            RuntimeRunnerStatus::Running
         );
         Ok(())
     }
@@ -6139,7 +6079,7 @@ mod tests {
             .await
             .expect_err("startup validation must reject removed metadata fields");
         assert!(validation_error.to_string().contains(&task_id));
-        assert!(recover_pending_runtime_tasks(&state).await.is_err());
+        assert!(restore_pending_runtime_state(&state).await.is_err());
         assert_eq!(
             runtime
                 .get_task(&task_id)
@@ -6152,36 +6092,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_recovery_does_not_overwrite_progress_from_attachment() -> Result<()> {
+    async fn startup_recovery_preserves_provider_checkpoint_without_attachment() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
-            "startup-attachment-progress",
+            "startup-provider-checkpoint",
         ))?);
-        let submission = canonical_submission(native_local_route(), false);
-        let fingerprint = batch_request_fingerprint_for_test(&submission)?;
-        let plan = build_submission_plan(&submission, &fingerprint)
-            .map_err(|error| anyhow!(error.message))?;
-        let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
-            .map_err(|error| anyhow!(error.message))?;
-        let task_id = registration.task_id.clone();
-        runtime.register_task(registration).await?;
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        set_test_proposal_runtime(
+            &mut metadata,
+            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+        );
+        let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        let task_id = record.task_id.clone();
+        runtime.upsert_task(&record).await?;
 
-        let recorder = Arc::new(RecordingEngine::progressing(Arc::clone(&runtime)));
-        let state = test_state(Arc::clone(&runtime), recorder);
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaRisc0Network,
+                recorder.clone() as Arc<dyn EngineHandle>,
+            )],
+        );
 
-        assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
+        assert_eq!(restore_pending_runtime_state(&state).await?, 1);
+        assert!(
+            recorder
+                .attached
+                .lock()
+                .expect("attached owners")
+                .is_empty(),
+            "startup must not resume the provider request"
+        );
+        let restored = runtime.get_task(&task_id).await?.expect("runtime task");
+        assert_eq!(restored.runner_status, RuntimeRunnerStatus::Running);
+        let restored_metadata = TaskMetadata::decode_for_record(&restored)?;
         assert_eq!(
-            runtime
-                .get_task(&task_id)
-                .await?
-                .expect("runtime task")
-                .runner_status,
-            RuntimeRunnerStatus::Running
+            restored_metadata.runtime.proposals[&restored_metadata.proposals[0].task_id]
+                .provider_request_id
+                .as_deref(),
+            Some("0xpending")
         );
         Ok(())
     }
 
     #[tokio::test]
-    async fn startup_recovery_reopens_failed_runtime_task_before_attaching() -> Result<()> {
+    async fn startup_recovery_leaves_failed_runtime_task_for_client_retry() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "startup-failed-recovery",
         ))?);
@@ -6200,14 +6155,14 @@ mod tests {
 
         let recorder = Arc::new(RecordingEngine::new());
         let state = test_state(runtime.clone(), recorder.clone());
-        assert_eq!(recover_pending_runtime_tasks(&state).await?, 1);
-        assert_eq!(
+        assert_eq!(restore_pending_runtime_state(&state).await?, 0);
+        assert!(
             recorder
-                .proposals
+                .attached
                 .lock()
-                .expect("proposal submissions")
-                .len(),
-            1
+                .expect("attached owners")
+                .is_empty(),
+            "startup must not retry failed work"
         );
         assert_eq!(
             runtime
@@ -6215,8 +6170,24 @@ mod tests {
                 .await?
                 .expect("runtime task")
                 .runner_status,
-            RuntimeRunnerStatus::Allocated
+            RuntimeRunnerStatus::Failed
         );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_request_reattaches_stale_provider_checkpoint() -> Result<()> {
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        set_test_proposal_runtime(
+            &mut metadata,
+            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+        );
+        let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+
+        assert!(should_reenqueue_existing_submission(
+            &record,
+            &TaskMetadata::decode_for_record(&record)?,
+        ));
         Ok(())
     }
 

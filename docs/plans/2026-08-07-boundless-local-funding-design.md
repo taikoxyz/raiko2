@@ -76,7 +76,8 @@ cancellation, send timeout, or an ambiguous RPC error must not remove its reserv
 - A confirmed submit transaction revert removes only the matching request digest.
 - Successful, timed-out, and ambiguous submissions remain reserved.
 - Other rebid digests under the same request ID remain active.
-- Reservations are pruned only after `lock_expires_at`.
+- Reservations are pruned only after `lock_expires_at` plus a 60-second local-clock/chain-time
+  safety margin.
 
 Keeping a reservation after an earlier lock or fulfillment can temporarily over-deposit, but cannot
 underfund the account. Network I/O must never occur while holding the funding-state mutex.
@@ -113,8 +114,10 @@ Keep the S3 change in the same PR as a separate commit:
 - Declare `boundless-market` with `default-features = false` and GCS enabled.
 - Add a non-default `boundless-s3` feature enabling `boundless-market/s3`.
 - Compile S3 imports, fields, configuration, and tests only with `boundless-s3`.
-- A default build receiving `BOUNDLESS_STORAGE_UPLOADER=s3` must return a clear configuration error
-  explaining that the S3 feature is not compiled.
+- A default build receiving an explicit `BOUNDLESS_STORAGE_UPLOADER=s3` must fail during startup
+  with a clear configuration error explaining that the S3 feature is not compiled. Implicit
+  selection prefers GCS, Pinata, and File, and a default build ignores an otherwise stale
+  `S3_BUCKET`.
 - GCS, Pinata, file, and none retain their current behavior.
 
 SP1 may still carry its own AWS signer dependency. Acceptance here is narrower: constructing and

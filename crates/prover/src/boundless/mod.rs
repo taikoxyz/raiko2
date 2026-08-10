@@ -75,6 +75,7 @@ const BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 const BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS: u64 = 3;
 const BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
 const BOUNDLESS_NONCE_RECOVERY_POLL_DELAY: Duration = Duration::from_secs(1);
+const BOUNDLESS_FUNDING_EXPIRY_GRACE_SECS: u64 = 60;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -168,10 +169,9 @@ type BoundlessClient = Client<
 
 /// Downloader used by the Boundless requestor client.
 ///
-/// Boundless's standard downloader eagerly constructs every feature-enabled backend. In a GCS-only
-/// deployment that includes the S3 feature for compatibility, that starts AWS's credential chain
-/// and probes IMDS even though no `s3://` URL can be produced. Keep those backends opt-in based on
-/// the configured uploader instead.
+/// Default builds omit Boundless S3 support entirely. Builds that explicitly enable S3 still
+/// initialize its downloader only when S3 is selected, so GCS-only deployments do not start the
+/// AWS credential chain or probe IMDS.
 #[derive(Clone, Debug)]
 struct BoundlessStorageDownloader {
     http: HttpDownloader,
@@ -245,7 +245,7 @@ impl StorageDownloader for BoundlessStorageDownloader {
                 #[cfg(not(feature = "boundless-s3"))]
                 {
                     Err(StorageError::UnsupportedScheme(
-                        "s3 (raiko2-prover was built without the boundless-s3 feature)".to_string(),
+                        "s3 (this build does not include the boundless-s3 feature)".to_string(),
                     ))
                 }
             }
@@ -1478,7 +1478,7 @@ fn should_initialize_s3_downloader(config: &StorageUploaderConfig) -> bool {
 #[cfg(not(feature = "boundless-s3"))]
 fn s3_feature_disabled_error() -> RaikoError {
     RaikoError::InvalidRequestConfig(
-        "Boundless S3 storage was requested, but raiko2-prover was built without the boundless-s3 feature"
+        "Boundless S3 storage was requested, but this build does not include the boundless-s3 feature"
             .to_string(),
     )
 }
@@ -1508,19 +1508,11 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
                 "Invalid BOUNDLESS_STORAGE_UPLOADER/STORAGE_UPLOADER value {other}"
             )));
         }
-        None if env_var("S3_BUCKET").is_some() => {
-            #[cfg(feature = "boundless-s3")]
-            {
-                StorageUploaderType::S3
-            }
-            #[cfg(not(feature = "boundless-s3"))]
-            {
-                return Err(s3_feature_disabled_error());
-            }
-        }
         None if env_var("GCS_BUCKET").is_some() => StorageUploaderType::Gcs,
         None if env_var("PINATA_JWT").is_some() => StorageUploaderType::Pinata,
         None if env_var("FILE_PATH").is_some() => StorageUploaderType::File,
+        #[cfg(feature = "boundless-s3")]
+        None if env_var("S3_BUCKET").is_some() => StorageUploaderType::S3,
         None => StorageUploaderType::None,
     };
     #[cfg(feature = "boundless-s3")]
@@ -1710,7 +1702,14 @@ impl BoundlessFundingState {
         now: u64,
     ) -> BoundlessFundingDecision {
         self.recent.retain(|_, recent_by_digest| {
-            recent_by_digest.retain(|_, recent| now <= recent.lock_expires_at);
+            // The market evaluates lock expiry against block.timestamp, while `now` is local wall
+            // clock. Retain a short grace so a locally fast clock cannot release funds that a
+            // slightly lagging chain can still debit.
+            recent_by_digest.retain(|_, recent| {
+                now <= recent
+                    .lock_expires_at
+                    .saturating_add(BOUNDLESS_FUNDING_EXPIRY_GRACE_SECS)
+            });
             !recent_by_digest.is_empty()
         });
 
@@ -1807,6 +1806,56 @@ where
     run().await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn reserve_boundless_funding_before_dispatch<T, F, Fut>(
+    balance_gate: &BoundlessBalanceGate,
+    request: &ProofRequest,
+    submission: &Submission,
+    signature: Bytes,
+    request_digest: B256,
+    market_balance: U256,
+    latest_nonce: u64,
+    pending_nonce: u64,
+    now: u64,
+    dispatch: F,
+) -> RaikoResult<(u64, T)>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    let max_price = U256::from(request.offer.maxPrice);
+    let (decision, nonce) = {
+        let mut state = balance_gate.lock_state().await;
+        let decision = state.funding_decision(request.id, max_price, market_balance, now);
+        let nonce = state.allocate_nonce(latest_nonce, pending_nonce)?;
+        state.record_uncertain(BoundlessUncertainSubmission {
+            submission: submission.clone(),
+            request: request.clone(),
+            signature,
+            request_digest,
+            value: decision.attached_value,
+            nonce,
+        })?;
+        state.record_recent(
+            request.id,
+            max_price,
+            submission.lock_expires_at,
+            request_digest,
+        );
+        (decision, nonce)
+    };
+    tracing::info!(
+        request_id = %request.id,
+        reserved_count = decision.reserved_count,
+        market_balance = %market_balance,
+        required_total = %decision.required_total,
+        attached_value = %decision.attached_value,
+        "Prepared Boundless funding decision"
+    );
+
+    Ok((nonce, dispatch().await))
+}
+
 pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
@@ -1824,6 +1873,16 @@ pub struct BoundlessProver {
 }
 
 impl BoundlessProver {
+    /// Validate process-level Boundless storage selection before the server starts workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when uploader environment variables are invalid or request a storage
+    /// backend that was not compiled into this build.
+    pub fn validate_storage_configuration() -> RaikoResult<()> {
+        storage_uploader_config_from_env().map(drop)
+    }
+
     /// Build a prover with its own private balance gate. Use [`BoundlessProver::with_balance_gate`]
     /// in production so every pair funding the same market account shares one gate.
     #[must_use]
@@ -1898,6 +1957,9 @@ impl BoundlessProver {
     }
 
     async fn funding_balance(client: &BoundlessClient, requestor: Address) -> RaikoResult<U256> {
+        // This read deliberately avoids the external request-history indexer. The configured
+        // market RPC must expose a monotonic `latest` view; operators using a load balancer must
+        // keep lagging nodes out of rotation (see docs/operations.md).
         retry_external_bounded(
             "query boundless balance",
             BOUNDLESS_RPC_TOTAL_TIMEOUT,
@@ -2514,7 +2576,6 @@ impl BoundlessProver {
         evaluated_mcycles_count: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
-        let max_price = U256::from(request.offer.maxPrice);
         // Sign the request before reserving on the balance gate: signing is independent of the
         // deposit value, so there's no reason to hold a reservation across it. The bounded chain id
         // query retries transient RPC errors. `get_chain_id` caches the value inside the SDK's
@@ -2555,39 +2616,23 @@ impl BoundlessProver {
         // Recheck runtime admission after the read-only account work and before nonce reservation:
         // draining may have started while this task waited for the account permit or RPCs.
         let broadcast_permit = submission_permit.acquire_broadcast_permit(observer).await?;
-        // The only broadcast path below reloads this uncertain submission from state. Keep the
-        // decision, nonce allocation, reservation, and uncertain record in one non-async section
-        // so cancellation cannot expose a sent request without its funding reservation.
-        let (decision, nonce) = {
-            let mut state = self.balance_gate.lock_state().await;
-            let decision = state.funding_decision(request.id, max_price, balance, now_secs());
-            let nonce = state.allocate_nonce(latest_nonce, pending_nonce)?;
-            state.record_uncertain(BoundlessUncertainSubmission {
-                submission: submission.clone(),
-                request: request.clone(),
-                signature,
-                request_digest,
-                value: decision.attached_value,
-                nonce,
-            })?;
-            state.record_recent(
-                request.id,
-                max_price,
-                submission.lock_expires_at,
-                request_digest,
-            );
-            (decision, nonce)
-        };
-        tracing::info!(
-            request_id = %request.id,
-            reserved_count = decision.reserved_count,
-            market_balance = %balance,
-            required_total = %decision.required_total,
-            attached_value = %decision.attached_value,
-            "Prepared Boundless funding decision"
-        );
+        // The helper records the funding reservation and uncertain nonce before invoking the only
+        // broadcast path, so cancellation at any dispatch await cannot expose an untracked send.
+        let (nonce, resolution) = reserve_boundless_funding_before_dispatch(
+            &self.balance_gate,
+            request,
+            &submission,
+            signature,
+            request_digest,
+            balance,
+            latest_nonce,
+            pending_nonce,
+            now_secs(),
+            || self.resolve_uncertain_submission(client),
+        )
+        .await?;
 
-        match self.resolve_uncertain_submission(client).await {
+        match resolution {
             Ok(remote_tx_hash) => submission.remote_tx_hash = remote_tx_hash,
             Err(error) => tracing::warn!(
                 provider_request_id = %submission.provider_request_id,
@@ -3278,8 +3323,8 @@ fn parse_request_amount(
 }
 
 /// Top-up needed so the on-chain balance covers all submitted-but-unlocked max-price claims.
-/// Over-deposit under RPC or indexer lag is possible and safe because deposits accrue to the market
-/// account.
+/// Over-deposit under RPC lag or conservative local retention is safe because deposits accrue to
+/// the market account.
 const fn deposit_topup(on_chain_balance: U256, reserved_total: U256) -> U256 {
     reserved_total.saturating_sub(on_chain_balance)
 }
@@ -3576,10 +3621,10 @@ mod tests {
         dispatch_offchain_after_checkpoint, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
         parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
-        quote_batch_mcycles, retry_external_bounded, run_after_submission_permit,
-        should_defer_boundless_poll_timeout, should_rebid_unlocked_request,
-        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
-        validate_resume_context,
+        quote_batch_mcycles, reserve_boundless_funding_before_dispatch, retry_external_bounded,
+        run_after_submission_permit, should_defer_boundless_poll_timeout,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
+        validate_offer_params, validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{Address, B256, Bloom, Bytes, U256, address, utils::parse_ether};
@@ -5174,29 +5219,29 @@ mod tests {
         let request = test_proof_request();
         let request_id = request.id;
         let request_digest = test_digest(11);
-        {
-            let mut state = gate.lock_state().await;
-            state
-                .record_uncertain(super::BoundlessUncertainSubmission {
-                    submission: test_submission(),
-                    request,
-                    signature: Bytes::from_static(b"fixture_signature"),
-                    request_digest,
-                    value: U256::from(2u64),
-                    nonce: 1,
-                })
-                .expect("record uncertain submission before broadcast");
-            state.record_recent(request_id, U256::from(2u64), 90, request_digest);
-        }
-
+        let submission = test_submission();
         let gate_during_broadcast = gate.clone();
-        let cancelled = tokio::time::timeout(Duration::from_millis(20), async move {
-            let state = gate_during_broadcast.lock_state().await;
-            assert!(state.uncertain_submission().is_some());
-            assert!(state.recent[&request_id].contains_key(&request_digest));
-            drop(state);
-            std::future::pending::<()>().await;
-        })
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(20),
+            reserve_boundless_funding_before_dispatch(
+                &gate,
+                &request,
+                &submission,
+                Bytes::from_static(b"fixture_signature"),
+                request_digest,
+                U256::ZERO,
+                1,
+                1,
+                10,
+                || async move {
+                    let state = gate_during_broadcast.lock_state().await;
+                    assert!(state.uncertain_submission().is_some());
+                    assert!(state.recent[&request_id].contains_key(&request_digest));
+                    drop(state);
+                    std::future::pending::<()>().await;
+                },
+            ),
+        )
         .await;
 
         assert!(
@@ -5238,18 +5283,27 @@ mod tests {
     }
 
     #[test]
-    fn boundless_funding_state_prunes_reservations_only_after_lock_expiry() {
+    fn boundless_funding_state_prunes_reservations_after_chain_time_grace() {
         let mut state = super::BoundlessFundingState::default();
         state.record_recent(U256::from(1u64), U256::from(100u64), 100, test_digest(11));
         state.record_recent(U256::from(2u64), U256::from(50u64), 101, test_digest(21));
 
-        let decision = state.funding_decision(U256::from(3u64), U256::from(70u64), U256::ZERO, 101);
+        let at_boundary =
+            state.funding_decision(U256::from(3u64), U256::from(70u64), U256::ZERO, 160);
+
+        assert!(state.recent.contains_key(&U256::from(1u64)));
+        assert!(state.recent.contains_key(&U256::from(2u64)));
+        assert_eq!(at_boundary.reserved_count, 3);
+        assert_eq!(at_boundary.required_total, U256::from(220u64));
+
+        let after_boundary =
+            state.funding_decision(U256::from(3u64), U256::from(70u64), U256::ZERO, 161);
 
         assert!(!state.recent.contains_key(&U256::from(1u64)));
         assert!(state.recent.contains_key(&U256::from(2u64)));
-        assert_eq!(decision.reserved_count, 2);
-        assert_eq!(decision.required_total, U256::from(120u64));
-        assert_eq!(decision.attached_value, U256::from(120u64));
+        assert_eq!(after_boundary.reserved_count, 2);
+        assert_eq!(after_boundary.required_total, U256::from(120u64));
+        assert_eq!(after_boundary.attached_value, U256::from(120u64));
     }
 
     #[test]
@@ -5481,6 +5535,29 @@ mod tests {
         assert_eq!(config.gcs_public_url, Some(false));
     }
 
+    #[test]
+    fn storage_uploader_config_prefers_implicit_gcs_over_stale_s3_bucket() {
+        let _guard = StorageEnvGuard::new(&[
+            ("GCS_BUCKET", "raiko-boundless"),
+            ("S3_BUCKET", "stale-s3-bucket"),
+        ]);
+
+        let config = storage_uploader_config_from_env().expect("GCS storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::Gcs);
+        assert_eq!(config.gcs_bucket.as_deref(), Some("raiko-boundless"));
+    }
+
+    #[cfg(not(feature = "boundless-s3"))]
+    #[test]
+    fn storage_uploader_config_ignores_implicit_s3_without_compiled_support() {
+        let _guard = StorageEnvGuard::new(&[("S3_BUCKET", "stale-s3-bucket")]);
+
+        let config = storage_uploader_config_from_env().expect("unconfigured storage");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::None);
+    }
+
     #[cfg(not(feature = "boundless-s3"))]
     #[test]
     fn storage_uploader_config_rejects_s3_without_compiled_support() {
@@ -5495,7 +5572,7 @@ mod tests {
             ("S3_PUBLIC_URL", "false"),
         ]);
 
-        let error = storage_uploader_config_from_env()
+        let error = BoundlessProver::validate_storage_configuration()
             .expect_err("S3 must require the optional boundless-s3 feature");
 
         assert!(error.to_string().contains("boundless-s3"), "{error}");

@@ -1347,6 +1347,8 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   `GCS_CREDENTIALS_JSON` can provide service account JSON when ADC is not used.
   S3 support is excluded from default host builds; build `raiko2` with the
   non-default `boundless-s3` feature before selecting `BOUNDLESS_STORAGE_UPLOADER=s3`.
+  An explicit unsupported S3 selection fails during host startup. When no uploader is explicitly
+  selected, GCS, Pinata, and File settings take precedence, and default builds ignore `S3_BUCKET`.
 - `rpc.pairs[*].l2_witness_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
 - `l2_provider = "reth"` expects `debug_executionWitness` headers as RLP-encoded bytes.

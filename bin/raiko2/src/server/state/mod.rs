@@ -312,10 +312,15 @@ impl PipelineResources {
 
         // Every pair uses the same market account, so reservations share one balance gate.
         #[cfg(feature = "host")]
-        let boundless_balance_gate = pipelines
+        let boundless_enabled = pipelines
             .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network)
-            .then(BoundlessBalanceGate::new);
+            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
+        #[cfg(feature = "host")]
+        if boundless_enabled {
+            BoundlessProver::validate_storage_configuration().map_err(anyhow::Error::msg)?;
+        }
+        #[cfg(feature = "host")]
+        let boundless_balance_gate = boundless_enabled.then(BoundlessBalanceGate::new);
 
         Ok(Self {
             #[cfg(feature = "local-provers")]

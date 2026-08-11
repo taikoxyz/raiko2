@@ -161,8 +161,8 @@ cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check
 ```
 
 Check mode exits nonzero when a source input, artifact, or provenance manifest is missing or stale.
-Refresh locally with `just build-guest <backend>`, or dispatch the manual `sync-guest-elf` workflow
-when the required guest toolchain is not available locally.
+Refresh locally with `just build-guest <backend>` on a machine with the required guest toolchain and
+enough build storage.
 
 Check mode is a drift detector, not a reproducibility attestation: the manifest is recorded by the
 same build tooling from local state, so it catches accidental staleness rather than substituted

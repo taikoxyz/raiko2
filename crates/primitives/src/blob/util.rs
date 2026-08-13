@@ -55,7 +55,7 @@ fn proof_of_equivalence_kzg_settings() -> KzgSettings {
     KzgSettings {
         roots_of_unity: kzg_rs::get_roots_of_unity(),
         g1_points: &[],
-        g2_points: kzg_rs::get_g2_points(),
+        g2_points: kzg_rs::get_g2_verification_points(),
     }
 }
 
@@ -266,12 +266,13 @@ mod test {
     }
 
     #[test]
-    fn proof_of_equivalence_settings_skip_unused_g1_setup() {
+    fn proof_of_equivalence_settings_skip_unused_setup_points() {
         let settings = proof_of_equivalence_kzg_settings();
 
         assert!(settings.g1_points.is_empty());
         assert_eq!(settings.roots_of_unity.len(), kzg_rs::NUM_ROOTS_OF_UNITY);
-        assert!(settings.g2_points.len() > 1);
+        assert_eq!(settings.g2_points.len(), 2);
+        assert_eq!(settings.g2_points, &kzg_rs::get_g2_points()[..2]);
     }
 
     #[cfg(feature = "kzg-host")]

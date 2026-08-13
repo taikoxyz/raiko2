@@ -3042,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "bindings"
 version = "2.2.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118#4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=b5b259d8d57d2309b8c008c12981a3afa43659e6#b5b259d8d57d2309b8c008c12981a3afa43659e6"
 dependencies = [
  "alloy 1.8.3",
  "serde",
@@ -6208,7 +6208,7 @@ dependencies = [
 [[package]]
 name = "kzg-rs"
 version = "0.2.8"
-source = "git+https://github.com/taikoxyz/kzg-rs?branch=feat%2Fraiko2#b61ef3e78f0fdc252229cec119b7abb46a57bb0f"
+source = "git+https://github.com/taikoxyz/kzg-rs?rev=186d219afef748560eb3f4e15a7377c9ebc5b670#186d219afef748560eb3f4e15a7377c9ebc5b670"
 dependencies = [
  "bls12_381 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bls12_381 0.8.0 (git+https://github.com/sp1-patches/bls12_381?tag=patch-0.8.0-sp1-6.0.0)",
@@ -8061,7 +8061,7 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "2.2.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118#4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=b5b259d8d57d2309b8c008c12981a3afa43659e6#b5b259d8d57d2309b8c008c12981a3afa43659e6"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",

@@ -78,7 +78,7 @@ raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "4dbf3522c5b2e2daa3e5de8045cc4a6b60aae118", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "b5b259d8d57d2309b8c008c12981a3afa43659e6", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
@@ -221,4 +221,4 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "portable",
     "std",
 ] }
-kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false }
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "186d219afef748560eb3f4e15a7377c9ebc5b670", default-features = false }

@@ -67,13 +67,13 @@ const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const BOUNDLESS_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const BOUNDLESS_RPC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const BOUNDLESS_RPC_TOTAL_TIMEOUT: Duration = Duration::from_mins(1);
 const BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDLESS_SUBMIT_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 // Covers three confirmations on Sepolia, including Alloy's HTTP polling interval and RPC latency.
 const BOUNDLESS_SUBMIT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 const BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS: u64 = 3;
-const BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+const BOUNDLESS_NONCE_RECOVERY_TOTAL_TIMEOUT: Duration = Duration::from_mins(3);
 const BOUNDLESS_NONCE_RECOVERY_POLL_DELAY: Duration = Duration::from_secs(1);
 const BOUNDLESS_FUNDING_EXPIRY_GRACE_SECS: u64 = 60;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";

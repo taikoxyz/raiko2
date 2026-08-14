@@ -268,10 +268,7 @@ fn validate_l1_anchor_linkage(
             );
         }
 
-        loop {
-            let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) else {
-                break;
-            };
+        while let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) {
             if checkpoint.block_number != header.number {
                 break;
             }

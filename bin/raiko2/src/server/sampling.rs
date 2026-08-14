@@ -137,8 +137,7 @@ impl ZkAnySampler {
 
         let should_draw = target.last_draw_at.is_none_or(|last_draw_at| {
             now.duration_since(last_draw_at)
-                .map(|elapsed| elapsed >= min_interval)
-                .unwrap_or(false)
+                .is_ok_and(|elapsed| elapsed >= min_interval)
         });
 
         if should_draw {

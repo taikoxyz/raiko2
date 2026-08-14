@@ -169,7 +169,7 @@ const fn durability_retry_policy() -> RetryPolicy {
     RetryPolicy::Exponential {
         max_attempts: u32::MAX,
         base_delay: Duration::from_secs(1),
-        max_delay: Duration::from_secs(5 * 60),
+        max_delay: Duration::from_mins(5),
     }
 }
 
@@ -565,7 +565,7 @@ where
 {
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
-            lease_duration: Duration::from_secs(60),
+            lease_duration: Duration::from_mins(1),
             retry: RetryPolicy::None,
         }
     }

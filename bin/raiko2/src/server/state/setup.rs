@@ -89,7 +89,7 @@ pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
         lease_duration: task_lease_duration(config),
         retry: RetryPolicy::Fixed {
             max_attempts: 21,
-            delay: Duration::from_secs(5 * 60),
+            delay: Duration::from_mins(5),
         },
     }
 }

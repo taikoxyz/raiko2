@@ -36,7 +36,7 @@ impl SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            lease_duration: Duration::from_secs(60),
+            lease_duration: Duration::from_mins(1),
             retry: RetryPolicy::None,
         }
     }

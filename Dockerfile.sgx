@@ -1,9 +1,9 @@
 # Dedicated Gramine-based image for the raiko2 SGX proving runtime.
 
-FROM rust:1.94.0-bookworm AS builder
+FROM rust:1.95.0-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV RUSTUP_TOOLCHAIN=1.94.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -24,7 +24,7 @@ COPY bin ./bin
 COPY config ./config
 COPY xtask ./xtask
 
-RUN cargo +1.94.0 build --release -p raiko2-sgx-prover
+RUN cargo +1.95.0 build --release -p raiko2-sgx-prover
 
 FROM gramineproject/gramine:1.8-jammy AS runtime
 

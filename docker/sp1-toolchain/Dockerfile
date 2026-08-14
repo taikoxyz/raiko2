@@ -1,5 +1,5 @@
 # Keep in sync with rust-toolchain.toml.
-ARG RUST_VERSION=1.94.0
+ARG RUST_VERSION=1.95.0
 
 # Keep in sync with the sp1-zkvm version in guests/sp1/Cargo.lock.
 # For example, sp1-zkvm 6.3.0 in Cargo.lock corresponds to Docker tag v6.3.0 here.

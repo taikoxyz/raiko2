@@ -460,7 +460,7 @@ where
 impl<P, O, Id> MemoryStore<P, O, Id> {
     #[must_use]
     pub fn new() -> Self {
-        Self::with_lease(Duration::from_secs(60))
+        Self::with_lease(Duration::from_mins(1))
     }
 
     #[must_use]

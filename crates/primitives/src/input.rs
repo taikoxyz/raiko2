@@ -23,6 +23,7 @@ pub struct StatelessInput {
     /// These are never verified against the pre-state root and are not consumed by consensus
     /// validation — they must not be used in guest logic. Execution reads accounts from the
     /// Merkle-verified witness trie instead.
+    #[serde_as(as = "crate::serde_bincode::SortedAddressMap")]
     pub accounts: AddressMap<TrieAccount>,
 }
 

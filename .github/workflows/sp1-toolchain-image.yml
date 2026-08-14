@@ -51,7 +51,7 @@ jobs:
       packages: write
     env:
       # Keep in sync with rust-toolchain.toml.
-      RUST_VERSION: "1.94.0"
+      RUST_VERSION: "1.95.0"
       # Keep in sync with guests/sp1/Cargo.lock (sp1-zkvm version), but with a leading 'v' (e.g. v6.3.0).
       SP1_DOCKER_TAG: "v6.3.0"
     steps:

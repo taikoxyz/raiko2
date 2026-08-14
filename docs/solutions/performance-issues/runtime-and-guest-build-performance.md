@@ -81,7 +81,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/var/cache/sccache,sharing=locked \
-    cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES}
+    cargo +1.95.0 build --release -p raiko2 ${BIN_FEATURES}
 ```
 
 The runtime Dockerfile defaults Rust and native compilation through `sccache`, and uses `mold` for host linking:

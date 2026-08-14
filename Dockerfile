@@ -3,7 +3,7 @@
 # Raiko2 runtime image for Docker and Docker Compose deployments.
 # This image intentionally excludes SGX-specific setup.
 
-FROM rust:1.94.0-bookworm AS chef
+FROM rust:1.95.0-bookworm AS chef
 
 ARG BIN_FEATURES=""
 ARG CARGO_CHEF_VERSION=0.1.77
@@ -13,7 +13,7 @@ ARG CC="sccache cc"
 ARG CXX="sccache c++"
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV RUSTUP_TOOLCHAIN=1.94.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -75,7 +75,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/var/cache/sccache,sharing=locked \
-    cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES} && \
+    cargo +1.95.0 build --release -p raiko2 ${BIN_FEATURES} && \
     mkdir -p /app/build-output && \
     cp /app/target/release/raiko2 /app/build-output/raiko2 && \
     (sccache --show-stats || true)

@@ -398,47 +398,46 @@ async fn fetch_preflight_witnesses<P: Provider>(
         .map(|(chunk_index, start)| (chunk_index, start, (start + chunk_size).min(blocks.len())))
         .collect::<Vec<_>>();
     let chunk_count = chunked_inputs.len();
-    let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
-        stream::iter(chunked_inputs.into_iter())
-            .map(|(chunk_index, start, end)| {
-                let chain_spec = chain_spec.clone();
-                let chunk_blocks = &blocks[start..end];
-                let chunk_tx_lists = tx_lists.map(|tx_lists| &tx_lists[start..end]);
-                async move {
-                    let chunk_block_numbers = chunk_blocks
-                        .iter()
-                        .map(|block| block.header.number)
-                        .collect::<Vec<_>>();
-                    let operation = preflight_chunk_operation(
-                        proposal_id,
-                        chunk_index,
-                        chunk_count,
-                        &chunk_block_numbers,
-                        chunk_tx_lists.is_some(),
-                    );
-                    retry_shasta_preflight_operation(&operation, || {
-                        let chain_spec = chain_spec.clone();
-                        async {
-                            fetch_preflight_chunk(
-                                provider,
-                                proposal_id,
-                                chunk_index,
-                                chunk_count,
-                                chunk_blocks,
-                                chunk_tx_lists,
-                                chain_spec,
-                            )
-                            .await
-                        }
-                    })
-                    .await
-                }
-            })
-            .buffer_unordered(chunk_concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<RaikoResult<Vec<_>>>()?;
+    let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> = stream::iter(chunked_inputs)
+        .map(|(chunk_index, start, end)| {
+            let chain_spec = chain_spec.clone();
+            let chunk_blocks = &blocks[start..end];
+            let chunk_tx_lists = tx_lists.map(|tx_lists| &tx_lists[start..end]);
+            async move {
+                let chunk_block_numbers = chunk_blocks
+                    .iter()
+                    .map(|block| block.header.number)
+                    .collect::<Vec<_>>();
+                let operation = preflight_chunk_operation(
+                    proposal_id,
+                    chunk_index,
+                    chunk_count,
+                    &chunk_block_numbers,
+                    chunk_tx_lists.is_some(),
+                );
+                retry_shasta_preflight_operation(&operation, || {
+                    let chain_spec = chain_spec.clone();
+                    async {
+                        fetch_preflight_chunk(
+                            provider,
+                            proposal_id,
+                            chunk_index,
+                            chunk_count,
+                            chunk_blocks,
+                            chunk_tx_lists,
+                            chain_spec,
+                        )
+                        .await
+                    }
+                })
+                .await
+            }
+        })
+        .buffer_unordered(chunk_concurrency)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<RaikoResult<Vec<_>>>()?;
     chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
     Ok(chunk_results
         .into_iter()
@@ -1805,10 +1804,7 @@ fn validate_l1_headers(
             )));
         }
 
-        loop {
-            let Some(checkpoint) = anchor_checkpoints.get(checkpoint_index) else {
-                break;
-            };
+        while let Some(checkpoint) = anchor_checkpoints.get(checkpoint_index) {
             if checkpoint.block_number != header.number {
                 break;
             }

@@ -380,7 +380,7 @@ impl RpcL2Provider {
             let mut proofs = self.fetch_system_account_proofs(&requests).await?;
             proofs.sort_by_key(|(block_idx, _)| *block_idx);
 
-            for ((_, witness), (_, proof)) in witness_chunk.iter_mut().zip(proofs.into_iter()) {
+            for ((_, witness), (_, proof)) in witness_chunk.iter_mut().zip(proofs) {
                 witness.state.extend(
                     proof
                         .account_proof

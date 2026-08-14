@@ -7,7 +7,7 @@ use crate::server::state::AppState;
 
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
 pub(crate) const DEFAULT_ACL_RATE_LIMIT_PER_MINUTE: u32 = 200;
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const RATE_LIMIT_WINDOW: Duration = Duration::from_mins(1);
 
 pub(crate) fn authorize_acl_feature_with_rate_limit(
     state: &AppState,

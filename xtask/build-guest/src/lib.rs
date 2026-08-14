@@ -1331,8 +1331,8 @@ mod tests {
         let root = repo_root();
         let workspace = parse_git_revs(&root.join("Cargo.toml")).unwrap();
         let guest_common = parse_git_revs(&root.join("crates/guest-common/Cargo.toml")).unwrap();
-        let risc0_lock = parse_lock_git_revs(&root.join("guests/risc0/Cargo.lock")).unwrap();
-        let sp1_lock = parse_lock_git_revs(&root.join("guests/sp1/Cargo.lock")).unwrap();
+        let risc0_lock = parse_lock_git_rev_sets(&root.join("guests/risc0/Cargo.lock")).unwrap();
+        let sp1_lock = parse_lock_git_rev_sets(&root.join("guests/sp1/Cargo.lock")).unwrap();
 
         let workspace_alethia = workspace
             .get("alethia-reth")
@@ -1346,25 +1346,29 @@ mod tests {
             Some(workspace_alethia),
             "guest-common alethia-reth rev must match workspace"
         );
-        assert_eq!(
-            risc0_lock.get("alethia-reth"),
-            Some(workspace_alethia),
-            "guests/risc0 lock alethia-reth rev must match workspace"
+        assert!(
+            risc0_lock
+                .get("alethia-reth")
+                .is_some_and(|revs| revs.contains(workspace_alethia)),
+            "guests/risc0 lock must include workspace alethia-reth rev {workspace_alethia}"
         );
-        assert_eq!(
-            sp1_lock.get("alethia-reth"),
-            Some(workspace_alethia),
-            "guests/sp1 lock alethia-reth rev must match workspace"
+        assert!(
+            sp1_lock
+                .get("alethia-reth")
+                .is_some_and(|revs| revs.contains(workspace_alethia)),
+            "guests/sp1 lock must include workspace alethia-reth rev {workspace_alethia}"
         );
-        assert_eq!(
-            risc0_lock.get("taiko-mono"),
-            Some(workspace_protocol),
-            "guests/risc0 lock taiko-mono rev must match workspace"
+        assert!(
+            risc0_lock
+                .get("taiko-mono")
+                .is_some_and(|revs| revs.contains(workspace_protocol)),
+            "guests/risc0 lock must include workspace taiko-mono rev {workspace_protocol}"
         );
-        assert_eq!(
-            sp1_lock.get("taiko-mono"),
-            Some(workspace_protocol),
-            "guests/sp1 lock taiko-mono rev must match workspace"
+        assert!(
+            sp1_lock
+                .get("taiko-mono")
+                .is_some_and(|revs| revs.contains(workspace_protocol)),
+            "guests/sp1 lock must include workspace taiko-mono rev {workspace_protocol}"
         );
     }
 
@@ -1413,6 +1417,32 @@ mod tests {
                     rev,
                     &format!("lockfile {}", lock_path.display()),
                 )?;
+            }
+        }
+        Ok(revs)
+    }
+
+    fn parse_lock_git_rev_sets(
+        lock_path: &Path,
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
+        let contents = fs::read_to_string(lock_path)?;
+        let mut revs = std::collections::BTreeMap::new();
+        for line in contents.lines() {
+            let Some(source) = line.strip_prefix("source = \"git+") else {
+                continue;
+            };
+            let source = source.trim_end_matches('"');
+            let Some(repo) = git_repo_name_from_source(source) else {
+                continue;
+            };
+            if let Some(rev) = source
+                .split("rev=")
+                .nth(1)
+                .and_then(|rest| rest.split(['#', '&']).next().map(str::to_owned))
+            {
+                revs.entry(repo)
+                    .or_insert_with(std::collections::BTreeSet::new)
+                    .insert(rev);
             }
         }
         Ok(revs)
@@ -1474,6 +1504,27 @@ source = "git+https://github.com/taikoxyz/alethia-reth?rev=bbbbbbbbbbbbbbbbbbbbb
                 .contains("inconsistent git rev pins for alethia-reth"),
             "unexpected error: {err}"
         );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn parse_lock_git_rev_sets_accepts_transitive_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let lock = temp.join("Cargo.lock");
+        fs::write(
+            &lock,
+            r#"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"#,
+        )
+        .unwrap();
+
+        let revs = parse_lock_git_rev_sets(&lock).unwrap();
+        let alethia_revs = revs.get("alethia-reth").unwrap();
+        assert_eq!(alethia_revs.len(), 2);
+        assert!(alethia_revs.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(alethia_revs.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let _ = fs::remove_dir_all(temp);
     }
 

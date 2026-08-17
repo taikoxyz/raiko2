@@ -713,16 +713,13 @@ impl TaskRuntimeMetadata {
         let current_kind = self
             .validate_remote_submission()?
             .context("runtime provider checkpoint is missing")?;
-        let backend_matches = matches!(
-            (identity.backend, current_kind),
-            (
-                NetworkProverBackend::Boundless,
-                RemoteSubmissionKind::Boundless
-            ) | (NetworkProverBackend::Sp1, RemoteSubmissionKind::Sp1)
+        anyhow::ensure!(
+            matches!(identity.backend, NetworkProverBackend::Boundless),
+            "terminal provider checkpoint reset only supports Boundless"
         );
         anyhow::ensure!(
-            backend_matches,
-            "runtime provider checkpoint backend does not match clear request"
+            matches!(current_kind, RemoteSubmissionKind::Boundless),
+            "runtime provider checkpoint is not a Boundless submission"
         );
         anyhow::ensure!(
             self.provider_request_id.as_deref() == Some(identity.provider_request_id.as_str()),
@@ -1188,10 +1185,15 @@ mod tests {
     fn clear_boundless_checkpoint_rejects_sp1_submission() {
         let mut runtime = complete_sp1_runtime();
         let original = runtime.clone();
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Sp1,
+            provider_request_id: "sp1-request".to_string(),
+            attempt: std::num::NonZeroU32::MIN,
+        };
 
         runtime
-            .clear_remote_submission(&boundless_checkpoint_identity("sp1-request", 1), 42)
-            .expect_err("Boundless reset must not clear an SP1 checkpoint");
+            .clear_remote_submission(&identity, 42)
+            .expect_err("terminal reset must not support SP1 checkpoints");
 
         assert_eq!(runtime, original);
     }

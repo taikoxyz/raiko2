@@ -56,4 +56,3 @@ retry then starts attempt 1. Fulfilled or still-payable submissions are never cl
 - A failed task with a cleared checkpoint is re-enqueueable and the next submission begins at attempt
   1 with a new provider request ID.
 - A legacy exhausted checkpoint is cleared after its terminal status is confirmed.
-

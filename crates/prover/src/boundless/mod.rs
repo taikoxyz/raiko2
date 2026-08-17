@@ -652,6 +652,20 @@ fn classify_boundless_status(
     let local_now = now_secs();
     let (status, reason, terminal_outcome) = if is_fulfilled {
         (RemoteStatus::Fulfilled, None, None)
+    } else if !is_locked
+        && matches!(
+            metadata.no_lock_timeout_action,
+            BoundlessTimeoutAction::Abort
+        )
+        && block_timestamp > metadata.lock_expires_at
+    {
+        (
+            RemoteStatus::Failed,
+            Some(RemoteStatusReason::new(format!(
+                "Boundless request {provider_request_id} was not locked before payable window closed"
+            ))),
+            Some(BoundlessTerminalOutcome::NoLockAbortTimeout),
+        )
     } else if block_timestamp > metadata.expires_at {
         (
             RemoteStatus::Expired,
@@ -669,7 +683,7 @@ fn classify_boundless_status(
             Some(BoundlessTerminalOutcome::LockExpired),
         )
     } else if Instant::now() >= metadata.poll_timeout_at
-        && !should_defer_boundless_poll_timeout(metadata, local_now)
+        && !should_defer_boundless_poll_timeout(metadata, block_timestamp)
     {
         let rotate_request_id = local_now >= metadata.expires_at;
         (
@@ -681,23 +695,18 @@ fn classify_boundless_status(
         )
     } else if is_locked {
         (RemoteStatus::Locked, None, None)
-    } else if local_now >= metadata.no_lock_deadline {
-        match metadata.no_lock_timeout_action {
-            BoundlessTimeoutAction::Rebid => (
-                RemoteStatus::Failed,
-                Some(RemoteStatusReason::new(format!(
-                    "Boundless request {provider_request_id} was not locked before rebid timeout"
-                ))),
-                Some(BoundlessTerminalOutcome::NoLockRebidTimeout),
-            ),
-            BoundlessTimeoutAction::Abort => (
-                RemoteStatus::Failed,
-                Some(RemoteStatusReason::new(format!(
-                    "Boundless request {provider_request_id} was not locked before payable window closed"
-                ))),
-                Some(BoundlessTerminalOutcome::NoLockAbortTimeout),
-            ),
-        }
+    } else if matches!(
+        metadata.no_lock_timeout_action,
+        BoundlessTimeoutAction::Rebid
+    ) && local_now >= metadata.no_lock_deadline
+    {
+        (
+            RemoteStatus::Failed,
+            Some(RemoteStatusReason::new(format!(
+                "Boundless request {provider_request_id} was not locked before rebid timeout"
+            ))),
+            Some(BoundlessTerminalOutcome::NoLockRebidTimeout),
+        )
     } else {
         (RemoteStatus::Pending, None, None)
     };
@@ -727,8 +736,8 @@ const fn should_defer_boundless_poll_timeout(
     matches!(
         metadata.no_lock_timeout_action,
         BoundlessTimeoutAction::Abort
-    ) && block_timestamp < metadata.expires_at
-        && block_timestamp < metadata.no_lock_deadline
+    ) && block_timestamp <= metadata.expires_at
+        && block_timestamp <= metadata.lock_expires_at
 }
 
 fn unrecoverable_boundless_status(
@@ -793,8 +802,13 @@ fn boundless_single_poll_error_status(
         }
         Err(err) => return err_status(submission.id, &err),
     };
+    // A final attempt cannot safely time out from an RPC error alone: without a latest block
+    // timestamp there is no proof that its payable window has closed.
     if Instant::now() >= metadata.poll_timeout_at
-        && !should_defer_boundless_poll_timeout(&metadata, local_now)
+        && !matches!(
+            metadata.no_lock_timeout_action,
+            BoundlessTimeoutAction::Abort
+        )
     {
         let rotate_request_id = local_now >= metadata.expires_at;
         let _ = record_boundless_terminal_outcome(
@@ -3669,7 +3683,8 @@ mod tests {
         BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
         DeploymentConfig, DeploymentType, ElfType, JsonRpcError, JsonRpcResponse,
         MIN_REBID_TIMEOUT_MS, NoLockTimeout, Submission, TimeoutPolicy,
-        boundless_poll_error_statuses, classify_boundless_nonce, classify_boundless_status,
+        boundless_poll_error_statuses, boundless_single_poll_error_status,
+        boundless_terminal_outcome, classify_boundless_nonce, classify_boundless_status,
         dispatch_offchain_after_checkpoint, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
         parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
@@ -4639,12 +4654,13 @@ mod tests {
             -1,
             Instant::now() + Duration::from_secs(60),
         );
-        let abort_state = boundless_submission_state(
+        let mut abort_state = boundless_submission_state(
             now,
             BoundlessTimeoutAction::Abort,
             -1,
             Instant::now() + Duration::from_secs(60),
         );
+        abort_state.metadata.lock_expires_at = now.saturating_sub(1);
 
         let (status, outcome) = classify_boundless_status(
             submission_id,
@@ -4712,6 +4728,79 @@ mod tests {
                 rotate_request_id: true
             })
         );
+    }
+
+    #[test]
+    fn final_no_lock_abort_waits_for_chain_deadline() {
+        let local_now = now_secs();
+        let lock_deadline = local_now.saturating_sub(10);
+        let submission_id = RemoteSubmissionId::new();
+        let mut state = boundless_submission_state(
+            local_now,
+            BoundlessTimeoutAction::Abort,
+            -10,
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("past poll deadline"),
+        );
+        state.metadata.lock_expires_at = lock_deadline;
+        state.metadata.no_lock_deadline = lock_deadline;
+
+        for block_timestamp in [lock_deadline.saturating_sub(1), lock_deadline] {
+            let (status, outcome) = classify_boundless_status(
+                submission_id,
+                "0x1",
+                &state.metadata,
+                false,
+                false,
+                0,
+                block_timestamp,
+            );
+            assert_eq!(status.status, RemoteStatus::Pending);
+            assert_eq!(outcome, None);
+        }
+
+        let (status, outcome) = classify_boundless_status(
+            submission_id,
+            "0x1",
+            &state.metadata,
+            false,
+            false,
+            0,
+            lock_deadline.saturating_add(1),
+        );
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(outcome, Some(BoundlessTerminalOutcome::NoLockAbortTimeout));
+    }
+
+    #[test]
+    fn final_no_lock_abort_poll_error_waits_for_chain_timestamp() {
+        let now = now_secs();
+        let submission = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x1".to_string(),
+            timeout_at: None,
+        };
+        let mut state = boundless_submission_state(
+            now,
+            BoundlessTimeoutAction::Abort,
+            -10,
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("past poll deadline"),
+        );
+        state.metadata.lock_expires_at = now.saturating_sub(10);
+        let registry = Arc::new(Mutex::new(HashMap::from([(submission.id, state)])));
+
+        let status = boundless_single_poll_error_status(&submission, "rpc unavailable", &registry);
+
+        assert_eq!(status.status, RemoteStatus::Pending);
+        let outcome = match boundless_terminal_outcome(&registry, submission.id) {
+            Ok(outcome) => outcome,
+            Err(_) => panic!("terminal outcome lookup failed"),
+        };
+        assert_eq!(outcome, None);
     }
 
     #[test]
@@ -4971,16 +5060,24 @@ mod tests {
             &metadata(10_000, 20_000, abort),
             9_999
         ));
-        // Once the lock deadline passes, the timeout may fire again.
-        assert!(!should_defer_boundless_poll_timeout(
+        // The offer is still payable at the exact deadline; it closes strictly after it.
+        assert!(should_defer_boundless_poll_timeout(
             &metadata(10_000, 20_000, abort),
             10_000
         ));
-        // The deferral is bounded by the request expiry even when a (corrupt) record claims a
-        // later lock deadline, so the poll loop cannot be pinned open forever.
         assert!(!should_defer_boundless_poll_timeout(
+            &metadata(10_000, 20_000, abort),
+            10_001
+        ));
+        // The deferral is bounded by the request expiry even when a (corrupt) record claims a
+        // later lock deadline. The request remains valid at the exact expiry timestamp.
+        assert!(should_defer_boundless_poll_timeout(
             &metadata(u64::MAX, 20_000, abort),
             20_000
+        ));
+        assert!(!should_defer_boundless_poll_timeout(
+            &metadata(u64::MAX, 20_000, abort),
+            20_001
         ));
 
         // Rebid attempts never defer the overall timeout.

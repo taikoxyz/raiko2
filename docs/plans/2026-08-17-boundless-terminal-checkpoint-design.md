@@ -22,6 +22,13 @@ The clear operation must compare the backend, provider request ID, and attempt b
 missing or mismatched checkpoint is an error, because starting a new payable request after clearing a
 different or newer checkpoint could create duplicate payment exposure.
 
+Final-attempt terminalization must also be confirmed by the latest chain timestamp. Host wall-clock
+time may trigger ordinary rebids, but it cannot prove that a request's payable window has closed.
+The final no-lock checkpoint is therefore cleared only when the latest block timestamp is strictly
+greater than the request's lock deadline, matching the Boundless market pricing boundary. At the
+exact deadline the request remains payable. If the status RPC cannot provide a block timestamp, the
+final attempt remains pending and retains its checkpoint.
+
 ## API And Persistence
 
 Extend `ProverProgressObserver` with a terminal-checkpoint operation carrying a compact expected
@@ -42,6 +49,7 @@ retry then starts attempt 1. Fulfilled or still-payable submissions are never cl
 ## Failure Handling
 
 - A durable clear is required before reporting the terminal cycle as safely reset.
+- A final no-lock clear requires chain-derived confirmation that the payable deadline has passed.
 - Retryable persistence errors use the existing checkpoint retry policy.
 - Permanent lifecycle, identity, or ownership errors stop the proof task without creating a new
   market request.

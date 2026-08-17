@@ -156,6 +156,9 @@ Add tests proving that:
 1. `NoLockAbortTimeout` produces a terminal-reset outcome carrying the exact request ID and attempt.
 2. `NoLockRebidTimeout`, expiry, poll timeout, malformed status, and fulfillment errors do not clear the checkpoint.
 3. The terminal-reset path calls the observer once before returning the proof-task failure.
+4. A host clock past the lock deadline cannot terminalize the final attempt while the latest chain
+   timestamp is before or equal to that deadline.
+5. A status RPC error cannot terminalize the final attempt without a chain timestamp.
 
 **Step 2: Run the tests to verify they fail**
 

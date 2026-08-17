@@ -775,6 +775,29 @@ mod tests {
         }
     }
 
+    struct PermanentClearFailureObserver;
+
+    #[async_trait::async_trait]
+    impl ProverProgressObserver for PermanentClearFailureObserver {
+        async fn on_progress(
+            &self,
+            _progress: &ProverProgress,
+            _permit: &SubmissionCheckpointPermit,
+        ) -> Result<(), ProgressPersistenceError> {
+            Ok(())
+        }
+
+        async fn clear_pending_proof_checkpoint(
+            &self,
+            _identity: &PendingProofCheckpointIdentity,
+            _permit: &SubmissionCheckpointPermit,
+        ) -> Result<(), ProgressPersistenceError> {
+            Err(ProgressPersistenceError::Permanent(
+                "terminal checkpoint clear rejected".to_string(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn clear_pending_checkpoint_forwards_exact_identity() {
         let observer = Arc::new(ClearingObserver::default());
@@ -808,6 +831,27 @@ mod tests {
         clear_pending_proof_checkpoint(None, &identity, &permit)
             .await
             .expect("unobserved clear is a no-op");
+    }
+
+    #[tokio::test]
+    async fn clear_pending_checkpoint_surfaces_permanent_failure() {
+        let observer: Arc<dyn ProverProgressObserver> = Arc::new(PermanentClearFailureObserver);
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: "request-1".to_string(),
+            attempt: std::num::NonZeroU32::MIN,
+        };
+        let permit = SubmissionCheckpointPermit::tracked(());
+
+        let error = clear_pending_proof_checkpoint(Some(&observer), &identity, &permit)
+            .await
+            .expect_err("permanent clear failure must be returned");
+
+        assert!(
+            error
+                .to_string()
+                .contains("terminal checkpoint clear rejected")
+        );
     }
 
     #[test]

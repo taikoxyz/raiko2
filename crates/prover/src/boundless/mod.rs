@@ -297,6 +297,12 @@ struct BoundlessStatusSource {
     registry: BoundlessStatusRegistry,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BoundlessBlockSnapshot {
+    hash: B256,
+    timestamp: u64,
+}
+
 impl BoundlessStatusSource {
     fn new(
         rpc_url: String,
@@ -337,7 +343,13 @@ impl BoundlessStatusSource {
             return Ok(invalid_statuses);
         }
 
-        let batch = self.build_batch_request(&pollable_submissions);
+        let block_snapshot = match self.fetch_latest_block_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                return boundless_poll_error_statuses(submissions, err.to_string(), &self.registry);
+            }
+        };
+        let batch = self.build_batch_request(&pollable_submissions, block_snapshot.hash);
         let responses = match self.http.post(&self.rpc_url).json(&batch).send().await {
             Ok(response) => response,
             Err(err) => {
@@ -373,26 +385,13 @@ impl BoundlessStatusSource {
             .into_iter()
             .map(|response| (response.id, response))
             .collect::<HashMap<_, _>>();
-        let block_result = match take_rpc_result(&mut by_id, 0) {
-            Ok(result) => result,
-            Err(err) => {
-                return boundless_poll_error_statuses(submissions, err.to_string(), &self.registry);
-            }
-        };
-        let block_timestamp = match parse_block_timestamp(&block_result) {
-            Ok(timestamp) => timestamp,
-            Err(err) => {
-                return boundless_poll_error_statuses(submissions, err.to_string(), &self.registry);
-            }
-        };
-
         let mut statuses = Vec::with_capacity(submissions.len());
         statuses.extend(invalid_statuses);
         for (index, submission) in pollable_submissions.iter().enumerate() {
             let status = match self.status_from_rpc_results(
                 index,
                 submission,
-                block_timestamp,
+                block_snapshot.timestamp,
                 &mut by_id,
             ) {
                 Ok(status) => status,
@@ -410,13 +409,39 @@ impl BoundlessStatusSource {
         Ok(statuses)
     }
 
-    fn build_batch_request(&self, submissions: &[BoundlessPollSubmission]) -> Vec<JsonRpcRequest> {
-        let mut batch = Vec::with_capacity(submissions.len().saturating_mul(3).saturating_add(1));
-        batch.push(json_rpc_request(
+    async fn fetch_latest_block_snapshot(&self) -> Result<BoundlessBlockSnapshot, RemotePollError> {
+        let request = json_rpc_request(
             0,
             "eth_getBlockByNumber",
             vec![serde_json::json!("latest"), serde_json::json!(false)],
-        ));
+        );
+        let response = self
+            .http
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| RemotePollError::Transient(format!("boundless status rpc: {err}")))?
+            .error_for_status()
+            .map_err(|err| RemotePollError::Transient(format!("boundless status rpc: {err}")))?
+            .json::<JsonRpcResponse>()
+            .await
+            .map_err(|err| {
+                RemotePollError::Transient(format!(
+                    "decode boundless reference block response: {err}"
+                ))
+            })?;
+        let mut by_id = HashMap::from([(response.id, response)]);
+        let block = take_rpc_result(&mut by_id, 0)?;
+        parse_block_snapshot(&block)
+    }
+
+    fn build_batch_request(
+        &self,
+        submissions: &[BoundlessPollSubmission],
+        block_hash: B256,
+    ) -> Vec<JsonRpcRequest> {
+        let mut batch = Vec::with_capacity(submissions.len().saturating_mul(3));
 
         for (index, submission) in submissions.iter().enumerate() {
             let base_id = rpc_base_id(index);
@@ -426,6 +451,7 @@ impl BoundlessStatusSource {
                 base_id,
                 &self.market_address,
                 &fulfilled_data,
+                block_hash,
             ));
             let locked_data =
                 boundless_call_data("requestIsLocked(uint256)", submission.request_id);
@@ -433,6 +459,7 @@ impl BoundlessStatusSource {
                 base_id + 1,
                 &self.market_address,
                 &locked_data,
+                block_hash,
             ));
             let deadline_data =
                 boundless_call_data("requestDeadline(uint256)", submission.request_id);
@@ -440,6 +467,7 @@ impl BoundlessStatusSource {
                 base_id + 2,
                 &self.market_address,
                 &deadline_data,
+                block_hash,
             ));
         }
 
@@ -542,7 +570,7 @@ const fn json_rpc_request(
     }
 }
 
-fn eth_call_request(id: u64, market_address: &str, data: &str) -> JsonRpcRequest {
+fn eth_call_request(id: u64, market_address: &str, data: &str, block_hash: B256) -> JsonRpcRequest {
     json_rpc_request(
         id,
         "eth_call",
@@ -551,7 +579,10 @@ fn eth_call_request(id: u64, market_address: &str, data: &str) -> JsonRpcRequest
                 "to": market_address,
                 "data": data,
             }),
-            serde_json::json!("latest"),
+            serde_json::json!({
+                "blockHash": format!("{block_hash:#x}"),
+                "requireCanonical": true,
+            }),
         ],
     )
 }
@@ -601,9 +632,28 @@ fn parse_block_timestamp(value: &serde_json::Value) -> Result<u64, RemotePollErr
         .get("timestamp")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            RemotePollError::Transient("boundless latest block missing timestamp".to_string())
+            RemotePollError::Transient("boundless reference block missing timestamp".to_string())
         })?;
     parse_rpc_hex_u64(timestamp)
+}
+
+fn parse_block_snapshot(
+    value: &serde_json::Value,
+) -> Result<BoundlessBlockSnapshot, RemotePollError> {
+    let hash = value
+        .get("hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            RemotePollError::Transient("boundless reference block missing hash".to_string())
+        })?
+        .parse::<B256>()
+        .map_err(|err| {
+            RemotePollError::Transient(format!("decode boundless reference block hash: {err}"))
+        })?;
+    Ok(BoundlessBlockSnapshot {
+        hash,
+        timestamp: parse_block_timestamp(value)?,
+    })
 }
 
 fn parse_bool_result(value: &serde_json::Value) -> Result<bool, RemotePollError> {
@@ -3711,6 +3761,7 @@ mod tests {
         price_oracle::{Amount, Asset},
         storage::StorageUploaderType,
     };
+    use httpmock::{Method::POST, MockServer};
     use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_remote_poller::{
         RemoteStatus, RemoteStatusReason, RemoteSubmission, RemoteSubmissionId,
@@ -4642,6 +4693,73 @@ mod tests {
 
         assert_eq!(unlocked_status.status, RemoteStatus::Pending);
         assert_eq!(fulfilled_status.status, RemoteStatus::Fulfilled);
+    }
+
+    #[tokio::test]
+    async fn boundless_status_poll_pins_market_reads_to_reference_block_hash() {
+        let server = MockServer::start();
+        let block_hash = format!("0x{}", "11".repeat(32));
+        let header = server.mock(|when, then| {
+            when.method(POST).body_contains("eth_getBlockByNumber");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "result": {
+                        "hash": block_hash,
+                        "timestamp": "0x65",
+                    },
+                }));
+        });
+        let pinned_status = server.mock(|when, then| {
+            when.method(POST)
+                .body_contains("eth_call")
+                .body_contains(&format!("\"blockHash\":\"{block_hash}\""))
+                .body_contains("\"requireCanonical\":true");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!([
+                    {"jsonrpc": "2.0", "id": 1, "result": rpc_word(0)},
+                    {"jsonrpc": "2.0", "id": 2, "result": rpc_word(1)},
+                    {"jsonrpc": "2.0", "id": 3, "result": rpc_word(200)},
+                ]));
+        });
+
+        let submission = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x1".to_string(),
+            timeout_at: None,
+        };
+        let mut state = boundless_submission_state(
+            100,
+            BoundlessTimeoutAction::Abort,
+            0,
+            Instant::now() + Duration::from_secs(60),
+        );
+        state.metadata.lock_expires_at = 100;
+        state.metadata.expires_at = 1_000;
+        let source = BoundlessStatusSource {
+            rpc_url: server.url("/"),
+            market_address: "0x0000000000000000000000000000000000000000".to_string(),
+            http: reqwest::Client::new(),
+            registry: Arc::new(Mutex::new(HashMap::from([(submission.id, state)]))),
+        };
+
+        let statuses = source
+            .poll_batch(vec![submission])
+            .await
+            .expect("poll pinned Boundless status");
+
+        header.assert();
+        pinned_status.assert();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, RemoteStatus::Locked);
+        assert!(matches!(
+            boundless_terminal_outcome(&source.registry, statuses[0].submission_id),
+            Ok(None)
+        ));
     }
 
     #[test]

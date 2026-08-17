@@ -159,6 +159,8 @@ Add tests proving that:
 4. A host clock past the lock deadline cannot terminalize the final attempt while the latest chain
    timestamp is before or equal to that deadline.
 5. A status RPC error cannot terminalize the final attempt without a chain timestamp.
+6. Market status calls use one canonical block hash and mixed-head responses cannot terminalize the
+   checkpoint.
 
 **Step 2: Run the tests to verify they fail**
 

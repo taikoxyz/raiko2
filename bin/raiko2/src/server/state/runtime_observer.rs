@@ -238,7 +238,7 @@ impl RuntimeObserver {
             if (!is_terminal_status(record.runner_status)
                 || (include_completed && record.runner_status == RunnerStatus::Completed))
                 && self.record_matches_observer(id, &record).map_err(|error| {
-                    EngineObserverError::RuntimeSync(format!(
+                    EngineObserverError::ProgressRejected(format!(
                         "failed to validate runtime owner {}: {error}",
                         record.task_id
                     ))
@@ -1158,7 +1158,7 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         execution_owners: &RuntimeExecutionOwners,
         include_completed: bool,
-    ) -> Result<Vec<uuid::Uuid>> {
+    ) -> std::result::Result<Vec<uuid::Uuid>, EngineObserverError> {
         let mut owner_incarnations = self
             .current_execution_owners(id, include_completed)
             .await?
@@ -1613,12 +1613,7 @@ impl EngineObserver for RuntimeObserver {
         let _lifecycle_guard = gate.lock().await;
         let owner_incarnations = self
             .current_owner_incarnations(id, &execution_owners, false)
-            .await
-            .map_err(|error| {
-                EngineObserverError::RuntimeSync(format!(
-                    "failed to refresh provider checkpoint owners: {error}"
-                ))
-            })?;
+            .await?;
         if owner_incarnations.is_empty() {
             return Err(EngineObserverError::RuntimeInactive(format!(
                 "provider checkpoint matched no active runtime root for {}",
@@ -1719,12 +1714,7 @@ impl EngineObserver for RuntimeObserver {
         let _lifecycle_guard = gate.lock().await;
         let owner_incarnations = self
             .current_owner_incarnations(id, &execution_owners, false)
-            .await
-            .map_err(|error| {
-                EngineObserverError::RuntimeSync(format!(
-                    "failed to refresh provider checkpoint owners: {error}"
-                ))
-            })?;
+            .await?;
         if owner_incarnations.is_empty() {
             return Err(EngineObserverError::RuntimeInactive(format!(
                 "provider checkpoint matched no active runtime root for {}",
@@ -1771,6 +1761,11 @@ impl EngineObserver for RuntimeObserver {
                             })?;
                         metadata.runtime.last_event = Some("submission_terminalized".to_string());
                         Ok(())
+                    })
+                    .map_err(|error| {
+                        RemoteSubmissionConflict::new(format!(
+                            "terminal provider checkpoint is not canonical runtime metadata: {error}"
+                        ))
                     })?;
                     record.runner_status = RunnerStatus::Allocated;
                     record.error = None;
@@ -3264,6 +3259,63 @@ mod tests {
             .await?
             .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_rejects_invalid_metadata_during_checkpoint_clear() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-reject-invalid-clear-metadata",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_public",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: id.clone(),
+        };
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
+
+        let mut record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task");
+        record.metadata = serde_json::json!({"invalid": "metadata"});
+        runtime.upsert_task(&record).await?;
+
+        let error = EngineObserver::clear_pending_proof_checkpoint(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0x1234".to_string(),
+                attempt: std::num::NonZeroU32::MIN,
+            },
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect_err("invalid checkpoint metadata must fail permanently");
+
+        assert!(matches!(error, EngineObserverError::ProgressRejected(_)));
         Ok(())
     }
 

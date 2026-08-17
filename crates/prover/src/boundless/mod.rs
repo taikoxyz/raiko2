@@ -52,10 +52,10 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use crate::{
-    BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
-    encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
-    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    BoundlessSubmissionProgress, BoundlessSubmissionResume, PendingProofCheckpointIdentity,
+    ProverProgress, ProverProgressObserver, encode_risc0_aggregation_seal_payload,
+    encode_risc0_proposal_seal_payload, ensure_shasta_proposal_input_matches_carry,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -1188,6 +1188,10 @@ enum BoundlessAttemptError {
         // never be locked again).
         rotate_request_id: bool,
     },
+    TerminalCheckpoint {
+        identity: PendingProofCheckpointIdentity,
+        error: RaikoError,
+    },
     Fatal(RaikoError),
 }
 
@@ -1223,6 +1227,14 @@ async fn publish_boundless_progress(
         rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
     });
     crate::persist_prover_progress(observer, &progress, "boundless_submission", permit).await
+}
+
+async fn terminalize_boundless_checkpoint(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    identity: &PendingProofCheckpointIdentity,
+) -> RaikoResult<()> {
+    let permit = crate::acquire_submission_checkpoint_permit(observer).await?;
+    crate::clear_pending_proof_checkpoint(observer, identity, &permit).await
 }
 
 async fn checkpoint_boundless_tx_hash(
@@ -2844,11 +2856,27 @@ impl BoundlessProver {
                 } else {
                     format!("within {} seconds", no_lock_timeout.delay.as_secs())
                 };
-                Err(BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
-                    "Boundless request {} was not locked {deadline_detail}; \
-                     exhausted boundless no-lock rebids",
-                    submission.provider_request_id
-                ))))
+                let Some(attempt) = u32::try_from(submission.attempt)
+                    .ok()
+                    .and_then(std::num::NonZeroU32::new)
+                else {
+                    return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
+                        "Boundless request {} has invalid terminal checkpoint attempt {}",
+                        submission.provider_request_id, submission.attempt
+                    ))));
+                };
+                Err(BoundlessAttemptError::TerminalCheckpoint {
+                    identity: PendingProofCheckpointIdentity {
+                        backend: crate::NetworkProverBackend::Boundless,
+                        provider_request_id: submission.provider_request_id.clone(),
+                        attempt,
+                    },
+                    error: RaikoError::Guest(format!(
+                        "Boundless request {} was not locked {deadline_detail}; \
+                         exhausted boundless no-lock rebids",
+                        submission.provider_request_id
+                    )),
+                })
             }
             Some(BoundlessTerminalOutcome::PollTimeout { rotate_request_id }) => {
                 Err(BoundlessAttemptError::Retryable {
@@ -3203,6 +3231,15 @@ impl BoundlessProver {
                     tokio::time::sleep(EXTERNAL_RETRY_INITIAL_DELAY).await;
                 }
                 Err(BoundlessAttemptError::Fatal(error)) => return Err(error),
+                Err(BoundlessAttemptError::TerminalCheckpoint { identity, error }) => {
+                    terminalize_boundless_checkpoint(observer.as_ref(), &identity).await?;
+                    tracing::info!(
+                        provider_request_id = %identity.provider_request_id,
+                        attempt = identity.attempt.get(),
+                        "Cleared exhausted Boundless submission checkpoint"
+                    );
+                    return Err(error);
+                }
             }
         }
     }
@@ -3626,19 +3663,21 @@ mod tests {
     #[cfg(feature = "boundless-s3")]
     use super::should_initialize_s3_downloader;
     use super::{
-        BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessConfig, BoundlessFundingState,
-        BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver, BoundlessStatusSource,
-        BoundlessStorageDownloader, BoundlessSubmissionMetadata, BoundlessSubmissionState,
-        BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
-        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, Submission, TimeoutPolicy,
+        BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessAttemptError, BoundlessConfig,
+        BoundlessFundingState, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
+        BoundlessStatusSource, BoundlessStorageDownloader, BoundlessSubmissionMetadata,
+        BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
+        DeploymentConfig, DeploymentType, ElfType, JsonRpcError, JsonRpcResponse,
+        MIN_REBID_TIMEOUT_MS, NoLockTimeout, Submission, TimeoutPolicy,
         boundless_poll_error_statuses, classify_boundless_nonce, classify_boundless_status,
         dispatch_offchain_after_checkpoint, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
         parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
         quote_batch_mcycles, reserve_boundless_funding_before_dispatch, retry_external_bounded,
         run_after_submission_permit, should_defer_boundless_poll_timeout,
-        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
-        validate_offer_params, validate_resume_context,
+        should_rebid_unlocked_request, storage_uploader_config_from_env,
+        terminalize_boundless_checkpoint, user_cycles_to_mcycles, validate_offer_params,
+        validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{Address, B256, Bloom, Bytes, U256, address, utils::parse_ether};
@@ -3658,7 +3697,9 @@ mod tests {
         storage::StorageUploaderType,
     };
     use raiko2_primitives::{Proof, ProofType, RaikoError};
-    use raiko2_remote_poller::{RemoteStatus, RemoteSubmission, RemoteSubmissionId};
+    use raiko2_remote_poller::{
+        RemoteStatus, RemoteStatusReason, RemoteSubmission, RemoteSubmissionId,
+    };
     use raiko2_runtime::RuntimeManager;
     use std::{
         collections::HashMap,
@@ -3691,6 +3732,11 @@ mod tests {
 
     struct RuntimeLifecycleProgressObserver {
         runtime: Arc<RuntimeManager>,
+    }
+
+    #[derive(Default)]
+    struct ClearingProgressObserver {
+        cleared: Mutex<Vec<crate::PendingProofCheckpointIdentity>>,
     }
 
     struct PermitDropSignal(Arc<AtomicBool>);
@@ -3770,6 +3816,29 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for ClearingProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            Ok(())
+        }
+
+        async fn clear_pending_proof_checkpoint(
+            &self,
+            identity: &crate::PendingProofCheckpointIdentity,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.cleared
+                .lock()
+                .expect("cleared checkpoint lock")
+                .push(identity.clone());
+            Ok(())
+        }
+    }
+
     fn test_submission() -> Submission {
         Submission {
             market_request_id: U256::from(1),
@@ -3782,6 +3851,56 @@ mod tests {
             max_price_wei: U256::from(1),
             attempt: 1,
         }
+    }
+
+    #[test]
+    fn boundless_terminal_checkpoint_reset_carries_exact_submission_identity() {
+        let mut submission = test_submission();
+        submission.provider_request_id = "0xterminal".to_string();
+        submission.attempt = 5;
+        let result = BoundlessProver::boundless_failed_terminal(
+            &submission,
+            NoLockTimeout {
+                delay: Duration::from_secs(30),
+                action: BoundlessTimeoutAction::Abort,
+            },
+            RemoteStatusReason::new("not locked"),
+            Some(BoundlessTerminalOutcome::NoLockAbortTimeout),
+        );
+
+        match result {
+            Err(BoundlessAttemptError::TerminalCheckpoint { identity, error }) => {
+                assert_eq!(identity.backend, crate::NetworkProverBackend::Boundless);
+                assert_eq!(identity.provider_request_id, "0xterminal");
+                assert_eq!(identity.attempt.get(), 5);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("exhausted boundless no-lock rebids")
+                );
+            }
+            _ => panic!("final no-lock abort must request checkpoint terminalization"),
+        }
+    }
+
+    #[tokio::test]
+    async fn boundless_terminal_checkpoint_reset_clears_before_returning_failure() {
+        let observer = Arc::new(ClearingProgressObserver::default());
+        let observer_dyn: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let identity = crate::PendingProofCheckpointIdentity {
+            backend: crate::NetworkProverBackend::Boundless,
+            provider_request_id: "0xterminal".to_string(),
+            attempt: std::num::NonZeroU32::new(5).expect("non-zero attempt"),
+        };
+
+        terminalize_boundless_checkpoint(Some(&observer_dyn), &identity)
+            .await
+            .expect("terminal checkpoint clears");
+
+        assert_eq!(
+            *observer.cleared.lock().expect("cleared checkpoint lock"),
+            vec![identity]
+        );
     }
 
     fn test_proof_request() -> ProofRequest {

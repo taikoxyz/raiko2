@@ -3235,6 +3235,35 @@ mod tests {
             .await?
             .is_none()
         );
+
+        drive_engine_failure(&observer, &id, &task, "no-lock rebids exhausted").await?;
+        let mut record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task after terminal failure");
+        assert_eq!(record.runner_status, RunnerStatus::Failed);
+        let metadata = TaskMetadata::decode_for_record(&record)?;
+        assert!(
+            metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(|runtime| !runtime.has_remote_submission_progress())
+        );
+
+        // The HTTP retry path reactivates the same deterministic task. Once active again, the
+        // prover must see no resumable provider checkpoint and therefore submit attempt one.
+        record.runner_status = RunnerStatus::Allocated;
+        record.error = None;
+        runtime.upsert_task(&record).await?;
+        assert!(
+            load_checkpoint_payload::<BoundlessSubmissionResume>(
+                &observer,
+                &id,
+                &task,
+                NetworkProverBackend::Boundless,
+            )
+            .await?
+            .is_none()
+        );
         Ok(())
     }
 

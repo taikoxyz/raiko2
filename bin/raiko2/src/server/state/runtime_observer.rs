@@ -358,9 +358,7 @@ impl RuntimeObserver {
             let observed_at_ms = now_ms();
             let mut updated_records = 0;
             for record in records {
-                if !self.record_matches_observer(id, record)?
-                    || owner_incarnations
-                        .is_some_and(|owners| !owners.contains(&record.incarnation_id))
+                if owner_incarnations.is_some_and(|owners| !owners.contains(&record.incarnation_id))
                     || (is_terminal_status(record.runner_status)
                         && !matches!(
                             (terminal_policy, record.runner_status),
@@ -370,6 +368,19 @@ impl RuntimeObserver {
                             ) | (TerminalRootPolicy::IncludeAll, _)
                         ))
                 {
+                    continue;
+                }
+                let matches_observer = match self.record_matches_observer(id, record) {
+                    Ok(matches_observer) => matches_observer,
+                    Err(error) if checkpoint_permit.is_some() => {
+                        return Err(RemoteSubmissionConflict::new(format!(
+                            "provider checkpoint owner metadata is invalid: {error}"
+                        ))
+                        .into());
+                    }
+                    Err(error) => return Err(error),
+                };
+                if !matches_observer {
                     continue;
                 }
                 if !mutator(record, updated_at, observed_at_ms)? {
@@ -2867,6 +2878,25 @@ mod tests {
         }
     }
 
+    fn boundless_progress_fixture(provider_request_id: &str, rebid_attempt: u32) -> ProverProgress {
+        let expires_at = now_secs().saturating_add(3_600);
+        ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+            provider_request_id: provider_request_id.to_string(),
+            remote_tx_hash: Some("0xabcd".to_string()),
+            expires_at,
+            lock_expires_at: expires_at - 600,
+            submitted_at: expires_at - 900,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(6_000),
+            evaluated_mcycles_count: Some(12_345),
+            max_price_multiplier: 4,
+            max_price_wei: Some("9000000000000".to_string()),
+            rebid_attempt,
+        })
+    }
+
     async fn checkpoint_proof_fixture(
         observer: &RuntimeObserver,
         id: &EngineTaskId,
@@ -3270,7 +3300,16 @@ mod tests {
         let request = proposal_request();
         register_observer_task(
             &runtime,
-            "task_public",
+            "task_active",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        register_observer_task(
+            &runtime,
+            "task_invalid",
             "taiko_dev/ethereum",
             PipelineKey::ShastaRisc0Network,
             &request,
@@ -3291,10 +3330,18 @@ mod tests {
             input_task: id.clone(),
         };
         let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &boundless_progress_fixture("0x1234", 1),
+            &checkpoint_permit,
+        )
+        .await?;
         let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
 
         let mut record = runtime
-            .get_task("task_public")
+            .get_task("task_invalid")
             .await?
             .expect("runtime task");
         record.metadata = serde_json::json!({"invalid": "metadata"});
@@ -3316,6 +3363,116 @@ mod tests {
         .expect_err("invalid checkpoint metadata must fail permanently");
 
         assert!(matches!(error, EngineObserverError::ProgressRejected(_)));
+        let active = runtime
+            .get_task("task_active")
+            .await?
+            .expect("active runtime task");
+        let active_metadata = TaskMetadata::decode_for_record(&active)?;
+        assert!(
+            active_metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(TaskRuntimeMetadata::has_remote_submission_progress)
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_invalid")
+                .await?
+                .expect("invalid runtime task")
+                .metadata,
+            serde_json::json!({"invalid": "metadata"})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_ignores_malformed_terminal_sibling_during_checkpoint_clear()
+    -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-ignore-terminal-clear-metadata",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_active",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        register_observer_task(
+            &runtime,
+            "task_terminal",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Failed,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: id.clone(),
+        };
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &boundless_progress_fixture("0x1234", 1),
+            &checkpoint_permit,
+        )
+        .await?;
+        let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
+
+        let mut terminal = runtime
+            .get_task("task_terminal")
+            .await?
+            .expect("terminal runtime task");
+        terminal.metadata = serde_json::json!({"invalid": "metadata"});
+        runtime.upsert_task(&terminal).await?;
+
+        EngineObserver::clear_pending_proof_checkpoint(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0x1234".to_string(),
+                attempt: std::num::NonZeroU32::MIN,
+            },
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect("terminal sibling must not block active checkpoint clear");
+
+        let active = runtime
+            .get_task("task_active")
+            .await?
+            .expect("active runtime task");
+        let active_metadata = TaskMetadata::decode_for_record(&active)?;
+        assert!(
+            active_metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(|runtime| !runtime.has_remote_submission_progress())
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_terminal")
+                .await?
+                .expect("terminal runtime task")
+                .metadata,
+            serde_json::json!({"invalid": "metadata"})
+        );
         Ok(())
     }
 

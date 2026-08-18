@@ -52,6 +52,9 @@ retry then starts attempt 1. Fulfilled or still-payable submissions are never cl
 
 - A durable clear is required before reporting the terminal cycle as safely reset.
 - A final no-lock clear requires chain-derived confirmation that the payable deadline has passed.
+- Atomic checkpoint updates filter terminal and non-owner siblings before decoding metadata. Invalid
+  metadata on a selected active owner is a permanent rejection and cannot partially mutate another
+  owner.
 - Retryable persistence errors use the existing checkpoint retry policy.
 - Permanent lifecycle, identity, ownership, or runtime-metadata validation errors stop the proof
   task without creating a new market request.

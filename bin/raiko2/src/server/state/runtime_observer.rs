@@ -228,6 +228,7 @@ impl RuntimeObserver {
         &self,
         id: &EngineTaskId,
         include_completed: bool,
+        expected_owners: Option<&HashMap<String, uuid::Uuid>>,
     ) -> std::result::Result<RuntimeExecutionOwners, EngineObserverError> {
         let mut owner_records = Vec::new();
         for record in self
@@ -235,17 +236,26 @@ impl RuntimeObserver {
             .tasks_referencing(&Self::root_task_ref(id))
             .await
         {
-            if (!is_terminal_status(record.runner_status)
-                || (include_completed && record.runner_status == RunnerStatus::Completed))
-                && self.record_matches_observer(id, &record).map_err(|error| {
-                    EngineObserverError::ProgressRejected(format!(
-                        "failed to validate runtime owner {}: {error}",
-                        record.task_id
-                    ))
-                })?
+            if is_terminal_status(record.runner_status)
+                && !(include_completed && record.runner_status == RunnerStatus::Completed)
             {
-                owner_records.push((record.task_id, record.incarnation_id));
+                continue;
             }
+            if expected_owners
+                .and_then(|owners| owners.get(&record.task_id))
+                .is_some_and(|expected| *expected != record.incarnation_id)
+            {
+                continue;
+            }
+            if !self.record_matches_observer(id, &record).map_err(|error| {
+                EngineObserverError::ProgressRejected(format!(
+                    "failed to validate runtime owner {}: {error}",
+                    record.task_id
+                ))
+            })? {
+                continue;
+            }
+            owner_records.push((record.task_id, record.incarnation_id));
         }
         let mut incarnations = owner_records
             .iter()
@@ -1170,22 +1180,10 @@ impl RuntimeObserver {
         execution_owners: &RuntimeExecutionOwners,
         include_completed: bool,
     ) -> std::result::Result<Vec<uuid::Uuid>, EngineObserverError> {
-        let mut owner_incarnations = self
-            .current_execution_owners(id, include_completed)
+        Ok(self
+            .current_execution_owners(id, include_completed, Some(&execution_owners.by_task_id))
             .await?
-            .by_task_id
-            .into_iter()
-            .filter(|(task_id, incarnation_id)| {
-                execution_owners
-                    .by_task_id
-                    .get(task_id)
-                    .is_none_or(|expected| expected == incarnation_id)
-            })
-            .map(|(_, incarnation_id)| incarnation_id)
-            .collect::<Vec<_>>();
-        owner_incarnations.sort_unstable();
-        owner_incarnations.dedup();
-        Ok(owner_incarnations)
+            .incarnations)
     }
 
     async fn sync_proof_success(
@@ -1328,7 +1326,7 @@ impl EngineObserver for RuntimeObserver {
         // `Completed`. It owns no further proving work, but it must retain authority to finish the
         // pending artifact saga and make the queue result durable.
         let owners = self
-            .current_execution_owners(id, matches!(task, EngineTask::PublishProof { .. }))
+            .current_execution_owners(id, matches!(task, EngineTask::PublishProof { .. }), None)
             .await?;
         if owners.incarnations.is_empty() {
             if matches!(
@@ -1378,17 +1376,10 @@ impl EngineObserver for RuntimeObserver {
         let execution_owners = Self::execution_owners(execution_permit)?.clone();
         let gate = self.runtime.execution_lifecycle_gate();
         let lifecycle_guard = gate.lock_owned().await;
-        let current_owners = self.current_execution_owners(id, false).await?;
-        let active_owners = current_owners
-            .by_task_id
-            .into_iter()
-            .filter(|(task_id, incarnation_id)| {
-                execution_owners
-                    .by_task_id
-                    .get(task_id)
-                    .is_none_or(|expected| expected == incarnation_id)
-            })
-            .collect::<HashMap<_, _>>();
+        let active_owners = self
+            .current_execution_owners(id, false, Some(&execution_owners.by_task_id))
+            .await?
+            .by_task_id;
         let mut active_owner_incarnations = active_owners.values().copied().collect::<Vec<_>>();
         active_owner_incarnations.sort_unstable();
         active_owner_incarnations.dedup();
@@ -1424,17 +1415,9 @@ impl EngineObserver for RuntimeObserver {
         let proof_ref = Self::root_task_ref(id);
         let execution_owners = Self::execution_owners(execution_permit)?;
         let active_owners = self
-            .current_execution_owners(id, true)
+            .current_execution_owners(id, true, Some(&execution_owners.by_task_id))
             .await?
-            .by_task_id
-            .into_iter()
-            .filter(|(task_id, incarnation)| {
-                execution_owners
-                    .by_task_id
-                    .get(task_id)
-                    .is_none_or(|expected| expected == incarnation)
-            })
-            .collect::<HashMap<_, _>>();
+            .by_task_id;
         if active_owners.is_empty() {
             let invalidated = self
                 .runtime
@@ -3470,6 +3453,109 @@ mod tests {
                 .get_task("task_terminal")
                 .await?
                 .expect("terminal runtime task")
+                .metadata,
+            serde_json::json!({"invalid": "metadata"})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_ignores_malformed_reincarnated_sibling_during_checkpoint_clear()
+    -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-ignore-reincarnated-clear-metadata",
+        ))?);
+        let request = proposal_request();
+        for task_id in ["task_active", "task_reincarnated"] {
+            register_observer_task(
+                &runtime,
+                task_id,
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaRisc0Network,
+                &request,
+                RunnerStatus::Allocated,
+            )
+            .await?;
+        }
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: id.clone(),
+        };
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &boundless_progress_fixture("0x1234", 1),
+            &checkpoint_permit,
+        )
+        .await?;
+        let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
+
+        let stale = runtime
+            .get_task("task_reincarnated")
+            .await?
+            .expect("original runtime task");
+        runtime
+            .cancel_task_if_current(&stale.lifetime(), None)
+            .await?;
+        runtime.remove_task_if_current(&stale.lifetime()).await?;
+        register_observer_task(
+            &runtime,
+            "task_reincarnated",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let mut replacement = runtime
+            .get_task("task_reincarnated")
+            .await?
+            .expect("replacement runtime task");
+        assert_ne!(replacement.incarnation_id, stale.incarnation_id);
+        replacement.metadata = serde_json::json!({"invalid": "metadata"});
+        runtime.upsert_task(&replacement).await?;
+
+        EngineObserver::clear_pending_proof_checkpoint(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0x1234".to_string(),
+                attempt: std::num::NonZeroU32::MIN,
+            },
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect("replacement sibling must not block the valid owner checkpoint clear");
+
+        let active = runtime
+            .get_task("task_active")
+            .await?
+            .expect("active runtime task");
+        let active_metadata = TaskMetadata::decode_for_record(&active)?;
+        assert!(
+            active_metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(|runtime| !runtime.has_remote_submission_progress())
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_reincarnated")
+                .await?
+                .expect("replacement runtime task")
                 .metadata,
             serde_json::json!({"invalid": "metadata"})
         );

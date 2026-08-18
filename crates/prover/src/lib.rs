@@ -127,6 +127,14 @@ pub struct BoundlessSubmissionResume {
     pub rebid_attempt: u32,
 }
 
+/// Exact persisted provider submission that may be cleared after a terminal outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProofCheckpointIdentity {
+    pub backend: NetworkProverBackend,
+    pub provider_request_id: String,
+    pub attempt: std::num::NonZeroU32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProverProgress {
@@ -232,6 +240,44 @@ pub(crate) async fn persist_prover_progress(
     }
 }
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+pub(crate) async fn clear_pending_proof_checkpoint(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    identity: &PendingProofCheckpointIdentity,
+    permit: &SubmissionCheckpointPermit,
+) -> RaikoResult<()> {
+    let Some(observer) = observer else {
+        return Ok(());
+    };
+    let schedule = CheckpointRetrySchedule::new();
+    let mut retry = 0_u32;
+    loop {
+        match observer
+            .clear_pending_proof_checkpoint(identity, permit)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(ProgressPersistenceError::Retryable(error)) => {
+                let delay = schedule.delay(retry);
+                tracing::warn!(
+                    %error,
+                    backend = ?identity.backend,
+                    provider_request_id = %identity.provider_request_id,
+                    attempt = identity.attempt.get(),
+                    retry,
+                    retry_delay_ms = delay.as_millis(),
+                    "failed to clear terminal provider checkpoint; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                retry = retry.saturating_add(1);
+            }
+            Err(ProgressPersistenceError::Permanent(error)) => {
+                return Err(RaikoError::Guest(error));
+            }
+        }
+    }
+}
+
 /// RAII token spanning provider acceptance through durable checkpoint persistence.
 pub struct SubmissionCheckpointPermit {
     guard: Box<dyn std::any::Any + Send + Sync>,
@@ -287,6 +333,16 @@ pub trait ProverProgressObserver: Send + Sync {
         _backend: NetworkProverBackend,
     ) -> Result<Option<PendingProofCheckpoint>, ProgressPersistenceError> {
         Ok(None)
+    }
+
+    async fn clear_pending_proof_checkpoint(
+        &self,
+        _identity: &PendingProofCheckpointIdentity,
+        _permit: &SubmissionCheckpointPermit,
+    ) -> Result<(), ProgressPersistenceError> {
+        Err(ProgressPersistenceError::Permanent(
+            "provider checkpoint clearing is unsupported".to_string(),
+        ))
     }
 }
 
@@ -668,8 +724,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, SubmissionCheckpointPermit,
-        build_shasta_aggregation_input, encode_proof_carry_data,
+        CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, NetworkProverBackend,
+        PendingProofCheckpointIdentity, ProgressPersistenceError, ProverProgress,
+        ProverProgressObserver, SubmissionCheckpointPermit, build_shasta_aggregation_input,
+        clear_pending_proof_checkpoint, encode_proof_carry_data,
         ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
         parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
     };
@@ -685,9 +743,116 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[derive(Default)]
+    struct ClearingObserver {
+        cleared: Mutex<Vec<PendingProofCheckpointIdentity>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProverProgressObserver for ClearingObserver {
+        async fn on_progress(
+            &self,
+            _progress: &ProverProgress,
+            _permit: &SubmissionCheckpointPermit,
+        ) -> Result<(), ProgressPersistenceError> {
+            Ok(())
+        }
+
+        async fn clear_pending_proof_checkpoint(
+            &self,
+            identity: &PendingProofCheckpointIdentity,
+            _permit: &SubmissionCheckpointPermit,
+        ) -> Result<(), ProgressPersistenceError> {
+            self.cleared
+                .lock()
+                .expect("cleared checkpoint lock")
+                .push(identity.clone());
+            Ok(())
+        }
+    }
+
+    struct PermanentClearFailureObserver;
+
+    #[async_trait::async_trait]
+    impl ProverProgressObserver for PermanentClearFailureObserver {
+        async fn on_progress(
+            &self,
+            _progress: &ProverProgress,
+            _permit: &SubmissionCheckpointPermit,
+        ) -> Result<(), ProgressPersistenceError> {
+            Ok(())
+        }
+
+        async fn clear_pending_proof_checkpoint(
+            &self,
+            _identity: &PendingProofCheckpointIdentity,
+            _permit: &SubmissionCheckpointPermit,
+        ) -> Result<(), ProgressPersistenceError> {
+            Err(ProgressPersistenceError::Permanent(
+                "terminal checkpoint clear rejected".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_pending_checkpoint_forwards_exact_identity() {
+        let observer = Arc::new(ClearingObserver::default());
+        let observer_dyn: Arc<dyn ProverProgressObserver> = observer.clone();
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: "request-1".to_string(),
+            attempt: std::num::NonZeroU32::new(5).expect("non-zero attempt"),
+        };
+        let permit = SubmissionCheckpointPermit::tracked(());
+
+        clear_pending_proof_checkpoint(Some(&observer_dyn), &identity, &permit)
+            .await
+            .expect("clear pending checkpoint");
+
+        assert_eq!(
+            *observer.cleared.lock().expect("cleared checkpoint lock"),
+            vec![identity]
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_pending_checkpoint_without_observer_is_a_noop() {
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: "request-1".to_string(),
+            attempt: std::num::NonZeroU32::MIN,
+        };
+        let permit = SubmissionCheckpointPermit::tracked(());
+
+        clear_pending_proof_checkpoint(None, &identity, &permit)
+            .await
+            .expect("unobserved clear is a no-op");
+    }
+
+    #[tokio::test]
+    async fn clear_pending_checkpoint_surfaces_permanent_failure() {
+        let observer: Arc<dyn ProverProgressObserver> = Arc::new(PermanentClearFailureObserver);
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: "request-1".to_string(),
+            attempt: std::num::NonZeroU32::MIN,
+        };
+        let permit = SubmissionCheckpointPermit::tracked(());
+
+        let error = clear_pending_proof_checkpoint(Some(&observer), &identity, &permit)
+            .await
+            .expect_err("permanent clear failure must be returned");
+
+        assert!(
+            error
+                .to_string()
+                .contains("terminal checkpoint clear rejected")
+        );
+    }
 
     #[test]
     fn checkpoint_retry_schedule_grows_caps_and_jitters_per_invocation() {

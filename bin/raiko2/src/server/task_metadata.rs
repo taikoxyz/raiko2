@@ -6,8 +6,9 @@ use raiko2_engine::{
 use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, ProofType, ShastaCheckpoint, proof_type::lowercase};
 use raiko2_prover::{
-    BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
-    Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
+    BoundlessSubmissionProgress, NetworkProverBackend, PendingProofCheckpointIdentity,
+    Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
+    sp1_config::ExecutionMode,
 };
 use raiko2_runtime::{ProofArtifactDescriptor, RuntimeTaskRecord};
 use serde::{Deserialize, Serialize};
@@ -704,6 +705,38 @@ impl TaskRuntimeMetadata {
         self.has_boundless_submission_resume() || self.has_sp1_network_submission_progress()
     }
 
+    pub(crate) fn clear_remote_submission(
+        &mut self,
+        identity: &PendingProofCheckpointIdentity,
+        updated_at: i64,
+    ) -> Result<()> {
+        let current_kind = self
+            .validate_remote_submission()?
+            .context("runtime provider checkpoint is missing")?;
+        anyhow::ensure!(
+            matches!(identity.backend, NetworkProverBackend::Boundless),
+            "terminal provider checkpoint reset only supports Boundless"
+        );
+        anyhow::ensure!(
+            matches!(current_kind, RemoteSubmissionKind::Boundless),
+            "runtime provider checkpoint is not a Boundless submission"
+        );
+        anyhow::ensure!(
+            self.provider_request_id.as_deref() == Some(identity.provider_request_id.as_str()),
+            "runtime provider request id does not match clear request"
+        );
+        anyhow::ensure!(
+            self.rebid_attempt == Some(identity.attempt.get()),
+            "runtime provider attempt does not match clear request"
+        );
+
+        *self = Self {
+            updated_at,
+            ..Self::default()
+        };
+        Ok(())
+    }
+
     fn validate_remote_submission(&self) -> Result<Option<RemoteSubmissionKind>> {
         if !self.has_remote_submission_progress() {
             return Ok(None);
@@ -1100,6 +1133,69 @@ mod tests {
             sp1_timeout_secs: Some(3_600),
             ..TaskRuntimeMetadata::default()
         }
+    }
+
+    fn boundless_checkpoint_identity(
+        provider_request_id: &str,
+        attempt: u32,
+    ) -> PendingProofCheckpointIdentity {
+        PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: provider_request_id.to_string(),
+            attempt: std::num::NonZeroU32::new(attempt).expect("non-zero attempt"),
+        }
+    }
+
+    #[test]
+    fn clear_boundless_checkpoint_requires_exact_identity() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.remote_tx_hash = Some("0xtx".to_string());
+        let original = runtime.clone();
+
+        runtime
+            .clear_remote_submission(&boundless_checkpoint_identity("0xother", 1), 10)
+            .expect_err("a different provider request must be rejected");
+        assert_eq!(runtime, original);
+
+        runtime
+            .clear_remote_submission(&boundless_checkpoint_identity("0x1", 2), 11)
+            .expect_err("a different attempt must be rejected");
+        assert_eq!(runtime, original);
+    }
+
+    #[test]
+    fn clear_boundless_checkpoint_removes_only_matching_submission() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.remote_tx_hash = Some("0xtx".to_string());
+
+        runtime
+            .clear_remote_submission(&boundless_checkpoint_identity("0x1", 1), 42)
+            .expect("matching checkpoint clears");
+
+        assert_eq!(
+            runtime,
+            TaskRuntimeMetadata {
+                updated_at: 42,
+                ..TaskRuntimeMetadata::default()
+            }
+        );
+    }
+
+    #[test]
+    fn clear_boundless_checkpoint_rejects_sp1_submission() {
+        let mut runtime = complete_sp1_runtime();
+        let original = runtime.clone();
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Sp1,
+            provider_request_id: "sp1-request".to_string(),
+            attempt: std::num::NonZeroU32::MIN,
+        };
+
+        runtime
+            .clear_remote_submission(&identity, 42)
+            .expect_err("terminal reset must not support SP1 checkpoints");
+
+        assert_eq!(runtime, original);
     }
 
     fn sp1_progress(provider_request_id: &str, attempt: u32) -> Sp1NetworkSubmissionProgress {

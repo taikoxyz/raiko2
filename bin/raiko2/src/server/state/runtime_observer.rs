@@ -9,8 +9,8 @@ use raiko2_engine::{
 use raiko2_pipeline::PipelineRoute;
 use raiko2_prover::{
     BoundlessSubmissionResume, NetworkProverBackend, PendingProofCheckpoint,
-    ProgressPersistenceError, ProverProgress, Sp1NetworkSubmissionProgress,
-    SubmissionCheckpointPermit,
+    PendingProofCheckpointIdentity, ProgressPersistenceError, ProverProgress,
+    Sp1NetworkSubmissionProgress, SubmissionCheckpointPermit,
 };
 use raiko2_queue::RootOwner;
 use raiko2_runtime::{
@@ -228,6 +228,7 @@ impl RuntimeObserver {
         &self,
         id: &EngineTaskId,
         include_completed: bool,
+        expected_owners: Option<&HashMap<String, uuid::Uuid>>,
     ) -> std::result::Result<RuntimeExecutionOwners, EngineObserverError> {
         let mut owner_records = Vec::new();
         for record in self
@@ -235,17 +236,26 @@ impl RuntimeObserver {
             .tasks_referencing(&Self::root_task_ref(id))
             .await
         {
-            if (!is_terminal_status(record.runner_status)
-                || (include_completed && record.runner_status == RunnerStatus::Completed))
-                && self.record_matches_observer(id, &record).map_err(|error| {
-                    EngineObserverError::RuntimeSync(format!(
-                        "failed to validate runtime owner {}: {error}",
-                        record.task_id
-                    ))
-                })?
+            if is_terminal_status(record.runner_status)
+                && !(include_completed && record.runner_status == RunnerStatus::Completed)
             {
-                owner_records.push((record.task_id, record.incarnation_id));
+                continue;
             }
+            if expected_owners
+                .and_then(|owners| owners.get(&record.task_id))
+                .is_some_and(|expected| *expected != record.incarnation_id)
+            {
+                continue;
+            }
+            if !self.record_matches_observer(id, &record).map_err(|error| {
+                EngineObserverError::ProgressRejected(format!(
+                    "failed to validate runtime owner {}: {error}",
+                    record.task_id
+                ))
+            })? {
+                continue;
+            }
+            owner_records.push((record.task_id, record.incarnation_id));
         }
         let mut incarnations = owner_records
             .iter()
@@ -358,9 +368,7 @@ impl RuntimeObserver {
             let observed_at_ms = now_ms();
             let mut updated_records = 0;
             for record in records {
-                if !self.record_matches_observer(id, record)?
-                    || owner_incarnations
-                        .is_some_and(|owners| !owners.contains(&record.incarnation_id))
+                if owner_incarnations.is_some_and(|owners| !owners.contains(&record.incarnation_id))
                     || (is_terminal_status(record.runner_status)
                         && !matches!(
                             (terminal_policy, record.runner_status),
@@ -370,6 +378,19 @@ impl RuntimeObserver {
                             ) | (TerminalRootPolicy::IncludeAll, _)
                         ))
                 {
+                    continue;
+                }
+                let matches_observer = match self.record_matches_observer(id, record) {
+                    Ok(matches_observer) => matches_observer,
+                    Err(error) if checkpoint_permit.is_some() => {
+                        return Err(RemoteSubmissionConflict::new(format!(
+                            "provider checkpoint owner metadata is invalid: {error}"
+                        ))
+                        .into());
+                    }
+                    Err(error) => return Err(error),
+                };
+                if !matches_observer {
                     continue;
                 }
                 if !mutator(record, updated_at, observed_at_ms)? {
@@ -1158,23 +1179,11 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         execution_owners: &RuntimeExecutionOwners,
         include_completed: bool,
-    ) -> Result<Vec<uuid::Uuid>> {
-        let mut owner_incarnations = self
-            .current_execution_owners(id, include_completed)
+    ) -> std::result::Result<Vec<uuid::Uuid>, EngineObserverError> {
+        Ok(self
+            .current_execution_owners(id, include_completed, Some(&execution_owners.by_task_id))
             .await?
-            .by_task_id
-            .into_iter()
-            .filter(|(task_id, incarnation_id)| {
-                execution_owners
-                    .by_task_id
-                    .get(task_id)
-                    .is_none_or(|expected| expected == incarnation_id)
-            })
-            .map(|(_, incarnation_id)| incarnation_id)
-            .collect::<Vec<_>>();
-        owner_incarnations.sort_unstable();
-        owner_incarnations.dedup();
-        Ok(owner_incarnations)
+            .incarnations)
     }
 
     async fn sync_proof_success(
@@ -1317,7 +1326,7 @@ impl EngineObserver for RuntimeObserver {
         // `Completed`. It owns no further proving work, but it must retain authority to finish the
         // pending artifact saga and make the queue result durable.
         let owners = self
-            .current_execution_owners(id, matches!(task, EngineTask::PublishProof { .. }))
+            .current_execution_owners(id, matches!(task, EngineTask::PublishProof { .. }), None)
             .await?;
         if owners.incarnations.is_empty() {
             if matches!(
@@ -1367,17 +1376,10 @@ impl EngineObserver for RuntimeObserver {
         let execution_owners = Self::execution_owners(execution_permit)?.clone();
         let gate = self.runtime.execution_lifecycle_gate();
         let lifecycle_guard = gate.lock_owned().await;
-        let current_owners = self.current_execution_owners(id, false).await?;
-        let active_owners = current_owners
-            .by_task_id
-            .into_iter()
-            .filter(|(task_id, incarnation_id)| {
-                execution_owners
-                    .by_task_id
-                    .get(task_id)
-                    .is_none_or(|expected| expected == incarnation_id)
-            })
-            .collect::<HashMap<_, _>>();
+        let active_owners = self
+            .current_execution_owners(id, false, Some(&execution_owners.by_task_id))
+            .await?
+            .by_task_id;
         let mut active_owner_incarnations = active_owners.values().copied().collect::<Vec<_>>();
         active_owner_incarnations.sort_unstable();
         active_owner_incarnations.dedup();
@@ -1413,17 +1415,9 @@ impl EngineObserver for RuntimeObserver {
         let proof_ref = Self::root_task_ref(id);
         let execution_owners = Self::execution_owners(execution_permit)?;
         let active_owners = self
-            .current_execution_owners(id, true)
+            .current_execution_owners(id, true, Some(&execution_owners.by_task_id))
             .await?
-            .by_task_id
-            .into_iter()
-            .filter(|(task_id, incarnation)| {
-                execution_owners
-                    .by_task_id
-                    .get(task_id)
-                    .is_none_or(|expected| expected == incarnation)
-            })
-            .collect::<HashMap<_, _>>();
+            .by_task_id;
         if active_owners.is_empty() {
             let invalidated = self
                 .runtime
@@ -1613,12 +1607,7 @@ impl EngineObserver for RuntimeObserver {
         let _lifecycle_guard = gate.lock().await;
         let owner_incarnations = self
             .current_owner_incarnations(id, &execution_owners, false)
-            .await
-            .map_err(|error| {
-                EngineObserverError::RuntimeSync(format!(
-                    "failed to refresh provider checkpoint owners: {error}"
-                ))
-            })?;
+            .await?;
         if owner_incarnations.is_empty() {
             return Err(EngineObserverError::RuntimeInactive(format!(
                 "provider checkpoint matched no active runtime root for {}",
@@ -1694,6 +1683,94 @@ impl EngineObserver for RuntimeObserver {
             Ok(_) => Err(EngineObserverError::RuntimeInactive(format!(
                 "provider checkpoint matched no active runtime root for {}",
                 Self::root_task_ref(id)
+            ))),
+            Err(error) => Err(self.progress_sync_error(id, runtime_permit, &error)),
+        }
+    }
+
+    async fn clear_pending_proof_checkpoint(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        identity: &PendingProofCheckpointIdentity,
+        permit: &SubmissionCheckpointPermit,
+        execution_permit: &TaskExecutionPermit,
+    ) -> std::result::Result<(), EngineObserverError> {
+        let execution_owners = Self::execution_owners(execution_permit)?.clone();
+        let runtime_permit = permit
+            .guard::<raiko2_runtime::RuntimeSubmissionCheckpointPermit>()
+            .ok_or_else(|| {
+                EngineObserverError::RuntimeInactive(
+                    "submission checkpoint permit does not belong to the runtime".to_string(),
+                )
+            })?;
+        let gate = self.runtime.execution_lifecycle_gate();
+        let _lifecycle_guard = gate.lock().await;
+        let owner_incarnations = self
+            .current_owner_incarnations(id, &execution_owners, false)
+            .await?;
+        if owner_incarnations.is_empty() {
+            return Err(EngineObserverError::RuntimeInactive(format!(
+                "provider checkpoint matched no active runtime root for {}",
+                Self::root_task_ref(id)
+            )));
+        }
+
+        let task_id = Self::root_task_ref(id);
+        let result = self
+            .checkpoint_retry_root_records(
+                id,
+                &owner_incarnations,
+                runtime_permit,
+                |record, updated_at, _observed_at_ms| {
+                    update_task_metadata(record, |metadata| {
+                        let runtime = match task.publication_source() {
+                            EngineTask::ProveProposal { .. } => metadata
+                                .runtime
+                                .proposals
+                                .get_mut(&task_id)
+                                .context("proposal provider checkpoint is missing"),
+                            EngineTask::Aggregate { .. } => metadata
+                                .runtime
+                                .aggregate
+                                .as_mut()
+                                .context("aggregate provider checkpoint is missing"),
+                            EngineTask::Preflight { .. }
+                            | EngineTask::Validate { .. }
+                            | EngineTask::Encode { .. }
+                            | EngineTask::Proposal { .. }
+                            | EngineTask::PublishProof { .. } => unreachable!(),
+                        }
+                        .map_err(|error| {
+                            RemoteSubmissionConflict::new(format!(
+                                "terminal provider checkpoint is not present: {error}"
+                            ))
+                        })?;
+                        runtime
+                            .clear_remote_submission(identity, updated_at)
+                            .map_err(|error| {
+                                RemoteSubmissionConflict::new(format!(
+                                    "terminal provider checkpoint identity mismatch: {error}"
+                                ))
+                            })?;
+                        metadata.runtime.last_event = Some("submission_terminalized".to_string());
+                        Ok(())
+                    })
+                    .map_err(|error| {
+                        RemoteSubmissionConflict::new(format!(
+                            "terminal provider checkpoint is not canonical runtime metadata: {error}"
+                        ))
+                    })?;
+                    record.runner_status = RunnerStatus::Allocated;
+                    record.error = None;
+                    Ok(true)
+                },
+            )
+            .await;
+        match result {
+            Ok(updated) if updated > 0 => Ok(()),
+            Ok(_) => Err(EngineObserverError::RuntimeInactive(format!(
+                "provider checkpoint matched no active runtime root for {task_id}"
             ))),
             Err(error) => Err(self.progress_sync_error(id, runtime_permit, &error)),
         }
@@ -2281,6 +2358,25 @@ mod tests {
         .await
     }
 
+    async fn drive_engine_checkpoint_clear(
+        observer: &RuntimeObserver,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        identity: &PendingProofCheckpointIdentity,
+        checkpoint_permit: &SubmissionCheckpointPermit,
+    ) -> std::result::Result<(), EngineObserverError> {
+        let execution_permit = engine_execution_permit(observer, id, task).await?;
+        EngineObserver::clear_pending_proof_checkpoint(
+            observer,
+            id,
+            task,
+            identity,
+            checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+    }
+
     async fn drive_engine_failure(
         observer: &RuntimeObserver,
         id: &EngineTaskId,
@@ -2765,6 +2861,25 @@ mod tests {
         }
     }
 
+    fn boundless_progress_fixture(provider_request_id: &str, rebid_attempt: u32) -> ProverProgress {
+        let expires_at = now_secs().saturating_add(3_600);
+        ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+            provider_request_id: provider_request_id.to_string(),
+            remote_tx_hash: Some("0xabcd".to_string()),
+            expires_at,
+            lock_expires_at: expires_at - 600,
+            submitted_at: expires_at - 900,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(6_000),
+            evaluated_mcycles_count: Some(12_345),
+            max_price_multiplier: 4,
+            max_price_wei: Some("9000000000000".to_string()),
+            rebid_attempt,
+        })
+    }
+
     async fn checkpoint_proof_fixture(
         observer: &RuntimeObserver,
         id: &EngineTaskId,
@@ -3037,6 +3152,526 @@ mod tests {
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.expires_at, expired_at);
         assert_eq!(resumed.rebid_attempt, 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_clears_only_matching_boundless_proposal_checkpoint() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-clear-boundless",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_public",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: id.clone(),
+        };
+        let expires_at = now_secs().saturating_add(3_600);
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+                provider_request_id: "0x1234".to_string(),
+                remote_tx_hash: Some("0xabcd".to_string()),
+                expires_at,
+                lock_expires_at: expires_at - 600,
+                submitted_at: expires_at - 900,
+                image_ref: "0ximage".to_string(),
+                deployment: "base".to_string(),
+                offchain: false,
+                quoted_mcycles_count: Some(6_000),
+                evaluated_mcycles_count: Some(12_345),
+                max_price_multiplier: 4,
+                max_price_wei: Some("9000000000000".to_string()),
+                rebid_attempt: 3,
+            }),
+            &checkpoint_permit,
+        )
+        .await?;
+
+        let wrong_identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: "0xother".to_string(),
+            attempt: std::num::NonZeroU32::new(3).expect("non-zero attempt"),
+        };
+        drive_engine_checkpoint_clear(&observer, &id, &task, &wrong_identity, &checkpoint_permit)
+            .await
+            .expect_err("mismatched checkpoint must not clear");
+        assert!(
+            load_checkpoint_payload::<BoundlessSubmissionResume>(
+                &observer,
+                &id,
+                &task,
+                NetworkProverBackend::Boundless,
+            )
+            .await?
+            .is_some()
+        );
+
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: "0x1234".to_string(),
+            attempt: std::num::NonZeroU32::new(3).expect("non-zero attempt"),
+        };
+        drive_engine_checkpoint_clear(&observer, &id, &task, &identity, &checkpoint_permit).await?;
+        assert!(
+            load_checkpoint_payload::<BoundlessSubmissionResume>(
+                &observer,
+                &id,
+                &task,
+                NetworkProverBackend::Boundless,
+            )
+            .await?
+            .is_none()
+        );
+
+        drive_engine_failure(&observer, &id, &task, "no-lock rebids exhausted").await?;
+        let mut record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task after terminal failure");
+        assert_eq!(record.runner_status, RunnerStatus::Failed);
+        let metadata = TaskMetadata::decode_for_record(&record)?;
+        assert!(
+            metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(|runtime| !runtime.has_remote_submission_progress())
+        );
+
+        // The HTTP retry path reactivates the same deterministic task. Once active again, the
+        // prover must see no resumable provider checkpoint and therefore submit attempt one.
+        record.runner_status = RunnerStatus::Allocated;
+        record.error = None;
+        runtime.upsert_task(&record).await?;
+        assert!(
+            load_checkpoint_payload::<BoundlessSubmissionResume>(
+                &observer,
+                &id,
+                &task,
+                NetworkProverBackend::Boundless,
+            )
+            .await?
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_rejects_invalid_metadata_during_checkpoint_clear() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-reject-invalid-clear-metadata",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_active",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        register_observer_task(
+            &runtime,
+            "task_invalid",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: id.clone(),
+        };
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &boundless_progress_fixture("0x1234", 1),
+            &checkpoint_permit,
+        )
+        .await?;
+        let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
+
+        let mut record = runtime
+            .get_task("task_invalid")
+            .await?
+            .expect("runtime task");
+        record.metadata = serde_json::json!({"invalid": "metadata"});
+        runtime.upsert_task(&record).await?;
+
+        let error = EngineObserver::clear_pending_proof_checkpoint(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0x1234".to_string(),
+                attempt: std::num::NonZeroU32::MIN,
+            },
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect_err("invalid checkpoint metadata must fail permanently");
+
+        assert!(matches!(error, EngineObserverError::ProgressRejected(_)));
+        let active = runtime
+            .get_task("task_active")
+            .await?
+            .expect("active runtime task");
+        let active_metadata = TaskMetadata::decode_for_record(&active)?;
+        assert!(
+            active_metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(TaskRuntimeMetadata::has_remote_submission_progress)
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_invalid")
+                .await?
+                .expect("invalid runtime task")
+                .metadata,
+            serde_json::json!({"invalid": "metadata"})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_ignores_malformed_terminal_sibling_during_checkpoint_clear()
+    -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-ignore-terminal-clear-metadata",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_active",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        register_observer_task(
+            &runtime,
+            "task_terminal",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Failed,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request,
+            input_task: id.clone(),
+        };
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &boundless_progress_fixture("0x1234", 1),
+            &checkpoint_permit,
+        )
+        .await?;
+        let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
+
+        let mut terminal = runtime
+            .get_task("task_terminal")
+            .await?
+            .expect("terminal runtime task");
+        terminal.metadata = serde_json::json!({"invalid": "metadata"});
+        runtime.upsert_task(&terminal).await?;
+
+        EngineObserver::clear_pending_proof_checkpoint(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0x1234".to_string(),
+                attempt: std::num::NonZeroU32::MIN,
+            },
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect("terminal sibling must not block active checkpoint clear");
+
+        let active = runtime
+            .get_task("task_active")
+            .await?
+            .expect("active runtime task");
+        let active_metadata = TaskMetadata::decode_for_record(&active)?;
+        assert!(
+            active_metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(|runtime| !runtime.has_remote_submission_progress())
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_terminal")
+                .await?
+                .expect("terminal runtime task")
+                .metadata,
+            serde_json::json!({"invalid": "metadata"})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_ignores_malformed_reincarnated_sibling_during_checkpoint_clear()
+    -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-ignore-reincarnated-clear-metadata",
+        ))?);
+        let request = proposal_request();
+        for task_id in ["task_active", "task_reincarnated"] {
+            register_observer_task(
+                &runtime,
+                task_id,
+                "taiko_dev/ethereum",
+                PipelineKey::ShastaRisc0Network,
+                &request,
+                RunnerStatus::Allocated,
+            )
+            .await?;
+        }
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            PipelineKey::ShastaRisc0Network.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: request.clone(),
+        });
+        let task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: id.clone(),
+        };
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &boundless_progress_fixture("0x1234", 1),
+            &checkpoint_permit,
+        )
+        .await?;
+        let execution_permit = engine_execution_permit(&observer, &id, &task).await?;
+
+        let stale = runtime
+            .get_task("task_reincarnated")
+            .await?
+            .expect("original runtime task");
+        runtime
+            .cancel_task_if_current(&stale.lifetime(), None)
+            .await?;
+        runtime.remove_task_if_current(&stale.lifetime()).await?;
+        register_observer_task(
+            &runtime,
+            "task_reincarnated",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaRisc0Network,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let mut replacement = runtime
+            .get_task("task_reincarnated")
+            .await?
+            .expect("replacement runtime task");
+        assert_ne!(replacement.incarnation_id, stale.incarnation_id);
+        replacement.metadata = serde_json::json!({"invalid": "metadata"});
+        runtime.upsert_task(&replacement).await?;
+
+        EngineObserver::clear_pending_proof_checkpoint(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0x1234".to_string(),
+                attempt: std::num::NonZeroU32::MIN,
+            },
+            &checkpoint_permit,
+            &execution_permit,
+        )
+        .await
+        .expect("replacement sibling must not block the valid owner checkpoint clear");
+
+        let active = runtime
+            .get_task("task_active")
+            .await?
+            .expect("active runtime task");
+        let active_metadata = TaskMetadata::decode_for_record(&active)?;
+        assert!(
+            active_metadata
+                .proposal_runtime(&RuntimeObserver::root_task_ref(&id))
+                .is_some_and(|runtime| !runtime.has_remote_submission_progress())
+        );
+        assert_eq!(
+            runtime
+                .get_task("task_reincarnated")
+                .await?
+                .expect("replacement runtime task")
+                .metadata,
+            serde_json::json!({"invalid": "metadata"})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_clears_matching_boundless_aggregate_checkpoint() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-clear-boundless-aggregate",
+        ))?);
+        let pipeline = PipelineKey::ShastaRisc0Network;
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "agg-42".to_string(),
+            proposal_ids: vec![42],
+            prover_config: ProverTaskConfig::default(),
+        };
+        let task_ref = aggregate_task_ref(pipeline, &aggregate_request);
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Risc0,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(task_ref),
+            aggregate_request: Some(aggregate_request.clone()),
+            aggregate_input_artifacts: vec![AggregateInputProofArtifact {
+                proof_ref: "aggregate-input-42".to_string(),
+            }],
+            runtime: RuntimeMetadata::default(),
+        };
+        let artifact_refs = publication_proof_artifact_refs(&metadata, pipeline);
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public_aggregate".to_string(),
+                pipeline_key: pipeline,
+                route: pipeline.route(),
+                task_kind: "hoodi_batch".to_string(),
+                network_pair: "taiko_dev/ethereum".to_string(),
+                artifact_refs,
+                metadata: serde_json::to_value(metadata)?,
+                request_fingerprint: "task-public-aggregate".to_string(),
+            })
+            .await?;
+        let mut record = runtime
+            .get_task("task_public_aggregate")
+            .await?
+            .expect("runtime task");
+        record.runner_status = RunnerStatus::Allocated;
+        runtime.upsert_task(&record).await?;
+
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            pipeline.route(),
+        );
+        let id = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline,
+            request: aggregate_request.clone(),
+        });
+        let task = EngineTask::Aggregate {
+            request: aggregate_request,
+            source: raiko2_engine::AggregationSource::Inputs(Vec::new()),
+        };
+        let expires_at = now_secs().saturating_add(3_600);
+        let checkpoint_permit = checkpoint_permit(&runtime);
+        drive_engine_progress(
+            &observer,
+            &id,
+            &task,
+            &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+                provider_request_id: "0xaggregate".to_string(),
+                remote_tx_hash: Some("0xaggregate-tx".to_string()),
+                expires_at,
+                lock_expires_at: expires_at - 600,
+                submitted_at: expires_at - 900,
+                image_ref: "0xaggregate-image".to_string(),
+                deployment: "base".to_string(),
+                offchain: false,
+                quoted_mcycles_count: Some(164),
+                evaluated_mcycles_count: Some(164),
+                max_price_multiplier: 5,
+                max_price_wei: Some("162360000000000".to_string()),
+                rebid_attempt: 5,
+            }),
+            &checkpoint_permit,
+        )
+        .await?;
+
+        drive_engine_checkpoint_clear(
+            &observer,
+            &id,
+            &task,
+            &PendingProofCheckpointIdentity {
+                backend: NetworkProverBackend::Boundless,
+                provider_request_id: "0xaggregate".to_string(),
+                attempt: std::num::NonZeroU32::new(5).expect("non-zero attempt"),
+            },
+            &checkpoint_permit,
+        )
+        .await?;
+
+        assert!(
+            load_checkpoint_payload::<BoundlessSubmissionResume>(
+                &observer,
+                &id,
+                &task,
+                NetworkProverBackend::Boundless,
+            )
+            .await?
+            .is_none()
+        );
         Ok(())
     }
 

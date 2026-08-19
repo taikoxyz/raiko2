@@ -951,8 +951,7 @@ impl RuntimeManager {
             let mut next = current.clone();
             let output = update(&mut next)?;
             validate_runtime_state(&next, self.environment())?;
-            // A byte-identical write cannot distinguish our retry from a foreign generation.
-            // Keep no-op mutations from adopting an out-of-band rewrite as authoritative.
+            // A no-op must not adopt an out-of-band generation as authoritative.
             if next == current {
                 return Ok(output);
             }
@@ -962,10 +961,7 @@ impl RuntimeManager {
                 .store
                 .store_runtime_state(&next_bytes, expected_generation)
                 .await;
-            self.ensure_in_flight_write_allowed(
-                checkpoint_permit,
-                "runtime lifecycle closed while authoritative state write was in flight",
-            )?;
+            self.ensure_runtime_state_write_open(checkpoint_permit)?;
             match write_result {
                 Ok(RuntimeStateWriteResult::Stored { generation }) => {
                     self.install_checkpointed_runtime_state(
@@ -980,22 +976,17 @@ impl RuntimeManager {
                 Ok(RuntimeStateWriteResult::Conflict(Some(observed)))
                     if observed.bytes == next_bytes =>
                 {
-                    // The intended changed state is already durable even though the conditional
-                    // write reported a conflict, as happens after an ambiguous committed retry.
-                    self.install_checkpointed_runtime_state(
+                    self.install_recovered_runtime_state(
                         next,
-                        observed.generation,
+                        observed,
+                        next_bytes.len(),
                         checkpoint_permit,
                     )
                     .await?;
                     return Ok(output);
                 }
                 Ok(RuntimeStateWriteResult::Conflict(_)) => {
-                    self.state_coherence
-                        .store(StateCoherence::Violated as u8, Ordering::Release);
-                    anyhow::bail!(
-                        "runtime state generation changed during mutation; refusing foreign state"
-                    );
+                    return self.reject_foreign_runtime_state();
                 }
                 Err(write_error) => {
                     let observed = match self.store.load_runtime_state().await {
@@ -1044,6 +1035,39 @@ impl RuntimeManager {
         }
         self.mark_state_coherence_recoverable();
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("runtime state mutation failed")))
+    }
+
+    fn reject_foreign_runtime_state<T>(&self) -> Result<T> {
+        self.state_coherence
+            .store(StateCoherence::Violated as u8, Ordering::Release);
+        anyhow::bail!("runtime state generation changed during mutation; refusing foreign state")
+    }
+
+    fn ensure_runtime_state_write_open(
+        &self,
+        checkpoint_permit: Option<&RuntimeSubmissionCheckpointPermit>,
+    ) -> Result<()> {
+        self.ensure_in_flight_write_allowed(
+            checkpoint_permit,
+            "runtime lifecycle closed while authoritative state write was in flight",
+        )
+    }
+
+    async fn install_recovered_runtime_state(
+        &self,
+        state: RuntimeState,
+        observed: RuntimeStateObject,
+        serialized_bytes: usize,
+        checkpoint_permit: Option<&RuntimeSubmissionCheckpointPermit>,
+    ) -> Result<()> {
+        // The intended state is already durable after an ambiguous committed retry.
+        self.install_checkpointed_runtime_state(
+            state,
+            observed.generation,
+            serialized_bytes,
+            checkpoint_permit,
+        )
+        .await
     }
 
     async fn reload_checkpoint_state_if_needed(

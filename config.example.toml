@@ -59,6 +59,8 @@ compute_units_per_second = 1000
 [runtime]
 environment = "development"
 namespace = "raiko2-development"
+# Terminal tasks and their unreferenced proof artifacts are retained for six hours by default.
+terminal_task_ttl_secs = 21600
 # Shared canonical preflight caching is enabled by default. Set this to "off" only as an
 # incident-response bypass; it disables both persistent cache access and local singleflight.
 preflight_cache = "shared"

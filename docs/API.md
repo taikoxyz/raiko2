@@ -1175,6 +1175,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
+- `runtime.terminal_task_ttl_secs` controls how long terminal task metadata and its unreferenced proof
+  artifacts remain eligible for reuse before background cleanup removes them. It defaults to `21600`
+  (6 hours), must be greater than zero, and does not expire active tasks.
 - `runtime.preflight_cache` accepts `"shared"` (default) or `"off"`. Shared mode enables the
   persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
   bypasses both layers and rebuilds preflight independently for each request; use it only as an

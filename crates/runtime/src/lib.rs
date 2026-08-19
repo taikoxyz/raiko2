@@ -105,6 +105,20 @@ enum StateCoherence {
     Violated,
 }
 
+fn runtime_generation_is_unchanged(
+    observed: Option<&RuntimeStateObject>,
+    expected_generation: Option<i64>,
+) -> bool {
+    // The object generation is the CAS identity. Runtime state contains hash maps, so unchanged
+    // snapshots are not guaranteed to serialize with identical byte order. This check only
+    // classifies a transport error before commit; comparing bytes there would create a false
+    // coherence violation.
+    match observed {
+        Some(observed) => observed.generation == expected_generation,
+        None => expected_generation.is_none(),
+    }
+}
+
 impl StateCoherence {
     fn load(value: &AtomicU8) -> Self {
         match value.load(Ordering::Acquire) {
@@ -830,6 +844,19 @@ impl RuntimeManager {
         Ok(())
     }
 
+    fn acquire_namespace_commit_fence(
+        &self,
+        checkpoint_permit: Option<&RuntimeSubmissionCheckpointPermit>,
+    ) -> Result<Option<tokio::sync::RwLockReadGuard<'_, ()>>> {
+        if checkpoint_permit.is_some() {
+            return Ok(None);
+        }
+        self.namespace_commit_fence
+            .try_read()
+            .map(Some)
+            .context("runtime is draining")
+    }
+
     async fn mutate_authoritative<T>(
         &self,
         update: impl Fn(&mut RuntimeState) -> Result<T>,
@@ -838,15 +865,7 @@ impl RuntimeManager {
         const MAX_ATTEMPTS: usize = 3;
 
         self.ensure_authoritative_write_allowed(checkpoint_permit)?;
-        let _commit = if checkpoint_permit.is_some() {
-            None
-        } else {
-            Some(
-                self.namespace_commit_fence
-                    .try_read()
-                    .context("runtime is draining")?,
-            )
-        };
+        let _commit = self.acquire_namespace_commit_fence(checkpoint_permit)?;
         self.ensure_authoritative_write_allowed(checkpoint_permit)?;
         let _mutation = self.mutation.lock().await;
         self.reload_checkpoint_state_if_needed(checkpoint_permit)
@@ -859,6 +878,11 @@ impl RuntimeManager {
             let mut next = current.clone();
             let output = update(&mut next)?;
             validate_runtime_state(&next, self.environment())?;
+            // A byte-identical write cannot distinguish our retry from a foreign generation.
+            // Keep no-op mutations from adopting an out-of-band rewrite as authoritative.
+            if next == current {
+                return Ok(output);
+            }
             let next_bytes = serde_json::to_vec(&next).context("encode runtime store state")?;
 
             let write_result = self
@@ -873,6 +897,19 @@ impl RuntimeManager {
                 Ok(RuntimeStateWriteResult::Stored { generation }) => {
                     self.install_checkpointed_runtime_state(next, generation, checkpoint_permit)
                         .await?;
+                    return Ok(output);
+                }
+                Ok(RuntimeStateWriteResult::Conflict(Some(observed)))
+                    if observed.bytes == next_bytes =>
+                {
+                    // The intended changed state is already durable even though the conditional
+                    // write reported a conflict, as happens after an ambiguous committed retry.
+                    self.install_checkpointed_runtime_state(
+                        next,
+                        observed.generation,
+                        checkpoint_permit,
+                    )
+                    .await?;
                     return Ok(output);
                 }
                 Ok(RuntimeStateWriteResult::Conflict(_)) => {
@@ -907,14 +944,8 @@ impl RuntimeManager {
                         .await?;
                         return Ok(output);
                     }
-                    // The object generation is the CAS identity. Runtime state contains hash maps,
-                    // so deserializing and serializing an unchanged snapshot is not guaranteed to
-                    // reproduce the original byte order. Comparing those bytes would turn a
-                    // transport error before commit into a false coherence violation.
-                    let remote_matches_current = match observed.as_ref() {
-                        Some(observed) => observed.generation == expected_generation,
-                        None => expected_generation.is_none(),
-                    };
+                    let remote_matches_current =
+                        runtime_generation_is_unchanged(observed.as_ref(), expected_generation);
                     if remote_matches_current {
                         last_error =
                             Some(write_error.context("runtime state write failed before commit"));
@@ -4179,6 +4210,7 @@ mod tests {
         inner: MemoryProofArtifactStore,
         runtime_state_writes: AtomicUsize,
         force_conflict: AtomicBool,
+        commit_then_conflict: AtomicBool,
         commit_then_error: AtomicBool,
         foreign_commit_then_error: AtomicBool,
         fail_before_commit: AtomicUsize,
@@ -4203,6 +4235,7 @@ mod tests {
                 inner: MemoryProofArtifactStore::new("test".into(), namespace.into())?,
                 runtime_state_writes: AtomicUsize::new(0),
                 force_conflict: AtomicBool::new(false),
+                commit_then_conflict: AtomicBool::new(false),
                 commit_then_error: AtomicBool::new(false),
                 foreign_commit_then_error: AtomicBool::new(false),
                 fail_before_commit: AtomicUsize::new(0),
@@ -4377,6 +4410,14 @@ mod tests {
                         generation: Some(99),
                     },
                 )));
+            }
+            if self.commit_then_conflict.swap(false, Ordering::SeqCst) {
+                self.inner
+                    .store_runtime_state(bytes, expected_generation)
+                    .await?;
+                return Ok(RuntimeStateWriteResult::Conflict(
+                    self.inner.load_runtime_state().await?,
+                ));
             }
             if self.commit_then_error.swap(false, Ordering::SeqCst) {
                 self.inner
@@ -4953,7 +4994,16 @@ mod tests {
         let runtime = RuntimeManager::with_store(store.clone());
 
         let error = runtime
-            .mutate(|_| Ok(()))
+            .register_task(TaskRegistration {
+                task_id: "conflicting-task".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "conflicting-task".into(),
+            })
             .await
             .expect_err("a true generation conflict must fail closed");
 
@@ -4966,23 +5016,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_rejects_out_of_band_runtime_generation_change() -> Result<()> {
-        let store = Arc::new(RuntimeStateProbeStore::new(
-            "readiness-generation-conflict",
-        )?);
+    async fn runtime_state_conflict_recovers_identical_committed_state() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("state-identical-conflict")?);
+        store.commit_then_conflict.store(true, Ordering::SeqCst);
         let runtime = RuntimeManager::with_store(store.clone());
+
         runtime
             .register_task(TaskRegistration {
-                task_id: "root".into(),
+                task_id: "committed-task".into(),
                 pipeline_key: PipelineKey::ShastaNative,
                 route: PipelineKey::ShastaNative.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
                 metadata: serde_json::json!({}),
-                request_fingerprint: "root-request".into(),
+                request_fingerprint: "committed-task".into(),
             })
             .await?;
+
+        assert!(runtime.accepts_mutations());
+        assert!(runtime.get_task("committed-task").await?.is_some());
+        assert_eq!(store.runtime_state_writes.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.current_generation()?, Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_op_mutation_cannot_adopt_out_of_band_runtime_generation() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "readiness-generation-conflict",
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let registration = TaskRegistration {
+            task_id: "root".into(),
+            pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
+            task_kind: "proposal".into(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: Vec::new(),
+            metadata: serde_json::json!({}),
+            request_fingerprint: "root-request".into(),
+        };
+        runtime.register_task(registration.clone()).await?;
         let stored = store
             .inner
             .load_runtime_state()
@@ -4995,6 +5070,13 @@ mod tests {
                 .await?,
             RuntimeStateWriteResult::Stored { .. }
         ));
+
+        assert!(matches!(
+            runtime.register_task_if_absent(registration).await?,
+            TaskRegistrationOutcome::Existing(_)
+        ));
+        assert_eq!(store.runtime_state_writes.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.current_generation()?, Some(1));
 
         let error = runtime
             .check_readiness()
@@ -5066,7 +5148,16 @@ mod tests {
         let runtime = RuntimeManager::with_store(store.clone());
 
         runtime
-            .mutate(|_| Ok(()))
+            .register_task(TaskRegistration {
+                task_id: "retryable-task".into(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: PipelineKey::ShastaNative.route(),
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: Vec::new(),
+                metadata: serde_json::json!({}),
+                request_fingerprint: "retryable-task".into(),
+            })
             .await
             .expect_err("three transient writes must exhaust the mutation retry");
 

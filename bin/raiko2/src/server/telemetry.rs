@@ -341,6 +341,14 @@ pub(crate) fn record_runtime_cleanup_stats(
             "retained_artifact_failures",
             stats.retained_artifact_failures,
         ),
+        (
+            "removed_pending_publications",
+            stats.removed_pending_publications,
+        ),
+        (
+            "retained_pending_publication_failures",
+            stats.retained_pending_publication_failures,
+        ),
         ("orphaned_tasks_cancelled", stats.orphaned_cancelled),
     ] {
         RUNTIME_RETENTION_TOTAL
@@ -672,6 +680,8 @@ mod tests {
             invalidated_artifacts: 2,
             removed_artifacts: 1,
             retained_artifact_failures: 1,
+            removed_pending_publications: 1,
+            retained_pending_publication_failures: 1,
             orphaned_cancelled: 0,
         });
 
@@ -689,6 +699,7 @@ mod tests {
             "removed_tasks",
             "invalidated_artifacts",
             "removed_artifacts",
+            "removed_pending_publications",
         ] {
             assert!(metrics.contains(&format!(
                 "raiko2_runtime_retention_total{{outcome=\"{outcome}\"}}"

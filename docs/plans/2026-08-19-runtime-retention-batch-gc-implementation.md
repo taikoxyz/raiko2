@@ -91,8 +91,9 @@ git commit -m "feat(runtime): batch terminal retention transitions"
 **Step 1: Write failing cleanup tests**
 
 Cover a multi-root cleanup pass, shared artifact retention, exact artifact finalization, detach
-failure retry, and proof-object deletion failure retry. Assert that cleanup performs a constant
-number of authoritative state writes per batch using the runtime probe store.
+failure retry, proof-object deletion failure retry, pending-publication deletion retry, and a slow
+object store that does not hold the execution lifecycle gate. Assert that cleanup performs a
+constant number of authoritative state writes per batch using the runtime probe store.
 
 **Step 2: Run the focused tests and verify failure**
 
@@ -102,9 +103,11 @@ Expected: FAIL because cleanup still removes one root at a time.
 
 **Step 3: Implement batch cleanup**
 
-Pass `config.runtime.terminal_task_ttl_secs` into the loop. Acquire the lifecycle gate once, call the
-batch prepare transition, detach selected roots, finalize artifact invalidations with bounded
-concurrency, then call the batch finalize transition.
+Pass `config.runtime.terminal_task_ttl_secs` into the loop. Hold the lifecycle gate only through the
+batch prepare transition and exact queue detachment. Release it before bounded-concurrent artifact
+and pending-publication finalization, then call the exact batch finalize transition. If the task seen
+by a request disappears during this process, atomically retry normal registration instead of
+returning an internal error.
 
 **Step 4: Run focused cleanup tests**
 

@@ -95,8 +95,8 @@ reported as `runner_status="completed_artifact_missing"`.
 Runtime state metrics expose the serialized authoritative-state size and bounded record counts for
 `tasks`, `artifacts`, and `pending_publications`. Runtime retention counters use only fixed outcome
 labels such as `selected_tasks`, `removed_tasks`, `retained_task_failures`,
-`invalidated_artifacts`, and `retained_artifact_failures`; task IDs and proof references are not
-metric labels.
+`invalidated_artifacts`, `retained_artifact_failures`, `removed_pending_publications`, and
+`retained_pending_publication_failures`; task IDs and proof references are not metric labels.
 
 ## Admin Ballot
 

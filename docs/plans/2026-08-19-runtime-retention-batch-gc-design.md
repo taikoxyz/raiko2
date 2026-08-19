@@ -35,13 +35,18 @@ Each maintenance pass selects at most one bounded batch of exact terminal task s
 
 1. Acquire the existing execution lifecycle gate.
 2. In one authoritative mutation, verify each task's full observed snapshot, retire unchanged
-   matches, and mark newly unowned artifact registrations invalidated.
-3. Detach the retired roots from their engine queues. A failed detach leaves that root retired for a
-   later cleanup pass.
+   matches, mark newly unowned artifact registrations invalidated, and capture exact unowned pending
+   publication intents.
+3. Detach the retired roots from their engine queues, then release the execution lifecycle gate. A
+   failed detach leaves that root retired for a later cleanup pass.
 4. Finalize exact artifact invalidations using their content hash and object generation. External
-   deletion is bounded-concurrent. A failed deletion leaves the artifact invalidated for retry.
-5. In one authoritative mutation, remove successfully detached task records, remove successfully
-   finalized artifact records, and release their pending-publication owner references.
+   deletion is bounded-concurrent and does not hold the lifecycle gate. A failed deletion leaves the
+   artifact invalidated for retry.
+5. Delete exact unowned pending publication objects under their artifact lifecycle locks. A changed
+   intent, new live owner, or deletion failure retains the terminal task and intent for retry.
+6. In one authoritative mutation, remove successfully detached task records, successfully finalized
+   artifact records, and exact pending publication intents. Shared pending intents retain owners that
+   belong to live tasks.
 
 The number of runtime-state writes is bounded by the number of cleanup phases, not by the number of
 tasks or artifacts in the batch.
@@ -53,14 +58,19 @@ tasks or artifacts in the batch.
 - An artifact remains active while any retained non-failed, non-cancelled task references it.
 - Artifact invalidation is authoritative before external object deletion.
 - An invalidated artifact cannot satisfy a cache lookup while deletion is retried.
+- Slow object-store operations never hold the process-wide execution lifecycle gate.
 - Runtime draining fences batch cleanup through the existing namespace and lifecycle gates.
-- Pending publication intents are not discarded merely because they are old.
+- Pending publication objects and intents are removed only after their last task owner becomes
+  terminal and exact external deletion succeeds.
+- A request whose observed task disappears during cleanup atomically returns to normal registration;
+  it does not fail with an internal replacement error.
 
 ## Observability
 
 Expose metrics for the current serialized runtime-state size and task/artifact/pending counts. Add
 cleanup counters for selected, retired, removed, retained-on-failure, and artifact invalidation
-outcomes. Keep the existing structured cleanup log as the per-pass summary.
+outcomes, including pending publication removal and retry failures. Keep the existing structured
+cleanup log as the per-pass summary.
 
 The initial rollout should compare snapshot size, GCS write duration/conflicts, and cleanup failure
 counts before considering a shorter three-hour window.

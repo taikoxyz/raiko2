@@ -31,6 +31,8 @@ pub(crate) struct RuntimeCleanupStats {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
+    pub removed_pending_publications: usize,
+    pub retained_pending_publication_failures: usize,
     pub orphaned_cancelled: usize,
 }
 
@@ -46,6 +48,8 @@ impl RuntimeCleanupStats {
             && self.invalidated_artifacts == 0
             && self.removed_artifacts == 0
             && self.retained_artifact_failures == 0
+            && self.removed_pending_publications == 0
+            && self.retained_pending_publication_failures == 0
             && self.orphaned_cancelled == 0
     }
 }
@@ -137,6 +141,8 @@ pub(crate) async fn run_runtime_cleanup_pass(
     stats.invalidated_artifacts = cleanup.invalidated_artifacts;
     stats.removed_artifacts = cleanup.removed_artifacts;
     stats.retained_artifact_failures = cleanup.retained_artifact_failures;
+    stats.removed_pending_publications = cleanup.removed_pending_publications;
+    stats.retained_pending_publication_failures = cleanup.retained_pending_publication_failures;
 
     crate::server::telemetry::record_runtime_cleanup_stats(&stats);
     crate::server::telemetry::record_runtime_state_stats(runtime.runtime_state_stats().await);
@@ -315,6 +321,9 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
                     invalidated_artifacts = stats.invalidated_artifacts,
                     removed_artifacts = stats.removed_artifacts,
                     retained_artifact_failures = stats.retained_artifact_failures,
+                    removed_pending_publications = stats.removed_pending_publications,
+                    retained_pending_publication_failures =
+                        stats.retained_pending_publication_failures,
                     orphaned_cancelled = stats.orphaned_cancelled,
                     "runtime cleanup tick completed"
                 );
@@ -374,7 +383,7 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -602,7 +611,12 @@ mod tests {
     #[derive(Debug)]
     struct FailOnceInvalidationStore {
         inner: MemoryProofArtifactStore,
+        runtime_state_writes: AtomicUsize,
         fail_next_invalidation: AtomicBool,
+        fail_next_delete: AtomicBool,
+        block_next_invalidation: AtomicBool,
+        invalidation_started: tokio::sync::Notify,
+        allow_invalidation: tokio::sync::Notify,
     }
 
     impl FailOnceInvalidationStore {
@@ -612,8 +626,33 @@ mod tests {
                     "test".into(),
                     "retention-invalidation-retry".into(),
                 )?,
+                runtime_state_writes: AtomicUsize::new(0),
                 fail_next_invalidation: AtomicBool::new(true),
+                fail_next_delete: AtomicBool::new(false),
+                block_next_invalidation: AtomicBool::new(false),
+                invalidation_started: tokio::sync::Notify::new(),
+                allow_invalidation: tokio::sync::Notify::new(),
             })
+        }
+
+        fn blocking() -> Result<Self> {
+            let mut store = Self::new()?;
+            store.fail_next_invalidation = AtomicBool::new(false);
+            store.block_next_invalidation = AtomicBool::new(true);
+            Ok(store)
+        }
+
+        fn counting() -> Result<Self> {
+            let mut store = Self::new()?;
+            store.fail_next_invalidation = AtomicBool::new(false);
+            Ok(store)
+        }
+
+        fn pending_delete_failure() -> Result<Self> {
+            let mut store = Self::new()?;
+            store.fail_next_invalidation = AtomicBool::new(false);
+            store.fail_next_delete = AtomicBool::new(true);
+            Ok(store)
         }
     }
 
@@ -668,6 +707,10 @@ mod tests {
             if self.fail_next_invalidation.swap(false, Ordering::AcqRel) {
                 anyhow::bail!("injected proof artifact invalidation failure");
             }
+            if self.block_next_invalidation.swap(false, Ordering::AcqRel) {
+                self.invalidation_started.notify_one();
+                self.allow_invalidation.notified().await;
+            }
             self.inner.invalidate_exact(key, descriptor).await
         }
 
@@ -684,6 +727,9 @@ mod tests {
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
         ) -> Result<ProofArtifactDeleteResult> {
+            if self.fail_next_delete.swap(false, Ordering::AcqRel) {
+                anyhow::bail!("injected pending proof publication deletion failure");
+            }
             self.inner.delete_exact(key, descriptor).await
         }
     }
@@ -699,6 +745,7 @@ mod tests {
             bytes: &[u8],
             expected_generation: Option<i64>,
         ) -> Result<RuntimeStateWriteResult> {
+            self.runtime_state_writes.fetch_add(1, Ordering::AcqRel);
             self.inner
                 .store_runtime_state(bytes, expected_generation)
                 .await
@@ -933,6 +980,8 @@ mod tests {
                 invalidated_artifacts: 0,
                 removed_artifacts: 0,
                 retained_artifact_failures: 0,
+                removed_pending_publications: 0,
+                retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1095,10 +1144,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_invalidation_does_not_hold_the_execution_lifecycle_gate() -> Result<()> {
+        let store = Arc::new(FailOnceInvalidationStore::blocking()?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        register_runtime_task(
+            runtime.as_ref(),
+            "expired-root",
+            &encoded_proposal_task_id(19)?,
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        let expired = runtime
+            .get_task("expired-root")
+            .await?
+            .context("expired runtime root")?;
+        let proof_ref = expired
+            .artifact_refs
+            .first()
+            .context("expired proof reference")?;
+        register_runtime_proof_artifact(runtime.as_ref(), &expired, proof_ref).await?;
+
+        let lifecycle = crate::server::lifecycle::ProofLifecycle::new(
+            Arc::clone(&runtime),
+            Arc::new(build_factory(Arc::new(MockEngine::default()))),
+        );
+        let cleanup = tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            let expired = expired.clone();
+            async move { lifecycle.remove_terminal_retention_batch(&[expired]).await }
+        });
+        store.invalidation_started.notified().await;
+
+        let lifecycle_gate = runtime.execution_lifecycle_gate();
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle_gate.lock())
+            .await
+            .expect("external artifact invalidation must not hold the lifecycle gate");
+        drop(guard);
+        store.allow_invalidation.notify_one();
+
+        assert_eq!(cleanup.await??.removed_roots, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_cleanup_retries_failed_pending_publication_deletion() -> Result<()> {
+        let store = Arc::new(FailOnceInvalidationStore::pending_delete_failure()?);
+        let runtime = Arc::new(RuntimeManager::with_store(store));
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        register_runtime_task(
+            runtime.as_ref(),
+            "pending-root",
+            &encoded_proposal_task_id(20)?,
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        let mut terminal = runtime
+            .get_task("pending-root")
+            .await?
+            .context("pending runtime root")?;
+        let proof_ref = terminal
+            .artifact_refs
+            .first()
+            .context("pending proof reference")?
+            .clone();
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    &terminal.network_pair,
+                    terminal.pipeline_key,
+                    terminal.route,
+                    &proof_ref,
+                    &[terminal.incarnation_id],
+                    b"pending-proof",
+                )
+                .await?
+        );
+        terminal.runner_status = RunnerStatus::Completed;
+        terminal.proof_uri = Some("memory://proofs/pending-root".into());
+        terminal.updated_at = 1;
+        runtime.upsert_task(&terminal).await?;
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let first = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory.clone(),
+            7_200,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+        assert_eq!(first.removed_roots, 0);
+        assert_eq!(first.retained_failures, 1);
+        assert_eq!(first.retained_pending_publication_failures, 1);
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &terminal.network_pair,
+                    terminal.pipeline_key,
+                    terminal.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_some()
+        );
+
+        assert_eq!(
+            run_runtime_cleanup_pass(
+                runtime.clone(),
+                factory.clone(),
+                7_200,
+                7_200,
+                &mut orphan_cursor,
+                &mut terminal_cursor,
+            )
+            .await?,
+            RuntimeCleanupStats::default()
+        );
+        let retry = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+        assert_eq!(retry.removed_roots, 1);
+        assert_eq!(retry.removed_pending_publications, 1);
+        assert!(runtime.get_task("pending-root").await?.is_none());
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &terminal.network_pair,
+                    terminal.pipeline_key,
+                    terminal.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_cleanup_batches_terminal_state_writes() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "ttl-batch-writes",
-        ))?);
+        let store = Arc::new(FailOnceInvalidationStore::counting()?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let engine = Arc::new(MockEngine::default());
         let factory = Arc::new(build_factory(engine));
         for proposal_id in 20..23 {
@@ -1111,9 +1306,27 @@ mod tests {
             )
             .await?;
         }
-        let generation_before = runtime
-            .runtime_state_generation_for_test()?
-            .context("memory runtime generation before cleanup")?;
+        let pending_owner = runtime
+            .get_task("expired-20")
+            .await?
+            .context("pending retention owner")?;
+        let pending_ref = pending_owner
+            .artifact_refs
+            .first()
+            .context("pending retention proof reference")?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    &pending_owner.network_pair,
+                    pending_owner.pipeline_key,
+                    pending_owner.route,
+                    pending_ref,
+                    &[pending_owner.incarnation_id],
+                    b"pending-retention-proof",
+                )
+                .await?
+        );
+        let writes_before = store.runtime_state_writes.load(Ordering::Acquire);
 
         let mut orphan_cursor = None;
         let mut terminal_cursor = None;
@@ -1127,11 +1340,10 @@ mod tests {
         )
         .await?;
 
-        let generation_after = runtime
-            .runtime_state_generation_for_test()?
-            .context("memory runtime generation after cleanup")?;
+        let writes_after = store.runtime_state_writes.load(Ordering::Acquire);
         assert_eq!(stats.removed_roots, 3);
-        assert_eq!(generation_after - generation_before, 2);
+        assert_eq!(stats.removed_pending_publications, 1);
+        assert_eq!(writes_after - writes_before, 2);
         Ok(())
     }
 
@@ -1178,6 +1390,8 @@ mod tests {
                 invalidated_artifacts: 0,
                 removed_artifacts: 0,
                 retained_artifact_failures: 0,
+                removed_pending_publications: 0,
+                retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1223,6 +1437,8 @@ mod tests {
                 invalidated_artifacts: 0,
                 removed_artifacts: 0,
                 retained_artifact_failures: 0,
+                removed_pending_publications: 0,
+                retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1279,6 +1495,8 @@ mod tests {
                 invalidated_artifacts: 0,
                 removed_artifacts: 0,
                 retained_artifact_failures: 0,
+                removed_pending_publications: 0,
+                retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1321,6 +1539,8 @@ mod tests {
                 invalidated_artifacts: 0,
                 removed_artifacts: 0,
                 retained_artifact_failures: 0,
+                removed_pending_publications: 0,
+                retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
             }
         );

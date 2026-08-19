@@ -91,6 +91,21 @@ struct PendingProofPublicationRecord {
     owner_incarnations: Vec<uuid::Uuid>,
 }
 
+impl PendingProofPublicationRecord {
+    fn expectation(&self) -> PendingPublicationExpectation {
+        PendingPublicationExpectation {
+            key: RuntimeManager::artifact_key(
+                &self.network_pair,
+                self.pipeline_key,
+                self.route,
+                &self.proof_ref,
+            ),
+            content_hash: self.content_hash.clone(),
+            owner_incarnations: self.owner_incarnations.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingProofPublication {
     pub bytes: Vec<u8>,
@@ -305,6 +320,7 @@ pub struct TaskLifetime {
 pub struct TerminalTaskRetentionPrepare {
     pub retired_tasks: Vec<RuntimeTaskRecord>,
     pub artifact_invalidations: Vec<ArtifactExpectation>,
+    pub pending_publication_deletions: Vec<PendingPublicationExpectation>,
     pub skipped_tasks: usize,
 }
 
@@ -312,8 +328,17 @@ pub struct TerminalTaskRetentionPrepare {
 pub struct TerminalTaskRetentionFinalize {
     pub removed_tasks: Vec<TaskLifetime>,
     pub removed_artifacts: Vec<ArtifactExpectation>,
+    pub removed_pending_publications: Vec<PendingPublicationExpectation>,
     pub skipped_tasks: usize,
     pub skipped_artifacts: usize,
+    pub skipped_pending_publications: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPublicationExpectation {
+    pub key: ProofArtifactKey,
+    pub content_hash: String,
+    owner_incarnations: Vec<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2719,6 +2744,66 @@ impl RuntimeManager {
         .await
     }
 
+    /// Deletes the pending object only while its exact durable intent remains unowned.
+    pub async fn finalize_pending_publication_retention(
+        &self,
+        expectation: &PendingPublicationExpectation,
+    ) -> Result<ProofArtifactDeleteResult> {
+        let key = &expectation.key;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(
+                &key.network_pair,
+                key.pipeline_key,
+                key.route,
+                &key.proof_ref,
+            )
+            .lock()
+            .await;
+        let state_key = artifact_record_key(
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        );
+        {
+            let state = self.state.read().await;
+            let Some(current) = state.pending_publications.get(&state_key) else {
+                return Ok(ProofArtifactDeleteResult::Missing);
+            };
+            anyhow::ensure!(
+                current.expectation() == *expectation,
+                "pending proof publication changed before retention finalization"
+            );
+            anyhow::ensure!(
+                !pending_publication_has_live_owner(
+                    &state,
+                    &state_key,
+                    &key.network_pair,
+                    key.pipeline_key,
+                    key.route,
+                    &key.proof_ref,
+                ),
+                "pending proof publication gained a live owner before retention finalization"
+            );
+        }
+
+        let pending_key = Self::pending_artifact_key(
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        );
+        let Some(descriptor) = self.store.get_descriptor(&pending_key).await? else {
+            return Ok(ProofArtifactDeleteResult::Missing);
+        };
+        anyhow::ensure!(
+            descriptor.content_hash == expectation.content_hash,
+            "pending proof object changed before retention finalization"
+        );
+        let _commit = self.begin_object_commit()?;
+        self.store.delete_exact(&pending_key, &descriptor).await
+    }
+
     async fn remove_pending_proof_publication_if_unowned_locked(
         &self,
         network_pair: &str,
@@ -3136,6 +3221,9 @@ impl RuntimeManager {
                 prepared.artifact_invalidations.push(artifact.expectation());
             }
 
+            prepared.pending_publication_deletions =
+                terminal_pending_publication_candidates(state, &prepared.retired_tasks);
+
             Ok(prepared)
         })
         .await
@@ -3147,45 +3235,31 @@ impl RuntimeManager {
         &self,
         retired_tasks: &[RuntimeTaskRecord],
         finalized_artifacts: &[ArtifactExpectation],
+        finalized_pending_publications: &[PendingPublicationExpectation],
     ) -> Result<TerminalTaskRetentionFinalize> {
-        if retired_tasks.is_empty() && finalized_artifacts.is_empty() {
+        if retired_tasks.is_empty()
+            && finalized_artifacts.is_empty()
+            && finalized_pending_publications.is_empty()
+        {
             return Ok(TerminalTaskRetentionFinalize::default());
         }
-        anyhow::ensure!(
-            retired_tasks
-                .iter()
-                .map(|task| task.task_id.as_str())
-                .collect::<HashSet<_>>()
-                .len()
-                == retired_tasks.len(),
-            "terminal task retention finalization contains duplicate task ids"
-        );
-        anyhow::ensure!(
-            retired_tasks
-                .iter()
-                .all(|task| task.runner_status == RunnerStatus::Cancelled),
-            "terminal task retention finalization requires retired tasks"
-        );
-        anyhow::ensure!(
-            finalized_artifacts
-                .iter()
-                .map(|artifact| &artifact.key)
-                .collect::<HashSet<_>>()
-                .len()
-                == finalized_artifacts.len(),
-            "terminal task retention finalization contains duplicate artifacts"
-        );
-        anyhow::ensure!(
-            finalized_artifacts
-                .iter()
-                .all(|artifact| artifact.lifecycle == ProofArtifactLifecycle::Invalidated),
-            "terminal task retention finalization requires invalidated artifacts"
-        );
+        validate_terminal_retention_finalization(
+            retired_tasks,
+            finalized_artifacts,
+            finalized_pending_publications,
+        )?;
         let retired_tasks = retired_tasks.to_vec();
         let finalized_artifacts = finalized_artifacts.to_vec();
+        let finalized_pending_publications = finalized_pending_publications.to_vec();
         self.mutate(move |state| {
             let mut finalized = TerminalTaskRetentionFinalize::default();
             let mut removed_incarnations = HashSet::new();
+
+            finalize_terminal_pending_publications(
+                state,
+                &finalized_pending_publications,
+                &mut finalized,
+            );
 
             for expected in &retired_tasks {
                 if !state
@@ -3646,6 +3720,131 @@ fn task_matches_artifact_identity(
         return false;
     }
     record.network_pair == network_pair
+}
+
+fn validate_terminal_retention_finalization(
+    retired_tasks: &[RuntimeTaskRecord],
+    finalized_artifacts: &[ArtifactExpectation],
+    finalized_pending_publications: &[PendingPublicationExpectation],
+) -> Result<()> {
+    anyhow::ensure!(
+        retired_tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+            == retired_tasks.len(),
+        "terminal task retention finalization contains duplicate task ids"
+    );
+    anyhow::ensure!(
+        retired_tasks
+            .iter()
+            .all(|task| task.runner_status == RunnerStatus::Cancelled),
+        "terminal task retention finalization requires retired tasks"
+    );
+    anyhow::ensure!(
+        finalized_artifacts
+            .iter()
+            .map(|artifact| &artifact.key)
+            .collect::<HashSet<_>>()
+            .len()
+            == finalized_artifacts.len(),
+        "terminal task retention finalization contains duplicate artifacts"
+    );
+    anyhow::ensure!(
+        finalized_artifacts
+            .iter()
+            .all(|artifact| artifact.lifecycle == ProofArtifactLifecycle::Invalidated),
+        "terminal task retention finalization requires invalidated artifacts"
+    );
+    anyhow::ensure!(
+        finalized_pending_publications
+            .iter()
+            .map(|pending| &pending.key)
+            .collect::<HashSet<_>>()
+            .len()
+            == finalized_pending_publications.len(),
+        "terminal task retention finalization contains duplicate pending publications"
+    );
+    Ok(())
+}
+
+fn terminal_pending_publication_candidates(
+    state: &RuntimeState,
+    retired_tasks: &[RuntimeTaskRecord],
+) -> Vec<PendingPublicationExpectation> {
+    let retired_incarnations = retired_tasks
+        .iter()
+        .map(|task| task.incarnation_id)
+        .collect::<HashSet<_>>();
+    let mut candidates = state
+        .pending_publications
+        .iter()
+        .filter_map(|(key, pending)| {
+            let retired_owner = pending
+                .owner_incarnations
+                .iter()
+                .any(|owner| retired_incarnations.contains(owner));
+            (retired_owner
+                && !pending_publication_has_live_owner(
+                    state,
+                    key,
+                    &pending.network_pair,
+                    pending.pipeline_key,
+                    pending.route,
+                    &pending.proof_ref,
+                ))
+            .then(|| pending.expectation())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|pending| {
+        artifact_record_key(
+            &pending.key.network_pair,
+            pending.key.pipeline_key,
+            pending.key.route,
+            &pending.key.proof_ref,
+        )
+    });
+    candidates
+}
+
+fn finalize_terminal_pending_publications(
+    state: &mut RuntimeState,
+    expectations: &[PendingPublicationExpectation],
+    finalized: &mut TerminalTaskRetentionFinalize,
+) {
+    for expected in expectations {
+        let key = artifact_record_key(
+            &expected.key.network_pair,
+            expected.key.pipeline_key,
+            expected.key.route,
+            &expected.key.proof_ref,
+        );
+        let Some(current) = state.pending_publications.get(&key) else {
+            finalized
+                .removed_pending_publications
+                .push(expected.clone());
+            continue;
+        };
+        if current.expectation() != *expected
+            || pending_publication_has_live_owner(
+                state,
+                &key,
+                &expected.key.network_pair,
+                expected.key.pipeline_key,
+                expected.key.route,
+                &expected.key.proof_ref,
+            )
+        {
+            finalized.skipped_pending_publications =
+                finalized.skipped_pending_publications.saturating_add(1);
+            continue;
+        }
+        state.pending_publications.remove(&key);
+        finalized
+            .removed_pending_publications
+            .push(expected.clone());
+    }
 }
 
 fn pending_publication_has_live_owner(
@@ -5631,7 +5830,7 @@ mod tests {
             2,
         )
         .await?;
-        register_retention_task(
+        let active = register_retention_task(
             &runtime,
             "active",
             &["shared-proof"],
@@ -5644,6 +5843,22 @@ mod tests {
 
         runtime
             .mutate(|state| {
+                state.pending_publications.insert(
+                    artifact_record_key(
+                        "l1-l2",
+                        PipelineKey::ShastaNative,
+                        PipelineKey::ShastaNative.route(),
+                        "shared-proof",
+                    ),
+                    PendingProofPublicationRecord {
+                        network_pair: "l1-l2".into(),
+                        pipeline_key: PipelineKey::ShastaNative,
+                        route: PipelineKey::ShastaNative.route(),
+                        proof_ref: "shared-proof".into(),
+                        content_hash: "shared-pending".into(),
+                        owner_incarnations: vec![expired.incarnation_id, active.incarnation_id],
+                    },
+                );
                 state
                     .tasks
                     .get_mut("stale")
@@ -5666,6 +5881,7 @@ mod tests {
         );
         assert_eq!(prepared.retired_tasks[0].updated_at, 2);
         assert_eq!(prepared.artifact_invalidations.len(), 1);
+        assert!(prepared.pending_publication_deletions.is_empty());
         assert_eq!(
             prepared.artifact_invalidations[0].key.proof_ref,
             "orphan-proof"
@@ -5755,7 +5971,11 @@ mod tests {
             .clone();
 
         let finalized = runtime
-            .finalize_terminal_task_retention_batch(&prepared.retired_tasks, &[second_artifact])
+            .finalize_terminal_task_retention_batch(
+                &prepared.retired_tasks,
+                &[second_artifact],
+                &[],
+            )
             .await?;
 
         assert_eq!(finalized.removed_tasks.len(), 1);
@@ -5785,6 +6005,80 @@ mod tests {
                 .get(&pending_key)
                 .is_some_and(|pending| pending.owner_incarnations.is_empty())
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_retention_removes_unowned_pending_publication_exactly() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "batch-retention-pending-publication",
+        )?);
+        let runtime = RuntimeManager::with_store(store);
+        let running = register_retention_task(
+            &runtime,
+            "pending-root",
+            &["pending-proof"],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                    &[running.incarnation_id],
+                    b"pending-proof-bytes",
+                )
+                .await?
+        );
+        runtime
+            .mutate(|state| {
+                let current = state
+                    .tasks
+                    .get_mut("pending-root")
+                    .context("pending retention task")?;
+                current.runner_status = RunnerStatus::Completed;
+                current.proof_uri = Some("memory://proofs/pending-root".into());
+                current.updated_at = 1;
+                Ok(())
+            })
+            .await?;
+        let terminal = current_test_task(&runtime, "pending-root").await?;
+
+        let prepared = runtime
+            .prepare_terminal_task_retention_batch(&[terminal])
+            .await?;
+        assert_eq!(prepared.pending_publication_deletions.len(), 1);
+        let pending = prepared.pending_publication_deletions[0].clone();
+        runtime
+            .finalize_pending_publication_retention(&pending)
+            .await?;
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(
+                &prepared.retired_tasks,
+                &prepared.artifact_invalidations,
+                &[pending],
+            )
+            .await?;
+
+        assert_eq!(finalized.removed_tasks.len(), 1);
+        assert_eq!(finalized.removed_pending_publications.len(), 1);
+        assert!(runtime.get_task("pending-root").await?.is_none());
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                )
+                .await?
+                .is_none()
+        );
+        assert_eq!(runtime.runtime_state_stats().await.pending_publications, 0);
         Ok(())
     }
 

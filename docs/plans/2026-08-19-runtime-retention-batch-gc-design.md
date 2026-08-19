@@ -71,4 +71,3 @@ counts before considering a shorter three-hour window.
 - Replacing the runtime authority backend with SQLite in this change.
 - Changing the GCS bucket lifecycle policy.
 - Introducing distributed ownership or supporting overlapping runtime processes.
-

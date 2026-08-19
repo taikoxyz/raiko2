@@ -4,8 +4,8 @@ use anyhow::{Result, bail};
 use raiko2_engine::EngineExecutionPlan;
 use raiko2_queue::{DetachMode, DetachOutcome, RootOwner};
 use raiko2_runtime::{
-    ProofArtifactPrecondition, RunnerStatus, RuntimeManager, RuntimeMutationOutcome,
-    RuntimeTaskRecord, TaskRegistration,
+    ArtifactExpectation, ProofArtifactPrecondition, RunnerStatus, RuntimeManager,
+    RuntimeMutationOutcome, RuntimeTaskRecord, TaskRegistration,
 };
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -38,6 +38,12 @@ pub(crate) struct TerminalRetentionBatchOutcome {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
+}
+
+#[derive(Debug, Default)]
+struct ArtifactFinalizationBatch {
+    finalized: Vec<ArtifactExpectation>,
+    failures: usize,
 }
 
 impl ProofLifecycle {
@@ -326,8 +332,6 @@ impl ProofLifecycle {
         &self,
         records: &[RuntimeTaskRecord],
     ) -> Result<TerminalRetentionBatchOutcome> {
-        const ARTIFACT_FINALIZATION_CONCURRENCY: usize = 8;
-
         if records.is_empty() {
             return Ok(TerminalRetentionBatchOutcome::default());
         }
@@ -380,43 +384,12 @@ impl ProofLifecycle {
             }
         }
 
-        let mut artifact_queue = prepared.artifact_invalidations.into_iter();
-        let mut artifact_finalizations = JoinSet::new();
-        let mut finalized_artifacts = Vec::new();
-        loop {
-            while artifact_finalizations.len() < ARTIFACT_FINALIZATION_CONCURRENCY {
-                let Some(expectation) = artifact_queue.next() else {
-                    break;
-                };
-                let runtime = Arc::clone(&self.runtime);
-                artifact_finalizations.spawn(async move {
-                    let result = runtime
-                        .finalize_proof_artifact_invalidation(&expectation)
-                        .await;
-                    (expectation, result)
-                });
-            }
-            let Some(finalized) = artifact_finalizations.join_next().await else {
-                break;
-            };
-            match finalized {
-                Ok((expectation, Ok(_))) => finalized_artifacts.push(expectation),
-                Ok((expectation, Err(error))) => {
-                    outcome.retained_artifact_failures =
-                        outcome.retained_artifact_failures.saturating_add(1);
-                    warn!(
-                        proof_ref = %expectation.key.proof_ref,
-                        error = %error,
-                        "failed to finalize expired proof artifact invalidation"
-                    );
-                }
-                Err(error) => {
-                    outcome.retained_artifact_failures =
-                        outcome.retained_artifact_failures.saturating_add(1);
-                    warn!(error = %error, "proof artifact invalidation worker failed");
-                }
-            }
-        }
+        let artifact_batch = finalize_terminal_retention_artifacts(
+            Arc::clone(&self.runtime),
+            prepared.artifact_invalidations,
+        )
+        .await;
+        outcome.retained_artifact_failures = artifact_batch.failures;
 
         let removable_tasks = if outcome.retained_artifact_failures == 0 {
             detached_tasks
@@ -426,12 +399,12 @@ impl ProofLifecycle {
                 .saturating_add(detached_tasks.len());
             Vec::new()
         };
-        if removable_tasks.is_empty() && finalized_artifacts.is_empty() {
+        if removable_tasks.is_empty() && artifact_batch.finalized.is_empty() {
             return Ok(outcome);
         }
         let finalized = self
             .runtime
-            .finalize_terminal_task_retention_batch(&removable_tasks, &finalized_artifacts)
+            .finalize_terminal_task_retention_batch(&removable_tasks, &artifact_batch.finalized)
             .await?;
         outcome.removed_roots = finalized.removed_tasks.len();
         outcome.removed_artifacts = finalized.removed_artifacts.len();
@@ -488,6 +461,50 @@ impl ProofLifecycle {
         let publication_cleanup = self.runtime.release_task_pending_publications(record).await;
         finish_lifecycle_effect(removal, publication_cleanup)
     }
+}
+
+async fn finalize_terminal_retention_artifacts(
+    runtime: Arc<RuntimeManager>,
+    expectations: Vec<ArtifactExpectation>,
+) -> ArtifactFinalizationBatch {
+    const CONCURRENCY: usize = 8;
+
+    let mut queue = expectations.into_iter();
+    let mut workers = JoinSet::new();
+    let mut batch = ArtifactFinalizationBatch::default();
+    loop {
+        while workers.len() < CONCURRENCY {
+            let Some(expectation) = queue.next() else {
+                break;
+            };
+            let runtime = Arc::clone(&runtime);
+            workers.spawn(async move {
+                let result = runtime
+                    .finalize_proof_artifact_invalidation(&expectation)
+                    .await;
+                (expectation, result)
+            });
+        }
+        let Some(finalized) = workers.join_next().await else {
+            break;
+        };
+        match finalized {
+            Ok((expectation, Ok(_))) => batch.finalized.push(expectation),
+            Ok((expectation, Err(error))) => {
+                batch.failures = batch.failures.saturating_add(1);
+                warn!(
+                    proof_ref = %expectation.key.proof_ref,
+                    error = %error,
+                    "failed to finalize expired proof artifact invalidation"
+                );
+            }
+            Err(error) => {
+                batch.failures = batch.failures.saturating_add(1);
+                warn!(error = %error, "proof artifact invalidation worker failed");
+            }
+        }
+    }
+    batch
 }
 
 fn finish_lifecycle_effect<T>(effect: Result<T>, publication_cleanup: Result<()>) -> Result<T> {

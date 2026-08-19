@@ -1104,21 +1104,18 @@ impl RuntimeManager {
     }
 
     async fn install_runtime_state_object(&self, stored: Option<RuntimeStateObject>) -> Result<()> {
-        match stored {
-            Some(stored) => {
-                let serialized_bytes = stored.bytes.len();
-                let state = serde_json::from_slice(&stored.bytes)
-                    .context("decode authoritative runtime store state")?;
-                validate_runtime_state(&state, self.environment())?;
-                self.install_runtime_state(state, stored.generation, serialized_bytes)
-                    .await
-            }
-            None => {
-                let state = RuntimeState::default();
-                let serialized_bytes = encoded_runtime_state_len(&state);
-                self.install_runtime_state(state, None, serialized_bytes)
-                    .await
-            }
+        if let Some(stored) = stored {
+            let serialized_bytes = stored.bytes.len();
+            let state = serde_json::from_slice(&stored.bytes)
+                .context("decode authoritative runtime store state")?;
+            validate_runtime_state(&state, self.environment())?;
+            self.install_runtime_state(state, stored.generation, serialized_bytes)
+                .await
+        } else {
+            let state = RuntimeState::default();
+            let serialized_bytes = encoded_runtime_state_len(&state);
+            self.install_runtime_state(state, None, serialized_bytes)
+                .await
         }
     }
 

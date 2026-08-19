@@ -8,6 +8,8 @@ use raiko2_runtime::{
     RuntimeTaskRecord, TaskRegistration,
 };
 use std::sync::Arc;
+use tokio::task::JoinSet;
+use tracing::warn;
 
 use crate::server::state::{EngineHandle, PipelineFactory};
 
@@ -24,6 +26,18 @@ pub(crate) enum RecoveryOutcome {
     Recovered,
     Active,
     TaskChanged,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TerminalRetentionBatchOutcome {
+    pub retired_roots: usize,
+    pub skipped_roots: usize,
+    pub removed_roots: usize,
+    pub retained_root_failures: usize,
+    pub skipped_shared_children: usize,
+    pub invalidated_artifacts: usize,
+    pub removed_artifacts: usize,
+    pub retained_artifact_failures: usize,
 }
 
 impl ProofLifecycle {
@@ -303,6 +317,130 @@ impl ProofLifecycle {
         drop(gate);
         let publication_cleanup = self.runtime.release_task_pending_publications(record).await;
         finish_lifecycle_effect(projection, publication_cleanup)?;
+        Ok(outcome)
+    }
+
+    /// Retires, detaches, and finalizes one bounded terminal-retention batch while holding the
+    /// process-local execution lifecycle gate.
+    pub(crate) async fn remove_terminal_retention_batch(
+        &self,
+        records: &[RuntimeTaskRecord],
+    ) -> Result<TerminalRetentionBatchOutcome> {
+        const ARTIFACT_FINALIZATION_CONCURRENCY: usize = 8;
+
+        if records.is_empty() {
+            return Ok(TerminalRetentionBatchOutcome::default());
+        }
+
+        let lifecycle_gate = self.runtime.execution_lifecycle_gate();
+        let _lifecycle_gate = lifecycle_gate.lock().await;
+        let prepared = self
+            .runtime
+            .prepare_terminal_task_retention_batch(records)
+            .await?;
+        let mut outcome = TerminalRetentionBatchOutcome {
+            retired_roots: prepared.retired_tasks.len(),
+            skipped_roots: prepared.skipped_tasks,
+            invalidated_artifacts: prepared.artifact_invalidations.len(),
+            ..TerminalRetentionBatchOutcome::default()
+        };
+
+        let mut detached_tasks = Vec::with_capacity(prepared.retired_tasks.len());
+        for record in prepared.retired_tasks {
+            let detached = if let Some(engine) = self
+                .pipelines
+                .get(&record.network_pair, record.pipeline_key)
+            {
+                engine
+                    .detach_execution(
+                        RootOwner::new(record.task_id.clone(), record.incarnation_id),
+                        DetachMode::Remove,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)
+            } else {
+                Ok(DetachOutcome::not_attached(DetachMode::Remove))
+            };
+            match detached {
+                Ok(detached) => {
+                    outcome.skipped_shared_children = outcome
+                        .skipped_shared_children
+                        .saturating_add(detached.retained.len());
+                    detached_tasks.push(record);
+                }
+                Err(error) => {
+                    outcome.retained_root_failures =
+                        outcome.retained_root_failures.saturating_add(1);
+                    warn!(
+                        task_id = %record.task_id,
+                        error = %error,
+                        "failed to detach expired runtime task"
+                    );
+                }
+            }
+        }
+
+        let mut artifact_queue = prepared.artifact_invalidations.into_iter();
+        let mut artifact_finalizations = JoinSet::new();
+        let mut finalized_artifacts = Vec::new();
+        loop {
+            while artifact_finalizations.len() < ARTIFACT_FINALIZATION_CONCURRENCY {
+                let Some(expectation) = artifact_queue.next() else {
+                    break;
+                };
+                let runtime = Arc::clone(&self.runtime);
+                artifact_finalizations.spawn(async move {
+                    let result = runtime
+                        .finalize_proof_artifact_invalidation(&expectation)
+                        .await;
+                    (expectation, result)
+                });
+            }
+            let Some(finalized) = artifact_finalizations.join_next().await else {
+                break;
+            };
+            match finalized {
+                Ok((expectation, Ok(_))) => finalized_artifacts.push(expectation),
+                Ok((expectation, Err(error))) => {
+                    outcome.retained_artifact_failures =
+                        outcome.retained_artifact_failures.saturating_add(1);
+                    warn!(
+                        proof_ref = %expectation.key.proof_ref,
+                        error = %error,
+                        "failed to finalize expired proof artifact invalidation"
+                    );
+                }
+                Err(error) => {
+                    outcome.retained_artifact_failures =
+                        outcome.retained_artifact_failures.saturating_add(1);
+                    warn!(error = %error, "proof artifact invalidation worker failed");
+                }
+            }
+        }
+
+        let removable_tasks = if outcome.retained_artifact_failures == 0 {
+            detached_tasks
+        } else {
+            outcome.retained_root_failures = outcome
+                .retained_root_failures
+                .saturating_add(detached_tasks.len());
+            Vec::new()
+        };
+        if removable_tasks.is_empty() && finalized_artifacts.is_empty() {
+            return Ok(outcome);
+        }
+        let finalized = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&removable_tasks, &finalized_artifacts)
+            .await?;
+        outcome.removed_roots = finalized.removed_tasks.len();
+        outcome.removed_artifacts = finalized.removed_artifacts.len();
+        outcome.retained_root_failures = outcome
+            .retained_root_failures
+            .saturating_add(finalized.skipped_tasks);
+        outcome.retained_artifact_failures = outcome
+            .retained_artifact_failures
+            .saturating_add(finalized.skipped_artifacts);
         Ok(outcome)
     }
 

@@ -819,6 +819,11 @@ impl RuntimeManager {
         self.store.backend_name()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn runtime_state_generation_for_test(&self) -> Result<Option<i64>> {
+        self.current_generation()
+    }
+
     async fn mutate<T>(&self, update: impl Fn(&mut RuntimeState) -> Result<T>) -> Result<T> {
         self.mutate_authoritative(update, None).await
     }
@@ -3003,6 +3008,9 @@ impl RuntimeManager {
         &self,
         expected_tasks: &[RuntimeTaskRecord],
     ) -> Result<TerminalTaskRetentionPrepare> {
+        if expected_tasks.is_empty() {
+            return Ok(TerminalTaskRetentionPrepare::default());
+        }
         anyhow::ensure!(
             expected_tasks
                 .iter()
@@ -3095,6 +3103,9 @@ impl RuntimeManager {
         retired_tasks: &[RuntimeTaskRecord],
         finalized_artifacts: &[ArtifactExpectation],
     ) -> Result<TerminalTaskRetentionFinalize> {
+        if retired_tasks.is_empty() && finalized_artifacts.is_empty() {
+            return Ok(TerminalTaskRetentionFinalize::default());
+        }
         anyhow::ensure!(
             retired_tasks
                 .iter()

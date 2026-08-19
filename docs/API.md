@@ -80,6 +80,9 @@ The canonical minimal metric families are:
 - `raiko2_stage_task_duration_seconds`
 - `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
+- `raiko2_runtime_state_serialized_bytes`
+- `raiko2_runtime_state_records`
+- `raiko2_runtime_retention_total`
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
@@ -88,6 +91,12 @@ Failure counters also include a bounded `error_kind` label, such as `rpc_error`,
 `invalid_request`. Duplicate-request counters include `runner_status` so cache hits and stale
 failed tasks can be alerted separately; completed tasks whose proof artifact is missing are
 reported as `runner_status="completed_artifact_missing"`.
+
+Runtime state metrics expose the serialized authoritative-state size and bounded record counts for
+`tasks`, `artifacts`, and `pending_publications`. Runtime retention counters use only fixed outcome
+labels such as `selected_tasks`, `removed_tasks`, `retained_task_failures`,
+`invalidated_artifacts`, and `retained_artifact_failures`; task IDs and proof references are not
+metric labels.
 
 ## Admin Ballot
 

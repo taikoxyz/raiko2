@@ -1,15 +1,15 @@
 //! Minimal Prometheus telemetry for the hosted `raiko2` API.
 
 use prometheus::{
-    Encoder, HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder, histogram_opts,
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec,
+    Encoder, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, histogram_opts,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
 use raiko2_pipeline::forks::shasta::preflight_cache::{
     PreflightCacheResult, PreflightCacheStage, PreflightObserver, PreflightSingleFlightEvent,
     PreflightSingleFlightPhase,
 };
 use raiko2_primitives::ProofType;
-use raiko2_runtime::{StartupCleanupReport, StartupCleanupScope};
+use raiko2_runtime::{RuntimeStateStats, StartupCleanupReport, StartupCleanupScope};
 use std::{sync::LazyLock, time::Duration};
 
 static REQUEST_REGISTRATIONS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
@@ -203,6 +203,32 @@ static STARTUP_CLEANUP_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(
     .expect("register raiko2_startup_cleanup_duration_seconds")
 });
 
+static RUNTIME_STATE_SERIALIZED_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "raiko2_runtime_state_serialized_bytes",
+        "Current serialized authoritative runtime-state size in bytes"
+    )
+    .expect("register raiko2_runtime_state_serialized_bytes")
+});
+
+static RUNTIME_STATE_RECORDS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "raiko2_runtime_state_records",
+        "Current authoritative runtime-state records grouped by bounded kind",
+        &["kind"]
+    )
+    .expect("register raiko2_runtime_state_records")
+});
+
+static RUNTIME_RETENTION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_runtime_retention_total",
+        "Runtime retention outcomes grouped by bounded outcome",
+        &["outcome"]
+    )
+    .expect("register raiko2_runtime_retention_total")
+});
+
 #[derive(Debug)]
 pub(crate) struct PreflightCacheMetricsObserver {
     pair: String,
@@ -285,6 +311,42 @@ pub(crate) fn record_startup_cleanup_failure(scope: StartupCleanupScope) {
     STARTUP_CLEANUP_OBJECTS_TOTAL
         .with_label_values(&[scope.as_str(), "failed"])
         .inc();
+}
+
+pub(crate) fn record_runtime_state_stats(stats: RuntimeStateStats) {
+    RUNTIME_STATE_SERIALIZED_BYTES.set(i64::try_from(stats.serialized_bytes).unwrap_or(i64::MAX));
+    for (kind, count) in [
+        ("tasks", stats.tasks),
+        ("artifacts", stats.artifacts),
+        ("pending_publications", stats.pending_publications),
+    ] {
+        RUNTIME_STATE_RECORDS
+            .with_label_values(&[kind])
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+}
+
+pub(crate) fn record_runtime_cleanup_stats(
+    stats: &crate::server::task_cleanup::RuntimeCleanupStats,
+) {
+    for (outcome, count) in [
+        ("selected_tasks", stats.expired),
+        ("retired_tasks", stats.retired_roots),
+        ("skipped_tasks", stats.skipped_roots),
+        ("removed_tasks", stats.removed_roots),
+        ("retained_task_failures", stats.retained_failures),
+        ("invalidated_artifacts", stats.invalidated_artifacts),
+        ("removed_artifacts", stats.removed_artifacts),
+        (
+            "retained_artifact_failures",
+            stats.retained_artifact_failures,
+        ),
+        ("orphaned_tasks_cancelled", stats.orphaned_cancelled),
+    ] {
+        RUNTIME_RETENTION_TOTAL
+            .with_label_values(&[outcome])
+            .inc_by(u64::try_from(count).unwrap_or(u64::MAX));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -509,6 +571,8 @@ pub(crate) fn render() -> Result<(String, Vec<u8>), prometheus::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::task_cleanup::RuntimeCleanupStats;
+    use raiko2_runtime::RuntimeStateStats;
 
     #[test]
     fn preflight_metrics_use_only_bounded_dimensions() {
@@ -587,5 +651,50 @@ mod tests {
             "raiko2_startup_cleanup_objects_total{outcome=\"failed\",scope=\"preflight\"}"
         ));
         assert!(metrics.contains("raiko2_startup_cleanup_duration_seconds_count{scope=\"proof\"}"));
+    }
+
+    #[test]
+    fn runtime_retention_metrics_use_only_bounded_dimensions() {
+        record_runtime_state_stats(RuntimeStateStats {
+            serialized_bytes: 12_345,
+            tasks: 7,
+            artifacts: 5,
+            pending_publications: 2,
+        });
+        record_runtime_cleanup_stats(&RuntimeCleanupStats {
+            scanned: 4,
+            expired: 4,
+            retired_roots: 3,
+            skipped_roots: 1,
+            removed_roots: 2,
+            skipped_shared_children: 1,
+            retained_failures: 1,
+            invalidated_artifacts: 2,
+            removed_artifacts: 1,
+            retained_artifact_failures: 1,
+            orphaned_cancelled: 0,
+        });
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        assert!(metrics.contains("raiko2_runtime_state_serialized_bytes 12345"));
+        for (kind, value) in [("tasks", 7), ("artifacts", 5), ("pending_publications", 2)] {
+            assert!(metrics.contains(&format!(
+                "raiko2_runtime_state_records{{kind=\"{kind}\"}} {value}"
+            )));
+        }
+        for outcome in [
+            "selected_tasks",
+            "retired_tasks",
+            "removed_tasks",
+            "invalidated_artifacts",
+            "removed_artifacts",
+        ] {
+            assert!(metrics.contains(&format!(
+                "raiko2_runtime_retention_total{{outcome=\"{outcome}\"}}"
+            )));
+        }
+        assert!(!metrics.contains("task_id="));
+        assert!(!metrics.contains("proof_ref="));
     }
 }

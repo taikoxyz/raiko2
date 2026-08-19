@@ -50,7 +50,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, watch};
@@ -207,6 +207,7 @@ pub struct RuntimeManager {
     canonical_preflight_store: Arc<dyn CanonicalPreflightStore>,
     state: RwLock<RuntimeState>,
     generation: StdMutex<Option<i64>>,
+    serialized_bytes: AtomicU64,
     lifecycle_commit: StdMutex<()>,
     mutation: Mutex<()>,
     artifact_lifecycle_locks: [Mutex<()>; ARTIFACT_LIFECYCLE_LOCK_SHARDS],
@@ -313,6 +314,14 @@ pub struct TerminalTaskRetentionFinalize {
     pub removed_artifacts: Vec<ArtifactExpectation>,
     pub skipped_tasks: usize,
     pub skipped_artifacts: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeStateStats {
+    pub serialized_bytes: usize,
+    pub tasks: usize,
+    pub artifacts: usize,
+    pub pending_publications: usize,
 }
 
 /// Explicit outcome of a conditional authoritative runtime mutation.
@@ -575,6 +584,10 @@ impl RuntimeManager {
             canonical_preflight_store,
             state: RwLock::new(RuntimeState::default()),
             generation: StdMutex::new(None),
+            serialized_bytes: AtomicU64::new(
+                u64::try_from(encoded_runtime_state_len(&RuntimeState::default()))
+                    .unwrap_or(u64::MAX),
+            ),
             lifecycle_commit: StdMutex::new(()),
             mutation: Mutex::new(()),
             artifact_lifecycle_locks: std::array::from_fn(|_| Mutex::new(())),
@@ -777,7 +790,9 @@ impl RuntimeManager {
             "runtime namespace reset is only valid before initialization"
         );
         let cleared = self.store.reset_namespace().await?;
-        self.install_runtime_state(RuntimeState::default(), None)
+        let state = RuntimeState::default();
+        let serialized_bytes = encoded_runtime_state_len(&state);
+        self.install_runtime_state(state, None, serialized_bytes)
             .await?;
         Ok(cleared)
     }
@@ -798,7 +813,9 @@ impl RuntimeManager {
         );
         let report = self.store.cleanup_before_start(scopes).await?;
         if scopes.contains(StartupCleanupMask::PROOF) {
-            self.install_runtime_state(RuntimeState::default(), None)
+            let state = RuntimeState::default();
+            let serialized_bytes = encoded_runtime_state_len(&state);
+            self.install_runtime_state(state, None, serialized_bytes)
                 .await?;
         }
         Ok(report)
@@ -817,6 +834,17 @@ impl RuntimeManager {
     #[must_use]
     pub fn backend_name(&self) -> &'static str {
         self.store.backend_name()
+    }
+
+    pub async fn runtime_state_stats(&self) -> RuntimeStateStats {
+        let state = self.state.read().await;
+        RuntimeStateStats {
+            serialized_bytes: usize::try_from(self.serialized_bytes.load(Ordering::Acquire))
+                .unwrap_or(usize::MAX),
+            tasks: state.tasks.len(),
+            artifacts: state.artifacts.len(),
+            pending_publications: state.pending_publications.len(),
+        }
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -915,8 +943,13 @@ impl RuntimeManager {
             )?;
             match write_result {
                 Ok(RuntimeStateWriteResult::Stored { generation }) => {
-                    self.install_checkpointed_runtime_state(next, generation, checkpoint_permit)
-                        .await?;
+                    self.install_checkpointed_runtime_state(
+                        next,
+                        generation,
+                        next_bytes.len(),
+                        checkpoint_permit,
+                    )
+                    .await?;
                     return Ok(output);
                 }
                 Ok(RuntimeStateWriteResult::Conflict(Some(observed)))
@@ -959,6 +992,7 @@ impl RuntimeManager {
                         self.install_checkpointed_runtime_state(
                             next,
                             observed.generation,
+                            next_bytes.len(),
                             checkpoint_permit,
                         )
                         .await?;
@@ -1012,6 +1046,7 @@ impl RuntimeManager {
         &self,
         state: RuntimeState,
         generation: Option<i64>,
+        serialized_bytes: usize,
     ) -> Result<()> {
         let mut local_state = self.state.write().await;
         let _commit = self
@@ -1027,6 +1062,10 @@ impl RuntimeManager {
             .generation
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))? = generation;
+        self.serialized_bytes.store(
+            u64::try_from(serialized_bytes).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
         self.state_coherence
             .store(StateCoherence::Coherent as u8, Ordering::Release);
         Ok(())
@@ -1036,6 +1075,7 @@ impl RuntimeManager {
         &self,
         state: RuntimeState,
         generation: Option<i64>,
+        serialized_bytes: usize,
         checkpoint_permit: Option<&RuntimeSubmissionCheckpointPermit>,
     ) -> Result<()> {
         let mut local_state = self.state.write().await;
@@ -1054,6 +1094,10 @@ impl RuntimeManager {
             .generation
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime generation lock poisoned"))? = generation;
+        self.serialized_bytes.store(
+            u64::try_from(serialized_bytes).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
         self.state_coherence
             .store(StateCoherence::Coherent as u8, Ordering::Release);
         Ok(())
@@ -1062,13 +1106,17 @@ impl RuntimeManager {
     async fn install_runtime_state_object(&self, stored: Option<RuntimeStateObject>) -> Result<()> {
         match stored {
             Some(stored) => {
+                let serialized_bytes = stored.bytes.len();
                 let state = serde_json::from_slice(&stored.bytes)
                     .context("decode authoritative runtime store state")?;
                 validate_runtime_state(&state, self.environment())?;
-                self.install_runtime_state(state, stored.generation).await
+                self.install_runtime_state(state, stored.generation, serialized_bytes)
+                    .await
             }
             None => {
-                self.install_runtime_state(RuntimeState::default(), None)
+                let state = RuntimeState::default();
+                let serialized_bytes = encoded_runtime_state_len(&state);
+                self.install_runtime_state(state, None, serialized_bytes)
                     .await
             }
         }
@@ -3727,6 +3775,12 @@ fn artifact_task_records(
         .collect()
 }
 
+fn encoded_runtime_state_len(state: &RuntimeState) -> usize {
+    serde_json::to_vec(state)
+        .expect("runtime state is always JSON serializable")
+        .len()
+}
+
 fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5733,6 +5787,58 @@ mod tests {
                 .pending_publications
                 .get(&pending_key)
                 .is_some_and(|pending| pending.owner_incarnations.is_empty())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_state_stats_track_serialized_size_and_record_counts() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "runtime-state-stats".into())?;
+        let initial = runtime.runtime_state_stats().await;
+        assert_eq!(initial.tasks, 0);
+        assert_eq!(initial.artifacts, 0);
+        assert_eq!(initial.pending_publications, 0);
+        assert!(initial.serialized_bytes > 0);
+
+        let task = register_retention_task(
+            &runtime,
+            "stats-root",
+            &["stats-proof"],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        register_retention_artifact(&runtime, "stats-proof").await?;
+        let pending_key = artifact_record_key(
+            "l1-l2",
+            PipelineKey::ShastaNative,
+            PipelineKey::ShastaNative.route(),
+            "stats-proof",
+        );
+        runtime
+            .mutate(|state| {
+                state.pending_publications.insert(
+                    pending_key.clone(),
+                    PendingProofPublicationRecord {
+                        network_pair: "l1-l2".into(),
+                        pipeline_key: PipelineKey::ShastaNative,
+                        route: PipelineKey::ShastaNative.route(),
+                        proof_ref: "stats-proof".into(),
+                        content_hash: "stats-pending".into(),
+                        owner_incarnations: vec![task.incarnation_id],
+                    },
+                );
+                Ok(())
+            })
+            .await?;
+
+        let stats = runtime.runtime_state_stats().await;
+        assert_eq!(stats.tasks, 1);
+        assert_eq!(stats.artifacts, 1);
+        assert_eq!(stats.pending_publications, 1);
+        assert_eq!(
+            stats.serialized_bytes,
+            serde_json::to_vec(&*runtime.state.read().await)?.len()
         );
         Ok(())
     }

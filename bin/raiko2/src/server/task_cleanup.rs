@@ -23,9 +23,14 @@ const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local exe
 pub(crate) struct RuntimeCleanupStats {
     pub scanned: usize,
     pub expired: usize,
+    pub retired_roots: usize,
+    pub skipped_roots: usize,
     pub removed_roots: usize,
     pub skipped_shared_children: usize,
     pub retained_failures: usize,
+    pub invalidated_artifacts: usize,
+    pub removed_artifacts: usize,
+    pub retained_artifact_failures: usize,
     pub orphaned_cancelled: usize,
 }
 
@@ -33,9 +38,14 @@ impl RuntimeCleanupStats {
     const fn is_idle(self) -> bool {
         self.scanned == 0
             && self.expired == 0
+            && self.retired_roots == 0
+            && self.skipped_roots == 0
             && self.removed_roots == 0
             && self.skipped_shared_children == 0
             && self.retained_failures == 0
+            && self.invalidated_artifacts == 0
+            && self.removed_artifacts == 0
+            && self.retained_artifact_failures == 0
             && self.orphaned_cancelled == 0
     }
 }
@@ -119,9 +129,17 @@ pub(crate) async fn run_runtime_cleanup_pass(
     };
 
     let cleanup = lifecycle.remove_terminal_retention_batch(&records).await?;
+    stats.retired_roots = cleanup.retired_roots;
+    stats.skipped_roots = cleanup.skipped_roots;
     stats.removed_roots = cleanup.removed_roots;
     stats.skipped_shared_children = cleanup.skipped_shared_children;
     stats.retained_failures = cleanup.retained_root_failures;
+    stats.invalidated_artifacts = cleanup.invalidated_artifacts;
+    stats.removed_artifacts = cleanup.removed_artifacts;
+    stats.retained_artifact_failures = cleanup.retained_artifact_failures;
+
+    crate::server::telemetry::record_runtime_cleanup_stats(&stats);
+    crate::server::telemetry::record_runtime_state_stats(runtime.runtime_state_stats().await);
 
     Ok(stats)
 }
@@ -289,9 +307,14 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
                 info!(
                     scanned = stats.scanned,
                     expired = stats.expired,
+                    retired_roots = stats.retired_roots,
+                    skipped_roots = stats.skipped_roots,
                     removed_roots = stats.removed_roots,
                     skipped_shared_children = stats.skipped_shared_children,
                     retained_failures = stats.retained_failures,
+                    invalidated_artifacts = stats.invalidated_artifacts,
+                    removed_artifacts = stats.removed_artifacts,
+                    retained_artifact_failures = stats.retained_artifact_failures,
                     orphaned_cancelled = stats.orphaned_cancelled,
                     "runtime cleanup tick completed"
                 );
@@ -902,9 +925,14 @@ mod tests {
             RuntimeCleanupStats {
                 scanned: 1,
                 expired: 1,
+                retired_roots: 1,
+                skipped_roots: 0,
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 0,
+                invalidated_artifacts: 0,
+                removed_artifacts: 0,
+                retained_artifact_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1142,9 +1170,14 @@ mod tests {
             RuntimeCleanupStats {
                 scanned: 1,
                 expired: 1,
+                retired_roots: 1,
+                skipped_roots: 0,
                 removed_roots: 0,
                 skipped_shared_children: 0,
                 retained_failures: 1,
+                invalidated_artifacts: 0,
+                removed_artifacts: 0,
+                retained_artifact_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1182,9 +1215,14 @@ mod tests {
             RuntimeCleanupStats {
                 scanned: 1,
                 expired: 1,
+                retired_roots: 1,
+                skipped_roots: 0,
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 0,
+                invalidated_artifacts: 0,
+                removed_artifacts: 0,
+                retained_artifact_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1233,9 +1271,14 @@ mod tests {
             RuntimeCleanupStats {
                 scanned: 2,
                 expired: 2,
+                retired_roots: 2,
+                skipped_roots: 0,
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 1,
+                invalidated_artifacts: 0,
+                removed_artifacts: 0,
+                retained_artifact_failures: 0,
                 orphaned_cancelled: 0,
             }
         );
@@ -1270,9 +1313,14 @@ mod tests {
             RuntimeCleanupStats {
                 scanned: 1,
                 expired: 1,
+                retired_roots: 1,
+                skipped_roots: 0,
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 0,
+                invalidated_artifacts: 0,
+                removed_artifacts: 0,
+                retained_artifact_failures: 0,
                 orphaned_cancelled: 0,
             }
         );

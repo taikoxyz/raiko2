@@ -440,6 +440,9 @@ impl AppState {
                 "restored pending runtime state without execution attachment"
             );
         }
+        crate::server::telemetry::record_runtime_state_stats(
+            self.runtime.runtime_state_stats().await,
+        );
         self.pipelines.start_workers(
             self.config.queue.workers,
             Duration::from_millis(self.config.queue.maintenance_interval_ms),

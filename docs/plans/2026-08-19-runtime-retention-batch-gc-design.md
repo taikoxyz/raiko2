@@ -29,6 +29,7 @@ and may prove again; the runtime does not rehydrate expired tasks from old GCS p
 The six-hour window starts at the terminal task's `updated_at` timestamp. Active tasks are never
 removed by this TTL, even if they run longer than six hours. An active task older than the same
 window is abnormal and emits one deduplicated structured warning per observed task incarnation.
+This is an operational failure signal, not a second reclamation policy.
 
 ## Configuration
 
@@ -77,12 +78,15 @@ by the previous collector.
 ### Pending-publication reclamation
 
 1. Independently select pending intents with no retained task incarnation owner, using the same
-   retry/fresh fairness rule and the same ownership index. Task status does not affect ownership.
+   retry/fresh fairness rule and the same ownership index. Task status and the intent's potentially
+   stale owner list do not affect retention ownership; an authoritative task-record reference is
+   sufficient.
 2. Under the per-artifact lifecycle lock, recheck the exact intent, owner incarnations, and content
-   hash. If a canonical object exists without an artifact record, first record and finalize its exact
-   invalidation so the historical publication crash window cannot leave an untracked manifest.
+   hash. If a canonical object exists without an artifact record, exact-invalidate that descriptor
+   without adopting it into runtime state, so the historical publication crash window cannot leave
+   an untracked manifest or turn a concurrently replaced descriptor into stale local authority.
 3. Delete the exact pending object and remove only the exact durable intent. A changed intent, a new
-   live owner, or an external failure retains only that pending intent for retry.
+   retained task reference, or an external failure retains only that pending intent for retry.
 
 The number of runtime-state writes is bounded by cleanup phases, not by the number of ordinary tasks
 or artifacts in a batch. External cleanup never performs one full-snapshot mutation per item. A
@@ -95,13 +99,25 @@ Cleanup cursors, retry queues, and overdue-active warning deduplication are proc
 optimizations, not authority. Restarting resets them and scans authoritative state from the
 beginning. Retry selection is non-destructive: an identity remains queued until its lane completes
 successfully or authoritative state proves it no longer eligible. Fresh cursors advance only after a
-complete successful selection.
+complete successful selection. Each retry lane is capped at 4096 identities; the authoritative scan
+remains the recovery source for work that cannot enter a full process-local queue.
 
 Startup must restore recoverable pending publications before attempting cleanup-only invalidations.
 An invalidated artifact is already unreadable from runtime state, so object-store cleanup is not a
 readiness prerequisite. Transient cleanup failures are logged and retried by maintenance rather than
 crash-looping the service. A stale descriptor is reconciled against the current canonical descriptor
 and live pending owners; it is never accepted as permission to delete a changed object.
+
+Retention ownership and publication liveness are deliberately separate predicates. Retention treats
+every extant task incarnation as an owner, including failed and cancelled records. Publication
+activation and recovery continue to require a live task owner, so terminal records cannot make an
+in-flight publication usable merely because they retain it from garbage collection.
+
+If aggregation discovers that a succeeded proposal dependency no longer has a readable proof
+artifact, the queue atomically resets that dependency to ready and the running aggregate to pending.
+The proposal republishes its proof before aggregation resumes. This makes accidental or retention-
+driven artifact loss recoverable in the current process instead of relying on a restart and duplicate
+client submission.
 
 ## Safety Invariants
 
@@ -117,11 +133,15 @@ and live pending owners; it is never accepted as permission to delete a changed 
 - Selecting a retry or fresh item cannot lose it when another lane or later phase fails.
 - Slow object-store operations never hold the process-wide execution lifecycle gate.
 - Runtime draining fences batch cleanup through the existing namespace and lifecycle gates.
-- Pending publication objects and intents are removed only after their last task owner becomes
-  terminal and exact external deletion succeeds.
+- Pending publication objects and intents are removed only after their last task-owner record is
+  removed and exact external deletion succeeds.
 - A request whose observed task disappears during cleanup atomically returns to normal registration;
   it does not fail with an internal replacement error.
 - An active task older than the terminal retention window is logged but never selected for removal.
+- Overdue-active observation runs before orphan cancellation or any retention state transition in a
+  cleanup pass.
+- A missing aggregate input artifact requeues its succeeded proposal dependency before aggregation
+  retries.
 
 ## Observability
 

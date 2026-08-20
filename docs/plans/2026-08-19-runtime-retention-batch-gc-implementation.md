@@ -420,7 +420,9 @@ references it, regardless of status, and becomes reclaimable after the final own
 
 Build an ownership index once per runtime-state snapshot. Artifact and pending selection use exact
 task incarnations from this index rather than scanning the task table once per candidate. Root
-preparation retires only task records; it must not invalidate referenced artifacts.
+preparation retires only task records; it must not invalidate referenced artifacts. Pending
+retention follows authoritative task references even when a durable intent's owner list is stale;
+publication activation continues to use the stricter live-owner predicate.
 
 **Step 3: Run the runtime tests**
 
@@ -495,7 +497,9 @@ new observation.
 
 Scan at most one configured batch per pass. Deduplicate warnings by task incarnation in a bounded
 process-local set, emit structured age/status/pipeline/route fields, and increment a fixed-label
-counter. Restart may emit the warning again because process-local observation state is not authority.
+counter. Run this observation before orphan cancellation or any retention state transition. The
+observation must not mutate, retire, or remove the active task. Restart may emit the warning again
+because process-local observation state is not authority.
 
 **Step 3: Run cleanup and telemetry tests**
 
@@ -508,19 +512,28 @@ Expected: PASS.
 ### Task 13: Verify aggregate recovery after proposal-artifact loss
 
 **Files:**
+- Modify: `crates/queue/src/store.rs`
+- Modify: `crates/queue/src/scheduler/mod.rs`
+- Modify: `crates/engine/src/lib.rs`
 - Test: `crates/engine/src/lib.rs`
-- Test: `bin/raiko2/src/server/task_cleanup.rs`
 
 **Step 1: Add a recovery regression**
 
-Persist aggregate recovery metadata, remove one proposal proof artifact, and rebuild the execution
-plan. Assert that the missing proposal node is scheduled for proving before the aggregate node rather
-than treating the aggregate as permanently failed.
+Run a proposal to success, remove its proof artifact, and execute the dependent aggregate in the same
+process. Assert that the proposal returns to ready, the aggregate returns to pending, the proposal
+reproves and republishes, and aggregation then succeeds.
 
-**Step 2: Run engine and server recovery tests**
+**Step 2: Add atomic dependency recovery**
 
-Run: `cargo test -p raiko2-engine recovery`
+When aggregation reports missing proof artifacts, atomically verify the running aggregate lease,
+reset only its declared succeeded dependencies to ready, and return the aggregate to pending. Reject
+missing, failed, cancelled, or unrelated dependency records. Notify scheduler waiters after the
+transition commits.
 
-Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server recovery`
+**Step 3: Run queue and engine recovery tests**
+
+Run: `cargo test -p raiko2-queue`
+
+Run: `cargo test -p raiko2-engine missing_aggregate_artifact_requeues_succeeded_proposal`
 
 Expected: PASS.

@@ -39,8 +39,6 @@ pub(crate) struct TerminalRetentionBatchOutcome {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
-    pub removed_pending_publications: usize,
-    pub retained_pending_publication_failures: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +46,15 @@ pub(crate) struct ArtifactRetentionBatchOutcome {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PendingRetentionBatchOutcome {
+    pub invalidated_artifacts: usize,
+    pub removed_artifacts: usize,
+    pub retained_artifact_failures: usize,
+    pub removed_pending_publications: usize,
+    pub retained_pending_publication_failures: usize,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +66,7 @@ struct ArtifactFinalizationBatch {
 #[derive(Debug, Default)]
 struct PendingPublicationFinalizationBatch {
     finalized: Vec<PendingPublicationExpectation>,
+    finalized_artifacts: Vec<ArtifactExpectation>,
     failures: usize,
 }
 
@@ -409,34 +417,24 @@ impl ProofLifecycle {
             .saturating_add(finalized_roots.skipped_tasks);
         drop(lifecycle_gate_guard);
 
-        let (artifact_batch, pending_batch) = finalize_terminal_retention_external(
+        let artifact_batch = finalize_terminal_retention_artifacts(
             Arc::clone(&self.runtime),
             prepared.artifact_invalidations,
-            prepared.pending_publication_deletions,
         )
         .await;
         outcome.retained_artifact_failures = artifact_batch.failures;
-        outcome.retained_pending_publication_failures = pending_batch.failures;
 
-        if artifact_batch.finalized.is_empty() && pending_batch.finalized.is_empty() {
+        if artifact_batch.finalized.is_empty() {
             return Ok(outcome);
         }
         let finalized = self
             .runtime
-            .finalize_terminal_task_retention_batch(
-                &[],
-                &artifact_batch.finalized,
-                &pending_batch.finalized,
-            )
+            .finalize_terminal_task_retention_batch(&[], &artifact_batch.finalized, &[])
             .await?;
         outcome.removed_artifacts = finalized.removed_artifacts.len();
         outcome.retained_artifact_failures = outcome
             .retained_artifact_failures
             .saturating_add(finalized.skipped_artifacts);
-        outcome.removed_pending_publications = finalized.removed_pending_publications.len();
-        outcome.retained_pending_publication_failures = outcome
-            .retained_pending_publication_failures
-            .saturating_add(finalized.skipped_pending_publications);
         Ok(outcome)
     }
 
@@ -469,6 +467,40 @@ impl ProofLifecycle {
         outcome.retained_artifact_failures = outcome
             .retained_artifact_failures
             .saturating_add(finalized.skipped_artifacts);
+        Ok(outcome)
+    }
+
+    pub(crate) async fn remove_pending_retention_batch(
+        &self,
+        expectations: &[PendingPublicationExpectation],
+    ) -> Result<PendingRetentionBatchOutcome> {
+        let pending_batch = finalize_terminal_retention_pending_publications(
+            Arc::clone(&self.runtime),
+            expectations.to_vec(),
+        )
+        .await;
+        let mut outcome = PendingRetentionBatchOutcome {
+            invalidated_artifacts: pending_batch.finalized_artifacts.len(),
+            retained_pending_publication_failures: pending_batch.failures,
+            ..PendingRetentionBatchOutcome::default()
+        };
+        if pending_batch.finalized.is_empty() && pending_batch.finalized_artifacts.is_empty() {
+            return Ok(outcome);
+        }
+        let finalized = self
+            .runtime
+            .finalize_terminal_task_retention_batch(
+                &[],
+                &pending_batch.finalized_artifacts,
+                &pending_batch.finalized,
+            )
+            .await?;
+        outcome.removed_artifacts = finalized.removed_artifacts.len();
+        outcome.retained_artifact_failures = finalized.skipped_artifacts;
+        outcome.removed_pending_publications = finalized.removed_pending_publications.len();
+        outcome.retained_pending_publication_failures = outcome
+            .retained_pending_publication_failures
+            .saturating_add(finalized.skipped_pending_publications);
         Ok(outcome)
     }
 
@@ -562,23 +594,6 @@ async fn finalize_terminal_retention_artifacts(
     batch
 }
 
-async fn finalize_terminal_retention_external(
-    runtime: Arc<RuntimeManager>,
-    artifacts: Vec<ArtifactExpectation>,
-    pending_publications: Vec<PendingPublicationExpectation>,
-) -> (
-    ArtifactFinalizationBatch,
-    PendingPublicationFinalizationBatch,
-) {
-    let artifacts = finalize_terminal_retention_artifacts(Arc::clone(&runtime), artifacts).await;
-    let pending_publications = if artifacts.failures == 0 {
-        finalize_terminal_retention_pending_publications(runtime, pending_publications).await
-    } else {
-        PendingPublicationFinalizationBatch::default()
-    };
-    (artifacts, pending_publications)
-}
-
 async fn finalize_terminal_retention_pending_publications(
     runtime: Arc<RuntimeManager>,
     expectations: Vec<PendingPublicationExpectation>,
@@ -605,7 +620,12 @@ async fn finalize_terminal_retention_pending_publications(
             break;
         };
         match finalized {
-            Ok((expectation, Ok(_))) => batch.finalized.push(expectation),
+            Ok((expectation, Ok(finalized))) => {
+                batch.finalized.push(expectation);
+                batch
+                    .finalized_artifacts
+                    .extend(finalized.artifact_invalidation);
+            }
             Ok((expectation, Err(error))) => {
                 batch.failures = batch.failures.saturating_add(1);
                 warn!(

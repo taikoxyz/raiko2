@@ -142,6 +142,25 @@ pub(crate) async fn run_runtime_cleanup_pass(
     stats.removed_artifacts = artifact_cleanup.removed_artifacts;
     stats.retained_artifact_failures = artifact_cleanup.retained_artifact_failures;
 
+    let pending_publications = runtime
+        .list_reclaimable_pending_publications(None, RUNTIME_CLEANUP_BATCH_SIZE)
+        .await?;
+    let pending_cleanup = lifecycle
+        .remove_pending_retention_batch(&pending_publications)
+        .await?;
+    stats.invalidated_artifacts = stats
+        .invalidated_artifacts
+        .saturating_add(pending_cleanup.invalidated_artifacts);
+    stats.removed_artifacts = stats
+        .removed_artifacts
+        .saturating_add(pending_cleanup.removed_artifacts);
+    stats.retained_artifact_failures = stats
+        .retained_artifact_failures
+        .saturating_add(pending_cleanup.retained_artifact_failures);
+    stats.removed_pending_publications = pending_cleanup.removed_pending_publications;
+    stats.retained_pending_publication_failures =
+        pending_cleanup.retained_pending_publication_failures;
+
     let cleanup = lifecycle.remove_terminal_retention_batch(&records).await?;
     stats.retired_roots = cleanup.retired_roots;
     stats.skipped_roots = cleanup.skipped_roots;
@@ -157,9 +176,6 @@ pub(crate) async fn run_runtime_cleanup_pass(
     stats.retained_artifact_failures = stats
         .retained_artifact_failures
         .saturating_add(cleanup.retained_artifact_failures);
-    stats.removed_pending_publications = cleanup.removed_pending_publications;
-    stats.retained_pending_publication_failures = cleanup.retained_pending_publication_failures;
-
     crate::server::telemetry::record_runtime_cleanup_stats(&stats);
     crate::server::telemetry::record_runtime_state_stats(runtime.runtime_state_stats().await);
 
@@ -1327,7 +1343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cleanup_retains_failed_pending_without_retaining_root() -> Result<()> {
+    async fn pending_publication_failure_does_not_block_artifact_or_root_cleanup() -> Result<()> {
         let store = Arc::new(FailOnceInvalidationStore::pending_delete_failure()?);
         let runtime = Arc::new(RuntimeManager::with_store(store));
         let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
@@ -1378,7 +1394,63 @@ mod tests {
         .await?;
         assert_eq!(first.removed_roots, 1);
         assert_eq!(first.retained_failures, 0);
-        assert_eq!(first.retained_pending_publication_failures, 1);
+        assert_eq!(first.retained_pending_publication_failures, 0);
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &terminal.network_pair,
+                    terminal.pipeline_key,
+                    terminal.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_some()
+        );
+        assert!(runtime.get_task("pending-root").await?.is_none());
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "legacy-artifact-root",
+            &encoded_proposal_task_id(48)?,
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        let legacy_root = runtime
+            .get_task("legacy-artifact-root")
+            .await?
+            .context("legacy artifact root")?;
+        let legacy_ref = legacy_root
+            .artifact_refs
+            .first()
+            .context("legacy artifact proof reference")?;
+        register_runtime_proof_artifact(runtime.as_ref(), &legacy_root, legacy_ref).await?;
+        assert!(matches!(
+            runtime.retire_task_if_unchanged(&legacy_root, None).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+        let retired_legacy = runtime
+            .get_task("legacy-artifact-root")
+            .await?
+            .context("retired legacy artifact root")?;
+        assert!(matches!(
+            runtime
+                .remove_task_if_current(&retired_legacy.lifetime())
+                .await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+
+        let failed_pending = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory.clone(),
+            7_200,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+        assert_eq!(failed_pending.removed_artifacts, 1);
+        assert_eq!(failed_pending.retained_pending_publication_failures, 1);
         assert!(
             runtime
                 .get_pending_proof_publication(
@@ -1391,7 +1463,27 @@ mod tests {
                 .is_some()
         );
 
-        assert!(runtime.get_task("pending-root").await?.is_none());
+        let retry = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+        assert_eq!(retry.removed_pending_publications, 1);
+        assert!(
+            runtime
+                .get_pending_proof_publication(
+                    &terminal.network_pair,
+                    terminal.pipeline_key,
+                    terminal.route,
+                    &proof_ref,
+                )
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 

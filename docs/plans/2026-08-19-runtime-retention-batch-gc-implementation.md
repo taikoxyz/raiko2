@@ -402,3 +402,125 @@ and neutral fixture labels.
 
 Summarize the changed lifecycle model, list every verification command and result, and explicitly
 map the new regressions to the review findings before pushing the branch.
+
+### Task 9: Make task-record ownership the retention boundary
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Test: `crates/runtime/src/lib.rs`
+
+**Step 1: Write failing ownership tests**
+
+Assert that failed and cancelled task records retain their proof artifacts and pending publications
+until the terminal record expires. Assert that shared proof remains retained while any task record
+references it, regardless of status, and becomes reclaimable after the final owner record is removed.
+
+**Step 2: Replace usable-owner checks with retained-record ownership**
+
+Build an ownership index once per runtime-state snapshot. Artifact and pending selection use exact
+task incarnations from this index rather than scanning the task table once per candidate. Root
+preparation retires only task records; it must not invalidate referenced artifacts.
+
+**Step 3: Run the runtime tests**
+
+Run: `cargo test -p raiko2-runtime --lib retention`
+
+Expected: PASS.
+
+### Task 10: Make cleanup scheduling failure-atomic
+
+**Files:**
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Write failing scheduler tests**
+
+Cover a later-lane error after root selection, an error while loading mixed retry/fresh candidates,
+and a root skipped during exact finalization. Assert that retry identities remain queued and fresh
+cursors do not advance past unprocessed work.
+
+**Step 2: Implement selection acknowledgement**
+
+Peek retry identities without removing them. Carry selected retry and fresh identities through lane
+execution, acknowledge retries only after successful completion, and enqueue all unprocessed fresh
+identities on lane failure. Advance fresh cursors only after selection succeeds. Run root retirement
+before artifact and pending cleanup.
+
+**Step 3: Run cleanup tests**
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
+
+Expected: PASS.
+
+### Task 11: Bound cleanup writes and stale reconciliation
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Restore a representative write-count regression**
+
+Include multiple roots, artifacts, and pending publications. Assert that increasing batch cardinality
+does not increase authoritative runtime-state writes linearly.
+
+**Step 2: Remove per-item authoritative mutations**
+
+Fold pending cleanup and stale artifact reconciliation into lane-level exact finalization. Never adopt
+a newly observed canonical descriptor into an `Invalidated` local record. A changed descriptor is
+stale work and must remain protected for publication reconciliation.
+
+**Step 3: Run lifecycle and cleanup tests**
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server retention`
+
+Expected: PASS.
+
+### Task 12: Observe overdue active tasks without deleting them
+
+**Files:**
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `bin/raiko2/src/server/telemetry.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Write a failing active-task test**
+
+Seed an allocated or running task older than six hours. Assert that cleanup preserves it and emits
+only one observation for the task incarnation across repeated passes. A new incarnation may emit a
+new observation.
+
+**Step 2: Add bounded observation state**
+
+Scan at most one configured batch per pass. Deduplicate warnings by task incarnation in a bounded
+process-local set, emit structured age/status/pipeline/route fields, and increment a fixed-label
+counter. Restart may emit the warning again because process-local observation state is not authority.
+
+**Step 3: Run cleanup and telemetry tests**
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::telemetry`
+
+Expected: PASS.
+
+### Task 13: Verify aggregate recovery after proposal-artifact loss
+
+**Files:**
+- Test: `crates/engine/src/lib.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Add a recovery regression**
+
+Persist aggregate recovery metadata, remove one proposal proof artifact, and rebuild the execution
+plan. Assert that the missing proposal node is scheduled for proving before the aggregate node rather
+than treating the aggregate as permanently failed.
+
+**Step 2: Run engine and server recovery tests**
+
+Run: `cargo test -p raiko2-engine recovery`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server recovery`
+
+Expected: PASS.

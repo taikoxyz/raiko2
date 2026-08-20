@@ -229,6 +229,33 @@ static RUNTIME_RETENTION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("register raiko2_runtime_retention_total")
 });
 
+static RUNTIME_RETENTION_RETRY_QUEUE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "raiko2_runtime_retention_retry_queue",
+        "Current process-local runtime retention retry identities by lane",
+        &["lane"]
+    )
+    .expect("register raiko2_runtime_retention_retry_queue")
+});
+
+static RUNTIME_RETENTION_ATTEMPTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_runtime_retention_attempts_total",
+        "Runtime retention attempts by lane and scheduler source",
+        &["lane", "source"]
+    )
+    .expect("register raiko2_runtime_retention_attempts_total")
+});
+
+static RUNTIME_RETENTION_OUTCOMES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_runtime_retention_outcomes_total",
+        "Runtime retention outcomes by lane",
+        &["lane", "outcome"]
+    )
+    .expect("register raiko2_runtime_retention_outcomes_total")
+});
+
 #[derive(Debug)]
 pub(crate) struct PreflightCacheMetricsObserver {
     pair: String,
@@ -353,6 +380,34 @@ pub(crate) fn record_runtime_cleanup_stats(
     ] {
         RUNTIME_RETENTION_TOTAL
             .with_label_values(&[outcome])
+            .inc_by(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+}
+
+pub(crate) fn record_runtime_cleanup_scheduler_lane(
+    lane: &'static str,
+    retry_queue_len: usize,
+    fresh_attempts: usize,
+    retry_attempts: usize,
+    successes: usize,
+    failures: usize,
+    stale: usize,
+) {
+    RUNTIME_RETENTION_RETRY_QUEUE
+        .with_label_values(&[lane])
+        .set(i64::try_from(retry_queue_len).unwrap_or(i64::MAX));
+    for (source, attempts) in [("fresh", fresh_attempts), ("retry", retry_attempts)] {
+        RUNTIME_RETENTION_ATTEMPTS_TOTAL
+            .with_label_values(&[lane, source])
+            .inc_by(u64::try_from(attempts).unwrap_or(u64::MAX));
+    }
+    for (outcome, count) in [
+        ("success", successes),
+        ("failure", failures),
+        ("stale", stale),
+    ] {
+        RUNTIME_RETENTION_OUTCOMES_TOTAL
+            .with_label_values(&[lane, outcome])
             .inc_by(u64::try_from(count).unwrap_or(u64::MAX));
     }
 }
@@ -703,6 +758,32 @@ mod tests {
         ] {
             assert!(metrics.contains(&format!(
                 "raiko2_runtime_retention_total{{outcome=\"{outcome}\"}}"
+            )));
+        }
+        assert!(!metrics.contains("task_id="));
+        assert!(!metrics.contains("proof_ref="));
+    }
+
+    #[test]
+    fn runtime_retention_scheduler_metrics_use_only_fixed_lane_labels() {
+        record_runtime_cleanup_scheduler_lane("root", 2, 3, 1, 2, 1, 1);
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        assert!(metrics.contains("raiko2_runtime_retention_retry_queue{lane=\"root\"}"));
+        assert!(
+            metrics.contains(
+                "raiko2_runtime_retention_attempts_total{lane=\"root\",source=\"fresh\"}"
+            )
+        );
+        assert!(
+            metrics.contains(
+                "raiko2_runtime_retention_attempts_total{lane=\"root\",source=\"retry\"}"
+            )
+        );
+        for outcome in ["success", "failure", "stale"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_runtime_retention_outcomes_total{{lane=\"root\",outcome=\"{outcome}\"}}"
             )));
         }
         assert!(!metrics.contains("task_id="));

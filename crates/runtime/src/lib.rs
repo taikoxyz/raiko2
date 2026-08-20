@@ -2218,6 +2218,24 @@ impl RuntimeManager {
         Ok(artifacts.into_iter().map(|(_, record)| record).collect())
     }
 
+    pub async fn get_reclaimable_proof_artifact(
+        &self,
+        key: &ProofArtifactKey,
+    ) -> Result<Option<ProofArtifactRecord>> {
+        let state_key = artifact_record_key(
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        );
+        let state = self.state.read().await;
+        Ok(state
+            .artifacts
+            .get(&state_key)
+            .filter(|record| !artifact_has_usable_owner(&state, record))
+            .cloned())
+    }
+
     /// Exact-matches reclaimable artifact snapshots and durably marks them invalidated.
     pub async fn prepare_artifact_retention_batch(
         &self,
@@ -2839,6 +2857,33 @@ impl RuntimeManager {
             .collect())
     }
 
+    pub async fn get_reclaimable_pending_publication(
+        &self,
+        key: &ProofArtifactKey,
+    ) -> Result<Option<PendingPublicationExpectation>> {
+        let state_key = artifact_record_key(
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        );
+        let state = self.state.read().await;
+        Ok(state
+            .pending_publications
+            .get(&state_key)
+            .filter(|record| {
+                !pending_publication_has_live_owner(
+                    &state,
+                    &state_key,
+                    &record.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &record.proof_ref,
+                )
+            })
+            .map(PendingProofPublicationRecord::expectation))
+    }
+
     /// Reconciles publication intents that no current runtime task still owns.
     ///
     /// An activated artifact with a live consumer needs only pending-blob cleanup. Every other
@@ -3405,6 +3450,30 @@ impl RuntimeManager {
     ) -> Result<Vec<RuntimeTaskRecord>> {
         self.list_tasks_matching(now, ttl_secs, after, limit, true)
             .await
+    }
+
+    pub async fn get_expired_terminal_task(
+        &self,
+        lifetime: &TaskLifetime,
+        now: i64,
+        ttl_secs: u64,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        if ttl_secs == 0 {
+            return Ok(None);
+        }
+        let cutoff = now.saturating_sub(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
+        Ok(self
+            .state
+            .read()
+            .await
+            .tasks
+            .get(&lifetime.task_id)
+            .filter(|record| {
+                record.incarnation_id == lifetime.incarnation_id
+                    && record.runner_status.is_terminal()
+                    && record.updated_at <= cutoff
+            })
+            .cloned())
     }
 
     pub async fn list_stale_nonterminal_tasks(

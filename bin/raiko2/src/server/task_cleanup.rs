@@ -8,16 +8,137 @@ use crate::server::task_metadata::{
 use anyhow::{Context, Result};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_runtime::{
-    ExpiredTaskCursor, ProofArtifactRecord, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
+    ArtifactRetentionCursor, ExpiredTaskCursor, PendingPublicationExpectation,
+    PendingPublicationRetentionCursor, ProofArtifactKey, ProofArtifactRecord, RunnerStatus,
+    RuntimeManager, RuntimeTaskRecord, TaskLifetime,
 };
+use std::collections::{HashSet, VecDeque};
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
-const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
 const ORPHANED_RUNTIME_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local execution";
+
+#[derive(Debug)]
+struct RetryQueue<T> {
+    queue: VecDeque<T>,
+    identities: HashSet<T>,
+}
+
+impl<T> Default for RetryQueue<T> {
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            identities: HashSet::new(),
+        }
+    }
+}
+
+impl<T> RetryQueue<T>
+where
+    T: Clone + Eq + Hash,
+{
+    fn enqueue(&mut self, identity: T) -> bool {
+        if !self.identities.insert(identity.clone()) {
+            return false;
+        }
+        self.queue.push_back(identity);
+        true
+    }
+
+    fn take(&mut self, limit: usize) -> Vec<T> {
+        let mut identities = Vec::with_capacity(limit.min(self.queue.len()));
+        while identities.len() < limit {
+            let Some(identity) = self.queue.pop_front() else {
+                break;
+            };
+            self.identities.remove(&identity);
+            identities.push(identity);
+        }
+        identities
+    }
+
+    fn contains(&self, identity: &T) -> bool {
+        self.identities.contains(identity)
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    fn is_deduplicated(&self) -> bool {
+        self.queue.len() == self.identities.len()
+            && self.queue.iter().all(|item| self.identities.contains(item))
+    }
+}
+
+#[derive(Debug)]
+struct RetentionLaneState<I, C> {
+    fresh_cursor: Option<C>,
+    retries: RetryQueue<I>,
+    prefer_retry: bool,
+    last_fresh_attempts: usize,
+    last_retry_attempts: usize,
+}
+
+impl<I, C> Default for RetentionLaneState<I, C> {
+    fn default() -> Self {
+        Self {
+            fresh_cursor: None,
+            retries: RetryQueue::default(),
+            prefer_retry: true,
+            last_fresh_attempts: 0,
+            last_retry_attempts: 0,
+        }
+    }
+}
+
+impl<I, C> RetentionLaneState<I, C> {
+    fn budgets(&mut self, total: usize) -> (usize, usize) {
+        if total == 0 || self.retries.queue.is_empty() {
+            return (0, total);
+        }
+        if total == 1 {
+            let budgets = if self.prefer_retry { (1, 0) } else { (0, 1) };
+            self.prefer_retry = !self.prefer_retry;
+            return budgets;
+        }
+        let retry = total / 2;
+        (retry, total - retry)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeCleanupLoopState {
+    orphan_cursor: Option<ExpiredTaskCursor>,
+    roots: RetentionLaneState<TaskLifetime, ExpiredTaskCursor>,
+    artifacts: RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
+    pending: RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
+}
+
+#[cfg(test)]
+impl RuntimeCleanupLoopState {
+    fn root_retry_len(&self) -> usize {
+        self.roots.retries.len()
+    }
+
+    fn artifact_retry_len(&self) -> usize {
+        self.artifacts.retries.len()
+    }
+
+    fn pending_retry_len(&self) -> usize {
+        self.pending.retries.len()
+    }
+
+    fn retry_queues_are_deduplicated(&self) -> bool {
+        self.roots.retries.is_deduplicated()
+            && self.artifacts.retries.is_deduplicated()
+            && self.pending.retries.is_deduplicated()
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeCleanupStats {
@@ -60,18 +181,18 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     pipelines: Arc<dyn PipelineFactory>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
-        let interval_duration = Duration::from_millis(config.queue.maintenance_interval_ms);
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+        let interval_duration = Duration::from_secs(config.runtime.cleanup_interval_secs);
         let terminal_task_ttl_secs = config.runtime.terminal_task_ttl_secs;
+        let cleanup_batch_size = config.runtime.cleanup_batch_size;
         log_runtime_cleanup_stats(
             run_runtime_cleanup_pass(
                 Arc::clone(&runtime),
                 Arc::clone(&pipelines),
                 ORPHANED_RUNTIME_TASK_TTL_SECS,
                 terminal_task_ttl_secs,
-                &mut orphan_cursor,
-                &mut terminal_cursor,
+                cleanup_batch_size,
+                &mut cleanup_state,
             )
             .await,
         );
@@ -88,8 +209,8 @@ pub(crate) fn spawn_runtime_cleanup_loop(
                     Arc::clone(&pipelines),
                     ORPHANED_RUNTIME_TASK_TTL_SECS,
                     terminal_task_ttl_secs,
-                    &mut orphan_cursor,
-                    &mut terminal_cursor,
+                    cleanup_batch_size,
+                    &mut cleanup_state,
                 )
                 .await,
             );
@@ -102,29 +223,29 @@ pub(crate) async fn run_runtime_cleanup_pass(
     pipelines: Arc<dyn PipelineFactory>,
     orphan_ttl_secs: u64,
     terminal_ttl_secs: u64,
-    orphan_cursor: &mut Option<ExpiredTaskCursor>,
-    terminal_cursor: &mut Option<ExpiredTaskCursor>,
+    batch_size: usize,
+    cleanup_state: &mut RuntimeCleanupLoopState,
 ) -> Result<RuntimeCleanupStats> {
-    if orphan_ttl_secs == 0 && terminal_ttl_secs == 0 {
+    if batch_size == 0 {
         return Ok(RuntimeCleanupStats::default());
     }
     let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
 
-    let orphaned_cancelled =
-        cancel_orphaned_runtime_tasks(runtime.as_ref(), &lifecycle, orphan_ttl_secs, orphan_cursor)
-            .await?;
-    let records = runtime
-        .list_expired_terminal_tasks(
-            now_ts(),
-            terminal_ttl_secs,
-            terminal_cursor.as_ref(),
-            RUNTIME_CLEANUP_BATCH_SIZE,
-        )
-        .await?;
-    *terminal_cursor = records.last().map(|record| ExpiredTaskCursor {
-        updated_at: record.updated_at,
-        task_id: record.task_id.clone(),
-    });
+    let orphaned_cancelled = cancel_orphaned_runtime_tasks(
+        runtime.as_ref(),
+        &lifecycle,
+        orphan_ttl_secs,
+        batch_size,
+        &mut cleanup_state.orphan_cursor,
+    )
+    .await?;
+    let records = select_root_retention_batch(
+        runtime.as_ref(),
+        terminal_ttl_secs,
+        batch_size,
+        &mut cleanup_state.roots,
+    )
+    .await?;
     let mut stats = RuntimeCleanupStats {
         scanned: records.len(),
         expired: records.len(),
@@ -132,22 +253,40 @@ pub(crate) async fn run_runtime_cleanup_pass(
         ..RuntimeCleanupStats::default()
     };
 
-    let artifact_records = runtime
-        .list_reclaimable_proof_artifacts(None, RUNTIME_CLEANUP_BATCH_SIZE)
-        .await?;
+    let artifact_records =
+        select_artifact_retention_batch(runtime.as_ref(), batch_size, &mut cleanup_state.artifacts)
+            .await?;
     let artifact_cleanup = lifecycle
         .remove_artifact_retention_batch(&artifact_records)
         .await?;
+    for key in artifact_cleanup.retry_artifacts.iter().cloned() {
+        cleanup_state.artifacts.retries.enqueue(key);
+    }
     stats.invalidated_artifacts = artifact_cleanup.invalidated_artifacts;
     stats.removed_artifacts = artifact_cleanup.removed_artifacts;
     stats.retained_artifact_failures = artifact_cleanup.retained_artifact_failures;
 
-    let pending_publications = runtime
-        .list_reclaimable_pending_publications(None, RUNTIME_CLEANUP_BATCH_SIZE)
-        .await?;
+    let pending_publications =
+        select_pending_retention_batch(runtime.as_ref(), batch_size, &mut cleanup_state.pending)
+            .await?;
     let pending_cleanup = lifecycle
         .remove_pending_retention_batch(&pending_publications)
         .await?;
+    for key in pending_cleanup.retry_pending_publications.iter().cloned() {
+        cleanup_state.pending.retries.enqueue(key);
+    }
+    crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
+        "pending",
+        cleanup_state.pending.retries.len(),
+        cleanup_state.pending.last_fresh_attempts,
+        cleanup_state.pending.last_retry_attempts,
+        pending_cleanup.removed_pending_publications,
+        pending_cleanup.retry_pending_publications.len(),
+        pending_publications.len().saturating_sub(
+            pending_cleanup.removed_pending_publications
+                + pending_cleanup.retry_pending_publications.len(),
+        ),
+    );
     stats.invalidated_artifacts = stats
         .invalidated_artifacts
         .saturating_add(pending_cleanup.invalidated_artifacts);
@@ -162,6 +301,34 @@ pub(crate) async fn run_runtime_cleanup_pass(
         pending_cleanup.retained_pending_publication_failures;
 
     let cleanup = lifecycle.remove_terminal_retention_batch(&records).await?;
+    for lifetime in cleanup.retry_roots.iter().cloned() {
+        cleanup_state.roots.retries.enqueue(lifetime);
+    }
+    for key in cleanup.retry_artifacts.iter().cloned() {
+        cleanup_state.artifacts.retries.enqueue(key);
+    }
+    crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
+        "artifact",
+        cleanup_state.artifacts.retries.len(),
+        cleanup_state.artifacts.last_fresh_attempts,
+        cleanup_state.artifacts.last_retry_attempts,
+        artifact_cleanup.removed_artifacts,
+        artifact_cleanup.retry_artifacts.len(),
+        artifact_records.len().saturating_sub(
+            artifact_cleanup.removed_artifacts + artifact_cleanup.retry_artifacts.len(),
+        ),
+    );
+    crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
+        "root",
+        cleanup_state.roots.retries.len(),
+        cleanup_state.roots.last_fresh_attempts,
+        cleanup_state.roots.last_retry_attempts,
+        cleanup.removed_roots,
+        cleanup.retry_roots.len(),
+        records
+            .len()
+            .saturating_sub(cleanup.removed_roots + cleanup.retry_roots.len()),
+    );
     stats.retired_roots = cleanup.retired_roots;
     stats.skipped_roots = cleanup.skipped_roots;
     stats.removed_roots = cleanup.removed_roots;
@@ -182,19 +349,184 @@ pub(crate) async fn run_runtime_cleanup_pass(
     Ok(stats)
 }
 
+async fn select_root_retention_batch(
+    runtime: &RuntimeManager,
+    ttl_secs: u64,
+    batch_size: usize,
+    lane: &mut RetentionLaneState<TaskLifetime, ExpiredTaskCursor>,
+) -> Result<Vec<RuntimeTaskRecord>> {
+    let now = now_ts();
+    let (retry_budget, fresh_budget) = lane.budgets(batch_size);
+    let mut retries = load_root_retries(runtime, ttl_secs, now, lane, retry_budget).await?;
+    let fresh_capacity = fresh_budget.saturating_add(retry_budget.saturating_sub(retries.len()));
+    let fresh_page = runtime
+        .list_expired_terminal_tasks(now, ttl_secs, lane.fresh_cursor.as_ref(), fresh_capacity)
+        .await?;
+    if let Some(last) = fresh_page.last() {
+        lane.fresh_cursor = Some(ExpiredTaskCursor {
+            updated_at: last.updated_at,
+            task_id: last.task_id.clone(),
+        });
+    } else if fresh_capacity > 0 {
+        lane.fresh_cursor = None;
+    }
+    let retry_identities = retries
+        .iter()
+        .map(RuntimeTaskRecord::lifetime)
+        .collect::<HashSet<_>>();
+    let mut fresh = fresh_page
+        .into_iter()
+        .filter(|record| {
+            let lifetime = record.lifetime();
+            !retry_identities.contains(&lifetime) && !lane.retries.contains(&lifetime)
+        })
+        .collect::<Vec<_>>();
+    let extra_retry_capacity = batch_size.saturating_sub(retries.len() + fresh.len());
+    let extra_retries =
+        load_root_retries(runtime, ttl_secs, now, lane, extra_retry_capacity).await?;
+    retries.extend(extra_retries);
+    lane.last_retry_attempts = retries.len();
+    lane.last_fresh_attempts = fresh.len();
+    retries.append(&mut fresh);
+    Ok(retries)
+}
+
+async fn load_root_retries(
+    runtime: &RuntimeManager,
+    ttl_secs: u64,
+    now: i64,
+    lane: &mut RetentionLaneState<TaskLifetime, ExpiredTaskCursor>,
+    limit: usize,
+) -> Result<Vec<RuntimeTaskRecord>> {
+    let mut records = Vec::with_capacity(limit);
+    for lifetime in lane.retries.take(limit) {
+        if let Some(record) = runtime
+            .get_expired_terminal_task(&lifetime, now, ttl_secs)
+            .await?
+        {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+async fn select_artifact_retention_batch(
+    runtime: &RuntimeManager,
+    batch_size: usize,
+    lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
+) -> Result<Vec<ProofArtifactRecord>> {
+    let (retry_budget, fresh_budget) = lane.budgets(batch_size);
+    let mut retries = load_artifact_retries(runtime, lane, retry_budget).await?;
+    let fresh_capacity = fresh_budget.saturating_add(retry_budget.saturating_sub(retries.len()));
+    let fresh_page = runtime
+        .list_reclaimable_proof_artifacts(lane.fresh_cursor.as_ref(), fresh_capacity)
+        .await?;
+    if let Some(last) = fresh_page.last() {
+        lane.fresh_cursor = Some(ArtifactRetentionCursor::from_record(last));
+    } else if fresh_capacity > 0 {
+        lane.fresh_cursor = None;
+    }
+    let retry_identities = retries
+        .iter()
+        .map(proof_artifact_key)
+        .collect::<HashSet<_>>();
+    let mut fresh = fresh_page
+        .into_iter()
+        .filter(|record| {
+            let key = proof_artifact_key(record);
+            !retry_identities.contains(&key) && !lane.retries.contains(&key)
+        })
+        .collect::<Vec<_>>();
+    let extra_retry_capacity = batch_size.saturating_sub(retries.len() + fresh.len());
+    let extra_retries = load_artifact_retries(runtime, lane, extra_retry_capacity).await?;
+    retries.extend(extra_retries);
+    lane.last_retry_attempts = retries.len();
+    lane.last_fresh_attempts = fresh.len();
+    retries.append(&mut fresh);
+    Ok(retries)
+}
+
+async fn load_artifact_retries(
+    runtime: &RuntimeManager,
+    lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
+    limit: usize,
+) -> Result<Vec<ProofArtifactRecord>> {
+    let mut records = Vec::with_capacity(limit);
+    for key in lane.retries.take(limit) {
+        if let Some(record) = runtime.get_reclaimable_proof_artifact(&key).await? {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+async fn select_pending_retention_batch(
+    runtime: &RuntimeManager,
+    batch_size: usize,
+    lane: &mut RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
+) -> Result<Vec<PendingPublicationExpectation>> {
+    let (retry_budget, fresh_budget) = lane.budgets(batch_size);
+    let mut retries = load_pending_retries(runtime, lane, retry_budget).await?;
+    let fresh_capacity = fresh_budget.saturating_add(retry_budget.saturating_sub(retries.len()));
+    let fresh_page = runtime
+        .list_reclaimable_pending_publications(lane.fresh_cursor.as_ref(), fresh_capacity)
+        .await?;
+    if let Some(last) = fresh_page.last() {
+        lane.fresh_cursor = Some(PendingPublicationRetentionCursor::from_expectation(last));
+    } else if fresh_capacity > 0 {
+        lane.fresh_cursor = None;
+    }
+    let retry_identities = retries
+        .iter()
+        .map(|expectation| expectation.key.clone())
+        .collect::<HashSet<_>>();
+    let mut fresh = fresh_page
+        .into_iter()
+        .filter(|expectation| {
+            !retry_identities.contains(&expectation.key) && !lane.retries.contains(&expectation.key)
+        })
+        .collect::<Vec<_>>();
+    let extra_retry_capacity = batch_size.saturating_sub(retries.len() + fresh.len());
+    let extra_retries = load_pending_retries(runtime, lane, extra_retry_capacity).await?;
+    retries.extend(extra_retries);
+    lane.last_retry_attempts = retries.len();
+    lane.last_fresh_attempts = fresh.len();
+    retries.append(&mut fresh);
+    Ok(retries)
+}
+
+async fn load_pending_retries(
+    runtime: &RuntimeManager,
+    lane: &mut RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
+    limit: usize,
+) -> Result<Vec<PendingPublicationExpectation>> {
+    let mut pending = Vec::with_capacity(limit);
+    for key in lane.retries.take(limit) {
+        if let Some(expectation) = runtime.get_reclaimable_pending_publication(&key).await? {
+            pending.push(expectation);
+        }
+    }
+    Ok(pending)
+}
+
+fn proof_artifact_key(record: &ProofArtifactRecord) -> ProofArtifactKey {
+    ProofArtifactKey {
+        network_pair: record.network_pair.clone(),
+        pipeline_key: record.pipeline_key,
+        route: record.route,
+        proof_ref: record.proof_ref.clone(),
+    }
+}
+
 async fn cancel_orphaned_runtime_tasks(
     runtime: &RuntimeManager,
     lifecycle: &ProofLifecycle,
     ttl_secs: u64,
+    batch_size: usize,
     cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<usize> {
     let records = runtime
-        .list_stale_nonterminal_tasks(
-            now_ts(),
-            ttl_secs,
-            cursor.as_ref(),
-            RUNTIME_CLEANUP_BATCH_SIZE,
-        )
+        .list_stale_nonterminal_tasks(now_ts(), ttl_secs, cursor.as_ref(), batch_size)
         .await?;
     *cursor = records.last().map(|record| ExpiredTaskCursor {
         updated_at: record.updated_at,
@@ -388,7 +720,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupStats, proposal_task_id, run_runtime_cleanup_pass,
+        ExpiredTaskCursor, RuntimeCleanupLoopState, RuntimeCleanupStats, proposal_task_id,
+        run_runtime_cleanup_pass,
     };
     use crate::server::state::{
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
@@ -507,15 +840,14 @@ mod tests {
         ));
         let factory = Arc::new(build_factory(engine));
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -645,6 +977,7 @@ mod tests {
         inner: MemoryProofArtifactStore,
         runtime_state_writes: AtomicUsize,
         fail_next_invalidation: AtomicBool,
+        fail_invalidation_for: Option<String>,
         fail_next_delete: AtomicBool,
         block_next_invalidation: AtomicBool,
         invalidation_started: tokio::sync::Notify,
@@ -660,6 +993,7 @@ mod tests {
                 )?,
                 runtime_state_writes: AtomicUsize::new(0),
                 fail_next_invalidation: AtomicBool::new(true),
+                fail_invalidation_for: None,
                 fail_next_delete: AtomicBool::new(false),
                 block_next_invalidation: AtomicBool::new(false),
                 invalidation_started: tokio::sync::Notify::new(),
@@ -684,6 +1018,13 @@ mod tests {
             let mut store = Self::new()?;
             store.fail_next_invalidation = AtomicBool::new(false);
             store.fail_next_delete = AtomicBool::new(true);
+            Ok(store)
+        }
+
+        fn failing_invalidation_for(proof_ref: &str) -> Result<Self> {
+            let mut store = Self::new()?;
+            store.fail_next_invalidation = AtomicBool::new(false);
+            store.fail_invalidation_for = Some(proof_ref.to_string());
             Ok(store)
         }
     }
@@ -736,6 +1077,13 @@ mod tests {
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
         ) -> Result<ExactInvalidationResult> {
+            if self
+                .fail_invalidation_for
+                .as_deref()
+                .is_some_and(|proof_ref| proof_ref == key.proof_ref)
+            {
+                anyhow::bail!("injected persistent proof artifact invalidation failure");
+            }
             if self.fail_next_invalidation.swap(false, Ordering::AcqRel) {
                 anyhow::bail!("injected proof artifact invalidation failure");
             }
@@ -810,15 +1158,14 @@ mod tests {
         ));
         let factory = Arc::new(build_factory(engine));
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -873,15 +1220,14 @@ mod tests {
             })
             .await?;
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -987,15 +1333,14 @@ mod tests {
             .context("shared proof reference")?;
         register_runtime_proof_artifact(runtime.as_ref(), &expired, shared_proof_ref).await?;
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -1056,15 +1401,14 @@ mod tests {
         let artifact =
             register_runtime_proof_artifact(runtime.as_ref(), &expired, proof_ref).await?;
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -1128,15 +1472,14 @@ mod tests {
             raiko2_runtime::RuntimeMutationOutcome::Applied
         ));
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -1192,15 +1535,14 @@ mod tests {
             .context("expired proof reference")?;
         register_runtime_proof_artifact(runtime.as_ref(), &expired, proof_ref).await?;
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let first = run_runtime_cleanup_pass(
             runtime.clone(),
             factory.clone(),
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(first.removed_roots, 1);
@@ -1381,15 +1723,14 @@ mod tests {
         terminal.updated_at = 1;
         runtime.upsert_task(&terminal).await?;
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let first = run_runtime_cleanup_pass(
             runtime.clone(),
             factory.clone(),
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(first.removed_roots, 1);
@@ -1445,12 +1786,14 @@ mod tests {
             factory.clone(),
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(failed_pending.removed_artifacts, 1);
         assert_eq!(failed_pending.retained_pending_publication_failures, 1);
+        assert_eq!(cleanup_state.pending_retry_len(), 1);
+        assert!(cleanup_state.retry_queues_are_deduplicated());
         assert!(
             runtime
                 .get_pending_proof_publication(
@@ -1468,11 +1811,12 @@ mod tests {
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(retry.removed_pending_publications, 1);
+        assert_eq!(cleanup_state.pending_retry_len(), 0);
         assert!(
             runtime
                 .get_pending_proof_publication(
@@ -1505,15 +1849,14 @@ mod tests {
         }
         let writes_before = store.runtime_state_writes.load(Ordering::Acquire);
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -1541,15 +1884,14 @@ mod tests {
         )
         .await?;
 
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
             runtime.clone(),
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
 
@@ -1579,25 +1921,13 @@ mod tests {
         assert_eq!(retired.updated_at, 1);
 
         let healthy_factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
-        let empty_page = run_runtime_cleanup_pass(
-            runtime.clone(),
-            healthy_factory.clone(),
-            7_200,
-            7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
-        )
-        .await?;
-        assert_eq!(empty_page, RuntimeCleanupStats::default());
-        assert!(terminal_cursor.is_none());
-
         let retry = run_runtime_cleanup_pass(
             runtime.clone(),
             healthy_factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(
@@ -1629,8 +1959,7 @@ mod tests {
             "expired-a".to_string(),
         ])));
         let factory = Arc::new(build_factory(engine));
-        let mut orphan_cursor = None;
-        let mut terminal_cursor = None;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
 
         register_runtime_task(
             runtime.as_ref(),
@@ -1654,8 +1983,8 @@ mod tests {
             factory.clone(),
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(
@@ -1677,7 +2006,7 @@ mod tests {
             }
         );
         assert_eq!(
-            terminal_cursor,
+            cleanup_state.roots.fresh_cursor,
             Some(ExpiredTaskCursor {
                 updated_at: 2,
                 task_id: "expired-b".to_string()
@@ -1698,20 +2027,20 @@ mod tests {
             factory,
             7_200,
             7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
+            64,
+            &mut cleanup_state,
         )
         .await?;
         assert_eq!(
             second,
             RuntimeCleanupStats {
-                scanned: 1,
-                expired: 1,
-                retired_roots: 1,
+                scanned: 2,
+                expired: 2,
+                retired_roots: 2,
                 skipped_roots: 0,
                 removed_roots: 1,
                 skipped_shared_children: 0,
-                retained_failures: 0,
+                retained_failures: 1,
                 invalidated_artifacts: 0,
                 removed_artifacts: 0,
                 retained_artifact_failures: 0,
@@ -1721,6 +2050,85 @@ mod tests {
             }
         );
         assert!(runtime.get_task("expired-c").await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sustained_arrival_retries_failures_without_starving_fresh_work() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::with_store(Arc::new(
+            FailOnceInvalidationStore::failing_invalidation_for("a-retry-artifact")?,
+        )));
+        let engine = Arc::new(MockEngine::with_failing_owners(HashSet::from([
+            "retry-root".to_string(),
+        ])));
+        let factory = Arc::new(build_factory(engine));
+        register_runtime_task(
+            runtime.as_ref(),
+            "retry-root",
+            &encoded_proposal_task_id(49)?,
+            RunnerStatus::Failed,
+            1,
+        )
+        .await?;
+        register_unowned_runtime_artifact(runtime.as_ref(), "a-retry-artifact").await?;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+
+        for pass in 0..3 {
+            let task_id = format!("fresh-root-{pass}");
+            let proof_ref = format!("z-fresh-artifact-{pass}");
+            register_runtime_task(
+                runtime.as_ref(),
+                &task_id,
+                &encoded_proposal_task_id(50 + pass)?,
+                RunnerStatus::Completed,
+                10 + i64::try_from(pass).expect("small pass index"),
+            )
+            .await?;
+            register_unowned_runtime_artifact(runtime.as_ref(), &proof_ref).await?;
+
+            let stats = run_runtime_cleanup_pass(
+                runtime.clone(),
+                factory.clone(),
+                7_200,
+                7_200,
+                2,
+                &mut cleanup_state,
+            )
+            .await?;
+
+            assert_eq!(stats.removed_roots, 1);
+            assert_eq!(stats.retained_failures, 1);
+            assert_eq!(stats.removed_artifacts, 1);
+            assert_eq!(stats.retained_artifact_failures, 1);
+            assert!(runtime.get_task(&task_id).await?.is_none());
+            assert!(
+                runtime
+                    .get_proof_artifact_including_invalidated(
+                        "taiko_dev/ethereum",
+                        PipelineKey::ShastaRisc0,
+                        PipelineKey::ShastaRisc0.route(),
+                        &proof_ref,
+                    )
+                    .await?
+                    .is_none()
+            );
+            assert_eq!(cleanup_state.root_retry_len(), 1);
+            assert_eq!(cleanup_state.artifact_retry_len(), 1);
+            assert!(cleanup_state.retry_queues_are_deduplicated());
+        }
+
+        assert!(runtime.get_task("retry-root").await?.is_some());
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    "taiko_dev/ethereum",
+                    PipelineKey::ShastaRisc0,
+                    PipelineKey::ShastaRisc0.route(),
+                    "a-retry-artifact",
+                )
+                .await?
+                .is_some()
+        );
         Ok(())
     }
 
@@ -1876,6 +2284,37 @@ mod tests {
             proof_ref: proof_ref.to_string(),
             pipeline_key: record.pipeline_key,
             route: record.route,
+            proof_uri: object.proof_uri,
+            content_hash: object.content_hash,
+            generation: object.generation,
+        };
+        runtime.upsert_proof_artifact(registration.clone()).await?;
+        Ok(registration)
+    }
+
+    async fn register_unowned_runtime_artifact(
+        runtime: &RuntimeManager,
+        proof_ref: &str,
+    ) -> Result<ProofArtifactRegistration> {
+        let pipeline_key = PipelineKey::ShastaRisc0;
+        let route = pipeline_key.route();
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline_key,
+                route,
+                proof_ref,
+                proof_ref.as_bytes(),
+            )
+            .await?
+            .try_object()
+            .context("unowned runtime artifact")?
+            .clone();
+        let registration = ProofArtifactRegistration {
+            network_pair: "taiko_dev/ethereum".into(),
+            proof_ref: proof_ref.into(),
+            pipeline_key,
+            route,
             proof_uri: object.proof_uri,
             content_hash: object.content_hash,
             generation: object.generation,

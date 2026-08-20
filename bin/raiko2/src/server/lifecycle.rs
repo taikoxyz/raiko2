@@ -4,9 +4,9 @@ use anyhow::{Result, bail};
 use raiko2_engine::EngineExecutionPlan;
 use raiko2_queue::{DetachMode, DetachOutcome, RootOwner};
 use raiko2_runtime::{
-    ArtifactExpectation, PendingPublicationExpectation, ProofArtifactPrecondition,
-    ProofArtifactRecord, RunnerStatus, RuntimeManager, RuntimeMutationOutcome, RuntimeTaskRecord,
-    TaskRegistration,
+    ArtifactExpectation, PendingPublicationExpectation, ProofArtifactKey,
+    ProofArtifactPrecondition, ProofArtifactRecord, RunnerStatus, RuntimeManager,
+    RuntimeMutationOutcome, RuntimeTaskRecord, TaskLifetime, TaskRegistration,
 };
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -29,7 +29,7 @@ pub(crate) enum RecoveryOutcome {
     TaskChanged,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TerminalRetentionBatchOutcome {
     pub retired_roots: usize,
     pub skipped_roots: usize,
@@ -39,27 +39,32 @@ pub(crate) struct TerminalRetentionBatchOutcome {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
+    pub retry_roots: Vec<TaskLifetime>,
+    pub retry_artifacts: Vec<ProofArtifactKey>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ArtifactRetentionBatchOutcome {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
+    pub retry_artifacts: Vec<ProofArtifactKey>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PendingRetentionBatchOutcome {
     pub invalidated_artifacts: usize,
     pub removed_artifacts: usize,
     pub retained_artifact_failures: usize,
     pub removed_pending_publications: usize,
     pub retained_pending_publication_failures: usize,
+    pub retry_pending_publications: Vec<ProofArtifactKey>,
 }
 
 #[derive(Debug, Default)]
 struct ArtifactFinalizationBatch {
     finalized: Vec<ArtifactExpectation>,
+    retry_artifacts: Vec<ProofArtifactKey>,
     failures: usize,
 }
 
@@ -67,6 +72,7 @@ struct ArtifactFinalizationBatch {
 struct PendingPublicationFinalizationBatch {
     finalized: Vec<PendingPublicationExpectation>,
     finalized_artifacts: Vec<ArtifactExpectation>,
+    retry_pending_publications: Vec<ProofArtifactKey>,
     failures: usize,
 }
 
@@ -399,6 +405,7 @@ impl ProofLifecycle {
                 Err(error) => {
                     outcome.retained_root_failures =
                         outcome.retained_root_failures.saturating_add(1);
+                    outcome.retry_roots.push(record.lifetime());
                     warn!(
                         task_id = %record.task_id,
                         error = %error,
@@ -423,6 +430,7 @@ impl ProofLifecycle {
         )
         .await;
         outcome.retained_artifact_failures = artifact_batch.failures;
+        outcome.retry_artifacts = artifact_batch.retry_artifacts;
 
         if artifact_batch.finalized.is_empty() {
             return Ok(outcome);
@@ -456,6 +464,7 @@ impl ProofLifecycle {
         )
         .await;
         outcome.retained_artifact_failures = artifact_batch.failures;
+        outcome.retry_artifacts = artifact_batch.retry_artifacts;
         if artifact_batch.finalized.is_empty() {
             return Ok(outcome);
         }
@@ -482,6 +491,7 @@ impl ProofLifecycle {
         let mut outcome = PendingRetentionBatchOutcome {
             invalidated_artifacts: pending_batch.finalized_artifacts.len(),
             retained_pending_publication_failures: pending_batch.failures,
+            retry_pending_publications: pending_batch.retry_pending_publications,
             ..PendingRetentionBatchOutcome::default()
         };
         if pending_batch.finalized.is_empty() && pending_batch.finalized_artifacts.is_empty() {
@@ -579,6 +589,7 @@ async fn finalize_terminal_retention_artifacts(
             Ok((expectation, Ok(_))) => batch.finalized.push(expectation),
             Ok((expectation, Err(error))) => {
                 batch.failures = batch.failures.saturating_add(1);
+                batch.retry_artifacts.push(expectation.key.clone());
                 warn!(
                     proof_ref = %expectation.key.proof_ref,
                     error = %error,
@@ -628,6 +639,9 @@ async fn finalize_terminal_retention_pending_publications(
             }
             Ok((expectation, Err(error))) => {
                 batch.failures = batch.failures.saturating_add(1);
+                batch
+                    .retry_pending_publications
+                    .push(expectation.key.clone());
                 warn!(
                     proof_ref = %expectation.key.proof_ref,
                     error = %error,

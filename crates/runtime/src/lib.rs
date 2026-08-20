@@ -7010,6 +7010,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_retention_preserves_live_pending_after_identical_republication() -> Result<()>
+    {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "restart-retention-republication".into(),
+        )?);
+        let first = RuntimeManager::with_store(store.clone());
+        let owner = register_retention_task(
+            &first,
+            "live-root",
+            &["proposal-1"],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        let pipeline_key = PipelineKey::ShastaNative;
+        let route = pipeline_key.route();
+        let proof = b"identical-proof";
+        let old = first
+            .publish_proof_artifact_bytes("l1-l2", pipeline_key, route, "proposal-1", proof)
+            .await?
+            .try_object()
+            .context("old canonical proof")?
+            .clone();
+        first
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "l1-l2".into(),
+                proof_ref: "proposal-1".into(),
+                pipeline_key,
+                route,
+                proof_uri: old.proof_uri.clone(),
+                content_hash: old.content_hash.clone(),
+                generation: old.generation,
+            })
+            .await?;
+        assert!(
+            first
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline_key,
+                    route,
+                    "proposal-1",
+                    &[owner.incarnation_id],
+                    proof,
+                )
+                .await?
+        );
+        let state_key = artifact_record_key("l1-l2", pipeline_key, route, "proposal-1");
+        first
+            .mutate(move |state| {
+                let artifact = state
+                    .artifacts
+                    .get_mut(&state_key)
+                    .context("old artifact record")?;
+                artifact.lifecycle = ProofArtifactLifecycle::Invalidated;
+                artifact.invalidated_at = Some(now_ts());
+                Ok(())
+            })
+            .await?;
+        let key = ProofArtifactKey {
+            network_pair: "l1-l2".into(),
+            pipeline_key,
+            route,
+            proof_ref: "proposal-1".into(),
+        };
+        assert!(matches!(
+            store.invalidate_exact(&key, &old.descriptor()).await?,
+            ExactInvalidationResult::Invalidated(_)
+        ));
+        let current = first
+            .publish_proof_artifact_bytes("l1-l2", pipeline_key, route, "proposal-1", proof)
+            .await?
+            .try_object()
+            .context("republished canonical proof")?
+            .clone();
+        assert_ne!(old.generation, current.generation);
+
+        let restarted = RuntimeManager::with_store(store);
+        restarted.initialize().await?;
+        assert_eq!(
+            restarted
+                .get_recoverable_pending_proof_publication(
+                    "l1-l2",
+                    pipeline_key,
+                    route,
+                    "proposal-1",
+                )
+                .await?
+                .context("recoverable pending proof")?
+                .bytes,
+            proof
+        );
+        assert!(
+            restarted
+                .list_reclaimable_proof_artifacts(None, 64)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            restarted
+                .list_reclaimable_pending_publications(None, 64)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            restarted
+                .proof_artifact_descriptor_is_current(
+                    "l1-l2",
+                    pipeline_key,
+                    route,
+                    "proposal-1",
+                    &current.descriptor(),
+                )
+                .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn pending_publication_cleanup_is_fenced_by_task_incarnation() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "outbox-incarnation".into())?;
         let registration = TaskRegistration {

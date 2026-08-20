@@ -267,6 +267,31 @@ where
         }
     }
 
+    /// Moves a running dependent back to pending and requeues succeeded dependencies atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dependency projection is inconsistent.
+    pub async fn requeue_succeeded_dependencies(
+        &self,
+        lease: &TaskLease<P, Id>,
+        dependencies: &[TaskId<Id>],
+    ) -> Result<bool, TaskStoreError> {
+        let updated = self
+            .store
+            .requeue_succeeded_dependencies_if_running(
+                &lease.id,
+                &lease.lease_token,
+                lease.attempt,
+                dependencies,
+            )
+            .await?;
+        if updated {
+            self.notify.notify_waiters();
+        }
+        Ok(updated)
+    }
+
     async fn complete_success(
         &self,
         lease: TaskLease<P, Id>,

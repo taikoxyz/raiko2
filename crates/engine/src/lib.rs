@@ -104,6 +104,10 @@ impl std::error::Error for EngineObserverError {}
 enum TaskExecutionError {
     Retryable(String),
     Coordination(String),
+    MissingAggregateArtifacts {
+        error: String,
+        dependencies: Vec<EngineTaskId>,
+    },
     Stage {
         error: String,
         observer_task: Box<EngineTask>,
@@ -120,6 +124,7 @@ impl TaskExecutionError {
         match self {
             Self::Retryable(error)
             | Self::Coordination(error)
+            | Self::MissingAggregateArtifacts { error, .. }
             | Self::Stage { error, .. }
             | Self::ProofPublication { error, .. }
             | Self::ProofInvalidated(error) => error,
@@ -231,6 +236,14 @@ fn proof_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
             input_task: id.clone(),
         },
         EngineTaskKey::Aggregate { .. } => task.publication_source().clone(),
+    }
+}
+
+fn terminal_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
+    if matches!(task, EngineTask::PublishProof { .. }) {
+        proof_observer_task(id, task)
+    } else {
+        task.clone()
     }
 }
 
@@ -1203,6 +1216,35 @@ where
         }))
     }
 
+    async fn requeue_missing_aggregate_dependencies(
+        &self,
+        lease: &TaskLease<EngineTask, EngineTaskKey>,
+        execution_result: &Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
+    ) -> Result<bool, TaskStoreError> {
+        let Err(TaskExecutionError::MissingAggregateArtifacts {
+            error,
+            dependencies,
+        }) = execution_result
+        else {
+            return Ok(false);
+        };
+        if !self
+            .inner
+            .scheduler
+            .requeue_succeeded_dependencies(lease, dependencies)
+            .await?
+        {
+            return Ok(false);
+        }
+        tracing::warn!(
+            task = ?lease.id,
+            missing_dependencies = dependencies.len(),
+            %error,
+            "requeued proposal dependencies after aggregate artifact loss"
+        );
+        Ok(true)
+    }
+
     /// # Errors
     ///
     /// Returns an error if the task store cannot lease or complete work.
@@ -1221,10 +1263,7 @@ where
             return Ok(true);
         };
 
-        let mut terminal_observer_task = payload.clone();
-        if matches!(payload, EngineTask::PublishProof { .. }) {
-            terminal_observer_task = proof_observer_task(&lease.id, &payload);
-        }
+        let mut terminal_observer_task = terminal_observer_task(&lease.id, &payload);
         let (mut execution_result, recovered_output) = self
             .execute_leased_task(
                 &lease,
@@ -1235,6 +1274,13 @@ where
                 permit_error,
             )
             .await;
+        if self
+            .requeue_missing_aggregate_dependencies(&lease, &execution_result)
+            .await?
+        {
+            renew_task.abort_and_wait().await;
+            return Ok(true);
+        }
         if let Some(observer_task) = execution_result
             .as_ref()
             .err()
@@ -1534,17 +1580,51 @@ where
     async fn resolve_aggregation_source(
         &self,
         source: AggregationSource,
-    ) -> Result<Vec<raiko2_primitives::Proof>, String> {
+    ) -> Result<Vec<raiko2_primitives::Proof>, TaskExecutionError> {
         match source {
             AggregationSource::Inputs(inputs) => {
                 let mut proofs = Vec::with_capacity(inputs.len());
+                let mut missing_dependencies = Vec::new();
+                let mut missing_proof_refs = Vec::new();
                 for input in inputs {
                     match input {
-                        AggregateProofInput::ProofArtifact(artifact)
-                        | AggregateProofInput::PendingProofArtifact { artifact, .. } => {
-                            proofs.push(self.get_proof_artifact(artifact).await?);
+                        AggregateProofInput::ProofArtifact(artifact) => {
+                            proofs.push(
+                                self.get_proof_artifact(artifact)
+                                    .await
+                                    .map_err(TaskExecutionError::from)?,
+                            );
+                        }
+                        AggregateProofInput::PendingProofArtifact {
+                            artifact,
+                            dependency,
+                        } => {
+                            let observer = self.inner.observer.as_ref().ok_or_else(|| {
+                                TaskExecutionError::Retryable(
+                                    "proof artifact resolver is not configured".to_string(),
+                                )
+                            })?;
+                            if let Some(proof) = observer
+                                .load_proof_artifact(&artifact)
+                                .await
+                                .map_err(TaskExecutionError::from)?
+                            {
+                                proofs.push(proof);
+                            } else {
+                                missing_proof_refs.push(artifact.proof_ref);
+                                missing_dependencies.push(*dependency);
+                            }
                         }
                     }
+                }
+                if !missing_dependencies.is_empty() {
+                    return Err(TaskExecutionError::MissingAggregateArtifacts {
+                        error: format!(
+                            "aggregate proof artifacts are missing: {}",
+                            missing_proof_refs.join(", ")
+                        ),
+                        dependencies: missing_dependencies,
+                    });
                 }
                 Ok(proofs)
             }
@@ -1928,7 +2008,7 @@ fn now_millis() -> u64 {
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -2164,6 +2244,40 @@ mod tests {
 
     struct RecoveringObserver {
         proof_successes: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct VolatileArtifactObserver {
+        artifact: Mutex<Option<Proof>>,
+    }
+
+    impl VolatileArtifactObserver {
+        fn remove_artifact(&self) {
+            self.artifact.lock().expect("artifact lock").take();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for VolatileArtifactObserver {
+        async fn checkpoint_completed_proof(
+            &self,
+            _id: &EngineTaskId,
+            task: &EngineTask,
+            proof: &Proof,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) -> Result<crate::ProofCompletionPermit, EngineObserverError> {
+            if matches!(task.publication_source(), EngineTask::ProveProposal { .. }) {
+                *self.artifact.lock().expect("artifact lock") = Some(proof.clone());
+            }
+            Ok(crate::ProofCompletionPermit::tracked(()))
+        }
+
+        async fn load_proof_artifact(
+            &self,
+            _artifact: &ProofArtifactRef,
+        ) -> Result<Option<Proof>, String> {
+            Ok(self.artifact.lock().expect("artifact lock").clone())
+        }
     }
 
     #[async_trait::async_trait]
@@ -3294,6 +3408,65 @@ mod tests {
         assert!(matches!(view.state, TaskState::Succeeded { .. }));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 0);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_aggregate_artifact_requeues_succeeded_proposal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(VolatileArtifactObserver::default());
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+            Some(observer.clone()),
+        );
+        let proposal = proposal_request(1);
+        let proposal_id = engine.proposal_task_id(proposal.clone());
+        let (_owner, aggregate_id) = attach_aggregate!(
+            engine,
+            "aggregate-artifact-recovery",
+            vec![proposal],
+            aggregation_request("artifact-recovery"),
+            vec![pending_proof_input("proposal-1", proposal_id.clone())]
+        );
+
+        assert!(Box::pin(engine.run_one("proposal-1")).await?);
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        observer.remove_artifact();
+
+        assert!(Box::pin(engine.run_one("aggregate-1")).await?);
+        assert!(matches!(
+            engine
+                .get(proposal_id.clone())
+                .await?
+                .expect("proposal")
+                .state,
+            TaskState::Ready
+        ));
+        assert!(matches!(
+            engine
+                .get(aggregate_id.clone())
+                .await?
+                .expect("aggregate")
+                .state,
+            TaskState::Pending { .. }
+        ));
+
+        assert!(Box::pin(engine.run_one("proposal-2")).await?);
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 2);
+        assert!(Box::pin(engine.run_one("aggregate-2")).await?);
+        assert!(matches!(
+            engine.get(aggregate_id).await?.expect("aggregate").state,
+            TaskState::Succeeded { .. }
+        ));
         Ok(())
     }
 

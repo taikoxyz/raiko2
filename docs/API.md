@@ -83,6 +83,9 @@ The canonical minimal metric families are:
 - `raiko2_runtime_state_serialized_bytes`
 - `raiko2_runtime_state_records`
 - `raiko2_runtime_retention_total`
+- `raiko2_runtime_retention_retry_queue`
+- `raiko2_runtime_retention_attempts_total`
+- `raiko2_runtime_retention_outcomes_total`
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
@@ -96,7 +99,9 @@ Runtime state metrics expose the serialized authoritative-state size and bounded
 `tasks`, `artifacts`, and `pending_publications`. Runtime retention counters use only fixed outcome
 labels such as `selected_tasks`, `removed_tasks`, `retained_task_failures`,
 `invalidated_artifacts`, `retained_artifact_failures`, `removed_pending_publications`, and
-`retained_pending_publication_failures`; task IDs and proof references are not metric labels.
+`retained_pending_publication_failures`. Scheduler metrics use only fixed `lane`, `source`, and
+`outcome` labels for the root, artifact, and pending lanes; task IDs and proof references are not
+metric labels.
 
 ## Admin Ballot
 
@@ -1121,12 +1126,13 @@ Returns the root-task view derived from the original batch request.
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
-- Terminal root task records use a seven-day retention policy. Artifact manifests, including
-  external aggregation inputs, remain governed by explicit activation and invalidation rather than
-  root-record age. Active manifests must not have a bucket age rule, and immutable proof or program
-  content must remain available until every manifest that references it is gone. Generation-scoped
-  tombstones and unreferenced content use a minimum thirty-day retention window. Active root tasks
-  are never removed by runtime cleanup.
+- Terminal root task records use the configurable `runtime.terminal_task_ttl_secs` retention policy,
+  which defaults to six hours. Artifact manifests and pending publication intents, including
+  external aggregation inputs, are reclaimed independently when they have no usable runtime owner;
+  object-store failure never retains a successfully detached root. Active manifests must not have a
+  bucket age rule, and immutable proof or program content must remain available until every manifest
+  that references it is gone. Generation-scoped tombstones and unreferenced content use a minimum
+  thirty-day retention window. Active root tasks are never removed by terminal cleanup.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1184,9 +1190,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   single-instance persistence boundary. Namespaces do not share data; roots inside one namespace may
   reuse one canonical proof artifact. Both values scope request fingerprints, public task IDs,
   runtime records, provider checkpoints, and proof artifacts.
-- `runtime.terminal_task_ttl_secs` controls how long terminal task metadata and its unreferenced proof
-  artifacts remain eligible for reuse before background cleanup removes them. It defaults to `21600`
-  (6 hours), must be greater than zero, and does not expire active tasks.
+- `runtime.terminal_task_ttl_secs` controls how long terminal task metadata remains eligible for
+  reuse before background root retirement. It defaults to `21600` (6 hours), must be greater than
+  zero, and does not expire active tasks. Proof artifacts and pending publication intents use
+  ownership-driven cleanup rather than this TTL.
 - `runtime.cleanup_interval_secs` independently paces runtime retention passes and defaults to `30`.
   `runtime.cleanup_batch_size` bounds each cleanup lane to `64` records by default and accepts values
   from `1` through `1024`. Neither setting reuses queue maintenance timing.
@@ -1231,10 +1238,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   `TaskLifetime` before detaching its root owner. Projection failures are reconciled from runtime
   state and do not roll an authoritative transition back.
 - Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
-  pointer. Runtime snapshots use `*.runtime.json`; the suffixes allow operations to apply seven-day
-  runtime retention and a minimum thirty-day retention window to generation-scoped tombstones and
-  unreferenced content without a bucket-wide age rule. Active manifests must not be deleted by age,
-  and immutable content must remain available while any active manifest references it.
+  pointer. Runtime snapshots use `*.runtime.json`; the suffixes let operations distinguish
+  authoritative state, active manifests, generation-scoped tombstones, and unreferenced content.
+  Terminal roots use the configurable six-hour default in runtime state. Tombstones and unreferenced
+  content use a minimum thirty-day object lifecycle, while active manifests must not be deleted by
+  age and immutable content must remain available while any active manifest references it.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and satisfies its task-identity payload contract. Proposal tasks accept a
   non-null `proof`, plus the complete Compressed SP1 tuple (`quote`, `input`, `uuid`, `extra_data`)

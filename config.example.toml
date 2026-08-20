@@ -59,7 +59,7 @@ compute_units_per_second = 1000
 [runtime]
 environment = "development"
 namespace = "raiko2-development"
-# Terminal tasks and their unreferenced proof artifacts are retained for six hours by default.
+# Terminal task metadata is retained for six hours by default. Artifact cleanup is ownership-driven.
 terminal_task_ttl_secs = 21600
 # Runtime retention is paced independently from queue maintenance.
 cleanup_interval_secs = 30

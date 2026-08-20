@@ -8,9 +8,9 @@ whole snapshot with a generation precondition. Mainnet measurements showed that 
 metadata and old artifact registrations dominate the snapshot, while the information is normally
 needed only until proposal proofs have been aggregated and consumed.
 
-The existing cleanup loop retains terminal tasks for seven days and removes them one at a time. A
-shorter TTL alone would reduce steady-state size, but the one-at-a-time lifecycle would rewrite the
-large snapshot repeatedly during cleanup.
+Before this change, the cleanup loop retained terminal tasks for seven days and removed them one at
+a time. A shorter TTL alone would reduce steady-state size, but the one-at-a-time lifecycle would
+rewrite the large snapshot repeatedly during cleanup.
 
 ## Decision
 
@@ -29,9 +29,10 @@ removed by this TTL, even if they run longer than six hours.
 
 ## Configuration
 
-Add `runtime.terminal_task_ttl_secs` with a default of `21600`, plus an independent cleanup interval
-and batch-size bound. All values must be greater than zero. Cleanup pacing must not reuse the queue's
-200 ms maintenance interval because a retention batch can rewrite the complete authoritative
+Use `runtime.terminal_task_ttl_secs` with a default of `21600`,
+`runtime.cleanup_interval_secs` with a default of `30`, and `runtime.cleanup_batch_size` with a
+default of `64` and maximum of `1024`. All values must be greater than zero. Cleanup pacing does not
+reuse the queue maintenance interval because a retention batch can rewrite the complete authoritative
 snapshot more than once. The GCS bucket lifecycle remains independent and continues to control
 deletion of unrelated or unreachable objects.
 
@@ -112,8 +113,9 @@ and live pending owners; it is never accepted as permission to delete a changed 
 
 Expose metrics for the current serialized runtime-state size and task/artifact/pending counts. Add
 cleanup counters for selected, retired, removed, retained-on-failure, and artifact invalidation
-outcomes, including pending publication removal and retry failures. Keep the existing structured
-cleanup log as the per-pass summary.
+outcomes, including pending publication removal and retry failures. Per-lane metrics expose bounded
+fresh/retry attempts, success/failure/stale outcomes, and current process-local retry queue lengths.
+Keep the existing structured cleanup log as the per-pass summary.
 
 The initial rollout should explicitly configure the cleanup interval and batch size, then compare
 snapshot size, GCS write duration/conflicts, and cleanup failure counts. The six-hour TTL must not

@@ -590,6 +590,25 @@ async fn finalize_terminal_retention_artifacts(
             Ok((expectation, Err(error))) => {
                 batch.failures = batch.failures.saturating_add(1);
                 batch.retry_artifacts.push(expectation.key.clone());
+                match runtime
+                    .refresh_stale_proof_artifact_invalidation(&expectation)
+                    .await
+                {
+                    Ok(Some(refreshed)) => {
+                        warn!(
+                            proof_ref = %refreshed.key.proof_ref,
+                            "refreshed stale proof artifact invalidation for retry"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(refresh_error) => {
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %refresh_error,
+                            "failed to refresh proof artifact invalidation after finalization error"
+                        );
+                    }
+                }
                 warn!(
                     proof_ref = %expectation.key.proof_ref,
                     error = %error,

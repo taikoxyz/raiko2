@@ -2468,6 +2468,59 @@ impl RuntimeManager {
         }
     }
 
+    pub async fn refresh_stale_proof_artifact_invalidation(
+        &self,
+        stale: &ArtifactExpectation,
+    ) -> Result<Option<ArtifactExpectation>> {
+        anyhow::ensure!(
+            stale.lifecycle == ProofArtifactLifecycle::Invalidated,
+            "only an invalidated artifact descriptor can be refreshed"
+        );
+        let key = &stale.key;
+        let _artifact_lifecycle = self
+            .artifact_lifecycle_lock(
+                &key.network_pair,
+                key.pipeline_key,
+                key.route,
+                &key.proof_ref,
+            )
+            .lock()
+            .await;
+        let Some(current_descriptor) = self.store.get_descriptor(key).await? else {
+            return Ok(None);
+        };
+        if current_descriptor == stale.descriptor {
+            return Ok(None);
+        }
+        let state_key = artifact_record_key(
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        );
+        let stale = stale.clone();
+        self.mutate(move |state| {
+            let Some(current) = state.artifacts.get(&state_key) else {
+                return Ok(None);
+            };
+            if current.expectation() != stale || artifact_has_usable_owner(state, current) {
+                return Ok(None);
+            }
+            let current = state
+                .artifacts
+                .get_mut(&state_key)
+                .context("stale invalidated artifact disappeared during refresh")?;
+            current.proof_uri = current_descriptor.proof_uri.clone();
+            current.content_hash = current_descriptor.content_hash.clone();
+            current.generation = current_descriptor.generation;
+            current.lifecycle = ProofArtifactLifecycle::Invalidated;
+            current.invalidated_at.get_or_insert_with(now_ts);
+            current.updated_at = now_ts();
+            Ok(Some(current.expectation()))
+        })
+        .await
+    }
+
     /// Completes external tombstone/delete work for invalidations committed before a crash.
     pub async fn reconcile_invalidated_proof_artifacts(&self) -> Result<usize> {
         let invalidated = self
@@ -7121,6 +7174,94 @@ mod tests {
                     pipeline_key,
                     route,
                     "proposal-1",
+                    &current.descriptor(),
+                )
+                .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_retention_refreshes_stale_unowned_invalidation_descriptor() -> Result<()> {
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".into(),
+            "restart-retention-refresh".into(),
+        )?);
+        let first = RuntimeManager::with_store(store.clone());
+        let pipeline_key = PipelineKey::ShastaNative;
+        let route = pipeline_key.route();
+        let proof_ref = "orphan-proof";
+        let old = first
+            .publish_proof_artifact_bytes(
+                "l1-l2",
+                pipeline_key,
+                route,
+                proof_ref,
+                b"identical-proof",
+            )
+            .await?
+            .try_object()
+            .context("old orphan proof")?
+            .clone();
+        first
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "l1-l2".into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key,
+                route,
+                proof_uri: old.proof_uri.clone(),
+                content_hash: old.content_hash.clone(),
+                generation: old.generation,
+            })
+            .await?;
+        let active = first
+            .get_proof_artifact_including_invalidated("l1-l2", pipeline_key, route, proof_ref)
+            .await?
+            .context("active orphan proof")?;
+        let stale = first
+            .prepare_artifact_retention_batch(&[active])
+            .await?
+            .artifact_invalidations
+            .into_iter()
+            .next()
+            .context("stale invalidation")?;
+        let key = ProofArtifactKey {
+            network_pair: "l1-l2".into(),
+            pipeline_key,
+            route,
+            proof_ref: proof_ref.into(),
+        };
+        assert!(matches!(
+            store.invalidate_exact(&key, &old.descriptor()).await?,
+            ExactInvalidationResult::Invalidated(_)
+        ));
+        let current = first
+            .publish_proof_artifact_bytes(
+                "l1-l2",
+                pipeline_key,
+                route,
+                proof_ref,
+                b"identical-proof",
+            )
+            .await?
+            .try_object()
+            .context("current orphan proof")?
+            .clone();
+
+        let restarted = RuntimeManager::with_store(store);
+        restarted.initialize().await?;
+        let refreshed = restarted
+            .refresh_stale_proof_artifact_invalidation(&stale)
+            .await?
+            .context("refreshed invalidation")?;
+        assert_eq!(refreshed.descriptor, current.descriptor());
+        assert!(
+            restarted
+                .proof_artifact_descriptor_is_current(
+                    "l1-l2",
+                    pipeline_key,
+                    route,
+                    proof_ref,
                     &current.descriptor(),
                 )
                 .await?

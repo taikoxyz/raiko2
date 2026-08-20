@@ -123,15 +123,6 @@ where
         error: String,
         dependent_error: String,
     ) -> StoreResult<bool>;
-    async fn requeue_succeeded_dependencies_if_running(
-        &self,
-        _id: &TaskId<Id>,
-        _lease_token: &str,
-        _attempt: u32,
-        _dependencies: &[TaskId<Id>],
-    ) -> StoreResult<bool> {
-        Ok(false)
-    }
     async fn cancel_and_fail_dependents(
         &self,
         id: &TaskId<Id>,
@@ -1258,87 +1249,6 @@ where
         };
         record.lease_until_ms = None;
         fail_dependents_locked(&mut g, id, &dependent_error);
-        Ok(true)
-    }
-
-    async fn requeue_succeeded_dependencies_if_running(
-        &self,
-        id: &TaskId<Id>,
-        lease_token: &str,
-        attempt: u32,
-        dependencies: &[TaskId<Id>],
-    ) -> StoreResult<bool> {
-        let mut g = self.inner.lock().await;
-        if !running_lease_matches(&g, id, lease_token, attempt) {
-            return Ok(false);
-        }
-        let declared_dependencies = g
-            .tasks
-            .get(id)
-            .map(|record| record.dependencies.iter().cloned().collect::<HashSet<_>>())
-            .ok_or_else(|| TaskStoreError::corrupt_msg("running task disappeared"))?;
-        let dependencies = dependencies
-            .iter()
-            .filter(|dependency| declared_dependencies.contains(*dependency))
-            .cloned()
-            .collect::<HashSet<_>>();
-        if dependencies.is_empty() {
-            return Ok(false);
-        }
-        if dependencies.iter().any(|dependency| {
-            g.tasks.get(dependency).is_none_or(|record| {
-                matches!(
-                    record.state,
-                    TaskState::Failed { .. } | TaskState::Cancelled
-                )
-            })
-        }) {
-            return Err(TaskStoreError::conflict(
-                "missing artifact dependency cannot be requeued",
-            ));
-        }
-
-        for dependency in &dependencies {
-            let should_reset = g
-                .tasks
-                .get(dependency)
-                .is_some_and(|record| matches!(record.state, TaskState::Succeeded { .. }));
-            if !should_reset {
-                continue;
-            }
-            remove_queue_memberships(&mut g, dependency);
-            let priority = {
-                let record = g
-                    .tasks
-                    .get_mut(dependency)
-                    .ok_or_else(|| TaskStoreError::corrupt_msg("dependency disappeared"))?;
-                record.payload = Some(record.definition_payload.clone());
-                record.state = TaskState::Ready;
-                record.attempt = 0;
-                record.lease_until_ms = None;
-                record.execution_policy = record.definition_execution_policy.clone();
-                record.priority
-            };
-            push_ready_locked(&mut g, priority, dependency.clone());
-        }
-
-        remove_queue_memberships(&mut g, id);
-        let remaining = dependencies.len();
-        let record = g
-            .tasks
-            .get_mut(id)
-            .ok_or_else(|| TaskStoreError::corrupt_msg("running task disappeared"))?;
-        record.payload = Some(record.definition_payload.clone());
-        record.state = TaskState::pending(remaining);
-        record.lease_until_ms = None;
-        record.execution_policy = record.definition_execution_policy.clone();
-        g.remaining.insert(id.clone(), remaining);
-        for dependency in dependencies {
-            let dependents = g.dependents.entry(dependency).or_default();
-            if !dependents.contains(id) {
-                dependents.push(id.clone());
-            }
-        }
         Ok(true)
     }
 

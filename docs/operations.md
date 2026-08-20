@@ -1298,10 +1298,12 @@ Operator notes:
   `runtime.terminal_task_ttl_secs`, which defaults to six hours. Runtime retention runs every
   `runtime.cleanup_interval_secs` (30 seconds by default) with an independent per-lane
   `runtime.cleanup_batch_size` bound (64 by default). Proof artifacts and pending publication intents
-  are reclaimed independently after their last usable owner disappears. Active proof and canonical
-  preflight manifests must not have an age-based GCS lifecycle rule. Immutable content must remain
-  available until every manifest that references it is gone. Generation-scoped invalidation markers
-  and unreferenced proof/preflight content use a minimum 30-day retention window.
+  are reclaimed independently after their last retained runtime task reference disappears. The
+  separate seven-day orphan-management pass remains capped at 64 records regardless of this setting.
+  Active proof and canonical preflight manifests must not have an age-based GCS lifecycle rule.
+  Immutable content must remain available until every manifest that references it is gone.
+  Generation-scoped invalidation markers and unreferenced proof/preflight content use a minimum
+  30-day retention window.
 - Proposal requests are sized by `prover.risc0.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`

@@ -21,19 +21,18 @@ use tracing::{info, warn};
 
 const ORPHANED_RUNTIME_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local execution";
+const ORPHAN_CLEANUP_BATCH_SIZE: usize = 64;
 const MAX_OVERDUE_ACTIVE_OBSERVATIONS: usize = 4_096;
 const MAX_RETENTION_RETRY_IDENTITIES: usize = 4_096;
 
 #[derive(Debug)]
 struct BoundedObservationSet<T> {
-    order: VecDeque<T>,
     identities: HashSet<T>,
 }
 
 impl<T> Default for BoundedObservationSet<T> {
     fn default() -> Self {
         Self {
-            order: VecDeque::new(),
             identities: HashSet::new(),
         }
     }
@@ -41,21 +40,14 @@ impl<T> Default for BoundedObservationSet<T> {
 
 impl<T> BoundedObservationSet<T>
 where
-    T: Clone + Eq + Hash,
+    T: Eq + Hash,
 {
     fn observe(&mut self, identity: T, capacity: usize) -> bool {
-        if capacity == 0 || self.identities.contains(&identity) {
+        if capacity == 0 || self.identities.len() >= capacity || self.identities.contains(&identity)
+        {
             return false;
         }
-        while self.order.len() >= capacity {
-            let Some(evicted) = self.order.pop_front() else {
-                break;
-            };
-            self.identities.remove(&evicted);
-        }
-        self.identities.insert(identity.clone());
-        self.order.push_back(identity);
-        true
+        self.identities.insert(identity)
     }
 }
 
@@ -473,15 +465,6 @@ async fn run_pending_retention_lane(
             cleanup.removed_pending_publications + cleanup.retry_pending_publications.len(),
         ),
     );
-    stats.invalidated_artifacts = stats
-        .invalidated_artifacts
-        .saturating_add(cleanup.invalidated_artifacts);
-    stats.removed_artifacts = stats
-        .removed_artifacts
-        .saturating_add(cleanup.removed_artifacts);
-    stats.retained_artifact_failures = stats
-        .retained_artifact_failures
-        .saturating_add(cleanup.retained_artifact_failures);
     stats.removed_pending_publications = cleanup.removed_pending_publications;
     stats.retained_pending_publication_failures = cleanup.retained_pending_publication_failures;
     Ok(())
@@ -760,12 +743,9 @@ async fn observe_overdue_active_tasks(
         *cursor = None;
     }
 
-    let capacity = batch_size
-        .saturating_mul(4)
-        .min(MAX_OVERDUE_ACTIVE_OBSERVATIONS);
     let mut warnings = 0usize;
     for record in records {
-        if !observations.observe(record.lifetime(), capacity) {
+        if !observations.observe(record.lifetime(), MAX_OVERDUE_ACTIVE_OBSERVATIONS) {
             continue;
         }
         warnings = warnings.saturating_add(1);
@@ -789,13 +769,18 @@ async fn cancel_orphaned_runtime_tasks(
     batch_size: usize,
     cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<usize> {
+    let batch_size = batch_size.min(ORPHAN_CLEANUP_BATCH_SIZE);
     let records = runtime
         .list_stale_nonterminal_tasks(now_ts(), ttl_secs, cursor.as_ref(), batch_size)
         .await?;
-    *cursor = records.last().map(|record| ExpiredTaskCursor {
+    let next_cursor = records.last().map(|record| ExpiredTaskCursor {
         updated_at: record.updated_at,
         task_id: record.task_id.clone(),
     });
+    if records.is_empty() {
+        *cursor = None;
+        return Ok(0);
+    }
     let mut cancelled = 0usize;
 
     for record in records {
@@ -837,6 +822,7 @@ async fn cancel_orphaned_runtime_tasks(
         warn!(task_id = %record.task_id, "cancelled orphaned runtime task");
     }
 
+    *cursor = next_cursor;
     Ok(cancelled)
 }
 
@@ -1205,6 +1191,155 @@ mod tests {
                 .context("overdue active task")?
                 .runner_status,
             RunnerStatus::Running
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_has_an_independent_batch_limit() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "orphan-batch-limit",
+        ))?);
+        let stale = now_ts().saturating_sub(7_201);
+        for index in 0..65 {
+            register_runtime_task(
+                runtime.as_ref(),
+                &format!("orphan-root-{index:03}"),
+                &encoded_proposal_task_id(100 + index)?,
+                RunnerStatus::Running,
+                stale,
+            )
+            .await?;
+        }
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            14_400,
+            1_024,
+            &mut cleanup_state,
+        )
+        .await?;
+
+        assert_eq!(stats.orphaned_cancelled, 64);
+        let records = runtime.list_tasks().await?;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.runner_status == RunnerStatus::Cancelled)
+                .count(),
+            64
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.runner_status == RunnerStatus::Running)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn overdue_active_observations_do_not_evict_at_four_batches() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "overdue-capacity",
+        ))?);
+        let stale = now_ts().saturating_sub(7_201);
+        for index in 0..5 {
+            register_runtime_task(
+                runtime.as_ref(),
+                &format!("overdue-root-{index}"),
+                &encoded_proposal_task_id(200 + index)?,
+                RunnerStatus::Running,
+                stale,
+            )
+            .await?;
+        }
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+
+        for _ in 0..5 {
+            let stats = run_runtime_cleanup_pass(
+                runtime.clone(),
+                factory.clone(),
+                14_400,
+                7_200,
+                1,
+                &mut cleanup_state,
+            )
+            .await?;
+            assert_eq!(stats.overdue_active_warnings, 1);
+        }
+        let wrapped = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory.clone(),
+            14_400,
+            7_200,
+            1,
+            &mut cleanup_state,
+        )
+        .await?;
+        assert_eq!(wrapped.overdue_active_warnings, 0);
+        let repeated =
+            run_runtime_cleanup_pass(runtime, factory, 14_400, 7_200, 1, &mut cleanup_state)
+                .await?;
+        assert_eq!(repeated.overdue_active_warnings, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphan_cursor_rolls_back_when_a_page_fails() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphan-cursor"))?);
+        let stale = now_ts().saturating_sub(7_201);
+        for (index, task_id) in ["a-orphan", "b-orphan"].into_iter().enumerate() {
+            register_runtime_task(
+                runtime.as_ref(),
+                task_id,
+                &encoded_proposal_task_id(300 + index as u64)?,
+                RunnerStatus::Running,
+                stale,
+            )
+            .await?;
+        }
+        let failing = Arc::new(MockEngine::with_failing_owners(HashSet::from([
+            "a-orphan".to_string()
+        ])));
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+
+        assert!(
+            run_runtime_cleanup_pass(
+                runtime.clone(),
+                Arc::new(build_factory(failing)),
+                7_200,
+                14_400,
+                64,
+                &mut cleanup_state,
+            )
+            .await
+            .is_err()
+        );
+        assert!(cleanup_state.orphan_cursor.is_none());
+
+        run_runtime_cleanup_pass(
+            runtime.clone(),
+            Arc::new(build_factory(Arc::new(MockEngine::default()))),
+            7_200,
+            14_400,
+            64,
+            &mut cleanup_state,
+        )
+        .await?;
+        assert_eq!(
+            runtime
+                .get_task("b-orphan")
+                .await?
+                .context("second orphan")?
+                .runner_status,
+            RunnerStatus::Cancelled
         );
         Ok(())
     }

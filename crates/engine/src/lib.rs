@@ -104,10 +104,6 @@ impl std::error::Error for EngineObserverError {}
 enum TaskExecutionError {
     Retryable(String),
     Coordination(String),
-    MissingAggregateArtifacts {
-        error: String,
-        dependencies: Vec<EngineTaskId>,
-    },
     Stage {
         error: String,
         observer_task: Box<EngineTask>,
@@ -124,7 +120,6 @@ impl TaskExecutionError {
         match self {
             Self::Retryable(error)
             | Self::Coordination(error)
-            | Self::MissingAggregateArtifacts { error, .. }
             | Self::Stage { error, .. }
             | Self::ProofPublication { error, .. }
             | Self::ProofInvalidated(error) => error,
@@ -236,14 +231,6 @@ fn proof_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
             input_task: id.clone(),
         },
         EngineTaskKey::Aggregate { .. } => task.publication_source().clone(),
-    }
-}
-
-fn terminal_observer_task(id: &EngineTaskId, task: &EngineTask) -> EngineTask {
-    if matches!(task, EngineTask::PublishProof { .. }) {
-        proof_observer_task(id, task)
-    } else {
-        task.clone()
     }
 }
 
@@ -1216,35 +1203,6 @@ where
         }))
     }
 
-    async fn requeue_missing_aggregate_dependencies(
-        &self,
-        lease: &TaskLease<EngineTask, EngineTaskKey>,
-        execution_result: &Result<EngineOutput<S::GuestInput>, TaskExecutionError>,
-    ) -> Result<bool, TaskStoreError> {
-        let Err(TaskExecutionError::MissingAggregateArtifacts {
-            error,
-            dependencies,
-        }) = execution_result
-        else {
-            return Ok(false);
-        };
-        if !self
-            .inner
-            .scheduler
-            .requeue_succeeded_dependencies(lease, dependencies)
-            .await?
-        {
-            return Ok(false);
-        }
-        tracing::warn!(
-            task = ?lease.id,
-            missing_dependencies = dependencies.len(),
-            %error,
-            "requeued proposal dependencies after aggregate artifact loss"
-        );
-        Ok(true)
-    }
-
     /// # Errors
     ///
     /// Returns an error if the task store cannot lease or complete work.
@@ -1263,7 +1221,10 @@ where
             return Ok(true);
         };
 
-        let mut terminal_observer_task = terminal_observer_task(&lease.id, &payload);
+        let mut terminal_observer_task = payload.clone();
+        if matches!(payload, EngineTask::PublishProof { .. }) {
+            terminal_observer_task = proof_observer_task(&lease.id, &payload);
+        }
         let (mut execution_result, recovered_output) = self
             .execute_leased_task(
                 &lease,
@@ -1274,13 +1235,6 @@ where
                 permit_error,
             )
             .await;
-        if self
-            .requeue_missing_aggregate_dependencies(&lease, &execution_result)
-            .await?
-        {
-            renew_task.abort_and_wait().await;
-            return Ok(true);
-        }
         if let Some(observer_task) = execution_result
             .as_ref()
             .err()
@@ -1580,51 +1534,17 @@ where
     async fn resolve_aggregation_source(
         &self,
         source: AggregationSource,
-    ) -> Result<Vec<raiko2_primitives::Proof>, TaskExecutionError> {
+    ) -> Result<Vec<raiko2_primitives::Proof>, String> {
         match source {
             AggregationSource::Inputs(inputs) => {
                 let mut proofs = Vec::with_capacity(inputs.len());
-                let mut missing_dependencies = Vec::new();
-                let mut missing_proof_refs = Vec::new();
                 for input in inputs {
                     match input {
-                        AggregateProofInput::ProofArtifact(artifact) => {
-                            proofs.push(
-                                self.get_proof_artifact(artifact)
-                                    .await
-                                    .map_err(TaskExecutionError::from)?,
-                            );
-                        }
-                        AggregateProofInput::PendingProofArtifact {
-                            artifact,
-                            dependency,
-                        } => {
-                            let observer = self.inner.observer.as_ref().ok_or_else(|| {
-                                TaskExecutionError::Retryable(
-                                    "proof artifact resolver is not configured".to_string(),
-                                )
-                            })?;
-                            if let Some(proof) = observer
-                                .load_proof_artifact(&artifact)
-                                .await
-                                .map_err(TaskExecutionError::from)?
-                            {
-                                proofs.push(proof);
-                            } else {
-                                missing_proof_refs.push(artifact.proof_ref);
-                                missing_dependencies.push(*dependency);
-                            }
+                        AggregateProofInput::ProofArtifact(artifact)
+                        | AggregateProofInput::PendingProofArtifact { artifact, .. } => {
+                            proofs.push(self.get_proof_artifact(artifact).await?);
                         }
                     }
-                }
-                if !missing_dependencies.is_empty() {
-                    return Err(TaskExecutionError::MissingAggregateArtifacts {
-                        error: format!(
-                            "aggregate proof artifacts are missing: {}",
-                            missing_proof_refs.join(", ")
-                        ),
-                        dependencies: missing_dependencies,
-                    });
                 }
                 Ok(proofs)
             }
@@ -3412,7 +3332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_aggregate_artifact_requeues_succeeded_proposal()
+    async fn missing_aggregate_artifact_is_terminal_without_resetting_proposal()
     -> Result<(), Box<dyn std::error::Error>> {
         let observer = Arc::new(VolatileArtifactObserver::default());
         let proof_runs = Arc::new(AtomicUsize::new(0));
@@ -3432,9 +3352,9 @@ mod tests {
         let proposal_id = engine.proposal_task_id(proposal.clone());
         let (_owner, aggregate_id) = attach_aggregate!(
             engine,
-            "aggregate-artifact-recovery",
+            "aggregate-artifact-loss",
             vec![proposal],
-            aggregation_request("artifact-recovery"),
+            aggregation_request("artifact-loss"),
             vec![pending_proof_input("proposal-1", proposal_id.clone())]
         );
 
@@ -3449,7 +3369,7 @@ mod tests {
                 .await?
                 .expect("proposal")
                 .state,
-            TaskState::Ready
+            TaskState::Succeeded { .. }
         ));
         assert!(matches!(
             engine
@@ -3457,16 +3377,9 @@ mod tests {
                 .await?
                 .expect("aggregate")
                 .state,
-            TaskState::Pending { .. }
+            TaskState::Failed { .. }
         ));
-
-        assert!(Box::pin(engine.run_one("proposal-2")).await?);
-        assert_eq!(proof_runs.load(Ordering::SeqCst), 2);
-        assert!(Box::pin(engine.run_one("aggregate-2")).await?);
-        assert!(matches!(
-            engine.get(aggregate_id).await?.expect("aggregate").state,
-            TaskState::Succeeded { .. }
-        ));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

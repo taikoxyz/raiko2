@@ -1128,8 +1128,8 @@ Returns the root-task view derived from the original batch request.
   `evaluated_mcycles_count`.
 - Terminal root task records use the configurable `runtime.terminal_task_ttl_secs` retention policy,
   which defaults to six hours. Artifact manifests and pending publication intents, including
-  external aggregation inputs, are reclaimed independently when they have no usable runtime owner;
-  object-store failure never retains a successfully detached root. Active manifests must not have a
+  external aggregation inputs, are reclaimed independently when no runtime task record references
+  them; object-store failure never retains a successfully detached root. Active manifests must not have a
   bucket age rule, and immutable proof or program content must remain available until every manifest
   that references it is gone. Generation-scoped tombstones and unreferenced content use a minimum
   thirty-day retention window. Active root tasks are never removed by terminal cleanup.
@@ -1195,8 +1195,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   zero, and does not expire active tasks. Proof artifacts and pending publication intents use
   ownership-driven cleanup rather than this TTL.
 - `runtime.cleanup_interval_secs` independently paces runtime retention passes and defaults to `30`.
-  `runtime.cleanup_batch_size` bounds each cleanup lane to `64` records by default and accepts values
-  from `1` through `1024`. Neither setting reuses queue maintenance timing.
+  `runtime.cleanup_batch_size` bounds each root, artifact, pending-publication, and overdue-active
+  retention lane to `64` records by default and accepts values from `1` through `1024`. The separate
+  seven-day orphan-management pass retains a fixed 64-record bound because it performs per-task
+  lifecycle mutations. Neither setting reuses queue maintenance timing.
 - `runtime.preflight_cache` accepts `"shared"` (default) or `"off"`. Shared mode enables the
   persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
   bypasses both layers and rebuilds preflight independently for each request; use it only as an

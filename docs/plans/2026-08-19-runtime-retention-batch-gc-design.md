@@ -37,8 +37,9 @@ Use `runtime.terminal_task_ttl_secs` with a default of `21600`,
 `runtime.cleanup_interval_secs` with a default of `30`, and `runtime.cleanup_batch_size` with a
 default of `64` and maximum of `1024`. All values must be greater than zero. Cleanup pacing does not
 reuse the queue maintenance interval because a retention batch can rewrite the complete authoritative
-snapshot more than once. The GCS bucket lifecycle remains independent and continues to control
-deletion of unrelated or unreachable objects.
+snapshot more than once. The pre-existing seven-day orphan-management pass keeps its own fixed
+64-record bound because it may perform per-task lifecycle mutations. The GCS bucket lifecycle remains
+independent and continues to control deletion of unrelated or unreachable objects.
 
 ## Batch Lifecycle
 
@@ -82,16 +83,17 @@ by the previous collector.
    stale owner list do not affect retention ownership; an authoritative task-record reference is
    sufficient.
 2. Under the per-artifact lifecycle lock, recheck the exact intent, owner incarnations, and content
-   hash. If a canonical object exists without an artifact record, exact-invalidate that descriptor
-   without adopting it into runtime state, so the historical publication crash window cannot leave
-   an untracked manifest or turn a concurrently replaced descriptor into stale local authority.
+   hash. If an artifact record exists, leave its canonical manifest exclusively to the artifact lane.
+   If no artifact record exists, exact-invalidate only a canonical descriptor with the same content
+   hash as the pending intent. A changed untracked descriptor is left untouched for explicit
+   namespace cleanup rather than being adopted as local invalidation authority.
 3. Delete the exact pending object and remove only the exact durable intent. A changed intent, a new
    retained task reference, or an external failure retains only that pending intent for retry.
 
-The number of runtime-state writes is bounded by cleanup phases, not by the number of ordinary tasks
-or artifacts in a batch. External cleanup never performs one full-snapshot mutation per item. A
-canonical-object-without-record crash window is handled under the per-artifact lock and folded into
-the lane's batched state transition.
+The number of runtime-state writes in the root, artifact, and pending retention lanes is bounded by
+cleanup phases, not by the number of records in a batch. External retention cleanup never performs
+one full-snapshot mutation per item. The separate orphan-management pass remains per-task and is
+therefore capped independently at 64 records.
 
 ## Restart And Retry
 
@@ -100,7 +102,9 @@ optimizations, not authority. Restarting resets them and scans authoritative sta
 beginning. Retry selection is non-destructive: an identity remains queued until its lane completes
 successfully or authoritative state proves it no longer eligible. Fresh cursors advance only after a
 complete successful selection. Each retry lane is capped at 4096 identities; the authoritative scan
-remains the recovery source for work that cannot enter a full process-local queue.
+remains the recovery source for work that cannot enter a full process-local queue. Overdue-active
+observation retains the first 4096 task incarnations seen by one process without FIFO eviction, so a
+small configured batch cannot make the same tasks cycle through warning logs.
 
 Startup must restore recoverable pending publications before attempting cleanup-only invalidations.
 An invalidated artifact is already unreadable from runtime state, so object-store cleanup is not a
@@ -113,11 +117,11 @@ every extant task incarnation as an owner, including failed and cancelled record
 activation and recovery continue to require a live task owner, so terminal records cannot make an
 in-flight publication usable merely because they retain it from garbage collection.
 
-If aggregation discovers that a succeeded proposal dependency no longer has a readable proof
-artifact, the queue atomically resets that dependency to ready and the running aggregate to pending.
-The proposal republishes its proof before aggregation resumes. This makes accidental or retention-
-driven artifact loss recoverable in the current process instead of relying on a restart and duplicate
-client submission.
+Retention never changes proposal or aggregate execution state. Proposal retry belongs to the proposal
+execution policy, and an aggregate remains pending until its declared proposal dependencies succeed.
+A succeeded proposal must already have a readable active artifact. External deletion or corruption
+after success is an explicit storage-recovery event handled by proof startup cleanup and request
+resubmission, not by aggregate-owned reproving.
 
 ## Safety Invariants
 
@@ -125,6 +129,8 @@ client submission.
 - Task incarnation and complete-record equality fence stale cleanup observations.
 - An artifact or pending publication remains retained while any task record references it,
   regardless of task status.
+- Artifact ownership is rechecked before invalidation admission. Once exact invalidation is
+  authoritative, a later task cannot resurrect that descriptor.
 - Artifact invalidation is authoritative before external object deletion.
 - An invalidated artifact cannot satisfy a cache lookup while deletion is retried.
 - Root removal depends only on exact retirement and queue detachment, never on external deletion.
@@ -140,8 +146,7 @@ client submission.
 - An active task older than the terminal retention window is logged but never selected for removal.
 - Overdue-active observation runs before orphan cancellation or any retention state transition in a
   cleanup pass.
-- A missing aggregate input artifact requeues its succeeded proposal dependency before aggregation
-  retries.
+- Retention never resets, retries, or otherwise mutates proposal or aggregate execution state.
 
 ## Observability
 

@@ -388,7 +388,6 @@ pub struct PendingPublicationExpectation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPublicationRetentionFinalization {
     pub pending_deletion: ProofArtifactDeleteResult,
-    pub artifact_invalidation: Option<ArtifactExpectation>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2903,9 +2902,9 @@ impl RuntimeManager {
 
     /// Reconciles publication intents that no current runtime task still owns.
     ///
-    /// An activated artifact with a live consumer needs only pending-blob cleanup. Every other
-    /// unfinished publication is invalidated before its pending intent is removed, including the
-    /// crash window after canonical object creation but before lifecycle registration.
+    /// An activated artifact is left to the artifact lifecycle while this pass removes only its
+    /// pending blob. A canonical object from the crash window before artifact registration is
+    /// invalidated only when it still matches the pending intent exactly.
     pub async fn reconcile_unowned_pending_proof_publications(&self) -> Result<usize> {
         let pending = {
             let state = self.state.read().await;
@@ -3024,7 +3023,6 @@ impl RuntimeManager {
         {
             return Ok(PendingPublicationRetentionFinalization {
                 pending_deletion: ProofArtifactDeleteResult::Missing,
-                artifact_invalidation: None,
             });
         }
         self.invalidate_pending_canonical_for_retention(expectation, &state_key)
@@ -3032,10 +3030,7 @@ impl RuntimeManager {
         self.validate_pending_publication_before_object_deletion(expectation, &state_key)
             .await?;
         let pending_deletion = self.delete_pending_publication_object(expectation).await?;
-        Ok(PendingPublicationRetentionFinalization {
-            pending_deletion,
-            artifact_invalidation: None,
-        })
+        Ok(PendingPublicationRetentionFinalization { pending_deletion })
     }
 
     async fn validate_pending_publication_retention_candidate(
@@ -3072,13 +3067,13 @@ impl RuntimeManager {
         state_key: &str,
     ) -> Result<()> {
         let key = &expectation.key;
+        if self.state.read().await.artifacts.contains_key(state_key) {
+            return Ok(());
+        }
         let Some(descriptor) = self.store.get_descriptor(key).await? else {
             return Ok(());
         };
-        if !self
-            .should_invalidate_pending_canonical(expectation, state_key, &descriptor)
-            .await
-        {
+        if descriptor.content_hash != expectation.content_hash {
             return Ok(());
         }
         self.validate_pending_publication_before_object_deletion(expectation, state_key)
@@ -3092,27 +3087,6 @@ impl RuntimeManager {
                 anyhow::bail!("canonical proof changed before pending retention invalidation")
             }
         }
-    }
-
-    async fn should_invalidate_pending_canonical(
-        &self,
-        expectation: &PendingPublicationExpectation,
-        state_key: &str,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> bool {
-        let state = self.state.read().await;
-        let artifact = state.artifacts.get(state_key);
-        let has_retained_task =
-            RetentionOwnershipIndex::from_state(&state).has_artifact_owner(state_key);
-        let canonical_has_lifecycle = |lifecycle| {
-            artifact.is_some_and(|record| {
-                record.descriptor() == *descriptor && record.lifecycle == lifecycle
-            })
-        };
-        !(has_retained_task && canonical_has_lifecycle(ProofArtifactLifecycle::Active))
-            && (canonical_has_lifecycle(ProofArtifactLifecycle::Invalidated)
-                || expectation.content_hash == descriptor.content_hash
-                || !has_retained_task)
     }
 
     async fn validate_pending_publication_before_object_deletion(
@@ -4056,32 +4030,29 @@ fn task_matches_artifact_identity(
 
 #[derive(Debug, Default)]
 struct RetentionOwnershipIndex {
-    owners_by_artifact: HashMap<String, HashSet<uuid::Uuid>>,
+    owned_artifacts: HashSet<String>,
 }
 
 impl RetentionOwnershipIndex {
     fn from_state(state: &RuntimeState) -> Self {
-        let mut owners_by_artifact = HashMap::<String, HashSet<uuid::Uuid>>::new();
+        let mut owned_artifacts = HashSet::new();
         for task in state.tasks.values() {
             for proof_ref in std::iter::once(task.task_id.as_str())
                 .chain(task.artifact_refs.iter().map(String::as_str))
             {
-                owners_by_artifact
-                    .entry(artifact_record_key(
-                        &task.network_pair,
-                        task.pipeline_key,
-                        task.route,
-                        proof_ref,
-                    ))
-                    .or_default()
-                    .insert(task.incarnation_id);
+                owned_artifacts.insert(artifact_record_key(
+                    &task.network_pair,
+                    task.pipeline_key,
+                    task.route,
+                    proof_ref,
+                ));
             }
         }
-        Self { owners_by_artifact }
+        Self { owned_artifacts }
     }
 
     fn has_artifact_owner(&self, state_key: &str) -> bool {
-        self.owners_by_artifact.contains_key(state_key)
+        self.owned_artifacts.contains(state_key)
     }
 }
 
@@ -4205,7 +4176,9 @@ fn pending_publication_has_retention_owner(
     let expected_key = artifact_record_key(network_pair, pipeline_key, route, proof_ref);
     state_key == expected_key
         && state.pending_publications.contains_key(state_key)
-        && RetentionOwnershipIndex::from_state(state).has_artifact_owner(state_key)
+        && state.tasks.values().any(|task| {
+            task_matches_artifact_identity(task, network_pair, pipeline_key, route, proof_ref)
+        })
 }
 
 fn mark_unowned_pending_publication_invalidated(
@@ -6548,15 +6521,11 @@ mod tests {
             .list_reclaimable_pending_publications(None, 64)
             .await?;
         assert_eq!(pending.len(), 1);
-        let pending_finalized = runtime
+        runtime
             .finalize_pending_publication_retention(&pending[0])
             .await?;
-        let artifact_invalidations = pending_finalized
-            .artifact_invalidation
-            .into_iter()
-            .collect::<Vec<_>>();
         let pending_removed = runtime
-            .finalize_terminal_task_retention_batch(&[], &artifact_invalidations, &pending)
+            .finalize_terminal_task_retention_batch(&[], &[], &pending)
             .await?;
 
         assert_eq!(finalized.removed_tasks.len(), 1);
@@ -6730,7 +6699,10 @@ mod tests {
         let finalized = runtime
             .finalize_pending_publication_retention(&pending[0])
             .await?;
-        assert!(finalized.artifact_invalidation.is_none());
+        assert!(matches!(
+            finalized.pending_deletion,
+            ProofArtifactDeleteResult::Removed | ProofArtifactDeleteResult::Missing
+        ));
         assert!(
             runtime
                 .proof_artifact_descriptor_is_invalidated(
@@ -6759,6 +6731,148 @@ mod tests {
             .await?;
         assert!(removed.removed_artifacts.is_empty());
         assert_eq!(removed.removed_pending_publications.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_retention_leaves_tracked_canonical_for_artifact_lane() -> Result<()> {
+        let runtime = RuntimeManager::new_memory(
+            "test".into(),
+            "pending-retention-tracked-canonical".into(),
+        )?;
+        let owner = register_retention_task(
+            &runtime,
+            "pending-root",
+            &["pending-proof"],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        let artifact = register_retention_artifact(&runtime, "pending-proof").await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                    &[owner.incarnation_id],
+                    b"pending-proof",
+                )
+                .await?
+        );
+        runtime
+            .mutate(|state| {
+                state.tasks.remove("pending-root");
+                for pending in state.pending_publications.values_mut() {
+                    pending.owner_incarnations.clear();
+                }
+                Ok(())
+            })
+            .await?;
+
+        let pending = runtime
+            .list_reclaimable_pending_publications(None, 64)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        runtime
+            .finalize_pending_publication_retention(&pending[0])
+            .await?;
+
+        assert!(
+            !runtime
+                .proof_artifact_descriptor_is_invalidated(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                    &artifact.descriptor(),
+                )
+                .await?
+        );
+        assert_eq!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                )
+                .await?
+                .context("tracked canonical artifact")?
+                .lifecycle,
+            ProofArtifactLifecycle::Active
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_retention_preserves_changed_untracked_canonical() -> Result<()> {
+        let runtime = RuntimeManager::new_memory(
+            "test".into(),
+            "pending-retention-changed-canonical".into(),
+        )?;
+        let owner = register_retention_task(
+            &runtime,
+            "pending-root",
+            &["pending-proof"],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        let canonical = runtime
+            .publish_proof_artifact_bytes(
+                "l1-l2",
+                PipelineKey::ShastaNative,
+                PipelineKey::ShastaNative.route(),
+                "pending-proof",
+                b"changed-canonical-proof",
+            )
+            .await?
+            .try_object()
+            .context("changed canonical proof")?
+            .clone();
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                    &[owner.incarnation_id],
+                    b"stale-pending-proof",
+                )
+                .await?
+        );
+        runtime
+            .mutate(|state| {
+                state.tasks.remove("pending-root");
+                for pending in state.pending_publications.values_mut() {
+                    pending.owner_incarnations.clear();
+                }
+                Ok(())
+            })
+            .await?;
+
+        let pending = runtime
+            .list_reclaimable_pending_publications(None, 64)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        runtime
+            .finalize_pending_publication_retention(&pending[0])
+            .await?;
+
+        assert!(
+            !runtime
+                .proof_artifact_descriptor_is_invalidated(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "pending-proof",
+                    &canonical.descriptor(),
+                )
+                .await?
+        );
         Ok(())
     }
 

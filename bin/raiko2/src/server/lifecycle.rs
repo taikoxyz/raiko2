@@ -53,9 +53,6 @@ pub(crate) struct ArtifactRetentionBatchOutcome {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PendingRetentionBatchOutcome {
-    pub invalidated_artifacts: usize,
-    pub removed_artifacts: usize,
-    pub retained_artifact_failures: usize,
     pub removed_pending_publications: usize,
     pub retained_pending_publication_failures: usize,
     pub retry_pending_publications: Vec<ProofArtifactKey>,
@@ -72,7 +69,6 @@ struct ArtifactFinalizationBatch {
 #[derive(Debug, Default)]
 struct PendingPublicationFinalizationBatch {
     finalized: Vec<PendingPublicationExpectation>,
-    finalized_artifacts: Vec<ArtifactExpectation>,
     retry_pending_publications: Vec<ProofArtifactKey>,
     failures: usize,
 }
@@ -505,24 +501,17 @@ impl ProofLifecycle {
         )
         .await;
         let mut outcome = PendingRetentionBatchOutcome {
-            invalidated_artifacts: pending_batch.finalized_artifacts.len(),
             retained_pending_publication_failures: pending_batch.failures,
             retry_pending_publications: pending_batch.retry_pending_publications,
             ..PendingRetentionBatchOutcome::default()
         };
-        if pending_batch.finalized.is_empty() && pending_batch.finalized_artifacts.is_empty() {
+        if pending_batch.finalized.is_empty() {
             return Ok(outcome);
         }
         let finalized = self
             .runtime
-            .finalize_terminal_task_retention_batch(
-                &[],
-                &pending_batch.finalized_artifacts,
-                &pending_batch.finalized,
-            )
+            .finalize_terminal_task_retention_batch(&[], &[], &pending_batch.finalized)
             .await?;
-        outcome.removed_artifacts = finalized.removed_artifacts.len();
-        outcome.retained_artifact_failures = finalized.skipped_artifacts;
         outcome.removed_pending_publications = finalized.removed_pending_publications.len();
         outcome.retained_pending_publication_failures = outcome
             .retained_pending_publication_failures
@@ -675,11 +664,8 @@ async fn finalize_terminal_retention_pending_publications(
             break;
         };
         match finalized {
-            Ok((expectation, Ok(finalized))) => {
+            Ok((expectation, Ok(_))) => {
                 batch.finalized.push(expectation);
-                batch
-                    .finalized_artifacts
-                    .extend(finalized.artifact_invalidation);
             }
             Ok((expectation, Err(error))) => {
                 batch.failures = batch.failures.saturating_add(1);

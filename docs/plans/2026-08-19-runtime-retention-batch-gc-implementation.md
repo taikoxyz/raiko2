@@ -183,8 +183,9 @@ Cover these cases:
 
 - an unowned pending intent is removed after its root record has already disappeared;
 - one pending delete failure does not block unrelated artifact or root finalization;
-- a canonical object plus pending intent with no artifact record is tombstoned and removed rather
-  than leaving an untracked canonical manifest;
+- a canonical object plus pending intent with no artifact record is removed only when its content
+  hash matches the exact pending intent;
+- a canonical object represented by an artifact record is left exclusively to the artifact lane;
 - a new live owner or changed intent between selection and deletion is preserved.
 
 **Step 2: Run the focused tests and verify failure**
@@ -202,10 +203,10 @@ records with no live owner. Do not derive candidates from a terminal task batch.
 
 **Step 4: Close the canonical-object crash window**
 
-Under the per-artifact lifecycle lock, exact-check the intent and owners, inspect the canonical
-descriptor, and record an invalidated artifact descriptor when the canonical object exists without a
-runtime artifact record. Finalize the exact canonical invalidation before deleting the exact pending
-object. Return finalized artifact and pending expectations for batched state removal.
+Under the per-artifact lifecycle lock, exact-check the intent and owners. When an artifact record
+exists, delete only the pending object and intent. When no artifact record exists, inspect the
+canonical descriptor and exact-invalidate it only if its content hash matches the intent before
+deleting the exact pending object. A changed descriptor remains untouched for explicit cleanup.
 
 **Step 5: Run focused tests**
 
@@ -509,31 +510,62 @@ Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::teleme
 
 Expected: PASS.
 
-### Task 13: Verify aggregate recovery after proposal-artifact loss
+### Task 13: Keep aggregate dependency recovery outside retention
 
 **Files:**
-- Modify: `crates/queue/src/store.rs`
-- Modify: `crates/queue/src/scheduler/mod.rs`
 - Modify: `crates/engine/src/lib.rs`
 - Test: `crates/engine/src/lib.rs`
 
-**Step 1: Add a recovery regression**
+**Step 1: Add a failing lifecycle-isolation regression**
 
-Run a proposal to success, remove its proof artifact, and execute the dependent aggregate in the same
-process. Assert that the proposal returns to ready, the aggregate returns to pending, the proposal
-reproves and republishes, and aggregation then succeeds.
+Run a proposal to success, remove its proof artifact outside the runtime lifecycle, and execute the
+dependent aggregate. Assert that the aggregate fails through its ordinary execution policy without
+resetting the succeeded proposal. External proof-store damage is recovered by explicit startup
+cleanup and request resubmission, not by an aggregate-owned proposal lifecycle.
 
-**Step 2: Add atomic dependency recovery**
+**Step 2: Remove cross-lifecycle queue recovery**
 
-When aggregation reports missing proof artifacts, atomically verify the running aggregate lease,
-reset only its declared succeeded dependencies to ready, and return the aggregate to pending. Reject
-missing, failed, cancelled, or unrelated dependency records. Notify scheduler waiters after the
-transition commits.
+Remove the aggregate missing-artifact task-store transition and its scheduler wrapper. Proposal
+retry remains owned by the proposal execution policy. Aggregate readiness remains owned by normal
+dependency completion, and retention never changes either task's execution state.
 
-**Step 3: Run queue and engine recovery tests**
+**Step 3: Run queue and engine tests**
 
 Run: `cargo test -p raiko2-queue`
 
-Run: `cargo test -p raiko2-engine missing_aggregate_artifact_requeues_succeeded_proposal`
+Run: `cargo test -p raiko2-engine missing_aggregate_artifact_is_terminal`
+
+Expected: PASS.
+
+### Task 14: Keep cleanup lanes single-purpose
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `docs/plans/2026-08-19-runtime-retention-batch-gc-design.md`
+- Test: `crates/runtime/src/lib.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Add failing lane-boundary regressions**
+
+Assert that pending retention never deletes a canonical object represented by an artifact record,
+that the artifact lane remains its sole owner, that an orphan pass processes at most its independent
+64-record bound, and that overdue-active observation does not evict earlier identities merely because
+the configured retention batch is small.
+
+**Step 2: Separate cleanup responsibilities**
+
+Make pending retention delete only its pending object and intent when an artifact record exists.
+Retain the historical no-artifact-record canonical cleanup as a compatibility case. Keep canonical
+artifact invalidation and removal in the artifact lane. Restore a fixed orphan-management batch
+limit and commit its cursor only after a complete successful page. Keep overdue-active observation
+bounded independently from retention batch sizing.
+
+**Step 3: Run focused runtime and server tests**
+
+Run: `cargo test -p raiko2-runtime --lib`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
 
 Expected: PASS.

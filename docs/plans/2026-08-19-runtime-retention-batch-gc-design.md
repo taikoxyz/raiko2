@@ -31,15 +31,22 @@ removed by this TTL, even if they run longer than six hours. An active task olde
 window is abnormal and emits one deduplicated structured warning per observed task incarnation.
 This is an operational failure signal, not a second reclamation policy.
 
+Retention admission is represented independently from execution status. Preparing a root for
+removal must preserve its `RunnerStatus`, proof URI, and execution error; a client continues to see
+the original terminal result until exact root removal commits. The dedicated retention state is an
+internal two-phase deletion marker and is never interpreted as proposal or aggregate execution
+progress.
+
 ## Configuration
 
 Use `runtime.terminal_task_ttl_secs` with a default of `21600`,
 `runtime.cleanup_interval_secs` with a default of `30`, and `runtime.cleanup_batch_size` with a
 default of `64` and maximum of `1024`. All values must be greater than zero. Cleanup pacing does not
 reuse the queue maintenance interval because a retention batch can rewrite the complete authoritative
-snapshot more than once. The pre-existing seven-day orphan-management pass keeps its own fixed
-64-record bound because it may perform per-task lifecycle mutations. The GCS bucket lifecycle remains
-independent and continues to control deletion of unrelated or unreachable objects.
+snapshot more than once. The pre-existing seven-day orphan-management pass processes at most 64
+records per pass and uses a smaller configured cleanup batch when requested because it may perform
+per-task lifecycle mutations. The GCS bucket lifecycle remains independent and continues to control
+deletion of unrelated or unreachable objects.
 
 ## Batch Lifecycle
 
@@ -52,11 +59,13 @@ continuous stream of newly expired records can starve the other side.
 ### Root retirement
 
 1. Acquire the existing execution lifecycle gate.
-2. In one authoritative mutation, verify each task's full observed snapshot and retire unchanged
-   matches. Root preparation does not invalidate proof artifacts or pending publications because
-   the task still owns them until exact root removal commits.
-3. Detach each retired root from its engine queue. A detach failure retains only that exact cancelled
-   root in the root retry lane.
+2. In one authoritative mutation, verify each task's full observed snapshot and mark unchanged
+   terminal matches as `removing` in the independent retention lifecycle. Preserve the task's
+   execution status, proof URI, error, and terminal timestamp. Root preparation does not invalidate
+   proof artifacts or pending publications because the task still owns them until exact root removal
+   commits.
+3. Detach each prepared root from its engine queue. A detach failure retains only that exact root,
+   with its original client-visible terminal result, in the root retry lane.
 4. In one authoritative mutation, remove every successfully detached exact root snapshot and prune
    its pending-publication ownership. Release the execution lifecycle gate before any object-store
    cleanup. No artifact or pending-publication failure can retain a successfully detached root.
@@ -106,6 +115,15 @@ remains the recovery source for work that cannot enter a full process-local queu
 observation retains the first 4096 task incarnations seen by one process without FIFO eviction, so a
 small configured batch cannot make the same tasks cycle through warning logs.
 
+The seven-day orphan lane is deliberately fail-stop. A persistent artifact-reconciliation or
+lifecycle error indicates an internally inconsistent task that requires operator intervention in this
+serial proving system; later retention lanes do not advance past it. The failing task identity and
+stage are logged, and a fixed-label blocked gauge remains set until a later orphan pass succeeds.
+Operators may repair the external state or perform a one-shot
+`runtime.startup_cleanup = ["proof"]`, which clears the authoritative task table and active proof
+manifests before runtime initialization. Ordinary proving failures and transient orphan absence do not
+enter this path.
+
 Startup must restore recoverable pending publications before attempting cleanup-only invalidations.
 An invalidated artifact is already unreadable from runtime state, so object-store cleanup is not a
 readiness prerequisite. Transient cleanup failures are logged and retried by maintenance rather than
@@ -127,6 +145,9 @@ resubmission, not by aggregate-owned reproving.
 
 - Non-terminal tasks are never selected by terminal retention.
 - Task incarnation and complete-record equality fence stale cleanup observations.
+- Retention admission never changes `RunnerStatus`, proof URI, execution error, or terminal time.
+- A failed queue detach leaves the original client-visible terminal result readable and retries only
+  the independent retention transition.
 - An artifact or pending publication remains retained while any task record references it,
   regardless of task status.
 - Artifact ownership is rechecked before invalidation admission. Once exact invalidation is
@@ -146,6 +167,8 @@ resubmission, not by aggregate-owned reproving.
 - An active task older than the terminal retention window is logged but never selected for removal.
 - Overdue-active observation runs before orphan cancellation or any retention state transition in a
   cleanup pass.
+- A persistent orphan reconciliation failure blocks later retention lanes until external repair or
+  explicit proof startup cleanup; it does not masquerade as an ordinary task failure.
 - Retention never resets, retries, or otherwise mutates proposal or aggregate execution state.
 
 ## Observability
@@ -156,7 +179,8 @@ failed maintenance passes, including pending publication removal and retry failu
 expose bounded fresh/retry attempts, success/failure/stale outcomes, and current process-local retry
 queue lengths. Keep the existing structured cleanup log as the per-pass summary. Overdue active-task
 warnings include only bounded identifiers and age, are deduplicated per process, and have a
-fixed-label counter suitable for alerting.
+fixed-label counter suitable for alerting. Expose orphan fail-stop as a fixed-label blocked gauge that
+returns to zero after the orphan lane completes successfully.
 
 The initial rollout should explicitly configure the cleanup interval and batch size, then compare
 snapshot size, GCS write duration/conflicts, and cleanup failure counts. The six-hour TTL must not

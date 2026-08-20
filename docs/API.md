@@ -84,6 +84,7 @@ The canonical minimal metric families are:
 - `raiko2_runtime_state_records`
 - `raiko2_runtime_retention_total`
 - `raiko2_runtime_retention_retry_queue`
+- `raiko2_runtime_retention_blocked`
 - `raiko2_runtime_retention_attempts_total`
 - `raiko2_runtime_retention_outcomes_total`
 
@@ -101,7 +102,9 @@ labels such as `selected_tasks`, `removed_tasks`, `retained_task_failures`,
 `invalidated_artifacts`, `retained_artifact_failures`, `removed_pending_publications`, and
 `retained_pending_publication_failures`. Scheduler metrics use only fixed `lane`, `source`, and
 `outcome` labels for the root, artifact, and pending lanes; task IDs and proof references are not
-metric labels.
+metric labels. `raiko2_runtime_retention_blocked{lane="orphan"}` reports whether the most recent
+orphan pass returned an error before later retention lanes could run: it is `1` after a blocked pass
+and returns to `0` after a successful pass. Alert on a sustained value; one transient pass can set it.
 
 ## Admin Ballot
 
@@ -1131,8 +1134,10 @@ Returns the root-task view derived from the original batch request.
   external aggregation inputs, are reclaimed independently when no runtime task record references
   them; object-store failure never retains a successfully detached root. Active manifests must not have a
   bucket age rule, and immutable proof or program content must remain available until every manifest
-  that references it is gone. Generation-scoped tombstones and unreferenced content use a minimum
-  thirty-day retention window. Active root tasks are never removed by terminal cleanup.
+  that references it is gone. Retention admission preserves the terminal runner status, proof URI,
+  error, and timestamp until exact task removal commits. Generation-scoped tombstones and unreferenced
+  content use a minimum thirty-day retention window. Active root tasks are never removed by terminal
+  cleanup.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
@@ -1197,8 +1202,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - `runtime.cleanup_interval_secs` independently paces runtime retention passes and defaults to `30`.
   `runtime.cleanup_batch_size` bounds each root, artifact, pending-publication, and overdue-active
   retention lane to `64` records by default and accepts values from `1` through `1024`. The separate
-  seven-day orphan-management pass retains a fixed 64-record bound because it performs per-task
-  lifecycle mutations. Neither setting reuses queue maintenance timing.
+  seven-day orphan-management pass processes at most `min(runtime.cleanup_batch_size, 64)` records
+  because it performs per-task lifecycle mutations. A persistent orphan reconciliation or lifecycle
+  error intentionally blocks later retention lanes until external repair or one-shot proof startup
+  cleanup; ordinary task failures do not enter this path. Neither setting reuses queue maintenance
+  timing. Overdue-active warnings retain only the first 4096 task incarnations observed by one
+  process, so warning coverage resets on restart after that bounded set saturates.
 - `runtime.preflight_cache` accepts `"shared"` (default) or `"off"`. Shared mode enables the
   persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
   bypasses both layers and rebuilds preflight independently for each request; use it only as an

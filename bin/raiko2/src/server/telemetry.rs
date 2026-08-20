@@ -238,6 +238,15 @@ static RUNTIME_RETENTION_RETRY_QUEUE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .expect("register raiko2_runtime_retention_retry_queue")
 });
 
+static RUNTIME_RETENTION_BLOCKED: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "raiko2_runtime_retention_blocked",
+        "Whether the most recent runtime retention pass for a lane was blocked",
+        &["lane"]
+    )
+    .expect("register raiko2_runtime_retention_blocked")
+});
+
 static RUNTIME_RETENTION_ATTEMPTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "raiko2_runtime_retention_attempts_total",
@@ -410,6 +419,12 @@ pub(crate) fn record_runtime_cleanup_pass(outcome: &'static str) {
             _ => "cleanup_pass_failure",
         }])
         .inc();
+}
+
+pub(crate) fn record_runtime_retention_blocked(lane: &'static str, blocked: bool) {
+    RUNTIME_RETENTION_BLOCKED
+        .with_label_values(&[lane])
+        .set(i64::from(blocked));
 }
 
 pub(crate) fn record_runtime_cleanup_scheduler_lane(
@@ -827,5 +842,15 @@ mod tests {
         }
         assert!(!metrics.contains("task_id="));
         assert!(!metrics.contains("proof_ref="));
+    }
+
+    #[test]
+    fn runtime_retention_blocked_gauge_uses_only_a_fixed_lane_label() {
+        record_runtime_retention_blocked("orphan", true);
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        assert!(metrics.contains("raiko2_runtime_retention_blocked{lane=\"orphan\"}"));
+        assert!(!metrics.contains("task_id="));
     }
 }

@@ -1649,6 +1649,7 @@ impl RuntimeManager {
                 return Ok(None);
             }
             task.runner_status = RunnerStatus::Allocated;
+            task.retention_state = TaskRetentionState::Retained;
             task.error = None;
             task.updated_at = now_ts();
             Ok(Some(task.clone()))
@@ -1669,11 +1670,12 @@ impl RuntimeManager {
         );
         let mut expected_original = prepared.clone();
         expected_original.runner_status = original.runner_status;
+        expected_original.retention_state = original.retention_state;
         expected_original.error.clone_from(&original.error);
         expected_original.updated_at = original.updated_at;
         anyhow::ensure!(
             expected_original == *original,
-            "recovery rollback may only restore status, error, and update time"
+            "recovery rollback may only restore status, retention state, error, and update time"
         );
 
         let prepared = prepared.clone();
@@ -3522,10 +3524,8 @@ impl RuntimeManager {
                     prepared.skipped_tasks = prepared.skipped_tasks.saturating_add(1);
                     continue;
                 }
-                if current.runner_status != RunnerStatus::Cancelled {
-                    current.runner_status = RunnerStatus::Cancelled;
-                    current.error = None;
-                    current.proof_uri = None;
+                if current.retention_state != TaskRetentionState::Removing {
+                    current.retention_state = TaskRetentionState::Removing;
                 }
                 prepared.retired_tasks.push(current.clone());
             }
@@ -3673,12 +3673,29 @@ pub struct RuntimeTaskRecord {
     /// Canonical proof references consumed or produced by this root.
     pub artifact_refs: Vec<String>,
     pub runner_status: RunnerStatus,
+    #[serde(default, skip_serializing_if = "TaskRetentionState::is_retained")]
+    pub retention_state: TaskRetentionState,
     pub image_ref: Option<String>,
     pub proof_uri: Option<String>,
     pub error: Option<String>,
     pub metadata: serde_json::Value,
     pub request_fingerprint: String,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRetentionState {
+    #[default]
+    Retained,
+    Removing,
+}
+
+impl TaskRetentionState {
+    #[must_use]
+    pub const fn is_retained(&self) -> bool {
+        matches!(self, Self::Retained)
+    }
 }
 
 impl RuntimeTaskRecord {
@@ -3769,6 +3786,7 @@ fn build_task_record(registration: &TaskRegistration) -> Result<RuntimeTaskRecor
         network_pair: registration.network_pair.clone(),
         artifact_refs: registration.artifact_refs.clone(),
         runner_status: RunnerStatus::Allocated,
+        retention_state: TaskRetentionState::Retained,
         image_ref: None,
         proof_uri: None,
         error: None,
@@ -3867,6 +3885,11 @@ fn validate_runtime_task_record<'a>(
     anyhow::ensure!(
         record.artifact_refs.iter().collect::<HashSet<_>>().len() == record.artifact_refs.len(),
         "runtime task contains duplicate artifact references"
+    );
+    anyhow::ensure!(
+        record.retention_state == TaskRetentionState::Retained
+            || record.runner_status.is_terminal(),
+        "non-terminal runtime task cannot enter retention removal"
     );
     anyhow::ensure!(
         !record.request_fingerprint.is_empty(),
@@ -4071,9 +4094,9 @@ fn validate_terminal_retention_finalization(
         "terminal task retention finalization contains duplicate task ids"
     );
     anyhow::ensure!(
-        retired_tasks
-            .iter()
-            .all(|task| task.runner_status == RunnerStatus::Cancelled),
+        retired_tasks.iter().all(|task| {
+            task.runner_status.is_terminal() && task.retention_state == TaskRetentionState::Removing
+        }),
         "terminal task retention finalization requires retired tasks"
     );
     anyhow::ensure!(
@@ -4361,6 +4384,55 @@ mod tests {
             RuntimeMutationOutcome::Blocked
         );
         assert!(runtime.get_task("root").await?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nonterminal_task_cannot_enter_terminal_retention_removal() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".into(), "nonterminal-retention-removal".into())?;
+        let mut root = register_native_task(&runtime, "root").await?;
+        root.retention_state = TaskRetentionState::Removing;
+
+        let error = runtime
+            .upsert_task(&root)
+            .await
+            .expect_err("active task must not enter terminal retention removal");
+        assert!(
+            error
+                .to_string()
+                .contains("non-terminal runtime task cannot enter retention removal")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn task_retention_state_defaults_and_omits_the_retained_value() -> Result<()> {
+        let registration = TaskRegistration {
+            task_id: "root".into(),
+            pipeline_key: PipelineKey::ShastaNative,
+            route: PipelineKey::ShastaNative.route(),
+            task_kind: "proposal".into(),
+            network_pair: "l1-l2".into(),
+            artifact_refs: Vec::new(),
+            metadata: serde_json::json!({}),
+            request_fingerprint: "root-request".into(),
+        };
+        let record = build_task_record(&registration)?;
+        let encoded = serde_json::to_value(&record)?;
+        assert!(encoded.get("retention_state").is_none());
+        assert_eq!(
+            serde_json::from_value::<RuntimeTaskRecord>(encoded)?.retention_state,
+            TaskRetentionState::Retained
+        );
+
+        let mut removing = record;
+        removing.runner_status = RunnerStatus::Completed;
+        removing.retention_state = TaskRetentionState::Removing;
+        assert_eq!(
+            serde_json::to_value(removing)?["retention_state"],
+            serde_json::json!("removing")
+        );
         Ok(())
     }
 
@@ -4714,6 +4786,7 @@ mod tests {
             network_pair: network_pair.into(),
             artifact_refs: vec![proof_ref.into()],
             runner_status: RunnerStatus::Running,
+            retention_state: TaskRetentionState::Retained,
             image_ref: None,
             proof_uri: None,
             error: None,
@@ -6346,8 +6419,17 @@ mod tests {
         assert_eq!(prepared.retired_tasks[0].task_id, "expired");
         assert_eq!(
             prepared.retired_tasks[0].runner_status,
-            RunnerStatus::Cancelled
+            RunnerStatus::Completed
         );
+        assert_eq!(
+            prepared.retired_tasks[0].retention_state,
+            TaskRetentionState::Removing
+        );
+        assert_eq!(
+            prepared.retired_tasks[0].proof_uri.as_deref(),
+            Some("memory://proofs/expired")
+        );
+        assert!(prepared.retired_tasks[0].error.is_none());
         assert_eq!(prepared.retired_tasks[0].updated_at, 2);
         assert!(prepared.artifact_invalidations.is_empty());
         assert_eq!(
@@ -6699,10 +6781,10 @@ mod tests {
         let finalized = runtime
             .finalize_pending_publication_retention(&pending[0])
             .await?;
-        assert!(matches!(
+        assert_eq!(
             finalized.pending_deletion,
-            ProofArtifactDeleteResult::Removed | ProofArtifactDeleteResult::Missing
-        ));
+            ProofArtifactDeleteResult::Removed
+        );
         assert!(
             runtime
                 .proof_artifact_descriptor_is_invalidated(

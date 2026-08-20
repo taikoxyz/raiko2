@@ -1056,7 +1056,7 @@ impl StageTimingMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raiko2_runtime::RunnerStatus;
+    use raiko2_runtime::{RunnerStatus, TaskRetentionState};
 
     fn runtime_record(metadata: &TaskMetadata, artifact_refs: Vec<String>) -> RuntimeTaskRecord {
         RuntimeTaskRecord {
@@ -1068,6 +1068,7 @@ mod tests {
             network_pair: metadata.network_pair.clone(),
             artifact_refs,
             runner_status: RunnerStatus::Allocated,
+            retention_state: TaskRetentionState::Retained,
             image_ref: None,
             proof_uri: None,
             error: None,

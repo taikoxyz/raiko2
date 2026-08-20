@@ -212,11 +212,12 @@ restart alone cannot submit or rebid paid proof work.
 
 Recovery, invalidation, cleanup, and replacement use snapshot-conditional runtime commands. A
 recovery attempt can reopen only the exact record whose metadata it used to build the recovery plan;
-an invalidation or cleanup attempt can retire only the exact non-cancelled record it selected. Root
-replacement atomically verifies the predecessor snapshot, removes its pending-publication
-ownership, and installs one successor. Only the winning replacement swaps the old and new
-`RootOwner` projections under the lifecycle transition gate. This closes same-incarnation races in
-which status or remote-checkpoint metadata changed after a caller read the root. Removing the
+terminal retention cleanup can admit only the exact record it selected to an independent retention
+state without changing the task's runner status, proof URI, or error. Invalidation keeps its distinct
+cancellation semantics. Root replacement atomically verifies the predecessor snapshot, removes its
+pending-publication ownership, and installs one successor. Only the winning replacement swaps the old
+and new `RootOwner` projections under the lifecycle transition gate. This closes same-incarnation
+races in which status or remote-checkpoint metadata changed after a caller read the root. Removing the
 predecessor owner leaves an unowned pending-publication record with its typed artifact identity until
 the proof object is deleted; a successor that references the same artifact key does not inherit the
 predecessor's publication authority. Startup reconciliation completes that cleanup after a crash.

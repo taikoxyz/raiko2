@@ -1299,7 +1299,14 @@ Operator notes:
   `runtime.cleanup_interval_secs` (30 seconds by default) with an independent per-lane
   `runtime.cleanup_batch_size` bound (64 by default). Proof artifacts and pending publication intents
   are reclaimed independently after their last retained runtime task reference disappears. The
-  separate seven-day orphan-management pass remains capped at 64 records regardless of this setting.
+  separate seven-day orphan-management pass processes at most
+  `min(runtime.cleanup_batch_size, 64)` records per pass. A persistent orphan reconciliation or
+  cancellation error intentionally blocks all later retention lanes and sets
+  `raiko2_runtime_retention_blocked{lane="orphan"}` to `1` after each blocked pass; the next successful
+  orphan pass resets it to `0`. Alert on a sustained value, then repair the external state or use
+  one-shot `runtime.startup_cleanup = ["proof"]`; ordinary failed proof tasks are terminal records and
+  do not trigger this fail-stop. Root retention admission preserves each task's client-visible
+  terminal status, proof URI, error, and timestamp until exact removal commits.
   Active proof and canonical preflight manifests must not have an age-based GCS lifecycle rule.
   Immutable content must remain available until every manifest that references it is gone.
   Generation-scoped invalidation markers and unreferenced proof/preflight content use a minimum

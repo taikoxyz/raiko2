@@ -569,3 +569,67 @@ Run: `cargo test -p raiko2-runtime --lib`
 Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
 
 Expected: PASS.
+
+### Task 15: Separate retention admission from execution status
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `bin/raiko2/src/server/telemetry.rs`
+- Modify: `docs/API.md`
+- Modify: `docs/operations.md`
+- Modify: `docs/plans/2026-08-19-runtime-retention-batch-gc-design.md`
+- Test: `crates/runtime/src/lib.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+- Test: `bin/raiko2/src/server/telemetry.rs`
+
+**Step 1: Add failing terminal-retention regressions**
+
+Assert that batch preparation preserves `Completed` and `Failed`, including proof URI and error,
+while setting only a dedicated retention state. Assert that a queue-detach failure leaves those
+business fields readable and that a later healthy pass removes the exact task.
+
+**Step 2: Add failing orphan fail-stop observability regressions**
+
+Run two passes against the same permanently failing orphan and assert that the cursor remains pinned,
+later terminal retention does not run, the error names the task and reconciliation stage, and the
+blocked gauge remains set. Replace the failed dependency, rerun the pass, and assert that retention
+resumes and the gauge clears.
+
+**Step 3: Implement the independent retention lifecycle**
+
+Add a Serde-defaulted task retention enum whose normal value is omitted from persisted JSON. Mark
+exact terminal snapshots as removing without changing `RunnerStatus`, proof URI, error, or
+`updated_at`. Require the exact removing snapshot during batch finalization. Keep ordinary task
+cancellation semantics separate from retention removal.
+
+**Step 4: Make orphan fail-stop explicit and bounded**
+
+Add task/stage context to orphan reconciliation failures and maintain a fixed-label blocked gauge.
+Keep the cursor rollback and early return: this is an intentional operator-intervention boundary, not
+a retry-queue lane. Document that the per-pass orphan bound is `min(cleanup_batch_size, 64)`.
+
+**Step 5: Fix adjacent review assertions and documentation**
+
+Replace the vacuous pending-deletion assertion with its exact expected result. Document overdue
+warning saturation and the explicit proof startup-cleanup recovery path without adding task IDs or
+other unbounded metric labels.
+
+**Step 6: Run focused and workspace verification**
+
+Run: `cargo test -p raiko2-runtime --lib`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::telemetry`
+
+Run: `cargo test -p raiko2-queue -p raiko2-engine -p raiko2-runtime --quiet`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server --quiet`
+
+Run: `cargo clippy --workspace -- -D warnings`
+
+Run: `cargo fmt --all -- --check`
+
+Expected: PASS.

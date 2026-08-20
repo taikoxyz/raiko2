@@ -3823,6 +3823,7 @@ mod tests {
             network_pair: metadata.network_pair.clone(),
             artifact_refs,
             runner_status,
+            retention_state: raiko2_runtime::TaskRetentionState::Retained,
             image_ref: None,
             proof_uri: None,
             error: None,

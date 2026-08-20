@@ -320,14 +320,16 @@ async fn run_runtime_cleanup_pass_inner(
         &mut cleanup_state.overdue_active_observations,
     )
     .await?;
-    let orphaned_cancelled = cancel_orphaned_runtime_tasks(
+    let orphan_result = cancel_orphaned_runtime_tasks(
         runtime.as_ref(),
         &lifecycle,
         orphan_ttl_secs,
         batch_size,
         &mut cleanup_state.orphan_cursor,
     )
-    .await?;
+    .await;
+    crate::server::telemetry::record_runtime_retention_blocked("orphan", orphan_result.is_err());
+    let orphaned_cancelled = orphan_result?;
     let root_cursor_before = cleanup_state.roots.fresh_cursor.clone();
     let records = select_root_retention_batch(
         runtime.as_ref(),
@@ -797,7 +799,13 @@ async fn cancel_orphaned_runtime_tasks(
         };
 
         if reconcile_runtime_task_from_artifacts(runtime, &record, &metadata)
-            .await?
+            .await
+            .with_context(|| {
+                format!(
+                    "orphan retention blocked while reconciling task {}",
+                    record.task_id
+                )
+            })?
             .is_some()
         {
             continue;
@@ -810,7 +818,12 @@ async fn cancel_orphaned_runtime_tasks(
         let cancellation = lifecycle
             .cancel_orphaned_if_unchanged(&record, ORPHANED_RUNTIME_ERROR.to_string())
             .await
-            .with_context(|| format!("failed cancel orphaned runtime task {}", record.task_id))?;
+            .with_context(|| {
+                format!(
+                    "orphan retention blocked while cancelling task {}",
+                    record.task_id
+                )
+            })?;
         if !matches!(
             cancellation,
             raiko2_runtime::RuntimeMutationOutcome::Applied
@@ -989,7 +1002,7 @@ mod tests {
     use raiko2_runtime::{
         ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
         ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
-        RuntimeManager, TaskRegistration,
+        RuntimeManager, TaskRegistration, TaskRetentionState,
         test_support::{
             ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore,
             RuntimeStateObject, RuntimeStateStore, RuntimeStateWriteResult, RuntimeStoreScope,
@@ -1305,24 +1318,63 @@ mod tests {
             )
             .await?;
         }
-        let failing = Arc::new(MockEngine::with_failing_owners(HashSet::from([
-            "a-orphan".to_string()
-        ])));
+        register_runtime_task(
+            runtime.as_ref(),
+            "terminal-behind-orphan",
+            &encoded_proposal_task_id(302)?,
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        let poison = runtime
+            .get_task("a-orphan")
+            .await?
+            .context("poison orphan")?;
+        let poison_ref = poison
+            .artifact_refs
+            .first()
+            .context("poison orphan proof reference")?
+            .clone();
+        let poison_artifact =
+            register_runtime_proof_artifact(runtime.as_ref(), &poison, &poison_ref).await?;
+        let failing = Arc::new(MockEngine::default());
         let mut cleanup_state = RuntimeCleanupLoopState::default();
 
-        assert!(
-            run_runtime_cleanup_pass(
+        for _ in 0..2 {
+            let error = run_runtime_cleanup_pass(
                 runtime.clone(),
-                Arc::new(build_factory(failing)),
+                Arc::new(build_factory(failing.clone())),
                 7_200,
                 14_400,
                 64,
                 &mut cleanup_state,
             )
             .await
-            .is_err()
+            .expect_err("permanent orphan failure must fail-stop retention");
+            assert!(
+                error
+                    .to_string()
+                    .contains("orphan retention blocked while reconciling task a-orphan")
+            );
+            assert!(cleanup_state.orphan_cursor.is_none());
+            assert!(
+                runtime.get_task("terminal-behind-orphan").await?.is_some(),
+                "later retention lanes must remain frozen"
+            );
+        }
+
+        assert!(
+            runtime
+                .remove_proof_artifact_if_descriptor(
+                    &poison.network_pair,
+                    poison.pipeline_key,
+                    poison.route,
+                    &poison_ref,
+                    &poison_artifact.descriptor(),
+                )
+                .await?,
+            "operator repair must remove the poison registration"
         );
-        assert!(cleanup_state.orphan_cursor.is_none());
 
         run_runtime_cleanup_pass(
             runtime.clone(),
@@ -1335,12 +1387,21 @@ mod tests {
         .await?;
         assert_eq!(
             runtime
+                .get_task("a-orphan")
+                .await?
+                .context("repaired orphan")?
+                .runner_status,
+            RunnerStatus::Cancelled
+        );
+        assert_eq!(
+            runtime
                 .get_task("b-orphan")
                 .await?
                 .context("second orphan")?
                 .runner_status,
             RunnerStatus::Cancelled
         );
+        assert!(runtime.get_task("terminal-behind-orphan").await?.is_none());
         Ok(())
     }
 
@@ -2433,7 +2494,18 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_cleanup_retries_a_durable_retirement_after_projection_failure() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("ttl-failure"))?);
+        let store = Arc::new(MemoryProofArtifactStore::new(
+            "test".to_string(),
+            format!(
+                "ttl-failure-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("time")
+                    .as_nanos()
+            ),
+        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        runtime.initialize().await?;
         let engine = Arc::new(MockEngine::with_failing_owners(HashSet::from([
             "expired-root".to_string(),
         ])));
@@ -2448,6 +2520,12 @@ mod tests {
             1,
         )
         .await?;
+        let mut failed = runtime
+            .get_task("expired-root")
+            .await?
+            .context("failed root before retention")?;
+        failed.error = Some("prover failed before retention".to_string());
+        runtime.upsert_task(&failed).await?;
 
         let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
@@ -2483,9 +2561,18 @@ mod tests {
             .get_task("expired-root")
             .await?
             .expect("retired root remains recoverable");
-        assert_eq!(retired.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(retired.runner_status, RunnerStatus::Failed);
+        assert_eq!(
+            retired.error.as_deref(),
+            Some("prover failed before retention")
+        );
+        assert_eq!(retired.retention_state, TaskRetentionState::Removing);
         assert_eq!(retired.updated_at, 1);
 
+        drop(runtime);
+        let runtime = Arc::new(RuntimeManager::with_store(store));
+        runtime.initialize().await?;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
         let healthy_factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
         let retry = run_runtime_cleanup_pass(
             runtime.clone(),

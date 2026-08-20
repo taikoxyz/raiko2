@@ -15,41 +15,81 @@ large snapshot repeatedly during cleanup.
 ## Decision
 
 Use a configurable six-hour terminal-task retention window and garbage-collect expired tasks in
-batches. Expired proof artifacts are invalidated and removed when no retained runtime task still
-references them. After cleanup, a repeated request creates a fresh task and may prove again; the
-runtime does not rehydrate expired tasks from old GCS proof objects.
+batches. Root retirement and external artifact reclamation are separate lifecycles: a proof-object
+deletion failure must not retain a client-visible task record, while an invalidated artifact record
+or pending publication intent remains an independent retry anchor.
+
+Proof artifacts and pending publications are swept independently of task selection. This both
+reclaims records orphaned by the pre-batch collector and lets external cleanup retry without
+occupying deterministic public task IDs. After root cleanup, a repeated request creates a fresh task
+and may prove again; the runtime does not rehydrate expired tasks from old GCS proof objects.
 
 The six-hour window starts at the terminal task's `updated_at` timestamp. Active tasks are never
 removed by this TTL, even if they run longer than six hours.
 
 ## Configuration
 
-Add `runtime.terminal_task_ttl_secs` with a default of `21600`. The value must be greater than zero.
-The GCS bucket lifecycle remains independent and continues to control deletion of unrelated or
-unreachable objects.
+Add `runtime.terminal_task_ttl_secs` with a default of `21600`, plus an independent cleanup interval
+and batch-size bound. All values must be greater than zero. Cleanup pacing must not reuse the queue's
+200 ms maintenance interval because a retention batch can rewrite the complete authoritative
+snapshot more than once. The GCS bucket lifecycle remains independent and continues to control
+deletion of unrelated or unreachable objects.
 
 ## Batch Lifecycle
 
-Each maintenance pass selects at most one bounded batch of exact terminal task snapshots whose
-`updated_at` is outside the retention window.
+Each maintenance pass has independent bounded budgets for root retirement, artifact reclamation,
+and pending-publication reclamation. Every lane reserves work for retries and fresh cursor progress,
+so neither a permanently failing record nor a continuous stream of newly expired records can starve
+the other side.
+
+### Root retirement
 
 1. Acquire the existing execution lifecycle gate.
 2. In one authoritative mutation, verify each task's full observed snapshot, retire unchanged
-   matches, mark newly unowned artifact registrations invalidated, and capture exact unowned pending
-   publication intents.
-3. Detach the retired roots from their engine queues, then release the execution lifecycle gate. A
-   failed detach leaves that root retired for a later cleanup pass.
-4. Finalize exact artifact invalidations using their content hash and object generation. External
-   deletion is bounded-concurrent and does not hold the lifecycle gate. A failed deletion leaves the
-   artifact invalidated for retry.
-5. Delete exact unowned pending publication objects under their artifact lifecycle locks. A changed
-   intent, new live owner, or deletion failure retains the terminal task and intent for retry.
-6. In one authoritative mutation, remove successfully detached task records, successfully finalized
-   artifact records, and exact pending publication intents. Shared pending intents retain owners that
-   belong to live tasks.
+   matches, and mark newly unowned artifact registrations invalidated. Invalidating before detachment
+   prevents an expired cache entry from being adopted by a concurrent replacement.
+3. Detach each retired root from its engine queue. A detach failure retains only that exact cancelled
+   root in the root retry lane.
+4. In one authoritative mutation, remove every successfully detached exact root snapshot and prune
+   its pending-publication ownership. Release the execution lifecycle gate before any object-store
+   cleanup. No artifact or pending-publication failure can retain a successfully detached root.
+
+### Artifact reclamation
+
+1. Select a bounded mix of retry artifacts and fresh artifact records. Fresh selection scans the
+   artifact table itself rather than deriving keys only from newly retired roots.
+2. In one authoritative mutation, recheck each exact record and its usable owners. Mark unowned
+   active or pending records invalidated; already-invalidated records remain eligible for retry.
+3. Finalize exact invalidations outside the execution lifecycle gate using content hash and object
+   generation. A failed or stale invalidation retains only that artifact record.
+4. Remove only exact successfully finalized artifact records in one authoritative mutation.
+
+This lane is also the forward migration for active artifact records whose task owners were removed
+by the previous collector.
+
+### Pending-publication reclamation
+
+1. Independently select pending intents with no live owner, using the same retry/fresh fairness rule.
+2. Under the per-artifact lifecycle lock, recheck the exact intent, owner incarnations, and content
+   hash. If a canonical object exists without an artifact record, first record and finalize its exact
+   invalidation so the historical publication crash window cannot leave an untracked manifest.
+3. Delete the exact pending object and remove only the exact durable intent. A changed intent, a new
+   live owner, or an external failure retains only that pending intent for retry.
 
 The number of runtime-state writes is bounded by the number of cleanup phases, not by the number of
-tasks or artifacts in the batch.
+ordinary tasks or artifacts in a batch. Repairing a rare canonical-object-without-record crash window
+may require an additional exact state transition.
+
+## Restart And Retry
+
+Cleanup cursors and retry queues are process-local optimizations, not authority. Restarting resets
+them and scans authoritative state from the beginning.
+
+Startup must restore recoverable pending publications before attempting cleanup-only invalidations.
+An invalidated artifact is already unreadable from runtime state, so object-store cleanup is not a
+readiness prerequisite. Transient cleanup failures are logged and retried by maintenance rather than
+crash-looping the service. A stale descriptor is reconciled against the current canonical descriptor
+and live pending owners; it is never accepted as permission to delete a changed object.
 
 ## Safety Invariants
 
@@ -58,6 +98,9 @@ tasks or artifacts in the batch.
 - An artifact remains active while any retained non-failed, non-cancelled task references it.
 - Artifact invalidation is authoritative before external object deletion.
 - An invalidated artifact cannot satisfy a cache lookup while deletion is retried.
+- Root removal depends only on exact retirement and queue detachment, never on external deletion.
+- A failed external operation retains only its exact artifact or pending intent.
+- Retry work and fresh cursor progress both receive bounded capacity on every maintenance pass.
 - Slow object-store operations never hold the process-wide execution lifecycle gate.
 - Runtime draining fences batch cleanup through the existing namespace and lifecycle gates.
 - Pending publication objects and intents are removed only after their last task owner becomes
@@ -72,8 +115,10 @@ cleanup counters for selected, retired, removed, retained-on-failure, and artifa
 outcomes, including pending publication removal and retry failures. Keep the existing structured
 cleanup log as the per-pass summary.
 
-The initial rollout should compare snapshot size, GCS write duration/conflicts, and cleanup failure
-counts before considering a shorter three-hour window.
+The initial rollout should explicitly configure the cleanup interval and batch size, then compare
+snapshot size, GCS write duration/conflicts, and cleanup failure counts. The six-hour TTL must not
+turn the accumulated seven-day backlog into an unpaced sequence of full-snapshot writes. Only after
+the backlog drains should operators consider a shorter three-hour window.
 
 ## Non-Goals
 

@@ -338,9 +338,9 @@ async fn canonical_preflight_publication_roundtrips_and_reuses_identical_content
     let object = first
         .try_object()
         .expect("created canonical preflight object");
-    assert!(
-        transport.contains(&store.canonical_preflight_content_name(&key, &object.content_hash)?)?
-    );
+    let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
+    assert!(content_name.ends_with(".preflight.bincode"));
+    assert!(transport.contains(&content_name)?);
     Ok(())
 }
 

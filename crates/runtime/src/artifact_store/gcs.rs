@@ -359,7 +359,7 @@ impl GcsProofArtifactStore {
         hash: &str,
     ) -> Result<String> {
         Ok(format!(
-            "{}/content/{}.bin",
+            "{}/content/{}.preflight.bincode",
             self.canonical_preflight_base_name(key)?,
             encode_component(hash)
         ))

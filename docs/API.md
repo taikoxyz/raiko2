@@ -1256,6 +1256,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   Terminal roots use the configurable six-hour default in runtime state. Tombstones and unreferenced
   content use a minimum thirty-day object lifecycle, while active manifests must not be deleted by
   age and immutable content must remain available while any active manifest references it.
+- Canonical preflight cores are bincode-serialized into immutable `*.preflight.bincode` objects.
+  Their distinct suffix keeps preflight lifecycle policy separate from Boundless RISC0 program
+  `*.bin` objects.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and satisfies its task-identity payload contract. Proposal tasks accept a
   non-null `proof`, plus the complete Compressed SP1 tuple (`quote`, `input`, `uuid`, `extra_data`)

@@ -292,7 +292,7 @@ Use the existing runtime environment and namespace scope with a separate preflig
 
 ```text
 <scope>/preflights/v1/<key-hash>/manifest.manifest.json
-<scope>/preflights/v1/<key-hash>/content/<content-sha256>.bin
+<scope>/preflights/v1/<key-hash>/content/<content-sha256>.preflight.bincode
 ```
 
 The manifest contains the full key, content hash, schema version, and content-object identity. It is

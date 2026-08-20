@@ -18,15 +18,9 @@ Existing bucket lifecycle policy removes the unreachable old objects.
 
 ## Lifecycle Separation
 
-The distinct suffix permits independent lifecycle rules:
-
-- Boundless request input (`*.input`): one day.
-- Boundless RISC0 program (`*.bin`): thirty days.
-- Canonical preflight content (`*.preflight.bincode`): seven days.
-- Proof content (`*.proof.json`): one day after runtime ownership cleanup is deployed.
-
-Bucket lifecycle changes are operational follow-up work and are intentionally outside this code
-change.
+The distinct suffix permits an independent canonical preflight lifecycle rule without matching
+Boundless RISC0 program `*.bin` objects. Bucket lifecycle changes are operational follow-up work and
+are intentionally outside this code change.
 
 ## Verification
 

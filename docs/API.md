@@ -1187,6 +1187,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - `runtime.terminal_task_ttl_secs` controls how long terminal task metadata and its unreferenced proof
   artifacts remain eligible for reuse before background cleanup removes them. It defaults to `21600`
   (6 hours), must be greater than zero, and does not expire active tasks.
+- `runtime.cleanup_interval_secs` independently paces runtime retention passes and defaults to `30`.
+  `runtime.cleanup_batch_size` bounds each cleanup lane to `64` records by default and accepts values
+  from `1` through `1024`. Neither setting reuses queue maintenance timing.
 - `runtime.preflight_cache` accepts `"shared"` (default) or `"off"`. Shared mode enables the
   persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
   bypasses both layers and rebuilds preflight independently for each request; use it only as an

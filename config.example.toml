@@ -61,6 +61,9 @@ environment = "development"
 namespace = "raiko2-development"
 # Terminal tasks and their unreferenced proof artifacts are retained for six hours by default.
 terminal_task_ttl_secs = 21600
+# Runtime retention is paced independently from queue maintenance.
+cleanup_interval_secs = 30
+cleanup_batch_size = 64
 # Shared canonical preflight caching is enabled by default. Set this to "off" only as an
 # incident-response bypass; it disables both persistent cache access and local singleflight.
 preflight_cache = "shared"

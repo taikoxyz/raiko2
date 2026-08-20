@@ -309,6 +309,25 @@ pub struct ExpiredTaskCursor {
     pub task_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRetentionCursor {
+    pub state_key: String,
+}
+
+impl ArtifactRetentionCursor {
+    #[must_use]
+    pub fn from_record(record: &ProofArtifactRecord) -> Self {
+        Self {
+            state_key: artifact_record_key(
+                &record.network_pair,
+                record.pipeline_key,
+                record.route,
+                &record.proof_ref,
+            ),
+        }
+    }
+}
+
 /// Exact identity of one authoritative runtime-task lifetime.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskLifetime {
@@ -322,6 +341,12 @@ pub struct TerminalTaskRetentionPrepare {
     pub artifact_invalidations: Vec<ArtifactExpectation>,
     pub pending_publication_deletions: Vec<PendingPublicationExpectation>,
     pub skipped_tasks: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtifactRetentionPrepare {
+    pub artifact_invalidations: Vec<ArtifactExpectation>,
+    pub skipped_artifacts: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2143,6 +2168,90 @@ impl RuntimeManager {
                 .then_with(|| left.proof_ref.cmp(&right.proof_ref))
         });
         Ok(artifacts)
+    }
+
+    /// Lists a stable page of proof artifact records that currently have no usable runtime owner.
+    pub async fn list_reclaimable_proof_artifacts(
+        &self,
+        after: Option<&ArtifactRetentionCursor>,
+        limit: usize,
+    ) -> Result<Vec<ProofArtifactRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let state = self.state.read().await;
+        let mut artifacts = state
+            .artifacts
+            .iter()
+            .filter(|(key, record)| {
+                after.is_none_or(|cursor| key.as_str() > cursor.state_key.as_str())
+                    && !artifact_has_usable_owner(&state, record)
+            })
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        artifacts.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        artifacts.truncate(limit);
+        Ok(artifacts.into_iter().map(|(_, record)| record).collect())
+    }
+
+    /// Exact-matches reclaimable artifact snapshots and durably marks them invalidated.
+    pub async fn prepare_artifact_retention_batch(
+        &self,
+        expected_artifacts: &[ProofArtifactRecord],
+    ) -> Result<ArtifactRetentionPrepare> {
+        if expected_artifacts.is_empty() {
+            return Ok(ArtifactRetentionPrepare::default());
+        }
+        anyhow::ensure!(
+            expected_artifacts
+                .iter()
+                .map(|record| {
+                    artifact_record_key(
+                        &record.network_pair,
+                        record.pipeline_key,
+                        record.route,
+                        &record.proof_ref,
+                    )
+                })
+                .collect::<HashSet<_>>()
+                .len()
+                == expected_artifacts.len(),
+            "artifact retention batch contains duplicate artifact keys"
+        );
+        let expected_artifacts = expected_artifacts.to_vec();
+        let invalidated_at = now_ts();
+        self.mutate(move |state| {
+            let mut prepared = ArtifactRetentionPrepare::default();
+            for expected in &expected_artifacts {
+                let key = artifact_record_key(
+                    &expected.network_pair,
+                    expected.pipeline_key,
+                    expected.route,
+                    &expected.proof_ref,
+                );
+                if !state
+                    .artifacts
+                    .get(&key)
+                    .is_some_and(|current| current == expected)
+                    || artifact_has_usable_owner(state, expected)
+                {
+                    prepared.skipped_artifacts = prepared.skipped_artifacts.saturating_add(1);
+                    continue;
+                }
+                let artifact = state
+                    .artifacts
+                    .get_mut(&key)
+                    .context("retention artifact disappeared during preparation")?;
+                if artifact.lifecycle != ProofArtifactLifecycle::Invalidated {
+                    artifact.lifecycle = ProofArtifactLifecycle::Invalidated;
+                    artifact.invalidated_at = Some(invalidated_at);
+                    artifact.updated_at = invalidated_at;
+                }
+                prepared.artifact_invalidations.push(artifact.expectation());
+            }
+            Ok(prepared)
+        })
+        .await
     }
 
     pub async fn remove_proof_artifact_if_descriptor(
@@ -3993,6 +4102,23 @@ fn artifact_task_records(
         })
         .cloned()
         .collect()
+}
+
+fn artifact_has_usable_owner(state: &RuntimeState, record: &ProofArtifactRecord) -> bool {
+    artifact_task_records(
+        state,
+        &record.network_pair,
+        record.pipeline_key,
+        record.route,
+        &record.proof_ref,
+    )
+    .iter()
+    .any(|task| {
+        !matches!(
+            task.runner_status,
+            RunnerStatus::Failed | RunnerStatus::Cancelled
+        )
+    })
 }
 
 fn encoded_runtime_state_len(state: &RuntimeState) -> usize {
@@ -6103,6 +6229,74 @@ mod tests {
                 .is_none()
         );
         assert_eq!(runtime.runtime_state_stats().await.pending_publications, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_retention_selects_and_invalidates_legacy_orphan() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".into(), "artifact-retention-orphan".into())?;
+        register_retention_task(
+            &runtime,
+            "legacy-root",
+            &["legacy-proof"],
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        register_retention_artifact(&runtime, "legacy-proof").await?;
+        runtime
+            .mutate(|state| {
+                state.tasks.remove("legacy-root");
+                Ok(())
+            })
+            .await?;
+
+        let candidates = runtime.list_reclaimable_proof_artifacts(None, 64).await?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].proof_ref, "legacy-proof");
+        assert_eq!(candidates[0].lifecycle, ProofArtifactLifecycle::Active);
+
+        let prepared = runtime
+            .prepare_artifact_retention_batch(&candidates)
+            .await?;
+        assert_eq!(prepared.skipped_artifacts, 0);
+        assert_eq!(prepared.artifact_invalidations.len(), 1);
+        assert_eq!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    "l1-l2",
+                    PipelineKey::ShastaNative,
+                    PipelineKey::ShastaNative.route(),
+                    "legacy-proof",
+                )
+                .await?
+                .context("invalidated legacy artifact")?
+                .lifecycle,
+            ProofArtifactLifecycle::Invalidated
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_retention_skips_artifact_with_usable_owner() -> Result<()> {
+        let runtime = RuntimeManager::new_memory("test".into(), "artifact-retention-owner".into())?;
+        register_retention_task(
+            &runtime,
+            "live-root",
+            &["shared-proof"],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        register_retention_artifact(&runtime, "shared-proof").await?;
+
+        assert!(
+            runtime
+                .list_reclaimable_proof_artifacts(None, 64)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 

@@ -4,8 +4,9 @@ use anyhow::{Result, bail};
 use raiko2_engine::EngineExecutionPlan;
 use raiko2_queue::{DetachMode, DetachOutcome, RootOwner};
 use raiko2_runtime::{
-    ArtifactExpectation, PendingPublicationExpectation, ProofArtifactPrecondition, RunnerStatus,
-    RuntimeManager, RuntimeMutationOutcome, RuntimeTaskRecord, TaskRegistration,
+    ArtifactExpectation, PendingPublicationExpectation, ProofArtifactPrecondition,
+    ProofArtifactRecord, RunnerStatus, RuntimeManager, RuntimeMutationOutcome, RuntimeTaskRecord,
+    TaskRegistration,
 };
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -40,6 +41,13 @@ pub(crate) struct TerminalRetentionBatchOutcome {
     pub retained_artifact_failures: usize,
     pub removed_pending_publications: usize,
     pub retained_pending_publication_failures: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ArtifactRetentionBatchOutcome {
+    pub invalidated_artifacts: usize,
+    pub removed_artifacts: usize,
+    pub retained_artifact_failures: usize,
 }
 
 #[derive(Debug, Default)]
@@ -429,6 +437,38 @@ impl ProofLifecycle {
         outcome.retained_pending_publication_failures = outcome
             .retained_pending_publication_failures
             .saturating_add(finalized.skipped_pending_publications);
+        Ok(outcome)
+    }
+
+    pub(crate) async fn remove_artifact_retention_batch(
+        &self,
+        records: &[ProofArtifactRecord],
+    ) -> Result<ArtifactRetentionBatchOutcome> {
+        let prepared = self
+            .runtime
+            .prepare_artifact_retention_batch(records)
+            .await?;
+        let mut outcome = ArtifactRetentionBatchOutcome {
+            invalidated_artifacts: prepared.artifact_invalidations.len(),
+            ..ArtifactRetentionBatchOutcome::default()
+        };
+        let artifact_batch = finalize_terminal_retention_artifacts(
+            Arc::clone(&self.runtime),
+            prepared.artifact_invalidations,
+        )
+        .await;
+        outcome.retained_artifact_failures = artifact_batch.failures;
+        if artifact_batch.finalized.is_empty() {
+            return Ok(outcome);
+        }
+        let finalized = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&[], &artifact_batch.finalized, &[])
+            .await?;
+        outcome.removed_artifacts = finalized.removed_artifacts.len();
+        outcome.retained_artifact_failures = outcome
+            .retained_artifact_failures
+            .saturating_add(finalized.skipped_artifacts);
         Ok(outcome)
     }
 

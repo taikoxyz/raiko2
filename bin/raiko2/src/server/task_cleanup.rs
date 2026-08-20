@@ -132,15 +132,31 @@ pub(crate) async fn run_runtime_cleanup_pass(
         ..RuntimeCleanupStats::default()
     };
 
+    let artifact_records = runtime
+        .list_reclaimable_proof_artifacts(None, RUNTIME_CLEANUP_BATCH_SIZE)
+        .await?;
+    let artifact_cleanup = lifecycle
+        .remove_artifact_retention_batch(&artifact_records)
+        .await?;
+    stats.invalidated_artifacts = artifact_cleanup.invalidated_artifacts;
+    stats.removed_artifacts = artifact_cleanup.removed_artifacts;
+    stats.retained_artifact_failures = artifact_cleanup.retained_artifact_failures;
+
     let cleanup = lifecycle.remove_terminal_retention_batch(&records).await?;
     stats.retired_roots = cleanup.retired_roots;
     stats.skipped_roots = cleanup.skipped_roots;
     stats.removed_roots = cleanup.removed_roots;
     stats.skipped_shared_children = cleanup.skipped_shared_children;
     stats.retained_failures = cleanup.retained_root_failures;
-    stats.invalidated_artifacts = cleanup.invalidated_artifacts;
-    stats.removed_artifacts = cleanup.removed_artifacts;
-    stats.retained_artifact_failures = cleanup.retained_artifact_failures;
+    stats.invalidated_artifacts = stats
+        .invalidated_artifacts
+        .saturating_add(cleanup.invalidated_artifacts);
+    stats.removed_artifacts = stats
+        .removed_artifacts
+        .saturating_add(cleanup.removed_artifacts);
+    stats.retained_artifact_failures = stats
+        .retained_artifact_failures
+        .saturating_add(cleanup.retained_artifact_failures);
     stats.removed_pending_publications = cleanup.removed_pending_publications;
     stats.retained_pending_publication_failures = cleanup.retained_pending_publication_failures;
 
@@ -1063,6 +1079,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_orphan_artifact_is_reclaimed_without_terminal_roots() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("legacy-orphan"))?);
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        register_runtime_task(
+            runtime.as_ref(),
+            "legacy-root",
+            &encoded_proposal_task_id(47)?,
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        let root = runtime
+            .get_task("legacy-root")
+            .await?
+            .context("legacy root")?;
+        let proof_ref = root
+            .artifact_refs
+            .first()
+            .context("legacy proof reference")?;
+        let artifact = register_runtime_proof_artifact(runtime.as_ref(), &root, proof_ref).await?;
+        assert!(matches!(
+            runtime.retire_task_if_unchanged(&root, None).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+        let retired = runtime
+            .get_task("legacy-root")
+            .await?
+            .context("retired legacy root")?;
+        assert!(matches!(
+            runtime.remove_task_if_current(&retired.lifetime()).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+
+        assert_eq!(stats.scanned, 0);
+        assert_eq!(stats.invalidated_artifacts, 1);
+        assert_eq!(stats.removed_artifacts, 1);
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &root.network_pair,
+                    root.pipeline_key,
+                    root.route,
+                    proof_ref,
+                )
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .proof_artifact_descriptor_is_invalidated(
+                    &root.network_pair,
+                    root.pipeline_key,
+                    root.route,
+                    proof_ref,
+                    &artifact.descriptor(),
+                )
+                .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_cleanup_retains_failed_artifact_without_retaining_root() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::with_store(Arc::new(
             FailOnceInvalidationStore::new()?,
@@ -1141,7 +1231,10 @@ mod tests {
             .get_task("artifact-root")
             .await?
             .context("artifact root")?;
-        let plain_root = runtime.get_task("plain-root").await?.context("plain root")?;
+        let plain_root = runtime
+            .get_task("plain-root")
+            .await?
+            .context("plain root")?;
         let original_incarnation = artifact_root.incarnation_id;
         let proof_ref = artifact_root
             .artifact_refs
@@ -1149,12 +1242,9 @@ mod tests {
             .context("artifact proof reference")?;
         register_runtime_proof_artifact(runtime.as_ref(), &artifact_root, proof_ref).await?;
 
-        let cleanup = crate::server::lifecycle::ProofLifecycle::new(
-            Arc::clone(&runtime),
-            factory,
-        )
-        .remove_terminal_retention_batch(&[artifact_root.clone(), plain_root])
-        .await?;
+        let cleanup = crate::server::lifecycle::ProofLifecycle::new(Arc::clone(&runtime), factory)
+            .remove_terminal_retention_batch(&[artifact_root.clone(), plain_root])
+            .await?;
 
         assert_eq!(cleanup.removed_roots, 2);
         assert_eq!(cleanup.retained_root_failures, 0);

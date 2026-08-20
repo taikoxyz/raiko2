@@ -2510,8 +2510,10 @@ impl RuntimeManager {
                 .artifacts
                 .get_mut(&state_key)
                 .context("stale invalidated artifact disappeared during refresh")?;
-            current.proof_uri = current_descriptor.proof_uri.clone();
-            current.content_hash = current_descriptor.content_hash.clone();
+            current.proof_uri.clone_from(&current_descriptor.proof_uri);
+            current
+                .content_hash
+                .clone_from(&current_descriptor.content_hash);
             current.generation = current_descriptor.generation;
             current.lifecycle = ProofArtifactLifecycle::Invalidated;
             current.invalidated_at.get_or_insert_with(now_ts);
@@ -3054,153 +3056,198 @@ impl RuntimeManager {
             key.route,
             &key.proof_ref,
         );
+        if !self
+            .validate_pending_publication_retention_candidate(expectation, &state_key)
+            .await?
         {
-            let state = self.state.read().await;
-            let Some(current) = state.pending_publications.get(&state_key) else {
-                return Ok(PendingPublicationRetentionFinalization {
-                    pending_deletion: ProofArtifactDeleteResult::Missing,
-                    artifact_invalidation: None,
-                });
-            };
-            anyhow::ensure!(
-                current.expectation() == *expectation,
-                "pending proof publication changed before retention finalization"
-            );
-            anyhow::ensure!(
-                !pending_publication_has_live_owner(
-                    &state,
-                    &state_key,
-                    &key.network_pair,
-                    key.pipeline_key,
-                    key.route,
-                    &key.proof_ref,
-                ),
-                "pending proof publication gained a live owner before retention finalization"
-            );
+            return Ok(PendingPublicationRetentionFinalization {
+                pending_deletion: ProofArtifactDeleteResult::Missing,
+                artifact_invalidation: None,
+            });
         }
+        let artifact_invalidation = self
+            .invalidate_pending_canonical_for_retention(expectation, &state_key)
+            .await?;
+        self.validate_pending_publication_before_object_deletion(expectation, &state_key)
+            .await?;
+        let pending_deletion = self.delete_pending_publication_object(expectation).await?;
+        Ok(PendingPublicationRetentionFinalization {
+            pending_deletion,
+            artifact_invalidation,
+        })
+    }
 
-        let canonical = self.store.get_descriptor(key).await?;
-        let artifact_invalidation = if let Some(descriptor) = canonical {
-            let should_invalidate = {
-                let state = self.state.read().await;
-                let artifact = state.artifacts.get(&state_key);
-                let has_live_task = artifact_task_records(
-                    &state,
-                    &key.network_pair,
-                    key.pipeline_key,
-                    key.route,
-                    &key.proof_ref,
-                )
-                .iter()
-                .any(|task| {
-                    !matches!(
-                        task.runner_status,
-                        RunnerStatus::Failed | RunnerStatus::Cancelled
-                    )
-                });
-                let canonical_has_lifecycle = |lifecycle| {
-                    artifact.is_some_and(|record| {
-                        record.descriptor() == descriptor && record.lifecycle == lifecycle
-                    })
-                };
-                !(has_live_task && canonical_has_lifecycle(ProofArtifactLifecycle::Active))
-                    && (canonical_has_lifecycle(ProofArtifactLifecycle::Invalidated)
-                        || expectation.content_hash == descriptor.content_hash
-                        || !has_live_task)
-            };
-            if should_invalidate {
-                let canonical_record = self
-                    .proof_artifact_record(
-                        ProofArtifactRegistration {
-                            network_pair: key.network_pair.clone(),
-                            proof_ref: key.proof_ref.clone(),
-                            pipeline_key: key.pipeline_key,
-                            route: key.route,
-                            proof_uri: descriptor.proof_uri.clone(),
-                            content_hash: descriptor.content_hash.clone(),
-                            generation: descriptor.generation,
-                        },
-                        ProofArtifactLifecycle::Invalidated,
-                    )
-                    .1;
-                let expected = expectation.clone();
-                let object_key = key.clone();
-                let state_key_for_mutation = state_key.clone();
-                let descriptor_for_mutation = descriptor.clone();
-                let (invalidate_canonical, recorded) = self
-                    .mutate(move |state| {
-                        let current = state
-                            .pending_publications
-                            .get(&state_key_for_mutation)
-                            .context("pending proof publication disappeared before invalidation")?;
-                        anyhow::ensure!(
-                            current.expectation() == expected,
-                            "pending proof publication changed before canonical invalidation"
-                        );
-                        let invalidated = mark_unowned_pending_publication_invalidated(
-                            state,
-                            &object_key,
-                            Some(&canonical_record),
-                        );
-                        anyhow::ensure!(
-                            invalidated.is_some(),
-                            "pending proof publication gained a live owner before canonical invalidation"
-                        );
-                        let invalidate_canonical =
-                            invalidated.is_some_and(|invalidate| invalidate);
-                        let recorded = invalidate_canonical.then(|| {
-                            state
-                                .artifacts
-                                .get(&state_key_for_mutation)
-                                .filter(|record| {
-                                    record.descriptor() == descriptor_for_mutation
-                                })
-                                .map(ProofArtifactRecord::expectation)
-                        });
-                        Ok((invalidate_canonical, recorded.flatten()))
-                    })
-                    .await?;
-                if invalidate_canonical {
-                    self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
-                        key: key.clone(),
-                        descriptor,
-                        lifecycle: ProofArtifactLifecycle::Invalidated,
-                    })
-                    .await?;
-                    recorded
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
+    async fn validate_pending_publication_retention_candidate(
+        &self,
+        expectation: &PendingPublicationExpectation,
+        state_key: &str,
+    ) -> Result<bool> {
+        let key = &expectation.key;
+        let state = self.state.read().await;
+        let Some(current) = state.pending_publications.get(state_key) else {
+            return Ok(false);
         };
+        anyhow::ensure!(
+            current.expectation() == *expectation,
+            "pending proof publication changed before retention finalization"
+        );
+        anyhow::ensure!(
+            !pending_publication_has_live_owner(
+                &state,
+                state_key,
+                &key.network_pair,
+                key.pipeline_key,
+                key.route,
+                &key.proof_ref,
+            ),
+            "pending proof publication gained a live owner before retention finalization"
+        );
+        Ok(true)
+    }
 
+    async fn invalidate_pending_canonical_for_retention(
+        &self,
+        expectation: &PendingPublicationExpectation,
+        state_key: &str,
+    ) -> Result<Option<ArtifactExpectation>> {
+        let key = &expectation.key;
+        let Some(descriptor) = self.store.get_descriptor(key).await? else {
+            return Ok(None);
+        };
+        if !self
+            .should_invalidate_pending_canonical(expectation, state_key, &descriptor)
+            .await
         {
-            let state = self.state.read().await;
-            let current = state
-                .pending_publications
-                .get(&state_key)
-                .context("pending proof publication disappeared before object deletion")?;
-            anyhow::ensure!(
-                current.expectation() == *expectation,
-                "pending proof publication changed before object deletion"
-            );
-            anyhow::ensure!(
-                !pending_publication_has_live_owner(
-                    &state,
-                    &state_key,
-                    &key.network_pair,
-                    key.pipeline_key,
-                    key.route,
-                    &key.proof_ref,
-                ),
-                "pending proof publication gained a live owner before object deletion"
-            );
+            return Ok(None);
         }
+        let canonical_record = self
+            .proof_artifact_record(
+                ProofArtifactRegistration {
+                    network_pair: key.network_pair.clone(),
+                    proof_ref: key.proof_ref.clone(),
+                    pipeline_key: key.pipeline_key,
+                    route: key.route,
+                    proof_uri: descriptor.proof_uri.clone(),
+                    content_hash: descriptor.content_hash.clone(),
+                    generation: descriptor.generation,
+                },
+                ProofArtifactLifecycle::Invalidated,
+            )
+            .1;
+        let expected = expectation.clone();
+        let object_key = key.clone();
+        let state_key_for_mutation = state_key.to_owned();
+        let descriptor_for_mutation = descriptor.clone();
+        let (invalidate_canonical, recorded) = self
+            .mutate(move |state| {
+                let current = state
+                    .pending_publications
+                    .get(&state_key_for_mutation)
+                    .context("pending proof publication disappeared before invalidation")?;
+                anyhow::ensure!(
+                    current.expectation() == expected,
+                    "pending proof publication changed before canonical invalidation"
+                );
+                let invalidated = mark_unowned_pending_publication_invalidated(
+                    state,
+                    &object_key,
+                    Some(&canonical_record),
+                );
+                anyhow::ensure!(
+                    invalidated.is_some(),
+                    "pending proof publication gained a live owner before canonical invalidation"
+                );
+                let invalidate_canonical = invalidated.is_some_and(|invalidate| invalidate);
+                let recorded = invalidate_canonical.then(|| {
+                    state
+                        .artifacts
+                        .get(&state_key_for_mutation)
+                        .filter(|record| record.descriptor() == descriptor_for_mutation)
+                        .map(ProofArtifactRecord::expectation)
+                });
+                Ok((invalidate_canonical, recorded.flatten()))
+            })
+            .await?;
+        if !invalidate_canonical {
+            return Ok(None);
+        }
+        self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
+            key: key.clone(),
+            descriptor,
+            lifecycle: ProofArtifactLifecycle::Invalidated,
+        })
+        .await?;
+        Ok(recorded)
+    }
 
+    async fn should_invalidate_pending_canonical(
+        &self,
+        expectation: &PendingPublicationExpectation,
+        state_key: &str,
+        descriptor: &ProofArtifactDescriptor,
+    ) -> bool {
+        let key = &expectation.key;
+        let state = self.state.read().await;
+        let artifact = state.artifacts.get(state_key);
+        let has_live_task = artifact_task_records(
+            &state,
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        )
+        .iter()
+        .any(|task| {
+            !matches!(
+                task.runner_status,
+                RunnerStatus::Failed | RunnerStatus::Cancelled
+            )
+        });
+        let canonical_has_lifecycle = |lifecycle| {
+            artifact.is_some_and(|record| {
+                record.descriptor() == *descriptor && record.lifecycle == lifecycle
+            })
+        };
+        !(has_live_task && canonical_has_lifecycle(ProofArtifactLifecycle::Active))
+            && (canonical_has_lifecycle(ProofArtifactLifecycle::Invalidated)
+                || expectation.content_hash == descriptor.content_hash
+                || !has_live_task)
+    }
+
+    async fn validate_pending_publication_before_object_deletion(
+        &self,
+        expectation: &PendingPublicationExpectation,
+        state_key: &str,
+    ) -> Result<()> {
+        let key = &expectation.key;
+        let state = self.state.read().await;
+        let current = state
+            .pending_publications
+            .get(state_key)
+            .context("pending proof publication disappeared before object deletion")?;
+        anyhow::ensure!(
+            current.expectation() == *expectation,
+            "pending proof publication changed before object deletion"
+        );
+        anyhow::ensure!(
+            !pending_publication_has_live_owner(
+                &state,
+                state_key,
+                &key.network_pair,
+                key.pipeline_key,
+                key.route,
+                &key.proof_ref,
+            ),
+            "pending proof publication gained a live owner before object deletion"
+        );
+        Ok(())
+    }
+
+    async fn delete_pending_publication_object(
+        &self,
+        expectation: &PendingPublicationExpectation,
+    ) -> Result<ProofArtifactDeleteResult> {
+        let key = &expectation.key;
         let pending_key = Self::pending_artifact_key(
             &key.network_pair,
             key.pipeline_key,
@@ -3208,21 +3255,14 @@ impl RuntimeManager {
             &key.proof_ref,
         );
         let Some(descriptor) = self.store.get_descriptor(&pending_key).await? else {
-            return Ok(PendingPublicationRetentionFinalization {
-                pending_deletion: ProofArtifactDeleteResult::Missing,
-                artifact_invalidation,
-            });
+            return Ok(ProofArtifactDeleteResult::Missing);
         };
         anyhow::ensure!(
             descriptor.content_hash == expectation.content_hash,
             "pending proof object changed before retention finalization"
         );
         let _commit = self.begin_object_commit()?;
-        let pending_deletion = self.store.delete_exact(&pending_key, &descriptor).await?;
-        Ok(PendingPublicationRetentionFinalization {
-            pending_deletion,
-            artifact_invalidation,
-        })
+        self.store.delete_exact(&pending_key, &descriptor).await
     }
 
     async fn remove_pending_proof_publication_if_unowned_locked(

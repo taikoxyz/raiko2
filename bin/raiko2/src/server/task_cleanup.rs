@@ -69,6 +69,7 @@ where
         self.queue.len()
     }
 
+    #[cfg(test)]
     fn is_deduplicated(&self) -> bool {
         self.queue.len() == self.identities.len()
             && self.queue.iter().all(|item| self.identities.contains(item))
@@ -155,6 +156,13 @@ pub(crate) struct RuntimeCleanupStats {
     pub removed_pending_publications: usize,
     pub retained_pending_publication_failures: usize,
     pub orphaned_cancelled: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RetentionLaneCleanupSummary {
+    attempts: usize,
+    removed: usize,
+    retries: usize,
 }
 
 impl RuntimeCleanupStats {
@@ -252,77 +260,125 @@ pub(crate) async fn run_runtime_cleanup_pass(
         orphaned_cancelled,
         ..RuntimeCleanupStats::default()
     };
-
-    let artifact_records =
-        select_artifact_retention_batch(runtime.as_ref(), batch_size, &mut cleanup_state.artifacts)
-            .await?;
-    let artifact_cleanup = lifecycle
-        .remove_artifact_retention_batch(&artifact_records)
-        .await?;
-    for key in artifact_cleanup.retry_artifacts.iter().cloned() {
-        cleanup_state.artifacts.retries.enqueue(key);
-    }
-    stats.invalidated_artifacts = artifact_cleanup.invalidated_artifacts;
-    stats.removed_artifacts = artifact_cleanup.removed_artifacts;
-    stats.retained_artifact_failures = artifact_cleanup.retained_artifact_failures;
-
-    let pending_publications =
-        select_pending_retention_batch(runtime.as_ref(), batch_size, &mut cleanup_state.pending)
-            .await?;
-    let pending_cleanup = lifecycle
-        .remove_pending_retention_batch(&pending_publications)
-        .await?;
-    for key in pending_cleanup.retry_pending_publications.iter().cloned() {
-        cleanup_state.pending.retries.enqueue(key);
-    }
-    crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
-        "pending",
-        cleanup_state.pending.retries.len(),
-        cleanup_state.pending.last_fresh_attempts,
-        cleanup_state.pending.last_retry_attempts,
-        pending_cleanup.removed_pending_publications,
-        pending_cleanup.retry_pending_publications.len(),
-        pending_publications.len().saturating_sub(
-            pending_cleanup.removed_pending_publications
-                + pending_cleanup.retry_pending_publications.len(),
-        ),
-    );
-    stats.invalidated_artifacts = stats
-        .invalidated_artifacts
-        .saturating_add(pending_cleanup.invalidated_artifacts);
-    stats.removed_artifacts = stats
-        .removed_artifacts
-        .saturating_add(pending_cleanup.removed_artifacts);
-    stats.retained_artifact_failures = stats
-        .retained_artifact_failures
-        .saturating_add(pending_cleanup.retained_artifact_failures);
-    stats.removed_pending_publications = pending_cleanup.removed_pending_publications;
-    stats.retained_pending_publication_failures =
-        pending_cleanup.retained_pending_publication_failures;
-
-    let cleanup = lifecycle.remove_terminal_retention_batch(&records).await?;
-    for lifetime in cleanup.retry_roots.iter().cloned() {
-        cleanup_state.roots.retries.enqueue(lifetime);
-    }
-    for key in cleanup.retry_artifacts.iter().cloned() {
-        cleanup_state.artifacts.retries.enqueue(key);
-    }
+    let artifact_summary = run_artifact_retention_lane(
+        &lifecycle,
+        runtime.as_ref(),
+        batch_size,
+        &mut cleanup_state.artifacts,
+        &mut stats,
+    )
+    .await?;
+    run_pending_retention_lane(
+        &lifecycle,
+        runtime.as_ref(),
+        batch_size,
+        &mut cleanup_state.pending,
+        &mut stats,
+    )
+    .await?;
+    run_root_retention_lane(
+        &lifecycle,
+        &records,
+        &mut cleanup_state.roots,
+        &mut cleanup_state.artifacts,
+        &mut stats,
+    )
+    .await?;
     crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
         "artifact",
         cleanup_state.artifacts.retries.len(),
         cleanup_state.artifacts.last_fresh_attempts,
         cleanup_state.artifacts.last_retry_attempts,
-        artifact_cleanup.removed_artifacts,
-        artifact_cleanup.retry_artifacts.len(),
-        artifact_records.len().saturating_sub(
-            artifact_cleanup.removed_artifacts + artifact_cleanup.retry_artifacts.len(),
+        artifact_summary.removed,
+        artifact_summary.retries,
+        artifact_summary
+            .attempts
+            .saturating_sub(artifact_summary.removed + artifact_summary.retries),
+    );
+    crate::server::telemetry::record_runtime_cleanup_stats(&stats);
+    crate::server::telemetry::record_runtime_state_stats(runtime.runtime_state_stats().await);
+
+    Ok(stats)
+}
+
+async fn run_artifact_retention_lane(
+    lifecycle: &ProofLifecycle,
+    runtime: &RuntimeManager,
+    batch_size: usize,
+    lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
+    stats: &mut RuntimeCleanupStats,
+) -> Result<RetentionLaneCleanupSummary> {
+    let records = select_artifact_retention_batch(runtime, batch_size, lane).await?;
+    let cleanup = lifecycle.remove_artifact_retention_batch(&records).await?;
+    for key in cleanup.retry_artifacts.iter().cloned() {
+        lane.retries.enqueue(key);
+    }
+    stats.invalidated_artifacts = cleanup.invalidated_artifacts;
+    stats.removed_artifacts = cleanup.removed_artifacts;
+    stats.retained_artifact_failures = cleanup.retained_artifact_failures;
+    Ok(RetentionLaneCleanupSummary {
+        attempts: records.len(),
+        removed: cleanup.removed_artifacts,
+        retries: cleanup.retry_artifacts.len(),
+    })
+}
+
+async fn run_pending_retention_lane(
+    lifecycle: &ProofLifecycle,
+    runtime: &RuntimeManager,
+    batch_size: usize,
+    lane: &mut RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
+    stats: &mut RuntimeCleanupStats,
+) -> Result<()> {
+    let records = select_pending_retention_batch(runtime, batch_size, lane).await?;
+    let cleanup = lifecycle.remove_pending_retention_batch(&records).await?;
+    for key in cleanup.retry_pending_publications.iter().cloned() {
+        lane.retries.enqueue(key);
+    }
+    crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
+        "pending",
+        lane.retries.len(),
+        lane.last_fresh_attempts,
+        lane.last_retry_attempts,
+        cleanup.removed_pending_publications,
+        cleanup.retry_pending_publications.len(),
+        records.len().saturating_sub(
+            cleanup.removed_pending_publications + cleanup.retry_pending_publications.len(),
         ),
     );
+    stats.invalidated_artifacts = stats
+        .invalidated_artifacts
+        .saturating_add(cleanup.invalidated_artifacts);
+    stats.removed_artifacts = stats
+        .removed_artifacts
+        .saturating_add(cleanup.removed_artifacts);
+    stats.retained_artifact_failures = stats
+        .retained_artifact_failures
+        .saturating_add(cleanup.retained_artifact_failures);
+    stats.removed_pending_publications = cleanup.removed_pending_publications;
+    stats.retained_pending_publication_failures = cleanup.retained_pending_publication_failures;
+    Ok(())
+}
+
+async fn run_root_retention_lane(
+    lifecycle: &ProofLifecycle,
+    records: &[RuntimeTaskRecord],
+    root_lane: &mut RetentionLaneState<TaskLifetime, ExpiredTaskCursor>,
+    artifact_lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
+    stats: &mut RuntimeCleanupStats,
+) -> Result<()> {
+    let cleanup = lifecycle.remove_terminal_retention_batch(records).await?;
+    for lifetime in cleanup.retry_roots.iter().cloned() {
+        root_lane.retries.enqueue(lifetime);
+    }
+    for key in cleanup.retry_artifacts.iter().cloned() {
+        artifact_lane.retries.enqueue(key);
+    }
     crate::server::telemetry::record_runtime_cleanup_scheduler_lane(
         "root",
-        cleanup_state.roots.retries.len(),
-        cleanup_state.roots.last_fresh_attempts,
-        cleanup_state.roots.last_retry_attempts,
+        root_lane.retries.len(),
+        root_lane.last_fresh_attempts,
+        root_lane.last_retry_attempts,
         cleanup.removed_roots,
         cleanup.retry_roots.len(),
         records
@@ -343,10 +399,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
     stats.retained_artifact_failures = stats
         .retained_artifact_failures
         .saturating_add(cleanup.retained_artifact_failures);
-    crate::server::telemetry::record_runtime_cleanup_stats(&stats);
-    crate::server::telemetry::record_runtime_state_stats(runtime.runtime_state_stats().await);
-
-    Ok(stats)
+    Ok(())
 }
 
 async fn select_root_retention_batch(

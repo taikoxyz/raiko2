@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cleanup_retries_failed_artifact_invalidation() -> Result<()> {
+    async fn runtime_cleanup_retains_failed_artifact_without_retaining_root() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::with_store(Arc::new(
             FailOnceInvalidationStore::new()?,
         )));
@@ -1097,37 +1097,9 @@ mod tests {
             &mut terminal_cursor,
         )
         .await?;
-        assert_eq!(first.removed_roots, 0);
-        assert_eq!(first.retained_failures, 1);
-        assert_eq!(
-            runtime
-                .get_task("expired-root")
-                .await?
-                .context("retained runtime root")?
-                .runner_status,
-            RunnerStatus::Cancelled
-        );
-
-        let empty_page = run_runtime_cleanup_pass(
-            runtime.clone(),
-            factory.clone(),
-            7_200,
-            7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
-        )
-        .await?;
-        assert_eq!(empty_page, RuntimeCleanupStats::default());
-        let retry = run_runtime_cleanup_pass(
-            runtime.clone(),
-            factory,
-            7_200,
-            7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
-        )
-        .await?;
-        assert_eq!(retry.removed_roots, 1);
+        assert_eq!(first.removed_roots, 1);
+        assert_eq!(first.retained_failures, 0);
+        assert_eq!(first.retained_artifact_failures, 1);
         assert!(runtime.get_task("expired-root").await?.is_none());
         assert!(
             runtime
@@ -1138,7 +1110,84 @@ mod tests {
                     proof_ref,
                 )
                 .await?
-                .is_none()
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_failure_does_not_retain_detached_roots() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::with_store(Arc::new(
+            FailOnceInvalidationStore::new()?,
+        )));
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        register_runtime_task(
+            runtime.as_ref(),
+            "artifact-root",
+            &encoded_proposal_task_id(45)?,
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "plain-root",
+            &encoded_proposal_task_id(46)?,
+            RunnerStatus::Completed,
+            2,
+        )
+        .await?;
+        let artifact_root = runtime
+            .get_task("artifact-root")
+            .await?
+            .context("artifact root")?;
+        let plain_root = runtime.get_task("plain-root").await?.context("plain root")?;
+        let original_incarnation = artifact_root.incarnation_id;
+        let proof_ref = artifact_root
+            .artifact_refs
+            .first()
+            .context("artifact proof reference")?;
+        register_runtime_proof_artifact(runtime.as_ref(), &artifact_root, proof_ref).await?;
+
+        let cleanup = crate::server::lifecycle::ProofLifecycle::new(
+            Arc::clone(&runtime),
+            factory,
+        )
+        .remove_terminal_retention_batch(&[artifact_root.clone(), plain_root])
+        .await?;
+
+        assert_eq!(cleanup.removed_roots, 2);
+        assert_eq!(cleanup.retained_root_failures, 0);
+        assert_eq!(cleanup.retained_artifact_failures, 1);
+        assert!(runtime.get_task("artifact-root").await?.is_none());
+        assert!(runtime.get_task("plain-root").await?.is_none());
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &artifact_root.network_pair,
+                    artifact_root.pipeline_key,
+                    artifact_root.route,
+                    proof_ref,
+                )
+                .await?
+                .is_some()
+        );
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "artifact-root",
+            &encoded_proposal_task_id(45)?,
+            RunnerStatus::Running,
+            now_ts(),
+        )
+        .await?;
+        assert_ne!(
+            runtime
+                .get_task("artifact-root")
+                .await?
+                .context("replacement artifact root")?
+                .incarnation_id,
+            original_incarnation
         );
         Ok(())
     }
@@ -1188,7 +1237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cleanup_retries_failed_pending_publication_deletion() -> Result<()> {
+    async fn runtime_cleanup_retains_failed_pending_without_retaining_root() -> Result<()> {
         let store = Arc::new(FailOnceInvalidationStore::pending_delete_failure()?);
         let runtime = Arc::new(RuntimeManager::with_store(store));
         let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
@@ -1237,8 +1286,8 @@ mod tests {
             &mut terminal_cursor,
         )
         .await?;
-        assert_eq!(first.removed_roots, 0);
-        assert_eq!(first.retained_failures, 1);
+        assert_eq!(first.removed_roots, 1);
+        assert_eq!(first.retained_failures, 0);
         assert_eq!(first.retained_pending_publication_failures, 1);
         assert!(
             runtime
@@ -1252,41 +1301,7 @@ mod tests {
                 .is_some()
         );
 
-        assert_eq!(
-            run_runtime_cleanup_pass(
-                runtime.clone(),
-                factory.clone(),
-                7_200,
-                7_200,
-                &mut orphan_cursor,
-                &mut terminal_cursor,
-            )
-            .await?,
-            RuntimeCleanupStats::default()
-        );
-        let retry = run_runtime_cleanup_pass(
-            runtime.clone(),
-            factory,
-            7_200,
-            7_200,
-            &mut orphan_cursor,
-            &mut terminal_cursor,
-        )
-        .await?;
-        assert_eq!(retry.removed_roots, 1);
-        assert_eq!(retry.removed_pending_publications, 1);
         assert!(runtime.get_task("pending-root").await?.is_none());
-        assert!(
-            runtime
-                .get_pending_proof_publication(
-                    &terminal.network_pair,
-                    terminal.pipeline_key,
-                    terminal.route,
-                    &proof_ref,
-                )
-                .await?
-                .is_none()
-        );
         Ok(())
     }
 
@@ -1306,26 +1321,6 @@ mod tests {
             )
             .await?;
         }
-        let pending_owner = runtime
-            .get_task("expired-20")
-            .await?
-            .context("pending retention owner")?;
-        let pending_ref = pending_owner
-            .artifact_refs
-            .first()
-            .context("pending retention proof reference")?;
-        assert!(
-            runtime
-                .checkpoint_pending_proof_publication(
-                    &pending_owner.network_pair,
-                    pending_owner.pipeline_key,
-                    pending_owner.route,
-                    pending_ref,
-                    &[pending_owner.incarnation_id],
-                    b"pending-retention-proof",
-                )
-                .await?
-        );
         let writes_before = store.runtime_state_writes.load(Ordering::Acquire);
 
         let mut orphan_cursor = None;
@@ -1342,7 +1337,6 @@ mod tests {
 
         let writes_after = store.runtime_state_writes.load(Ordering::Acquire);
         assert_eq!(stats.removed_roots, 3);
-        assert_eq!(stats.removed_pending_publications, 1);
         assert_eq!(writes_after - writes_before, 2);
         Ok(())
     }

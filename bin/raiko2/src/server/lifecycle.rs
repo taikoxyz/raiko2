@@ -391,6 +391,14 @@ impl ProofLifecycle {
                 }
             }
         }
+        let finalized_roots = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&detached_tasks, &[], &[])
+            .await?;
+        outcome.removed_roots = finalized_roots.removed_tasks.len();
+        outcome.retained_root_failures = outcome
+            .retained_root_failures
+            .saturating_add(finalized_roots.skipped_tasks);
         drop(lifecycle_gate_guard);
 
         let (artifact_batch, pending_batch) = finalize_terminal_retention_external(
@@ -402,35 +410,18 @@ impl ProofLifecycle {
         outcome.retained_artifact_failures = artifact_batch.failures;
         outcome.retained_pending_publication_failures = pending_batch.failures;
 
-        let removable_tasks = if outcome.retained_artifact_failures == 0
-            && outcome.retained_pending_publication_failures == 0
-        {
-            detached_tasks
-        } else {
-            outcome.retained_root_failures = outcome
-                .retained_root_failures
-                .saturating_add(detached_tasks.len());
-            Vec::new()
-        };
-        if removable_tasks.is_empty()
-            && artifact_batch.finalized.is_empty()
-            && pending_batch.finalized.is_empty()
-        {
+        if artifact_batch.finalized.is_empty() && pending_batch.finalized.is_empty() {
             return Ok(outcome);
         }
         let finalized = self
             .runtime
             .finalize_terminal_task_retention_batch(
-                &removable_tasks,
+                &[],
                 &artifact_batch.finalized,
                 &pending_batch.finalized,
             )
             .await?;
-        outcome.removed_roots = finalized.removed_tasks.len();
         outcome.removed_artifacts = finalized.removed_artifacts.len();
-        outcome.retained_root_failures = outcome
-            .retained_root_failures
-            .saturating_add(finalized.skipped_tasks);
         outcome.retained_artifact_failures = outcome
             .retained_artifact_failures
             .saturating_add(finalized.skipped_artifacts);

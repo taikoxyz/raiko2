@@ -340,16 +340,34 @@ pub(crate) fn record_startup_cleanup_failure(scope: StartupCleanupScope) {
         .inc();
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeStateMetricValues {
+    serialized_bytes: i64,
+    records: [(&'static str, i64); 3],
+}
+
+fn runtime_state_metric_values(stats: RuntimeStateStats) -> RuntimeStateMetricValues {
+    RuntimeStateMetricValues {
+        serialized_bytes: i64::try_from(stats.serialized_bytes).unwrap_or(i64::MAX),
+        records: [
+            ("tasks", i64::try_from(stats.tasks).unwrap_or(i64::MAX)),
+            (
+                "artifacts",
+                i64::try_from(stats.artifacts).unwrap_or(i64::MAX),
+            ),
+            (
+                "pending_publications",
+                i64::try_from(stats.pending_publications).unwrap_or(i64::MAX),
+            ),
+        ],
+    }
+}
+
 pub(crate) fn record_runtime_state_stats(stats: RuntimeStateStats) {
-    RUNTIME_STATE_SERIALIZED_BYTES.set(i64::try_from(stats.serialized_bytes).unwrap_or(i64::MAX));
-    for (kind, count) in [
-        ("tasks", stats.tasks),
-        ("artifacts", stats.artifacts),
-        ("pending_publications", stats.pending_publications),
-    ] {
-        RUNTIME_STATE_RECORDS
-            .with_label_values(&[kind])
-            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    let values = runtime_state_metric_values(stats);
+    RUNTIME_STATE_SERIALIZED_BYTES.set(values.serialized_bytes);
+    for (kind, count) in values.records {
+        RUNTIME_STATE_RECORDS.with_label_values(&[kind]).set(count);
     }
 }
 
@@ -377,11 +395,21 @@ pub(crate) fn record_runtime_cleanup_stats(
             stats.retained_pending_publication_failures,
         ),
         ("orphaned_tasks_cancelled", stats.orphaned_cancelled),
+        ("overdue_active_tasks", stats.overdue_active_warnings),
     ] {
         RUNTIME_RETENTION_TOTAL
             .with_label_values(&[outcome])
             .inc_by(u64::try_from(count).unwrap_or(u64::MAX));
     }
+}
+
+pub(crate) fn record_runtime_cleanup_pass(outcome: &'static str) {
+    RUNTIME_RETENTION_TOTAL
+        .with_label_values(&[match outcome {
+            "success" => "cleanup_pass_success",
+            _ => "cleanup_pass_failure",
+        }])
+        .inc();
 }
 
 pub(crate) fn record_runtime_cleanup_scheduler_lane(
@@ -718,12 +746,20 @@ mod tests {
 
     #[test]
     fn runtime_retention_metrics_use_only_bounded_dimensions() {
-        record_runtime_state_stats(RuntimeStateStats {
+        let state_stats = RuntimeStateStats {
             serialized_bytes: 12_345,
             tasks: 7,
             artifacts: 5,
             pending_publications: 2,
-        });
+        };
+        assert_eq!(
+            runtime_state_metric_values(state_stats),
+            RuntimeStateMetricValues {
+                serialized_bytes: 12_345,
+                records: [("tasks", 7), ("artifacts", 5), ("pending_publications", 2)],
+            }
+        );
+        record_runtime_state_stats(state_stats);
         record_runtime_cleanup_stats(&RuntimeCleanupStats {
             scanned: 4,
             expired: 4,
@@ -738,7 +774,10 @@ mod tests {
             removed_pending_publications: 1,
             retained_pending_publication_failures: 1,
             orphaned_cancelled: 0,
+            overdue_active_warnings: 1,
         });
+        record_runtime_cleanup_pass("success");
+        record_runtime_cleanup_pass("failure");
 
         let (_, metrics) = render().expect("render metrics");
         let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
@@ -753,6 +792,8 @@ mod tests {
             "invalidated_artifacts",
             "removed_artifacts",
             "removed_pending_publications",
+            "cleanup_pass_success",
+            "cleanup_pass_failure",
         ] {
             assert!(metrics.contains(&format!(
                 "raiko2_runtime_retention_total{{outcome=\"{outcome}\"}}"

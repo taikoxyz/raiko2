@@ -21,6 +21,43 @@ use tracing::{info, warn};
 
 const ORPHANED_RUNTIME_TASK_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local execution";
+const MAX_OVERDUE_ACTIVE_OBSERVATIONS: usize = 4_096;
+const MAX_RETENTION_RETRY_IDENTITIES: usize = 4_096;
+
+#[derive(Debug)]
+struct BoundedObservationSet<T> {
+    order: VecDeque<T>,
+    identities: HashSet<T>,
+}
+
+impl<T> Default for BoundedObservationSet<T> {
+    fn default() -> Self {
+        Self {
+            order: VecDeque::new(),
+            identities: HashSet::new(),
+        }
+    }
+}
+
+impl<T> BoundedObservationSet<T>
+where
+    T: Clone + Eq + Hash,
+{
+    fn observe(&mut self, identity: T, capacity: usize) -> bool {
+        if capacity == 0 || self.identities.contains(&identity) {
+            return false;
+        }
+        while self.order.len() >= capacity {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.identities.remove(&evicted);
+        }
+        self.identities.insert(identity.clone());
+        self.order.push_back(identity);
+        true
+    }
+}
 
 #[derive(Debug)]
 struct RetryQueue<T> {
@@ -42,23 +79,35 @@ where
     T: Clone + Eq + Hash,
 {
     fn enqueue(&mut self, identity: T) -> bool {
-        if !self.identities.insert(identity.clone()) {
+        if self.identities.contains(&identity) || self.queue.len() >= MAX_RETENTION_RETRY_IDENTITIES
+        {
             return false;
         }
+        self.identities.insert(identity.clone());
         self.queue.push_back(identity);
         true
     }
 
-    fn take(&mut self, limit: usize) -> Vec<T> {
-        let mut identities = Vec::with_capacity(limit.min(self.queue.len()));
-        while identities.len() < limit {
-            let Some(identity) = self.queue.pop_front() else {
-                break;
-            };
-            self.identities.remove(&identity);
-            identities.push(identity);
+    #[cfg(test)]
+    fn peek(&self, limit: usize) -> Vec<T> {
+        self.queue.iter().take(limit).cloned().collect()
+    }
+
+    fn peek_excluding(&self, limit: usize, excluded: &HashSet<T>) -> Vec<T> {
+        self.queue
+            .iter()
+            .filter(|identity| !excluded.contains(*identity))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn acknowledge(&mut self, acknowledged: &[T]) {
+        for identity in acknowledged {
+            self.identities.remove(identity);
         }
-        identities
+        self.queue
+            .retain(|identity| self.identities.contains(identity));
     }
 
     fn contains(&self, identity: &T) -> bool {
@@ -115,6 +164,8 @@ impl<I, C> RetentionLaneState<I, C> {
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCleanupLoopState {
     orphan_cursor: Option<ExpiredTaskCursor>,
+    overdue_active_cursor: Option<ExpiredTaskCursor>,
+    overdue_active_observations: BoundedObservationSet<TaskLifetime>,
     roots: RetentionLaneState<TaskLifetime, ExpiredTaskCursor>,
     artifacts: RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
     pending: RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
@@ -156,6 +207,7 @@ pub(crate) struct RuntimeCleanupStats {
     pub removed_pending_publications: usize,
     pub retained_pending_publication_failures: usize,
     pub orphaned_cancelled: usize,
+    pub overdue_active_warnings: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +232,7 @@ impl RuntimeCleanupStats {
             && self.removed_pending_publications == 0
             && self.retained_pending_publication_failures == 0
             && self.orphaned_cancelled == 0
+            && self.overdue_active_warnings == 0
     }
 }
 
@@ -234,11 +287,47 @@ pub(crate) async fn run_runtime_cleanup_pass(
     batch_size: usize,
     cleanup_state: &mut RuntimeCleanupLoopState,
 ) -> Result<RuntimeCleanupStats> {
+    let result = run_runtime_cleanup_pass_inner(
+        Arc::clone(&runtime),
+        pipelines,
+        orphan_ttl_secs,
+        terminal_ttl_secs,
+        batch_size,
+        cleanup_state,
+    )
+    .await;
+    crate::server::telemetry::record_runtime_cleanup_pass(if result.is_ok() {
+        "success"
+    } else {
+        "failure"
+    });
+    if result.is_err() {
+        crate::server::telemetry::record_runtime_state_stats(runtime.runtime_state_stats().await);
+    }
+    result
+}
+
+async fn run_runtime_cleanup_pass_inner(
+    runtime: Arc<RuntimeManager>,
+    pipelines: Arc<dyn PipelineFactory>,
+    orphan_ttl_secs: u64,
+    terminal_ttl_secs: u64,
+    batch_size: usize,
+    cleanup_state: &mut RuntimeCleanupLoopState,
+) -> Result<RuntimeCleanupStats> {
     if batch_size == 0 {
         return Ok(RuntimeCleanupStats::default());
     }
     let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
 
+    let overdue_active_warnings = observe_overdue_active_tasks(
+        runtime.as_ref(),
+        terminal_ttl_secs,
+        batch_size,
+        &mut cleanup_state.overdue_active_cursor,
+        &mut cleanup_state.overdue_active_observations,
+    )
+    .await?;
     let orphaned_cancelled = cancel_orphaned_runtime_tasks(
         runtime.as_ref(),
         &lifecycle,
@@ -247,6 +336,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
         &mut cleanup_state.orphan_cursor,
     )
     .await?;
+    let root_cursor_before = cleanup_state.roots.fresh_cursor.clone();
     let records = select_root_retention_batch(
         runtime.as_ref(),
         terminal_ttl_secs,
@@ -258,8 +348,21 @@ pub(crate) async fn run_runtime_cleanup_pass(
         scanned: records.len(),
         expired: records.len(),
         orphaned_cancelled,
+        overdue_active_warnings,
         ..RuntimeCleanupStats::default()
     };
+    if let Err(error) = run_root_retention_lane(
+        &lifecycle,
+        &records,
+        &mut cleanup_state.roots,
+        &mut cleanup_state.artifacts,
+        &mut stats,
+    )
+    .await
+    {
+        cleanup_state.roots.fresh_cursor = root_cursor_before;
+        return Err(error);
+    }
     let artifact_summary = run_artifact_retention_lane(
         &lifecycle,
         runtime.as_ref(),
@@ -273,14 +376,6 @@ pub(crate) async fn run_runtime_cleanup_pass(
         runtime.as_ref(),
         batch_size,
         &mut cleanup_state.pending,
-        &mut stats,
-    )
-    .await?;
-    run_root_retention_lane(
-        &lifecycle,
-        &records,
-        &mut cleanup_state.roots,
-        &mut cleanup_state.artifacts,
         &mut stats,
     )
     .await?;
@@ -308,14 +403,33 @@ async fn run_artifact_retention_lane(
     lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
     stats: &mut RuntimeCleanupStats,
 ) -> Result<RetentionLaneCleanupSummary> {
+    let cursor_before = lane.fresh_cursor.clone();
     let records = select_artifact_retention_batch(runtime, batch_size, lane).await?;
-    let cleanup = lifecycle.remove_artifact_retention_batch(&records).await?;
+    let selected_retries = records
+        .iter()
+        .map(proof_artifact_key)
+        .filter(|key| lane.retries.contains(key))
+        .collect::<Vec<_>>();
+    let cleanup = match lifecycle.remove_artifact_retention_batch(&records).await {
+        Ok(cleanup) => cleanup,
+        Err(error) => {
+            lane.fresh_cursor = cursor_before;
+            return Err(error);
+        }
+    };
+    lane.retries.acknowledge(&selected_retries);
     for key in cleanup.retry_artifacts.iter().cloned() {
         lane.retries.enqueue(key);
     }
-    stats.invalidated_artifacts = cleanup.invalidated_artifacts;
-    stats.removed_artifacts = cleanup.removed_artifacts;
-    stats.retained_artifact_failures = cleanup.retained_artifact_failures;
+    stats.invalidated_artifacts = stats
+        .invalidated_artifacts
+        .saturating_add(cleanup.invalidated_artifacts);
+    stats.removed_artifacts = stats
+        .removed_artifacts
+        .saturating_add(cleanup.removed_artifacts);
+    stats.retained_artifact_failures = stats
+        .retained_artifact_failures
+        .saturating_add(cleanup.retained_artifact_failures);
     Ok(RetentionLaneCleanupSummary {
         attempts: records.len(),
         removed: cleanup.removed_artifacts,
@@ -330,8 +444,21 @@ async fn run_pending_retention_lane(
     lane: &mut RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
     stats: &mut RuntimeCleanupStats,
 ) -> Result<()> {
+    let cursor_before = lane.fresh_cursor.clone();
     let records = select_pending_retention_batch(runtime, batch_size, lane).await?;
-    let cleanup = lifecycle.remove_pending_retention_batch(&records).await?;
+    let selected_retries = records
+        .iter()
+        .map(|expectation| expectation.key.clone())
+        .filter(|key| lane.retries.contains(key))
+        .collect::<Vec<_>>();
+    let cleanup = match lifecycle.remove_pending_retention_batch(&records).await {
+        Ok(cleanup) => cleanup,
+        Err(error) => {
+            lane.fresh_cursor = cursor_before;
+            return Err(error);
+        }
+    };
+    lane.retries.acknowledge(&selected_retries);
     for key in cleanup.retry_pending_publications.iter().cloned() {
         lane.retries.enqueue(key);
     }
@@ -367,7 +494,13 @@ async fn run_root_retention_lane(
     artifact_lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
     stats: &mut RuntimeCleanupStats,
 ) -> Result<()> {
+    let selected_retries = records
+        .iter()
+        .map(RuntimeTaskRecord::lifetime)
+        .filter(|lifetime| root_lane.retries.contains(lifetime))
+        .collect::<Vec<_>>();
     let cleanup = lifecycle.remove_terminal_retention_batch(records).await?;
+    root_lane.retries.acknowledge(&selected_retries);
     for lifetime in cleanup.retry_roots.iter().cloned() {
         root_lane.retries.enqueue(lifetime);
     }
@@ -410,19 +543,22 @@ async fn select_root_retention_batch(
 ) -> Result<Vec<RuntimeTaskRecord>> {
     let now = now_ts();
     let (retry_budget, fresh_budget) = lane.budgets(batch_size);
-    let mut retries = load_root_retries(runtime, ttl_secs, now, lane, retry_budget).await?;
+    let mut retries =
+        load_root_retries(runtime, ttl_secs, now, lane, retry_budget, &HashSet::new()).await?;
     let fresh_capacity = fresh_budget.saturating_add(retry_budget.saturating_sub(retries.len()));
     let fresh_page = runtime
         .list_expired_terminal_tasks(now, ttl_secs, lane.fresh_cursor.as_ref(), fresh_capacity)
         .await?;
-    if let Some(last) = fresh_page.last() {
-        lane.fresh_cursor = Some(ExpiredTaskCursor {
+    let next_cursor = if let Some(last) = fresh_page.last() {
+        Some(ExpiredTaskCursor {
             updated_at: last.updated_at,
             task_id: last.task_id.clone(),
-        });
+        })
     } else if fresh_capacity > 0 {
-        lane.fresh_cursor = None;
-    }
+        None
+    } else {
+        lane.fresh_cursor.clone()
+    };
     let retry_identities = retries
         .iter()
         .map(RuntimeTaskRecord::lifetime)
@@ -435,9 +571,17 @@ async fn select_root_retention_batch(
         })
         .collect::<Vec<_>>();
     let extra_retry_capacity = batch_size.saturating_sub(retries.len() + fresh.len());
-    let extra_retries =
-        load_root_retries(runtime, ttl_secs, now, lane, extra_retry_capacity).await?;
+    let extra_retries = load_root_retries(
+        runtime,
+        ttl_secs,
+        now,
+        lane,
+        extra_retry_capacity,
+        &retry_identities,
+    )
+    .await?;
     retries.extend(extra_retries);
+    lane.fresh_cursor = next_cursor;
     lane.last_retry_attempts = retries.len();
     lane.last_fresh_attempts = fresh.len();
     retries.append(&mut fresh);
@@ -450,16 +594,22 @@ async fn load_root_retries(
     now: i64,
     lane: &mut RetentionLaneState<TaskLifetime, ExpiredTaskCursor>,
     limit: usize,
+    excluded: &HashSet<TaskLifetime>,
 ) -> Result<Vec<RuntimeTaskRecord>> {
     let mut records = Vec::with_capacity(limit);
-    for lifetime in lane.retries.take(limit) {
+    let selected = lane.retries.peek_excluding(limit, excluded);
+    let mut stale = Vec::new();
+    for lifetime in selected {
         if let Some(record) = runtime
             .get_expired_terminal_task(&lifetime, now, ttl_secs)
             .await?
         {
             records.push(record);
+        } else {
+            stale.push(lifetime);
         }
     }
+    lane.retries.acknowledge(&stale);
     Ok(records)
 }
 
@@ -469,16 +619,18 @@ async fn select_artifact_retention_batch(
     lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
 ) -> Result<Vec<ProofArtifactRecord>> {
     let (retry_budget, fresh_budget) = lane.budgets(batch_size);
-    let mut retries = load_artifact_retries(runtime, lane, retry_budget).await?;
+    let mut retries = load_artifact_retries(runtime, lane, retry_budget, &HashSet::new()).await?;
     let fresh_capacity = fresh_budget.saturating_add(retry_budget.saturating_sub(retries.len()));
     let fresh_page = runtime
         .list_reclaimable_proof_artifacts(lane.fresh_cursor.as_ref(), fresh_capacity)
         .await?;
-    if let Some(last) = fresh_page.last() {
-        lane.fresh_cursor = Some(ArtifactRetentionCursor::from_record(last));
+    let next_cursor = if let Some(last) = fresh_page.last() {
+        Some(ArtifactRetentionCursor::from_record(last))
     } else if fresh_capacity > 0 {
-        lane.fresh_cursor = None;
-    }
+        None
+    } else {
+        lane.fresh_cursor.clone()
+    };
     let retry_identities = retries
         .iter()
         .map(proof_artifact_key)
@@ -491,8 +643,10 @@ async fn select_artifact_retention_batch(
         })
         .collect::<Vec<_>>();
     let extra_retry_capacity = batch_size.saturating_sub(retries.len() + fresh.len());
-    let extra_retries = load_artifact_retries(runtime, lane, extra_retry_capacity).await?;
+    let extra_retries =
+        load_artifact_retries(runtime, lane, extra_retry_capacity, &retry_identities).await?;
     retries.extend(extra_retries);
+    lane.fresh_cursor = next_cursor;
     lane.last_retry_attempts = retries.len();
     lane.last_fresh_attempts = fresh.len();
     retries.append(&mut fresh);
@@ -503,13 +657,19 @@ async fn load_artifact_retries(
     runtime: &RuntimeManager,
     lane: &mut RetentionLaneState<ProofArtifactKey, ArtifactRetentionCursor>,
     limit: usize,
+    excluded: &HashSet<ProofArtifactKey>,
 ) -> Result<Vec<ProofArtifactRecord>> {
     let mut records = Vec::with_capacity(limit);
-    for key in lane.retries.take(limit) {
+    let selected = lane.retries.peek_excluding(limit, excluded);
+    let mut stale = Vec::new();
+    for key in selected {
         if let Some(record) = runtime.get_reclaimable_proof_artifact(&key).await? {
             records.push(record);
+        } else {
+            stale.push(key);
         }
     }
+    lane.retries.acknowledge(&stale);
     Ok(records)
 }
 
@@ -519,16 +679,18 @@ async fn select_pending_retention_batch(
     lane: &mut RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
 ) -> Result<Vec<PendingPublicationExpectation>> {
     let (retry_budget, fresh_budget) = lane.budgets(batch_size);
-    let mut retries = load_pending_retries(runtime, lane, retry_budget).await?;
+    let mut retries = load_pending_retries(runtime, lane, retry_budget, &HashSet::new()).await?;
     let fresh_capacity = fresh_budget.saturating_add(retry_budget.saturating_sub(retries.len()));
     let fresh_page = runtime
         .list_reclaimable_pending_publications(lane.fresh_cursor.as_ref(), fresh_capacity)
         .await?;
-    if let Some(last) = fresh_page.last() {
-        lane.fresh_cursor = Some(PendingPublicationRetentionCursor::from_expectation(last));
+    let next_cursor = if let Some(last) = fresh_page.last() {
+        Some(PendingPublicationRetentionCursor::from_expectation(last))
     } else if fresh_capacity > 0 {
-        lane.fresh_cursor = None;
-    }
+        None
+    } else {
+        lane.fresh_cursor.clone()
+    };
     let retry_identities = retries
         .iter()
         .map(|expectation| expectation.key.clone())
@@ -540,8 +702,10 @@ async fn select_pending_retention_batch(
         })
         .collect::<Vec<_>>();
     let extra_retry_capacity = batch_size.saturating_sub(retries.len() + fresh.len());
-    let extra_retries = load_pending_retries(runtime, lane, extra_retry_capacity).await?;
+    let extra_retries =
+        load_pending_retries(runtime, lane, extra_retry_capacity, &retry_identities).await?;
     retries.extend(extra_retries);
+    lane.fresh_cursor = next_cursor;
     lane.last_retry_attempts = retries.len();
     lane.last_fresh_attempts = fresh.len();
     retries.append(&mut fresh);
@@ -552,13 +716,19 @@ async fn load_pending_retries(
     runtime: &RuntimeManager,
     lane: &mut RetentionLaneState<ProofArtifactKey, PendingPublicationRetentionCursor>,
     limit: usize,
+    excluded: &HashSet<ProofArtifactKey>,
 ) -> Result<Vec<PendingPublicationExpectation>> {
     let mut pending = Vec::with_capacity(limit);
-    for key in lane.retries.take(limit) {
+    let selected = lane.retries.peek_excluding(limit, excluded);
+    let mut stale = Vec::new();
+    for key in selected {
         if let Some(expectation) = runtime.get_reclaimable_pending_publication(&key).await? {
             pending.push(expectation);
+        } else {
+            stale.push(key);
         }
     }
+    lane.retries.acknowledge(&stale);
     Ok(pending)
 }
 
@@ -569,6 +739,47 @@ fn proof_artifact_key(record: &ProofArtifactRecord) -> ProofArtifactKey {
         route: record.route,
         proof_ref: record.proof_ref.clone(),
     }
+}
+
+async fn observe_overdue_active_tasks(
+    runtime: &RuntimeManager,
+    ttl_secs: u64,
+    batch_size: usize,
+    cursor: &mut Option<ExpiredTaskCursor>,
+    observations: &mut BoundedObservationSet<TaskLifetime>,
+) -> Result<usize> {
+    let now = now_ts();
+    let records = runtime
+        .list_stale_nonterminal_tasks(now, ttl_secs, cursor.as_ref(), batch_size)
+        .await?;
+    *cursor = records.last().map(|record| ExpiredTaskCursor {
+        updated_at: record.updated_at,
+        task_id: record.task_id.clone(),
+    });
+    if records.is_empty() {
+        *cursor = None;
+    }
+
+    let capacity = batch_size
+        .saturating_mul(4)
+        .min(MAX_OVERDUE_ACTIVE_OBSERVATIONS);
+    let mut warnings = 0usize;
+    for record in records {
+        if !observations.observe(record.lifetime(), capacity) {
+            continue;
+        }
+        warnings = warnings.saturating_add(1);
+        warn!(
+            task_id = %record.task_id,
+            incarnation_id = %record.incarnation_id,
+            status = %record.runner_status,
+            age_secs = now.saturating_sub(record.updated_at),
+            pipeline = record.pipeline_key.as_str(),
+            route = %record.route,
+            "runtime task remains active past the terminal retention window"
+        );
+    }
+    Ok(warnings)
 }
 
 async fn cancel_orphaned_runtime_tasks(
@@ -742,6 +953,7 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
                     retained_pending_publication_failures =
                         stats.retained_pending_publication_failures,
                     orphaned_cancelled = stats.orphaned_cancelled,
+                    overdue_active_warnings = stats.overdue_active_warnings,
                     "runtime cleanup tick completed"
                 );
             }
@@ -773,8 +985,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupLoopState, RuntimeCleanupStats, proposal_task_id,
-        run_runtime_cleanup_pass,
+        ExpiredTaskCursor, RetryQueue, RuntimeCleanupLoopState, RuntimeCleanupStats,
+        proposal_task_id, run_runtime_cleanup_pass,
     };
     use crate::server::state::{
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
@@ -816,6 +1028,26 @@ mod tests {
             }
             .is_idle()
         );
+    }
+
+    #[test]
+    fn retry_queue_keeps_selected_items_until_acknowledged() {
+        let mut queue = RetryQueue::default();
+        assert!(queue.enqueue("first".to_string()));
+        assert!(queue.enqueue("second".to_string()));
+
+        let selected = queue.peek(1);
+
+        assert_eq!(selected, vec!["first"]);
+        assert_eq!(queue.len(), 2);
+        queue.acknowledge(&selected);
+        assert_eq!(queue.peek(2), vec!["second"]);
+        assert_eq!(queue.len(), 1);
+
+        for index in 0..=super::MAX_RETENTION_RETRY_IDENTITIES {
+            queue.enqueue(format!("bounded-{index}"));
+        }
+        assert_eq!(queue.len(), super::MAX_RETENTION_RETRY_IDENTITIES);
     }
 
     #[tokio::test]
@@ -908,6 +1140,7 @@ mod tests {
             stats,
             RuntimeCleanupStats {
                 orphaned_cancelled: 2,
+                overdue_active_warnings: 3,
                 ..RuntimeCleanupStats::default()
             }
         );
@@ -929,10 +1162,58 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn overdue_active_task_is_observed_once_without_removal() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("overdue-active"))?);
+        let task_id = "overdue-active-root";
+        register_runtime_task(
+            runtime.as_ref(),
+            task_id,
+            &encoded_proposal_task_id(63)?,
+            RunnerStatus::Running,
+            now_ts().saturating_sub(7_201),
+        )
+        .await?;
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+
+        let first = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory.clone(),
+            14_400,
+            7_200,
+            64,
+            &mut cleanup_state,
+        )
+        .await?;
+        let second = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            14_400,
+            7_200,
+            64,
+            &mut cleanup_state,
+        )
+        .await?;
+
+        assert_eq!(first.overdue_active_warnings, 1);
+        assert_eq!(second.overdue_active_warnings, 0);
+        assert_eq!(
+            runtime
+                .get_task(task_id)
+                .await?
+                .context("overdue active task")?
+                .runner_status,
+            RunnerStatus::Running
+        );
+        Ok(())
+    }
+
     struct MockEngine {
         failing_owners: HashSet<String>,
         active_owners: HashSet<RootOwner>,
         queue_task_ids: HashSet<String>,
+        mutate_on_detach: Option<(Arc<RuntimeManager>, String)>,
     }
 
     impl Default for MockEngine {
@@ -941,6 +1222,7 @@ mod tests {
                 failing_owners: HashSet::new(),
                 active_owners: HashSet::new(),
                 queue_task_ids: HashSet::new(),
+                mutate_on_detach: None,
             }
         }
     }
@@ -951,6 +1233,7 @@ mod tests {
                 failing_owners,
                 active_owners: HashSet::new(),
                 queue_task_ids: HashSet::new(),
+                mutate_on_detach: None,
             }
         }
 
@@ -961,6 +1244,13 @@ mod tests {
             Self {
                 active_owners,
                 queue_task_ids,
+                ..Self::default()
+            }
+        }
+
+        fn with_mutating_detach(runtime: Arc<RuntimeManager>, task_id: &str) -> Self {
+            Self {
+                mutate_on_detach: Some((runtime, task_id.to_string())),
                 ..Self::default()
             }
         }
@@ -1013,16 +1303,69 @@ mod tests {
         ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
         {
             let should_fail = self.failing_owners.contains(&owner.task_id);
+            let mutate_on_detach = self.mutate_on_detach.clone();
             Box::pin(async move {
                 if should_fail {
                     Err(TaskStoreError::backend(std::io::Error::other(
                         "mock detach failure",
                     )))
                 } else {
+                    if let Some((runtime, task_id)) = mutate_on_detach {
+                        let mut task = runtime
+                            .get_task(&task_id)
+                            .await
+                            .map_err(|error| {
+                                TaskStoreError::backend(std::io::Error::other(error.to_string()))
+                            })?
+                            .context("task mutated during detach")
+                            .map_err(|error| {
+                                TaskStoreError::backend(std::io::Error::other(error.to_string()))
+                            })?;
+                        task.image_ref = Some("changed-during-detach".to_string());
+                        runtime.upsert_task(&task).await.map_err(|error| {
+                            TaskStoreError::backend(std::io::Error::other(error.to_string()))
+                        })?;
+                    }
                     Ok(raiko2_queue::DetachOutcome::not_attached(mode))
                 }
             })
         }
+    }
+
+    #[tokio::test]
+    async fn finalize_skipped_root_is_returned_to_retry_queue() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("finalize-skip"))?);
+        register_runtime_task(
+            runtime.as_ref(),
+            "expired-root",
+            &encoded_proposal_task_id(62)?,
+            RunnerStatus::Completed,
+            1,
+        )
+        .await?;
+        let expired = runtime
+            .get_task("expired-root")
+            .await?
+            .context("expired root")?;
+        let expected_lifetime = expired.lifetime();
+        let engine = Arc::new(MockEngine::with_mutating_detach(
+            runtime.clone(),
+            "expired-root",
+        ));
+        let lifecycle = crate::server::lifecycle::ProofLifecycle::new(
+            runtime.clone(),
+            Arc::new(build_factory(engine)),
+        );
+
+        let cleanup = lifecycle
+            .remove_terminal_retention_batch(&[expired])
+            .await?;
+
+        assert_eq!(cleanup.removed_roots, 0);
+        assert_eq!(cleanup.retained_root_failures, 1);
+        assert_eq!(cleanup.retry_roots, vec![expected_lifetime]);
+        assert!(runtime.get_task("expired-root").await?.is_some());
+        Ok(())
     }
 
     #[derive(Debug)]
@@ -1222,7 +1565,13 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(stats, RuntimeCleanupStats::default());
+        assert_eq!(
+            stats,
+            RuntimeCleanupStats {
+                overdue_active_warnings: 1,
+                ..RuntimeCleanupStats::default()
+            }
+        );
         let active = runtime.get_task("active-root").await?.expect("active root");
         assert_eq!(active.runner_status, RunnerStatus::Running);
         Ok(())
@@ -1413,6 +1762,7 @@ mod tests {
                 removed_pending_publications: 0,
                 retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
+                overdue_active_warnings: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_none());
@@ -1642,10 +1992,6 @@ mod tests {
             .get_task("artifact-root")
             .await?
             .context("artifact root")?;
-        let plain_root = runtime
-            .get_task("plain-root")
-            .await?
-            .context("plain root")?;
         let original_incarnation = artifact_root.incarnation_id;
         let proof_ref = artifact_root
             .artifact_refs
@@ -1653,12 +1999,19 @@ mod tests {
             .context("artifact proof reference")?;
         register_runtime_proof_artifact(runtime.as_ref(), &artifact_root, proof_ref).await?;
 
-        let cleanup = crate::server::lifecycle::ProofLifecycle::new(Arc::clone(&runtime), factory)
-            .remove_terminal_retention_batch(&[artifact_root.clone(), plain_root])
-            .await?;
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+        let cleanup = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            7_200,
+            64,
+            &mut cleanup_state,
+        )
+        .await?;
 
         assert_eq!(cleanup.removed_roots, 2);
-        assert_eq!(cleanup.retained_root_failures, 0);
+        assert_eq!(cleanup.retained_failures, 0);
         assert_eq!(cleanup.retained_artifact_failures, 1);
         assert!(runtime.get_task("artifact-root").await?.is_none());
         assert!(runtime.get_task("plain-root").await?.is_none());
@@ -1714,6 +2067,20 @@ mod tests {
             .first()
             .context("expired proof reference")?;
         register_runtime_proof_artifact(runtime.as_ref(), &expired, proof_ref).await?;
+        assert!(matches!(
+            runtime.retire_task_if_unchanged(&expired, None).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+        let retired = runtime
+            .get_task("expired-root")
+            .await?
+            .context("retired root")?;
+        assert!(matches!(
+            runtime.remove_task_if_current(&retired.lifetime()).await?,
+            raiko2_runtime::RuntimeMutationOutcome::Applied
+        ));
+        let artifacts = runtime.list_reclaimable_proof_artifacts(None, 64).await?;
+        assert_eq!(artifacts.len(), 1);
 
         let lifecycle = crate::server::lifecycle::ProofLifecycle::new(
             Arc::clone(&runtime),
@@ -1721,8 +2088,7 @@ mod tests {
         );
         let cleanup = tokio::spawn({
             let lifecycle = lifecycle.clone();
-            let expired = expired.clone();
-            async move { lifecycle.remove_terminal_retention_batch(&[expired]).await }
+            async move { lifecycle.remove_artifact_retention_batch(&artifacts).await }
         });
         store.invalidation_started.notified().await;
 
@@ -1733,7 +2099,7 @@ mod tests {
         drop(guard);
         store.allow_invalidation.notify_one();
 
-        assert_eq!(cleanup.await??.removed_roots, 1);
+        assert_eq!(cleanup.await??.removed_artifacts, 1);
         Ok(())
     }
 
@@ -1776,32 +2142,6 @@ mod tests {
         terminal.updated_at = 1;
         runtime.upsert_task(&terminal).await?;
 
-        let mut cleanup_state = RuntimeCleanupLoopState::default();
-        let first = run_runtime_cleanup_pass(
-            runtime.clone(),
-            factory.clone(),
-            7_200,
-            7_200,
-            64,
-            &mut cleanup_state,
-        )
-        .await?;
-        assert_eq!(first.removed_roots, 1);
-        assert_eq!(first.retained_failures, 0);
-        assert_eq!(first.retained_pending_publication_failures, 0);
-        assert!(
-            runtime
-                .get_pending_proof_publication(
-                    &terminal.network_pair,
-                    terminal.pipeline_key,
-                    terminal.route,
-                    &proof_ref,
-                )
-                .await?
-                .is_some()
-        );
-        assert!(runtime.get_task("pending-root").await?.is_none());
-
         register_runtime_task(
             runtime.as_ref(),
             "legacy-artifact-root",
@@ -1834,7 +2174,8 @@ mod tests {
             raiko2_runtime::RuntimeMutationOutcome::Applied
         ));
 
-        let failed_pending = run_runtime_cleanup_pass(
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+        let first = run_runtime_cleanup_pass(
             runtime.clone(),
             factory.clone(),
             7_200,
@@ -1843,8 +2184,10 @@ mod tests {
             &mut cleanup_state,
         )
         .await?;
-        assert_eq!(failed_pending.removed_artifacts, 1);
-        assert_eq!(failed_pending.retained_pending_publication_failures, 1);
+        assert_eq!(first.removed_roots, 1);
+        assert_eq!(first.retained_failures, 0);
+        assert_eq!(first.removed_artifacts, 1);
+        assert_eq!(first.retained_pending_publication_failures, 1);
         assert_eq!(cleanup_state.pending_retry_len(), 1);
         assert!(cleanup_state.retry_queues_are_deduplicated());
         assert!(
@@ -1858,6 +2201,7 @@ mod tests {
                 .await?
                 .is_some()
         );
+        assert!(runtime.get_task("pending-root").await?.is_none());
 
         let retry = run_runtime_cleanup_pass(
             runtime.clone(),
@@ -1891,14 +2235,46 @@ mod tests {
         let engine = Arc::new(MockEngine::default());
         let factory = Arc::new(build_factory(engine));
         for proposal_id in 20..23 {
+            let task_id = format!("expired-{proposal_id}");
             register_runtime_task(
                 runtime.as_ref(),
-                &format!("expired-{proposal_id}"),
+                &task_id,
                 &encoded_proposal_task_id(proposal_id)?,
-                RunnerStatus::Completed,
+                RunnerStatus::Running,
                 1,
             )
             .await?;
+            let mut record = runtime.get_task(&task_id).await?.context("pending root")?;
+            let proof_ref = record
+                .artifact_refs
+                .first()
+                .context("pending proof reference")?
+                .clone();
+            runtime
+                .publish_proof_artifact_bytes(
+                    &record.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proof_ref,
+                    proof_ref.as_bytes(),
+                )
+                .await?;
+            assert!(
+                runtime
+                    .checkpoint_pending_proof_publication(
+                        &record.network_pair,
+                        record.pipeline_key,
+                        record.route,
+                        &proof_ref,
+                        &[record.incarnation_id],
+                        proof_ref.as_bytes(),
+                    )
+                    .await?
+            );
+            record.runner_status = RunnerStatus::Completed;
+            record.proof_uri = Some(format!("memory://proofs/{task_id}"));
+            record.updated_at = 1;
+            runtime.upsert_task(&record).await?;
         }
         let writes_before = store.runtime_state_writes.load(Ordering::Acquire);
 
@@ -1915,7 +2291,8 @@ mod tests {
 
         let writes_after = store.runtime_state_writes.load(Ordering::Acquire);
         assert_eq!(stats.removed_roots, 3);
-        assert_eq!(writes_after - writes_before, 2);
+        assert_eq!(stats.removed_pending_publications, 3);
+        assert_eq!(writes_after - writes_before, 3);
         Ok(())
     }
 
@@ -1964,6 +2341,7 @@ mod tests {
                 removed_pending_publications: 0,
                 retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
+                overdue_active_warnings: 0,
             }
         );
         let retired = runtime
@@ -1999,6 +2377,7 @@ mod tests {
                 removed_pending_publications: 0,
                 retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
+                overdue_active_warnings: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_none());
@@ -2056,6 +2435,7 @@ mod tests {
                 removed_pending_publications: 0,
                 retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
+                overdue_active_warnings: 0,
             }
         );
         assert_eq!(
@@ -2100,6 +2480,7 @@ mod tests {
                 removed_pending_publications: 0,
                 retained_pending_publication_failures: 0,
                 orphaned_cancelled: 0,
+                overdue_active_warnings: 0,
             }
         );
         assert!(runtime.get_task("expired-c").await?.is_none());

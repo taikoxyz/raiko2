@@ -64,6 +64,7 @@ pub(crate) struct PendingRetentionBatchOutcome {
 #[derive(Debug, Default)]
 struct ArtifactFinalizationBatch {
     finalized: Vec<ArtifactExpectation>,
+    stale: Vec<ArtifactExpectation>,
     retry_artifacts: Vec<ProofArtifactKey>,
     failures: usize,
 }
@@ -418,6 +419,17 @@ impl ProofLifecycle {
             .runtime
             .finalize_terminal_task_retention_batch(&detached_tasks, &[], &[])
             .await?;
+        let removed_lifetimes = finalized_roots
+            .removed_tasks
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        for record in &detached_tasks {
+            let lifetime = record.lifetime();
+            if !removed_lifetimes.contains(&lifetime) && !outcome.retry_roots.contains(&lifetime) {
+                outcome.retry_roots.push(lifetime);
+            }
+        }
         outcome.removed_roots = finalized_roots.removed_tasks.len();
         outcome.retained_root_failures = outcome
             .retained_root_failures
@@ -432,12 +444,14 @@ impl ProofLifecycle {
         outcome.retained_artifact_failures = artifact_batch.failures;
         outcome.retry_artifacts = artifact_batch.retry_artifacts;
 
-        if artifact_batch.finalized.is_empty() {
+        let mut removable_artifacts = artifact_batch.finalized;
+        removable_artifacts.extend(artifact_batch.stale);
+        if removable_artifacts.is_empty() {
             return Ok(outcome);
         }
         let finalized = self
             .runtime
-            .finalize_terminal_task_retention_batch(&[], &artifact_batch.finalized, &[])
+            .finalize_terminal_task_retention_batch(&[], &removable_artifacts, &[])
             .await?;
         outcome.removed_artifacts = finalized.removed_artifacts.len();
         outcome.retained_artifact_failures = outcome
@@ -455,7 +469,7 @@ impl ProofLifecycle {
             .prepare_artifact_retention_batch(records)
             .await?;
         let mut outcome = ArtifactRetentionBatchOutcome {
-            invalidated_artifacts: prepared.artifact_invalidations.len(),
+            invalidated_artifacts: prepared.newly_invalidated_artifacts,
             ..ArtifactRetentionBatchOutcome::default()
         };
         let artifact_batch = finalize_terminal_retention_artifacts(
@@ -465,12 +479,14 @@ impl ProofLifecycle {
         .await;
         outcome.retained_artifact_failures = artifact_batch.failures;
         outcome.retry_artifacts = artifact_batch.retry_artifacts;
-        if artifact_batch.finalized.is_empty() {
+        let mut removable_artifacts = artifact_batch.finalized;
+        removable_artifacts.extend(artifact_batch.stale);
+        if removable_artifacts.is_empty() {
             return Ok(outcome);
         }
         let finalized = self
             .runtime
-            .finalize_terminal_task_retention_batch(&[], &artifact_batch.finalized, &[])
+            .finalize_terminal_task_retention_batch(&[], &removable_artifacts, &[])
             .await?;
         outcome.removed_artifacts = finalized.removed_artifacts.len();
         outcome.retained_artifact_failures = outcome
@@ -588,32 +604,41 @@ async fn finalize_terminal_retention_artifacts(
         match finalized {
             Ok((expectation, Ok(_))) => batch.finalized.push(expectation),
             Ok((expectation, Err(error))) => {
-                batch.failures = batch.failures.saturating_add(1);
-                batch.retry_artifacts.push(expectation.key.clone());
                 match runtime
-                    .refresh_stale_proof_artifact_invalidation(&expectation)
+                    .proof_artifact_invalidation_is_stale(&expectation)
                     .await
                 {
-                    Ok(Some(refreshed)) => {
-                        warn!(
-                            proof_ref = %refreshed.key.proof_ref,
-                            "refreshed stale proof artifact invalidation for retry"
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(refresh_error) => {
+                    Ok(true) => {
+                        batch.stale.push(expectation.clone());
                         warn!(
                             proof_ref = %expectation.key.proof_ref,
-                            error = %refresh_error,
-                            "failed to refresh proof artifact invalidation after finalization error"
+                            "dropping stale local proof artifact invalidation"
+                        );
+                    }
+                    Ok(false) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %error,
+                            "failed to finalize expired proof artifact invalidation"
+                        );
+                    }
+                    Err(stale_check_error) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %stale_check_error,
+                            "failed to inspect proof artifact descriptor after finalization error"
+                        );
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %error,
+                            "failed to finalize expired proof artifact invalidation"
                         );
                     }
                 }
-                warn!(
-                    proof_ref = %expectation.key.proof_ref,
-                    error = %error,
-                    "failed to finalize expired proof artifact invalidation"
-                );
             }
             Err(error) => {
                 batch.failures = batch.failures.saturating_add(1);

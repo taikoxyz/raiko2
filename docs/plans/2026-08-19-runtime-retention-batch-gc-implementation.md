@@ -2,15 +2,20 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Bound authoritative runtime-state growth with configurable six-hour terminal retention and constant-write batch garbage collection.
+**Goal:** Bound runtime-state growth without letting artifact-store failures retain client task IDs,
+starve retries, or leave legacy artifact records outside the collector.
 
-**Architecture:** Keep the existing single-writer runtime authority and immutable proof object store. Add exact batch lifecycle transitions to `RuntimeManager`, drive them from the existing maintenance loop under the lifecycle gate, and expose metrics needed to validate the rollout before shortening retention further.
+**Architecture:** Keep the single-writer runtime authority and immutable object store, but separate
+root retirement from artifact and pending-publication reclamation. Root removal is gated only by
+exact task retirement and queue detachment; independent bounded cleanup lanes own external retries,
+legacy orphan migration, and fair fresh progress.
 
-**Tech Stack:** Rust, Tokio, Serde/TOML, Prometheus, GCS generation CAS, existing raiko2 runtime and engine lifecycle APIs.
+**Tech Stack:** Rust, Tokio, Serde/TOML, Prometheus, GCS generation CAS, existing raiko2 runtime and
+engine lifecycle APIs.
 
 ---
 
-### Task 1: Add the retention configuration
+### Task 1: Add independently paced cleanup configuration
 
 **Files:**
 - Modify: `bin/raiko2/src/config/runtime.rs`
@@ -19,19 +24,26 @@
 
 **Step 1: Write failing configuration tests**
 
-Add tests asserting that `RuntimeConfig::default().terminal_task_ttl_secs == 21_600`, TOML can
-override it, and zero is rejected by `validate()`.
+Extend `config::runtime::tests` with exact default, override, and zero-value rejection cases for:
+
+```rust
+pub cleanup_interval_secs: u64,
+pub cleanup_batch_size: usize,
+```
+
+Use conservative defaults of 30 seconds and 64 records. Reject zero and cap batch size at 1024 so a
+misconfiguration cannot create an unbounded external fan-out.
 
 **Step 2: Run the focused tests and verify failure**
 
 Run: `cargo test -p raiko2 config::runtime`
 
-Expected: FAIL because the field does not exist.
+Expected: FAIL because the new fields do not exist.
 
-**Step 3: Implement the configuration**
+**Step 3: Implement and document the configuration**
 
-Add a Serde-defaulted `terminal_task_ttl_secs: u64`, validate that it is non-zero, and document the
-six-hour terminal inactivity semantics.
+Add Serde defaults and validation. Keep `terminal_task_ttl_secs = 21600`; do not reuse
+`queue.maintenance_interval_ms` for retention scheduling.
 
 **Step 4: Run the focused tests**
 
@@ -43,155 +55,350 @@ Expected: PASS.
 
 ```bash
 git add bin/raiko2/src/config/runtime.rs config.example.toml docs/API.md
-git commit -m "feat(runtime): configure terminal task retention"
+git commit -m "feat(runtime): pace retention cleanup independently"
 ```
 
-### Task 2: Add exact batch retirement and removal primitives
+### Task 2: Decouple exact root removal from external cleanup
 
 **Files:**
 - Modify: `crates/runtime/src/lib.rs`
-
-**Step 1: Write failing runtime tests**
-
-Cover multiple exact terminal records retired in one authoritative mutation, stale or changed
-records skipped, active artifacts retained while referenced by another live task, and newly unowned
-artifacts marked invalidated.
-
-**Step 2: Run the focused tests and verify failure**
-
-Run: `cargo test -p raiko2-runtime --lib batch_retention`
-
-Expected: FAIL because the batch APIs do not exist.
-
-**Step 3: Implement minimal typed batch APIs**
-
-Add typed prepare/finalize results. The prepare mutation retires unchanged terminal tasks and marks
-only unowned artifacts invalidated. The finalize mutation removes exact retired task lifetimes,
-removes only successfully finalized artifact descriptors, and releases pending publication owners.
-
-**Step 4: Run focused runtime tests**
-
-Run: `cargo test -p raiko2-runtime --lib batch_retention`
-
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add crates/runtime/src/lib.rs
-git commit -m "feat(runtime): batch terminal retention transitions"
-```
-
-### Task 3: Drive batch GC from the maintenance loop
-
-**Files:**
-- Modify: `bin/raiko2/src/server/task_cleanup.rs`
 - Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
 
-**Step 1: Write failing cleanup tests**
+**Step 1: Write failing lifecycle tests**
 
-Cover a multi-root cleanup pass, shared artifact retention, exact artifact finalization, detach
-failure retry, proof-object deletion failure retry, pending-publication deletion retry, and a slow
-object store that does not hold the execution lifecycle gate. Assert that cleanup performs a
-constant number of authoritative state writes per batch using the runtime probe store.
+Add a two-root regression where one root owns an artifact whose exact invalidation fails and the
+other root has no external failure. Assert that both successfully detached root records are removed,
+the failed artifact record remains invalidated, and a repeated deterministic request can register a
+fresh incarnation immediately.
+
+Add a detach-failure regression asserting that only the root whose projection failed remains
+cancelled.
 
 **Step 2: Run the focused tests and verify failure**
 
-Run: `cargo test -p raiko2 server::task_cleanup`
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
 
-Expected: FAIL because cleanup still removes one root at a time.
+Expected: FAIL because `remove_terminal_retention_batch` gates every root on the complete external
+batch.
 
-**Step 3: Implement batch cleanup**
+**Step 3: Move root finalization before external I/O**
 
-Pass `config.runtime.terminal_task_ttl_secs` into the loop. Hold the lifecycle gate only through the
-batch prepare transition and exact queue detachment. Release it before bounded-concurrent artifact
-and pending-publication finalization, then call the exact batch finalize transition. If the task seen
-by a request disappears during this process, atomically retry normal registration instead of
-returning an internal error.
+Keep `prepare_terminal_task_retention_batch` as the authoritative invalidation point. Under
+`execution_lifecycle_gate`, detach each exact retired root and immediately call
+`finalize_terminal_task_retention_batch` with only the successfully detached task snapshots. Release
+the gate after that state commit.
 
-**Step 4: Run focused cleanup tests**
+Do not pass external failures into root-removal decisions. Preserve failed detach snapshots for the
+root retry lane.
 
-Run: `cargo test -p raiko2 server::task_cleanup`
+**Step 4: Run runtime and cleanup tests**
+
+Run: `cargo test -p raiko2-runtime --lib batch_retention`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
 
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add bin/raiko2/src/server/task_cleanup.rs bin/raiko2/src/server/lifecycle.rs
-git commit -m "feat(runtime): garbage collect terminal tasks in batches"
+git add crates/runtime/src/lib.rs bin/raiko2/src/server/lifecycle.rs bin/raiko2/src/server/task_cleanup.rs
+git commit -m "fix(runtime): decouple root retention from artifact cleanup"
 ```
 
-### Task 4: Add runtime-state and cleanup observability
+### Task 3: Add an independent artifact retention lane
 
 **Files:**
 - Modify: `crates/runtime/src/lib.rs`
-- Modify: `bin/raiko2/src/server/telemetry.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
 - Modify: `bin/raiko2/src/server/task_cleanup.rs`
 
-**Step 1: Write failing metric/state-stat tests**
+**Step 1: Write failing legacy-orphan tests**
 
-Cover loaded and mutated serialized-byte length plus task, artifact, and pending-publication counts.
-Cover cleanup counter labels without task IDs or other unbounded dimensions.
+Seed an active proof artifact, retire and remove its only task through the pre-batch shape, and then
+run cleanup with no terminal task candidates. Assert that the artifact is selected, durably marked
+invalidated, externally finalized, and removed from runtime state.
 
-**Step 2: Run focused tests and verify failure**
+Add a shared-owner control asserting that an artifact referenced by any usable task is skipped.
 
-Run: `cargo test -p raiko2-runtime --lib runtime_state_stats`
+**Step 2: Run the focused tests and verify failure**
 
-Run: `cargo test -p raiko2 server::telemetry`
+Run: `cargo test -p raiko2-runtime --lib artifact_retention`
 
-Expected: FAIL because the stats and metrics do not exist.
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server legacy_orphan`
 
-**Step 3: Implement metrics**
+Expected: FAIL because artifact candidates are currently derived only from freshly retired tasks.
 
-Track the last installed serialized length in `RuntimeManager`, expose bounded state stats, and record
-gauges/counters after initialization and cleanup passes.
+**Step 3: Add exact artifact scanning and preparation APIs**
 
-**Step 4: Run focused tests**
+Add a stable artifact cursor keyed by the canonical artifact state key and APIs equivalent to:
 
-Run the two focused commands from Step 2.
+```rust
+pub async fn list_reclaimable_proof_artifacts(
+    &self,
+    after: Option<&ArtifactRetentionCursor>,
+    limit: usize,
+) -> Result<Vec<ProofArtifactRecord>>;
+
+pub async fn prepare_artifact_retention_batch(
+    &self,
+    expected: &[ProofArtifactRecord],
+) -> Result<ArtifactRetentionPrepare>;
+```
+
+The prepare mutation must exact-match each record, recheck usable owners, mark active/pending orphan
+records invalidated, and return already-invalidated records unchanged for retry. It must never
+invalidate a changed descriptor or an artifact with a usable owner.
+
+**Step 4: Drive bounded external finalization**
+
+Run artifact finalization outside the execution lifecycle gate with the existing concurrency bound.
+Finalize successful exact artifact records in one authoritative mutation; retain only failed or stale
+records.
+
+**Step 5: Run focused tests**
+
+Run the commands from Step 2.
+
+Expected: PASS.
+
+**Step 6: Commit**
+
+```bash
+git add crates/runtime/src/lib.rs bin/raiko2/src/server/lifecycle.rs bin/raiko2/src/server/task_cleanup.rs
+git commit -m "feat(runtime): sweep unowned proof artifacts independently"
+```
+
+### Task 4: Make pending-publication reclamation independent and complete
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/lifecycle.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Write failing pending-publication tests**
+
+Cover these cases:
+
+- an unowned pending intent is removed after its root record has already disappeared;
+- one pending delete failure does not block unrelated artifact or root finalization;
+- a canonical object plus pending intent with no artifact record is tombstoned and removed rather
+  than leaving an untracked canonical manifest;
+- a new live owner or changed intent between selection and deletion is preserved.
+
+**Step 2: Run the focused tests and verify failure**
+
+Run: `cargo test -p raiko2-runtime --lib pending_retention`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server pending_publication`
+
+Expected: at least the missing-artifact-record case and independent-root case FAIL.
+
+**Step 3: Add independent candidate selection**
+
+List exact pending expectations directly from `RuntimeState::pending_publications`, selecting only
+records with no live owner. Do not derive candidates from a terminal task batch.
+
+**Step 4: Close the canonical-object crash window**
+
+Under the per-artifact lifecycle lock, exact-check the intent and owners, inspect the canonical
+descriptor, and record an invalidated artifact descriptor when the canonical object exists without a
+runtime artifact record. Finalize the exact canonical invalidation before deleting the exact pending
+object. Return finalized artifact and pending expectations for batched state removal.
+
+**Step 5: Run focused tests**
+
+Run the commands from Step 2.
+
+Expected: PASS.
+
+**Step 6: Commit**
+
+```bash
+git add crates/runtime/src/lib.rs bin/raiko2/src/server/lifecycle.rs bin/raiko2/src/server/task_cleanup.rs
+git commit -m "fix(runtime): reclaim unowned pending publications independently"
+```
+
+### Task 5: Add fair retry and fresh-progress scheduling
+
+**Files:**
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `bin/raiko2/src/server/telemetry.rs`
+
+**Step 1: Write failing sustained-arrival regressions**
+
+Create more than one batch of terminal roots. Force one old detach and one artifact invalidation to
+fail on every attempt while adding at least one newly expired record before each pass. Assert across
+multiple passes that:
+
+- failed records are retried without waiting for an empty page;
+- fresh records continue to be removed;
+- a permanently failing item cannot consume the complete batch;
+- retry queues do not contain duplicate identities.
+
+**Step 2: Run the focused tests and verify failure**
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server sustained_arrival`
+
+Expected: FAIL because the current cursor retries only after an empty page.
+
+**Step 3: Implement per-lane scheduler state**
+
+Replace the standalone cursors with a cleanup-loop state containing fresh cursors plus deduplicated
+round-robin retry queues for roots, artifacts, and pending intents. Each lane divides its configured
+batch budget between retry and fresh work; unused capacity from either side is donated to the other.
+
+Retry entries contain only stable identities. Reload the current exact record before every retry and
+drop entries that disappeared, changed ownership, or are no longer eligible. Cursors and queues reset
+on restart; authoritative state remains the source of truth.
+
+**Step 4: Add bounded metrics**
+
+Expose retry-queue lengths and fresh/retry attempt counters using only fixed lane/outcome labels.
+Avoid task IDs, proof refs, and exact global-gauge values in parallel tests.
+
+**Step 5: Run focused tests**
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::telemetry`
+
+Expected: PASS.
+
+**Step 6: Commit**
+
+```bash
+git add bin/raiko2/src/server/task_cleanup.rs bin/raiko2/src/server/telemetry.rs
+git commit -m "fix(runtime): schedule retention retries fairly"
+```
+
+### Task 6: Make restart recovery cleanup-safe
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/state/mod.rs`
+- Test: `crates/runtime/src/lib.rs`
+- Test: `bin/raiko2/src/server/state/mod.rs`
+
+**Step 1: Write failing restart tests**
+
+Simulate an invalidated old descriptor, an identical republished canonical object with a new
+generation, and a durable pending intent owned by a live task. Restart the runtime and assert that it
+restores the current pending publication before cleanup and does not fail startup on the stale old
+descriptor.
+
+Also inject a transient invalidation failure and assert that initialization succeeds while the
+artifact remains invalidated and eligible for maintenance retry.
+
+**Step 2: Run the focused tests and verify failure**
+
+Run: `cargo test -p raiko2-runtime --lib restart_retention`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server startup_retention`
+
+Expected: FAIL because startup currently runs fail-fast invalidation reconciliation before pending
+runtime restoration.
+
+**Step 3: Reorder recovery and remove cleanup from readiness**
+
+Restore recoverable pending runtime state before invalidated-artifact cleanup. Treat exact external
+deletion as maintenance: keep invalidated state unreadable, log cleanup failures, and let the
+independent artifact lane retry after startup.
+
+Never treat a stale descriptor as permission to delete the current object. Reconcile it only through
+the current canonical descriptor plus exact durable pending owner checks.
+
+**Step 4: Run focused restart tests**
+
+Run the commands from Step 2.
 
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
-git add crates/runtime/src/lib.rs bin/raiko2/src/server/telemetry.rs bin/raiko2/src/server/task_cleanup.rs
-git commit -m "feat(metrics): observe runtime retention"
+git add crates/runtime/src/lib.rs bin/raiko2/src/server/state/mod.rs
+git commit -m "fix(runtime): defer artifact cleanup during restart"
 ```
 
-### Task 5: Verify the integrated change
+### Task 7: Align documentation and stabilize telemetry tests
+
+**Files:**
+- Modify: `docs/API.md`
+- Modify: `docs/operations.md`
+- Modify: `docs/architecture.md`
+- Modify: `config.example.toml`
+- Modify: `bin/raiko2/src/server/telemetry.rs`
+- Modify: `docs/plans/2026-08-19-runtime-retention-batch-gc-design.md`
+
+**Step 1: Remove stale seven-day terminal-retention statements**
+
+Keep the seven-day orphan-task window where it is still correct. Change terminal root retention to
+the configurable six-hour default and document that artifact/pending cleanup is ownership-driven and
+independent of root records.
+
+**Step 2: Stabilize the global-registry metric test**
+
+Assert metric family and bounded label presence rather than exact gauge values that other parallel
+tests can overwrite.
+
+**Step 3: Verify documentation and telemetry tests**
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::telemetry`
+
+Run: `rg -n "seven-day|seven days" docs`
+
+Expected: telemetry tests PASS; remaining seven-day references describe only the orphan-task policy
+or historical context.
+
+**Step 4: Commit**
+
+```bash
+git add docs config.example.toml bin/raiko2/src/server/telemetry.rs
+git commit -m "docs(runtime): align retention operations"
+```
+
+### Task 8: Verify the integrated change
 
 **Files:**
 - Verify only.
 
-**Step 1: Format**
+**Step 1: Format and check the patch**
 
 Run: `cargo fmt --all`
 
-Expected: PASS with no remaining diff after a second run.
-
-**Step 2: Run focused package tests**
-
-Run: `cargo test -p raiko2-runtime --lib`
-
-Run: `cargo test -p raiko2 server::task_cleanup`
+Run: `git diff --check origin/main`
 
 Expected: PASS.
 
-**Step 3: Run workspace lint**
+**Step 2: Run focused runtime and server tests**
+
+Run: `cargo test -p raiko2-runtime`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server`
+
+Expected: runtime and server suites PASS.
+
+**Step 3: Run the repository verification lanes**
+
+Run: `cargo test -p raiko2-queue -p raiko2-runtime`
+
+Run: `cargo test -p raiko2-provider -p raiko2-pipeline -p preflight`
 
 Run: `cargo clippy --workspace -- -D warnings`
 
+Run: `cargo fmt --all -- --check`
+
 Expected: PASS.
 
-**Step 4: Review configuration documentation**
+**Step 4: Review path and filename hygiene**
 
-Verify `config.example.toml` and `docs/API.md` describe the same default and terminal-time semantics.
+Inspect every added line for absolute paths, user-specific directories, machine-specific values, and
+person-identifying fixture names. Replace any occurrence with repository-relative or temporary paths
+and neutral fixture labels.
 
-**Step 5: Commit any verification-only fixes**
+**Step 5: Update the PR**
 
-```bash
-git add -u
-git commit -m "chore(runtime): finalize retention rollout checks"
-```
+Summarize the changed lifecycle model, list every verification command and result, and explicitly
+map the new regressions to the review findings before pushing the branch.

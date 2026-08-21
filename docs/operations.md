@@ -1306,7 +1306,9 @@ Operator notes:
   orphan pass resets it to `0`. Alert on a sustained value, then repair the external state or use
   one-shot `runtime.startup_cleanup = ["proof"]`; ordinary failed proof tasks are terminal records and
   do not trigger this fail-stop. Root retention admission preserves each task's client-visible
-  terminal status, proof URI, error, and timestamp until exact removal commits.
+  terminal status, proof URI, error, and timestamp until exact removal commits. The same terminal TTL
+  applies to failed or cancelled roots with remote submission progress; after expiry, resubmission may
+  create and pay for a new provider request even if the previous request later completes.
   Active proof and canonical preflight manifests must not have an age-based GCS lifecycle rule.
   Immutable content must remain available until every manifest that references it is gone.
   Generation-scoped invalidation markers and unreferenced proof/preflight content use a minimum

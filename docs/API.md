@@ -1137,7 +1137,9 @@ Returns the root-task view derived from the original batch request.
   that references it is gone. Retention admission preserves the terminal runner status, proof URI,
   error, and timestamp until exact task removal commits. Generation-scoped tombstones and unreferenced
   content use a minimum thirty-day retention window. Active root tasks are never removed by terminal
-  cleanup.
+  cleanup. The terminal TTL also applies to failed or cancelled roots that carry remote submission
+  progress. Once that checkpoint expires, a later resubmission may create and pay for a new provider
+  request even if the old provider request eventually completes.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 

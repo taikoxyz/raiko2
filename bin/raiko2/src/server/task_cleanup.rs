@@ -2534,7 +2534,7 @@ mod tests {
         let writes_after = store.runtime_state_writes.load(Ordering::Acquire);
         assert_eq!(stats.removed_roots, 3);
         assert_eq!(stats.removed_pending_publications, 3);
-        assert_eq!(writes_after - writes_before, 3);
+        assert_eq!(writes_after - writes_before, 2);
         Ok(())
     }
 

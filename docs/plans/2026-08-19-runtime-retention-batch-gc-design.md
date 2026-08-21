@@ -31,6 +31,12 @@ removed by this TTL, even if they run longer than six hours. An active task olde
 window is abnormal and emits one deduplicated structured warning per observed task incarnation.
 This is an operational failure signal, not a second reclamation policy.
 
+The terminal window also applies to failed or cancelled roots with remote-provider submission
+progress. Expiry deliberately releases those checkpoints with the rest of the terminal task; a later
+resubmission may create and pay for another provider request even if the old request eventually
+completes. This bounded retention tradeoff is preferred over keeping terminal runtime state
+indefinitely.
+
 Retention admission is represented independently from execution status. Preparing a root for
 removal must preserve its `RunnerStatus`, proof URI, and execution error; a client continues to see
 the original terminal result until exact root removal commits. The dedicated retention state is a
@@ -60,12 +66,14 @@ continuous stream of newly expired records can starve the other side.
 ### Root retirement
 
 1. Acquire the existing execution lifecycle gate.
-2. In one in-process authoritative mutation, verify each task's full observed snapshot and mark
+2. Under the namespace, mutation, lifecycle-commit, and state-write fences, verify each task's full
+   observed snapshot and mark
    unchanged terminal matches as `removing` in the independent retention lifecycle. Preserve the
    task's execution status, proof URI, error, and terminal timestamp. The process-local marker is
-   omitted from persisted snapshots, so a restart re-admits the same terminal root instead of
-   depending on a newer schema. Root preparation does not invalidate proof artifacts or pending
-   publications because the task still owns them until exact root removal commits.
+   omitted from persisted snapshots and does not issue a repository write or adopt a new generation,
+   so a restart re-admits the same terminal root instead of depending on a newer schema. Root
+   preparation does not invalidate proof artifacts or pending publications because the task still
+   owns them until exact root removal commits.
 3. Detach each prepared root from its engine queue. A detach failure retains only that exact root,
    with its original client-visible terminal result, in the root retry lane.
 4. In one authoritative mutation, remove every successfully detached exact root snapshot and prune

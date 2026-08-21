@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, watch};
+use tracing::warn;
 
 #[derive(Debug)]
 pub struct PendingProofPublicationRemoved {
@@ -3074,6 +3075,15 @@ impl RuntimeManager {
             return Ok(());
         };
         if descriptor.content_hash != expectation.content_hash {
+            warn!(
+                network_pair = %key.network_pair,
+                pipeline = key.pipeline_key.as_str(),
+                route = %key.route,
+                proof_ref = %key.proof_ref,
+                expected_content_hash = %expectation.content_hash,
+                observed_content_hash = %descriptor.content_hash,
+                "leaving changed untracked canonical proof for explicit namespace cleanup"
+            );
             return Ok(());
         }
         self.validate_pending_publication_before_object_deletion(expectation, state_key)
@@ -3506,27 +3516,33 @@ impl RuntimeManager {
             "terminal task retention batch contains duplicate task ids"
         );
         let expected_tasks = expected_tasks.to_vec();
-        self.mutate(move |state| {
-            let mut prepared = TerminalTaskRetentionPrepare::default();
+        self.ensure_active()?;
+        let _commit = self.acquire_namespace_commit_fence(None)?;
+        self.ensure_active()?;
+        let _mutation = self.mutation.lock().await;
+        self.ensure_active()?;
+        let mut state = self.state.write().await;
+        let _lifecycle_commit = self
+            .lifecycle_commit
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime lifecycle commit lock poisoned"))?;
+        self.ensure_active()?;
+        let mut prepared = TerminalTaskRetentionPrepare::default();
 
-            for expected in &expected_tasks {
-                let Some(current) = state.tasks.get_mut(&expected.task_id) else {
-                    prepared.skipped_tasks = prepared.skipped_tasks.saturating_add(1);
-                    continue;
-                };
-                if current != expected || !current.runner_status.is_terminal() {
-                    prepared.skipped_tasks = prepared.skipped_tasks.saturating_add(1);
-                    continue;
-                }
-                if current.retention_state != TaskRetentionState::Removing {
-                    current.retention_state = TaskRetentionState::Removing;
-                }
-                prepared.retired_tasks.push(current.clone());
+        for expected in &expected_tasks {
+            let Some(current) = state.tasks.get_mut(&expected.task_id) else {
+                prepared.skipped_tasks = prepared.skipped_tasks.saturating_add(1);
+                continue;
+            };
+            if current != expected || !current.runner_status.is_terminal() {
+                prepared.skipped_tasks = prepared.skipped_tasks.saturating_add(1);
+                continue;
             }
+            current.retention_state = TaskRetentionState::Removing;
+            prepared.retired_tasks.push(current.clone());
+        }
 
-            Ok(prepared)
-        })
-        .await
+        Ok(prepared)
     }
 
     /// Removes only exact retired task snapshots and exact externally-finalized artifact records in
@@ -6466,6 +6482,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_retention_admission_does_not_write_authoritative_state() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "terminal-retention-local-admission",
+        )?);
+        let runtime = RuntimeManager::with_store(store.clone());
+        let terminal =
+            register_retention_task(&runtime, "terminal-root", &[], RunnerStatus::Completed, 1)
+                .await?;
+        let writes_before = store.runtime_state_writes.load(Ordering::SeqCst);
+        let generation_before = runtime.runtime_state_generation_for_test()?;
+
+        let prepared = runtime
+            .prepare_terminal_task_retention_batch(&[terminal])
+            .await?;
+
+        assert_eq!(prepared.retired_tasks.len(), 1);
+        assert_eq!(
+            prepared.retired_tasks[0].retention_state,
+            TaskRetentionState::Removing
+        );
+        assert_eq!(
+            current_test_task(&runtime, "terminal-root")
+                .await?
+                .retention_state,
+            TaskRetentionState::Removing
+        );
+        assert_eq!(
+            store.runtime_state_writes.load(Ordering::SeqCst),
+            writes_before,
+            "process-local retention admission must not write byte-identical state"
+        );
+        assert_eq!(
+            runtime.runtime_state_generation_for_test()?,
+            generation_before,
+            "process-local retention admission must not adopt a new generation"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn batch_retention_finalizes_only_exact_successful_records() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "batch-retention-finalize".into())?;
         let first = register_retention_task(
@@ -8376,6 +8432,118 @@ mod tests {
                 .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
                 .await?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_retention_finalization_cannot_delete_a_republished_generation() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "retention-finalization-republication",
+        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-republication";
+        let proof = br#"{"proof":"0x01"}"#;
+        let owner = runtime
+            .register_task(TaskRegistration {
+                task_id: "root".into(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "proposal".into(),
+                network_pair: "l1-l2".into(),
+                artifact_refs: vec![proof_ref.into()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: "request".into(),
+            })
+            .await?
+            .incarnation_id;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[owner],
+                    proof,
+                )
+                .await?
+        );
+        let old = runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref, proof)
+            .await?
+            .try_object()
+            .context("old canonical proof")?
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "l1-l2".into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: old.proof_uri.clone(),
+                content_hash: old.content_hash.clone(),
+                generation: old.generation,
+            })
+            .await?;
+        let state_key = artifact_record_key("l1-l2", pipeline, route, proof_ref);
+        runtime
+            .mutate(move |state| {
+                let artifact = state
+                    .artifacts
+                    .get_mut(&state_key)
+                    .context("old artifact record")?;
+                artifact.lifecycle = ProofArtifactLifecycle::Invalidated;
+                artifact.invalidated_at = Some(now_ts());
+                Ok(())
+            })
+            .await?;
+        let stale = runtime
+            .get_proof_artifact_including_invalidated("l1-l2", pipeline, route, proof_ref)
+            .await?
+            .context("stale invalidation")?
+            .expectation();
+
+        store
+            .block_next_artifact_delete
+            .store(true, Ordering::SeqCst);
+        let finalization = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let stale = stale.clone();
+            async move { runtime.finalize_proof_artifact_invalidation(&stale).await }
+        });
+        store.artifact_delete_completed.notified().await;
+
+        let republished = runtime
+            .commit_proof_artifact_publication("l1-l2", pipeline, route, proof_ref, proof)
+            .await?
+            .try_object()
+            .context("republished canonical proof")?
+            .clone();
+        assert_ne!(old.generation, republished.generation);
+
+        store.allow_artifact_delete_return.notify_one();
+        assert_eq!(finalization.await??, ProofArtifactDeleteResult::Removed);
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(&[], &[stale], &[])
+            .await?;
+        assert!(finalized.removed_artifacts.is_empty());
+        assert_eq!(finalized.skipped_artifacts, 1);
+        let current = runtime
+            .get_proof_artifact_including_invalidated("l1-l2", pipeline, route, proof_ref)
+            .await?
+            .context("republished artifact record")?;
+        assert_eq!(current.lifecycle, ProofArtifactLifecycle::Pending);
+        assert_eq!(current.descriptor(), republished.descriptor());
+        assert_eq!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .context("republished proof bytes")?
+                .bytes,
+            proof
         );
         Ok(())
     }

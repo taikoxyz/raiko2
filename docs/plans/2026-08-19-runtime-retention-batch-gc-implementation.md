@@ -674,3 +674,43 @@ Run: `cargo clippy --workspace -- -D warnings`
 Run: `cargo fmt --all -- --check`
 
 Expected: PASS.
+
+### Task 17: Keep process-local retention admission out of the repository CAS
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `docs/API.md`
+- Modify: `docs/operations.md`
+- Modify: `docs/plans/2026-08-19-runtime-retention-batch-gc-design.md`
+- Test: `crates/runtime/src/lib.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Pin process-local admission**
+
+Assert that preparing an exact terminal root changes its in-process retention marker without writing
+the runtime repository or changing the observed generation. Update the cleanup write-count regression
+to require only the durable root-finalization and pending-intent-removal writes.
+
+**Step 2: Pin publication against stale finalization**
+
+Pause an old-generation invalidation after its exact object deletion, republish the same proof at a
+new generation, and assert that finalizing the old runtime expectation cannot remove the new pending
+record or canonical bytes.
+
+**Step 3: Implement local admission under existing fences**
+
+Use the namespace commit fence, runtime mutation lock, lifecycle commit lock, and state write lock to
+install only the `Removing` marker. Keep final root removal on the authoritative CAS path so an
+overlapping runtime writer still violates state coherence on the first durable mutation.
+
+**Step 4: Document accepted remote-checkpoint expiry and mismatch visibility**
+
+State explicitly that the six-hour TTL applies to terminal roots with remote submission progress and
+may cause a later resubmission to pay again. Warn when pending retention intentionally leaves a changed
+untracked canonical descriptor for explicit namespace cleanup.
+
+**Step 5: Verify and commit**
+
+Run the focused runtime and cleanup regressions, full runtime/server suites, workspace clippy, format,
+and diff checks before updating PR `#229`.

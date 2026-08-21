@@ -1,7 +1,5 @@
 # Runtime Retention Batch GC Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Bound runtime-state growth without letting artifact-store failures retain client task IDs,
 starve retries, or leave legacy artifact records outside the collector.
 
@@ -599,10 +597,10 @@ resumes and the gauge clears.
 
 **Step 3: Implement the independent retention lifecycle**
 
-Add a Serde-defaulted task retention enum whose normal value is omitted from persisted JSON. Mark
-exact terminal snapshots as removing without changing `RunnerStatus`, proof URI, error, or
-`updated_at`. Require the exact removing snapshot during batch finalization. Keep ordinary task
-cancellation semantics separate from retention removal.
+Add a Serde-defaulted task retention enum that is omitted from persisted JSON. Mark exact terminal
+snapshots as removing without changing `RunnerStatus`, proof URI, error, or `updated_at`. Require the
+exact removing snapshot during in-process batch finalization; after restart, select the unchanged
+terminal root again. Keep ordinary task cancellation semantics separate from retention removal.
 
 **Step 4: Make orphan fail-stop explicit and bounded**
 
@@ -623,6 +621,49 @@ Run: `cargo test -p raiko2-runtime --lib`
 Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
 
 Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::telemetry`
+
+Run: `cargo test -p raiko2-queue -p raiko2-engine -p raiko2-runtime --quiet`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server --quiet`
+
+Run: `cargo clippy --workspace -- -D warnings`
+
+Run: `cargo fmt --all -- --check`
+
+Expected: PASS.
+
+### Task 16: Complete interrupted retention without rollback coupling
+
+**Files:**
+- Modify: `crates/runtime/src/lib.rs`
+- Modify: `bin/raiko2/src/server/task_cleanup.rs`
+- Modify: `docs/plans/2026-08-19-runtime-retention-batch-gc-design.md`
+- Test: `crates/runtime/src/lib.rs`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
+
+**Step 1: Keep retention admission process-local**
+
+Assert that `Removing` participates in in-process full-record equality but is omitted from persisted
+JSON. A restarted runtime must default the marker to `Retained` and reselect the unchanged expired
+terminal root normally.
+
+**Step 2: Finalize committed artifact invalidations regardless of ownership**
+
+Seed an `Invalidated` artifact whose original failed task record still references it. Assert that the
+artifact lane selects and finalizes the already-committed invalidation while active artifacts remain
+protected by every retained task reference.
+
+**Step 3: Repair pending intent/object hash mismatch**
+
+Seed an unowned pending intent whose expected hash differs from the exact object currently stored at
+its pending key. Assert that retention deletes the observed exact object generation and then removes
+the unchanged intent record.
+
+**Step 4: Run focused and workspace verification**
+
+Run: `cargo test -p raiko2-runtime --lib`
+
+Run: `cargo test -p raiko2 --bin raiko2 --features fixture-server server::task_cleanup`
 
 Run: `cargo test -p raiko2-queue -p raiko2-engine -p raiko2-runtime --quiet`
 

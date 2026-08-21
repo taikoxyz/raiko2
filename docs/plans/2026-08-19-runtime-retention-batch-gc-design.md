@@ -33,9 +33,10 @@ This is an operational failure signal, not a second reclamation policy.
 
 Retention admission is represented independently from execution status. Preparing a root for
 removal must preserve its `RunnerStatus`, proof URI, and execution error; a client continues to see
-the original terminal result until exact root removal commits. The dedicated retention state is an
-internal two-phase deletion marker and is never interpreted as proposal or aggregate execution
-progress.
+the original terminal result until exact root removal commits. The dedicated retention state is a
+process-local two-phase deletion marker: it participates in exact in-process comparisons but is not
+persisted in the authoritative snapshot. After a restart, an unchanged expired terminal root is
+selected again normally. The marker is never interpreted as proposal or aggregate execution progress.
 
 ## Configuration
 
@@ -59,11 +60,12 @@ continuous stream of newly expired records can starve the other side.
 ### Root retirement
 
 1. Acquire the existing execution lifecycle gate.
-2. In one authoritative mutation, verify each task's full observed snapshot and mark unchanged
-   terminal matches as `removing` in the independent retention lifecycle. Preserve the task's
-   execution status, proof URI, error, and terminal timestamp. Root preparation does not invalidate
-   proof artifacts or pending publications because the task still owns them until exact root removal
-   commits.
+2. In one in-process authoritative mutation, verify each task's full observed snapshot and mark
+   unchanged terminal matches as `removing` in the independent retention lifecycle. Preserve the
+   task's execution status, proof URI, error, and terminal timestamp. The process-local marker is
+   omitted from persisted snapshots, so a restart re-admits the same terminal root instead of
+   depending on a newer schema. Root preparation does not invalidate proof artifacts or pending
+   publications because the task still owns them until exact root removal commits.
 3. Detach each prepared root from its engine queue. A detach failure retains only that exact root,
    with its original client-visible terminal result, in the root retry lane.
 4. In one authoritative mutation, remove every successfully detached exact root snapshot and prune
@@ -75,9 +77,10 @@ continuous stream of newly expired records can starve the other side.
 1. Build one ownership index from the authoritative task table, then select a bounded mix of retry
    artifacts and fresh artifact records. Fresh selection scans the artifact table itself rather than
    deriving keys only from newly retired roots.
-2. In one authoritative mutation, recheck each exact record and its retained task owners. Mark
-   ownerless active or pending records invalidated; already-invalidated ownerless records remain
-   eligible for retry. Task status does not affect ownership.
+2. In one authoritative mutation, recheck each exact record and its retained task owners. Mark only
+   ownerless active or pending records invalidated. An already-invalidated record is a committed
+   logical deletion and remains eligible for external finalization even if an older task record still
+   references it. Task status does not affect ownership before invalidation commits.
 3. Finalize exact invalidations outside the execution lifecycle gate using content hash and object
    generation. A failed or stale invalidation retains only that artifact record.
 4. Remove only exact successfully finalized artifact records in one authoritative mutation.
@@ -96,8 +99,11 @@ by the previous collector.
    If no artifact record exists, exact-invalidate only a canonical descriptor with the same content
    hash as the pending intent. A changed untracked descriptor is left untouched for explicit
    namespace cleanup rather than being adopted as local invalidation authority.
-3. Delete the exact pending object and remove only the exact durable intent. A changed intent, a new
-   retained task reference, or an external failure retains only that pending intent for retry.
+3. Revalidate the exact intent and absence of a retained owner, then delete the exact pending-object
+   generation currently observed at its private pending key. The object hash may differ from an older
+   intent after an interrupted or partial publication; generation matching prevents deletion of a
+   later concurrent write. Remove only the exact durable intent. A changed intent, a new retained
+   task reference, or an external failure retains only that pending intent for retry.
 
 The number of runtime-state writes in the root, artifact, and pending retention lanes is bounded by
 cleanup phases, not by the number of records in a batch. External retention cleanup never performs
@@ -152,6 +158,8 @@ resubmission, not by aggregate-owned reproving.
   regardless of task status.
 - Artifact ownership is rechecked before invalidation admission. Once exact invalidation is
   authoritative, a later task cannot resurrect that descriptor.
+- A committed artifact invalidation can always finish external deletion; an obsolete task reference
+  cannot turn the invalidated manifest back into a retained active artifact.
 - Artifact invalidation is authoritative before external object deletion.
 - An invalidated artifact cannot satisfy a cache lookup while deletion is retried.
 - Root removal depends only on exact retirement and queue detachment, never on external deletion.
@@ -161,7 +169,7 @@ resubmission, not by aggregate-owned reproving.
 - Slow object-store operations never hold the process-wide execution lifecycle gate.
 - Runtime draining fences batch cleanup through the existing namespace and lifecycle gates.
 - Pending publication objects and intents are removed only after their last task-owner record is
-  removed and exact external deletion succeeds.
+  removed and exact-generation external deletion succeeds.
 - A request whose observed task disappears during cleanup atomically returns to normal registration;
   it does not fail with an internal replacement error.
 - An active task older than the terminal retention window is logged but never selected for removal.

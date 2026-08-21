@@ -1405,6 +1405,52 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn orphan_cancellation_failure_names_task_and_keeps_cursor_uncommitted() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "orphan-cancellation-context",
+        ))?);
+        register_runtime_task(
+            runtime.as_ref(),
+            "cancel-poison",
+            &encoded_proposal_task_id(303)?,
+            RunnerStatus::Running,
+            now_ts().saturating_sub(7_201),
+        )
+        .await?;
+        let factory = Arc::new(build_factory(Arc::new(MockEngine::with_failing_owners(
+            HashSet::from(["cancel-poison".to_string()]),
+        ))));
+        let mut cleanup_state = RuntimeCleanupLoopState::default();
+
+        let error = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            14_400,
+            64,
+            &mut cleanup_state,
+        )
+        .await
+        .expect_err("orphan cancellation projection failure must fail-stop retention");
+
+        assert!(
+            error
+                .to_string()
+                .contains("orphan retention blocked while cancelling task cancel-poison")
+        );
+        assert!(cleanup_state.orphan_cursor.is_none());
+        assert_eq!(
+            runtime
+                .get_task("cancel-poison")
+                .await?
+                .context("cancelled poison task")?
+                .runner_status,
+            RunnerStatus::Cancelled
+        );
+        Ok(())
+    }
+
     struct MockEngine {
         failing_owners: HashSet<String>,
         active_owners: HashSet<RootOwner>,
@@ -2572,6 +2618,14 @@ mod tests {
         drop(runtime);
         let runtime = Arc::new(RuntimeManager::with_store(store));
         runtime.initialize().await?;
+        assert_eq!(
+            runtime
+                .get_task("expired-root")
+                .await?
+                .context("restarted root")?
+                .retention_state,
+            TaskRetentionState::Retained
+        );
         let mut cleanup_state = RuntimeCleanupLoopState::default();
         let healthy_factory = Arc::new(build_factory(Arc::new(MockEngine::default())));
         let retry = run_runtime_cleanup_pass(

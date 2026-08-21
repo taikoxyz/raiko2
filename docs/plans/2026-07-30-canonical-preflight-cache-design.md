@@ -291,8 +291,8 @@ retention, and continue to respect existing proving concurrency limits.
 Use the existing runtime environment and namespace scope with a separate preflight prefix:
 
 ```text
-<scope>/preflights/v1/<key-hash>/manifest.manifest.json
-<scope>/preflights/v1/<key-hash>/content/<content-sha256>.preflight.bincode
+<scope>/preflights/v1/<key-digest>/manifest.manifest.json
+<scope>/preflights/v1/<key-digest>/content/<content-sha256>.preflight.bincode
 ```
 
 The manifest contains the full key, content hash, schema version, and content-object identity. It is

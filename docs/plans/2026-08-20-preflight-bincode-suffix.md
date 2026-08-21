@@ -18,7 +18,7 @@ documentation that describes the object layout.
 - Modify: `crates/runtime/src/artifact_store/gcs_tests.rs`
 
 1. Extend the canonical preflight publication test to assert that the content object ends with
-   `.preflight.bincode` and does not end with `.bin`.
+   `.preflight.bincode`.
 2. Run the focused test and confirm it fails against the existing `.bin` implementation.
 
 ### Task 2: Rename canonical preflight content objects
@@ -37,6 +37,8 @@ documentation that describes the object layout.
 - Modify: `docs/architecture.md`
 
 1. Document the canonical preflight content suffix alongside the existing proof layout.
-2. Run `cargo fmt --all -- --check`.
-3. Run the focused runtime tests again and inspect the final diff for path hygiene and unrelated
+2. Add an upgrade test that rewrites a persisted manifest to the legacy `.bin` content name and
+   verifies generation-protected removal followed by typed-name republication.
+3. Run `cargo fmt --all -- --check`.
+4. Run the focused runtime tests again and inspect the final diff for path hygiene and unrelated
    changes.

@@ -520,6 +520,70 @@ async fn canonical_preflight_read_cas_removes_manifest_for_corrupt_content() -> 
 }
 
 #[tokio::test]
+async fn canonical_preflight_legacy_content_name_is_removed_and_republished() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let bytes = b"canonical-preflight";
+    let object = store
+        .put_canonical_preflight_if_absent(&key, bytes)
+        .await?
+        .try_object()
+        .expect("canonical preflight object")
+        .clone();
+    let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
+    let legacy_content_name = format!(
+        "{}.bin",
+        content_name
+            .strip_suffix(".preflight.bincode")
+            .expect("typed preflight suffix")
+    );
+    assert!(matches!(
+        transport.create(&legacy_content_name, bytes).await?,
+        GcsCreateResult::Created(_)
+    ));
+
+    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
+    let mut manifest: serde_json::Value = serde_json::from_slice(
+        &transport
+            .read(&manifest_name)
+            .await?
+            .expect("canonical manifest")
+            .bytes,
+    )?;
+    manifest["content_name"] = serde_json::json!(legacy_content_name);
+    transport.replace_bytes(&manifest_name, &serde_json::to_vec(&manifest)?)?;
+
+    let error = store
+        .get_canonical_preflight(&key)
+        .await
+        .expect_err("legacy content name must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("canonical preflight content object mismatch")
+    );
+    assert!(!transport.contains(&manifest_name)?);
+    assert!(transport.contains(&legacy_content_name)?);
+
+    let replacement = store.put_canonical_preflight_if_absent(&key, bytes).await?;
+    assert!(matches!(
+        replacement,
+        CanonicalPreflightPutResult::Created(_)
+    ));
+    let replacement_manifest: serde_json::Value = serde_json::from_slice(
+        &transport
+            .read(&manifest_name)
+            .await?
+            .expect("replacement canonical manifest")
+            .bytes,
+    )?;
+    assert_eq!(replacement_manifest["content_name"], content_name);
+    Ok(())
+}
+
+#[tokio::test]
 async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;

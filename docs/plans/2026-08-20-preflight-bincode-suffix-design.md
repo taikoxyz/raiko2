@@ -2,8 +2,8 @@
 
 ## Goal
 
-Give canonical preflight cache content a distinct object suffix so bucket lifecycle rules can retain
-Boundless program ELF files and preflight cache entries for different periods.
+Give canonical preflight cache content a typed object suffix that identifies its serialization
+format and artifact class.
 
 ## Design
 
@@ -12,15 +12,27 @@ The existing canonical preflight key, content hash, bincode payload, manifest fo
 invalidation layout remain unchanged. The change does not affect `GuestInput`, proof artifacts, or
 public API behavior.
 
-Existing `.bin` preflight objects are not migrated. A deployment using the new suffix sees a cache
-miss, rebuilds the canonical preflight core, and publishes the same bytes under the new object name.
-Existing bucket lifecycle policy removes the unreachable old objects.
+Existing `.bin` preflight objects are not migrated. Without startup cleanup, a deployment using the
+new suffix reports a cache read error for each legacy manifest, generation-protected deletion removes
+that manifest, and the same request rebuilds and republishes the canonical preflight core under the
+new name. Existing `.bin` content remains unreachable for its bucket lifecycle policy to remove.
+
+Deploy once with `runtime.startup_cleanup = ["preflight"]` to remove legacy manifests before serving
+traffic. This produces ordinary cache misses instead of a cutover-wide cache-error metric spike.
+Remove the one-shot setting after the replacement starts successfully. Rolling back to a version
+that uses `.bin` requires the same cleanup and rebuild in the opposite direction.
 
 ## Lifecycle Separation
 
-The distinct suffix permits an independent canonical preflight lifecycle rule without matching
-Boundless RISC0 program `*.bin` objects. Bucket lifecycle changes are operational follow-up work and
-are intentionally outside this code change.
+GCS can already separate flat Boundless program keys from runtime-prefixed preflight objects with
+combined prefix and suffix conditions, so lifecycle separation does not require this rename. The
+typed suffix instead makes the object class explicit and permits a direct `*.preflight.bincode`
+lifecycle condition.
+
+The deployed preflight cache remains disabled until the `*.preflight.bincode` lifecycle rule is in
+place. The operational sequence is: merge this code, install the seven-day lifecycle rule, deploy
+with one-shot preflight cleanup, and only then enable shared preflight caching. Bucket lifecycle
+changes are outside this code change.
 
 ## Verification
 

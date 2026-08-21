@@ -520,7 +520,7 @@ async fn canonical_preflight_read_cas_removes_manifest_for_corrupt_content() -> 
 }
 
 #[tokio::test]
-async fn canonical_preflight_legacy_content_name_is_removed_and_republished() -> Result<()> {
+async fn canonical_preflight_legacy_manifest_is_removed_and_republished() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = canonical_preflight_key();
@@ -542,6 +542,8 @@ async fn canonical_preflight_legacy_content_name_is_removed_and_republished() ->
         transport.create(&legacy_content_name, bytes).await?,
         GcsCreateResult::Created(_)
     ));
+    transport.remove(&content_name)?;
+    assert!(!transport.contains(&content_name)?);
 
     let manifest_name = store.canonical_preflight_manifest_name(&key)?;
     let mut manifest: serde_json::Value = serde_json::from_slice(
@@ -572,6 +574,7 @@ async fn canonical_preflight_legacy_content_name_is_removed_and_republished() ->
         replacement,
         CanonicalPreflightPutResult::Created(_)
     ));
+    assert!(transport.contains(&content_name)?);
     let replacement_manifest: serde_json::Value = serde_json::from_slice(
         &transport
             .read(&manifest_name)

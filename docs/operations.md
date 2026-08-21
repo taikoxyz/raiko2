@@ -1297,9 +1297,11 @@ Operator notes:
 - Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for
   `runtime.terminal_task_ttl_secs`, which defaults to six hours. Runtime retention runs every
   `runtime.cleanup_interval_secs` (30 seconds by default) with an independent per-lane
-  `runtime.cleanup_batch_size` bound (64 by default). Proof artifacts and pending publication intents
-  are reclaimed independently after their last retained runtime task reference disappears. The
-  separate seven-day orphan-management pass processes at most
+  `runtime.cleanup_batch_size` bound (64 by default). Before rolling back to an image older than this
+  release, remove all three keys from the ConfigMap; older config parsers reject them as unknown and
+  fail startup. Proof artifacts and pending publication intents are reclaimed independently after
+  their last retained runtime task reference disappears. The separate seven-day orphan-management
+  pass processes at most
   `min(runtime.cleanup_batch_size, 64)` records per pass. A persistent orphan reconciliation or
   cancellation error intentionally blocks all later retention lanes and sets
   `raiko2_runtime_retention_blocked{lane="orphan"}` to `1` after each blocked pass; the next successful

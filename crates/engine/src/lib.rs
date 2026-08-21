@@ -1928,7 +1928,7 @@ fn now_millis() -> u64 {
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -2164,6 +2164,40 @@ mod tests {
 
     struct RecoveringObserver {
         proof_successes: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct VolatileArtifactObserver {
+        artifact: Mutex<Option<Proof>>,
+    }
+
+    impl VolatileArtifactObserver {
+        fn remove_artifact(&self) {
+            self.artifact.lock().expect("artifact lock").take();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EngineObserver for VolatileArtifactObserver {
+        async fn checkpoint_completed_proof(
+            &self,
+            _id: &EngineTaskId,
+            task: &EngineTask,
+            proof: &Proof,
+            _execution_permit: &crate::TaskExecutionPermit,
+        ) -> Result<crate::ProofCompletionPermit, EngineObserverError> {
+            if matches!(task.publication_source(), EngineTask::ProveProposal { .. }) {
+                *self.artifact.lock().expect("artifact lock") = Some(proof.clone());
+            }
+            Ok(crate::ProofCompletionPermit::tracked(()))
+        }
+
+        async fn load_proof_artifact(
+            &self,
+            _artifact: &ProofArtifactRef,
+        ) -> Result<Option<Proof>, String> {
+            Ok(self.artifact.lock().expect("artifact lock").clone())
+        }
     }
 
     #[async_trait::async_trait]
@@ -3294,6 +3328,58 @@ mod tests {
         assert!(matches!(view.state, TaskState::Succeeded { .. }));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 0);
         assert_eq!(observer.proof_successes.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_aggregate_artifact_is_terminal_without_resetting_proposal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(VolatileArtifactObserver::default());
+        let proof_runs = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_store_scheduler_config_and_observer(
+            TestSpec::new(CountingProver {
+                proof_runs: Arc::clone(&proof_runs),
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+            Some(observer.clone()),
+        );
+        let proposal = proposal_request(1);
+        let proposal_id = engine.proposal_task_id(proposal.clone());
+        let (_owner, aggregate_id) = attach_aggregate!(
+            engine,
+            "aggregate-artifact-loss",
+            vec![proposal],
+            aggregation_request("artifact-loss"),
+            vec![pending_proof_input("proposal-1", proposal_id.clone())]
+        );
+
+        assert!(Box::pin(engine.run_one("proposal-1")).await?);
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        observer.remove_artifact();
+
+        assert!(Box::pin(engine.run_one("aggregate-1")).await?);
+        assert!(matches!(
+            engine
+                .get(proposal_id.clone())
+                .await?
+                .expect("proposal")
+                .state,
+            TaskState::Succeeded { .. }
+        ));
+        assert!(matches!(
+            engine
+                .get(aggregate_id.clone())
+                .await?
+                .expect("aggregate")
+                .state,
+            TaskState::Failed { .. }
+        ));
+        assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

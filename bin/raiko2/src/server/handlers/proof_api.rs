@@ -1183,36 +1183,36 @@ async fn replace_existing_batch_task(
     let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
     let Some(_replacement) = state
         .lifecycle
-        .replace(existing, registration, &[], &engine, execution_plan(&plan))
+        .replace(
+            existing,
+            registration.clone(),
+            &[],
+            &engine,
+            execution_plan(&plan),
+        )
         .await
         .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?
     else {
-        let matching = state
+        return match state
             .runtime
-            .find_task_by_request_fingerprint(&request_fingerprint)
+            .register_task_if_absent(registration)
             .await
             .map_err(|err| {
-                ApiError::internal(format!("failed to find concurrent replacement: {err}"))
-            })?;
-        if let Some(current) = matching {
-            return compatibility_response_for_task(state, &current.task_id).await;
-        }
-
-        let occupying = state
-            .runtime
-            .get_task(&submission.public_task_id)
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to load concurrent replacement: {err}"))
-            })?;
-        return Err(if let Some(occupying) = occupying {
-            ApiError::conflict(format!(
+                ApiError::internal(format!("failed to register concurrent replacement: {err}"))
+            })? {
+            TaskRegistrationOutcome::Created(record) => {
+                handle_created_batch_task(state, submission, &plan, &record).await
+            }
+            TaskRegistrationOutcome::Existing(current)
+                if current.request_fingerprint == request_fingerprint =>
+            {
+                compatibility_response_for_task(state, &current.task_id).await
+            }
+            TaskRegistrationOutcome::Existing(occupying) => Err(ApiError::conflict(format!(
                 "task {} changed to a different request while replacement was in progress",
                 occupying.task_id
-            ))
-        } else {
-            ApiError::internal("runtime task changed during replacement and then disappeared")
-        });
+            ))),
+        };
     };
 
     Ok(registered_batch_response(submission))
@@ -3823,6 +3823,7 @@ mod tests {
             network_pair: metadata.network_pair.clone(),
             artifact_refs,
             runner_status,
+            retention_state: raiko2_runtime::TaskRetentionState::Retained,
             image_ref: None,
             proof_uri: None,
             error: None,
@@ -5833,6 +5834,67 @@ mod tests {
                 .context("occupying root")?
                 .request_fingerprint,
             "concurrent-request"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_registers_fresh_task_when_retention_removed_the_observed_root()
+    -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "replacement-after-retention",
+        ))?);
+        let route = native_local_route();
+        let mut submission = canonical_submission(route, false);
+        submission.public_task_id = "replacement-after-retention-root".to_string();
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&submission, &request_fingerprint)
+            .map_err(|error| anyhow!(error.message))?;
+        let mut stale = runtime
+            .register_task(
+                build_batch_task_registration(&submission, &plan, &request_fingerprint)
+                    .map_err(|error| anyhow!(error.message))?,
+            )
+            .await?;
+        stale.runner_status = RuntimeRunnerStatus::Completed;
+        runtime.upsert_task(&stale).await?;
+        assert_eq!(
+            runtime.retire_task_if_unchanged(&stale, None).await?,
+            RuntimeMutationOutcome::Applied
+        );
+        let retired = runtime
+            .get_task(&stale.task_id)
+            .await?
+            .context("retired root")?;
+        assert_eq!(
+            runtime.remove_task_if_current(&retired.lifetime()).await?,
+            RuntimeMutationOutcome::Applied
+        );
+
+        let recorder = Arc::new(RecordingEngine::new());
+        let state = test_state(Arc::clone(&runtime), recorder.clone());
+        let response =
+            replace_existing_batch_task(&state, &submission, &stale, Some(&request_fingerprint))
+                .await
+                .map_err(|error| anyhow!(error.message))?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let replacement = runtime
+            .get_task(&submission.public_task_id)
+            .await?
+            .context("fresh replacement root")?;
+        assert_ne!(replacement.incarnation_id, stale.incarnation_id);
+        assert_eq!(replacement.request_fingerprint, request_fingerprint);
+        assert_eq!(
+            recorder
+                .attached
+                .lock()
+                .expect("attached owners")
+                .as_slice(),
+            &[raiko2_queue::RootOwner::new(
+                replacement.task_id,
+                replacement.incarnation_id,
+            )]
         );
         Ok(())
     }

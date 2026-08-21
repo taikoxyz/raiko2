@@ -53,6 +53,12 @@ impl Default for RuntimeStoreConfig {
 pub struct RuntimeConfig {
     pub environment: String,
     pub namespace: String,
+    #[serde(default = "default_terminal_task_ttl_secs")]
+    pub terminal_task_ttl_secs: u64,
+    #[serde(default = "default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+    #[serde(default = "default_cleanup_batch_size")]
+    pub cleanup_batch_size: usize,
     #[serde(default)]
     pub preflight_cache: PreflightCacheMode,
     #[serde(default, deserialize_with = "deserialize_startup_cleanup")]
@@ -65,6 +71,9 @@ impl Default for RuntimeConfig {
         Self {
             environment: "development".to_string(),
             namespace: "raiko2-development".to_string(),
+            terminal_task_ttl_secs: default_terminal_task_ttl_secs(),
+            cleanup_interval_secs: default_cleanup_interval_secs(),
+            cleanup_batch_size: default_cleanup_batch_size(),
             preflight_cache: PreflightCacheMode::Shared,
             startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig::default(),
@@ -76,6 +85,15 @@ impl RuntimeConfig {
     pub fn validate(&self) -> Result<()> {
         validate_scope_component("runtime.environment", &self.environment)?;
         validate_scope_component("runtime.namespace", &self.namespace)?;
+        if self.terminal_task_ttl_secs == 0 {
+            bail!("runtime.terminal_task_ttl_secs must be greater than zero");
+        }
+        if self.cleanup_interval_secs == 0 {
+            bail!("runtime.cleanup_interval_secs must be greater than zero");
+        }
+        if self.cleanup_batch_size == 0 || self.cleanup_batch_size > 1024 {
+            bail!("runtime.cleanup_batch_size must be between 1 and 1024");
+        }
         self.startup_cleanup_mask()?;
         match self.store.backend {
             RuntimeStoreBackend::Memory => {
@@ -151,6 +169,18 @@ fn default_prefix() -> String {
     "raiko2/runtime/v1".to_string()
 }
 
+const fn default_terminal_task_ttl_secs() -> u64 {
+    6 * 60 * 60
+}
+
+const fn default_cleanup_interval_secs() -> u64 {
+    30
+}
+
+const fn default_cleanup_batch_size() -> usize {
+    64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +229,9 @@ mod tests {
         let config = RuntimeConfig {
             environment: "devnet".into(),
             namespace: "raiko2-devnet-a".into(),
+            terminal_task_ttl_secs: default_terminal_task_ttl_secs(),
+            cleanup_interval_secs: default_cleanup_interval_secs(),
+            cleanup_batch_size: default_cleanup_batch_size(),
             preflight_cache: PreflightCacheMode::Shared,
             startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig {
@@ -232,6 +265,9 @@ mod tests {
         let config = RuntimeConfig {
             environment: "hoodi".into(),
             namespace: "raiko2-hoodi-ephemeral".into(),
+            terminal_task_ttl_secs: default_terminal_task_ttl_secs(),
+            cleanup_interval_secs: default_cleanup_interval_secs(),
+            cleanup_batch_size: default_cleanup_batch_size(),
             preflight_cache: PreflightCacheMode::Shared,
             startup_cleanup: Vec::new(),
             store: RuntimeStoreConfig {
@@ -263,6 +299,117 @@ mod tests {
             config.startup_cleanup_mask().expect("cleanup mask"),
             StartupCleanupMask::NONE
         );
+    }
+
+    #[test]
+    fn terminal_task_ttl_defaults_to_six_hours_and_accepts_override() {
+        assert_eq!(RuntimeConfig::default().terminal_task_ttl_secs, 21_600);
+
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                terminal_task_ttl_secs = 10800
+
+                [store]
+                backend = "memory"
+            "#,
+        )
+        .expect("terminal task TTL parses");
+
+        assert_eq!(config.terminal_task_ttl_secs, 10_800);
+    }
+
+    #[test]
+    fn terminal_task_ttl_rejects_zero() {
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                terminal_task_ttl_secs = 0
+
+                [store]
+                backend = "memory"
+            "#,
+        )
+        .expect("zero terminal task TTL parses before validation");
+
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("terminal_task_ttl_secs")
+        );
+    }
+
+    #[test]
+    fn cleanup_pacing_defaults_and_accepts_overrides() {
+        let default = RuntimeConfig::default();
+        assert_eq!(default.cleanup_interval_secs, 30);
+        assert_eq!(default.cleanup_batch_size, 64);
+
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+                environment = "development"
+                namespace = "raiko2-development"
+                cleanup_interval_secs = 45
+                cleanup_batch_size = 128
+
+                [store]
+                backend = "memory"
+            "#,
+        )
+        .expect("cleanup pacing parses");
+
+        assert_eq!(config.cleanup_interval_secs, 45);
+        assert_eq!(config.cleanup_batch_size, 128);
+    }
+
+    #[test]
+    fn cleanup_pacing_rejects_zero_values_and_oversized_batches() {
+        for (input, expected_error) in [
+            (
+                r#"
+                    environment = "development"
+                    namespace = "raiko2-development"
+                    cleanup_interval_secs = 0
+                    [store]
+                    backend = "memory"
+                "#,
+                "cleanup_interval_secs",
+            ),
+            (
+                r#"
+                    environment = "development"
+                    namespace = "raiko2-development"
+                    cleanup_batch_size = 0
+                    [store]
+                    backend = "memory"
+                "#,
+                "cleanup_batch_size",
+            ),
+            (
+                r#"
+                    environment = "development"
+                    namespace = "raiko2-development"
+                    cleanup_batch_size = 1025
+                    [store]
+                    backend = "memory"
+                "#,
+                "cleanup_batch_size",
+            ),
+        ] {
+            let config: RuntimeConfig =
+                toml::from_str(input).expect("invalid cleanup pacing parses before validation");
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected_error)
+            );
+        }
     }
 
     #[test]

@@ -212,11 +212,12 @@ restart alone cannot submit or rebid paid proof work.
 
 Recovery, invalidation, cleanup, and replacement use snapshot-conditional runtime commands. A
 recovery attempt can reopen only the exact record whose metadata it used to build the recovery plan;
-an invalidation or cleanup attempt can retire only the exact non-cancelled record it selected. Root
-replacement atomically verifies the predecessor snapshot, removes its pending-publication
-ownership, and installs one successor. Only the winning replacement swaps the old and new
-`RootOwner` projections under the lifecycle transition gate. This closes same-incarnation races in
-which status or remote-checkpoint metadata changed after a caller read the root. Removing the
+terminal retention cleanup can admit only the exact record it selected to an independent retention
+state without changing the task's runner status, proof URI, or error. Invalidation keeps its distinct
+cancellation semantics. Root replacement atomically verifies the predecessor snapshot, removes its
+pending-publication ownership, and installs one successor. Only the winning replacement swaps the old
+and new `RootOwner` projections under the lifecycle transition gate. This closes same-incarnation
+races in which status or remote-checkpoint metadata changed after a caller read the root. Removing the
 predecessor owner leaves an unowned pending-publication record with its typed artifact identity until
 the proof object is deleted; a successor that references the same artifact key does not inherit the
 predecessor's publication authority. Startup reconciliation completes that cleanup after a crash.
@@ -764,8 +765,9 @@ operator can identify the failed boundary without inferring it from the aggregat
 
 - Active manifests must not be removed by age-based lifecycle rules.
 - Immutable content must remain available until every manifest that references it is gone.
-- Terminal root records are retained for seven days. Artifact manifests, including external
-  aggregation inputs, are not deleted merely because their root record reaches that age.
+- Terminal root records use a configurable retention window with a six-hour default. Artifact
+  manifests and pending publication intents, including external aggregation inputs, have independent
+  ownership-driven reclamation and retry lifecycles.
 - Generation-scoped invalidation markers and unreferenced content must outlive the longest retry,
   recovery, and cleanup window; the current operational minimum is 30 days.
 - Runtime state is control-plane data and must not share artifact garbage-collection rules.

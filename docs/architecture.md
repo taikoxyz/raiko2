@@ -414,7 +414,7 @@ metadata carries request and progress details, but every read validates its deri
 type, and artifact references against the record before using it. Divergence is corruption and fails
 closed rather than selecting a second path or reconstructing missing identity.
 
-For a logical `ProofArtifactKey`, the GCS backend uses this layout:
+The GCS backend uses this runtime object layout:
 
 ```text
 <prefix>/<environment>/<namespace>/
@@ -422,6 +422,10 @@ For a logical `ProofArtifactKey`, the GCS backend uses this layout:
   proofs/<pipeline>/<route>/<network-pair>/<proof-ref>/
     manifest.manifest.json
     content/<sha256>.proof.json
+    invalidated/<manifest-generation>-<sha256>.tombstone
+  preflights/v1/<key-hash>/
+    manifest.manifest.json
+    content/<sha256>.preflight.bincode
     invalidated/<manifest-generation>-<sha256>.tombstone
 ```
 

@@ -372,8 +372,8 @@ Expected: new tests fail.
 Use:
 
 ```text
-<scope>/preflights/v1/<key-digest>/manifest.manifest.json
-<scope>/preflights/v1/<key-digest>/content/<content-sha256>.preflight.bincode
+<scope>/preflights/v1/<key-hash>/manifest.manifest.json
+<scope>/preflights/v1/<key-hash>/content/<content-sha256>.bin
 ```
 
 The manifest contains the full key, schema, content hash, and content object name. Verify all fields

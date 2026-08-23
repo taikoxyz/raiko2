@@ -18,9 +18,12 @@ bucket lifecycle removes them and duplicate authority already available elsewher
 - the supported deployment model allows only one live process per
   `(runtime.environment, runtime.namespace)`.
 
-The online `POST /v4/prover/invalidate-artifacts` endpoint is also no longer required by the normal
-operational lifecycle. Active work is handled by `POST /v4/prover/clear`, guest upgrades are handled
-by scoped startup cleanup, and terminal artifacts are reclaimed by retention.
+The online `POST /v4/prover/invalidate-artifacts` endpoint has no known production caller and is not
+required by the supported operational lifecycle. Active work is handled by `POST /v4/prover/clear`,
+guest upgrades are handled by scoped startup cleanup, and terminal artifacts are reclaimed by
+retention. Removing it deliberately gives up online range- or prefix-selective terminal-artifact
+cleanup; an exceptional bad-proof cleanup uses scoped startup proof cleanup plus a `Recreate`
+restart.
 
 This design removes proof and preflight tombstones, removes the online artifact-invalidation API,
 and makes same-artifact ordering explicit with true keyed lifecycle locks.
@@ -39,8 +42,8 @@ Proof objects have the conceptual layout:
 Canonical preflight objects have the conceptual layout:
 
 ```text
-<scope>/preflights/v1/<key-digest>/manifest.manifest.json
-<scope>/preflights/v1/<key-digest>/content/<content-hash>.preflight.bincode
+<scope>/preflights/v<cache-compatibility-version>/<key-digest>/manifest.manifest.json
+<scope>/preflights/v<cache-compatibility-version>/<key-digest>/content/<content-hash>.preflight.bincode
 ```
 
 The content object contains the immutable payload. The small manifest is the visibility point and
@@ -68,6 +71,11 @@ This design does not add distributed leases, owner epochs, or cross-process life
 generation CAS remains a final stale-write safeguard, but concurrent writers in one namespace are
 unsupported and must not be treated as a normal operating mode.
 
+`Recreate` prevents two application processes from remaining live together, but it cannot revoke a
+GCS request that the old process already submitted. Canonical preflight compatibility therefore does
+not rely on startup cleanup observing every old request. Incompatible implementations use different
+cache compatibility versions, as specified below.
+
 ## Decisions
 
 ### Remove all tombstones
@@ -78,6 +86,42 @@ operation. Existing tombstones are ignored by the new runtime and may be removed
 window.
 
 Tombstones are not replaced by another marker format.
+
+### Treat the canonical preflight version as a compatibility boundary
+
+The existing canonical preflight `v1` value is the complete cache compatibility version, not only a
+serialization schema. Keep one version number rather than adding a second process or deployment
+epoch. The version participates in the canonical key digest and the GCS object prefix.
+
+Bump the version whenever an old cached value may be incompatible with the current implementation,
+including changes to:
+
+- canonical host derivation or manifest selection;
+- witness generation or normalization;
+- transaction-list truncation or canonicalization;
+- fork interpretation not already represented by `chain_rules_fingerprint`;
+- serialized canonical preflight or manifest formats.
+
+`chain_rules_fingerprint` continues to separate chain configuration changes. The compatibility
+version separates host-code semantics that cannot be derived from chain configuration.
+
+A delayed write from an incompatible old version lands under the old version prefix and is therefore
+unreachable by the new implementation. A delayed write from an earlier process running the same
+version is intentionally allowed: the complete canonical key, chain-rules fingerprint, construction
+semantics, and validation rules are identical, so the object remains a valid cache candidate.
+
+Consequently, `startup_cleanup = ["preflight"]` is best-effort cache eviction, not a cross-process
+guarantee that the prefix remains empty after the operation returns. Requiring that stronger property
+would need a per-process epoch or a distributed drain protocol, would eliminate cross-restart cache
+reuse, and is outside this design.
+
+Rollback to an older binary reads only that binary's compatibility version. During the rollback
+window, retain manifests under the old version prefix. After that window closes and the prefix is
+frozen, an operator lists only `manifest.manifest.json` objects under the old
+`preflights/vN/` prefix and deletes the observed generations conditionally. Active/current-version
+preflight manifests must never receive an age-based lifecycle rule. Immutable content made
+unreachable by old-manifest removal is reclaimed by its existing bucket lifecycle rule; read
+correctness never depends on deleting old-version objects first.
 
 ### Keep proof invalidation authority in runtime state
 
@@ -107,8 +151,16 @@ HashMap<ProofArtifactKey, Weak<tokio::sync::Mutex<()>>>
 
 Lookup, weak-reference upgrade, creation, and dead-entry removal are serialized by a short-lived
 registry mutex. A holder or waiter keeps a strong `Arc`, so a second mutex cannot be created for the
-same key while the first mutex is still observable. Dead weak entries are removed opportunistically
-or by maintenance only while holding the registry mutex.
+same key while the first mutex is still observable.
+
+The existing runtime cleanup loop performs one full registry sweep at the end of each cleanup pass;
+no separate timer or task is added. The six-hour terminal TTL controls only when terminal root-task
+metadata becomes eligible for retirement. Proof artifacts and pending publications are
+ownership-driven: normal artifacts may remain indirectly retained by terminal roots during that
+window, while `Invalidated` or unowned artifacts may be reclaimed without waiting six hours.
+`runtime.cleanup_interval_secs` controls how often the shared maintenance pass and lock sweep run.
+The sweep removes only entries whose weak reference can no longer be upgraded, and it runs even when
+a retention lane reports an error.
 
 Registry cleanup must not be coupled directly to runtime artifact-record removal: a holder or waiter
 may still exist after the durable record disappears. Cleanup is allowed only when the weak reference
@@ -225,6 +277,10 @@ publication for the complete canonical key, so a second process-local keyed mute
 Cross-process same-namespace preflight writers remain unsupported by the deployment model; GCS
 generation CAS prevents stale exact deletion but is not a distributed workflow protocol.
 
+The single-flight key includes the cache compatibility version. Same-version callers still share one
+leader result. Old-version and new-version callers cannot contend for or load the same manifest, even
+if an old create-if-absent request completes after the new process has started.
+
 ## API And Store Cleanup
 
 Remove:
@@ -237,6 +293,12 @@ Remove:
 - in-memory invalidation sets;
 - GCS marker creation and marker readback;
 - `AlreadyInvalidated` results whose only distinction came from tombstone presence.
+
+Removing the endpoint is an explicit operational simplification, not a requirement of removing
+tombstones. The accepted incident path for a bad terminal artifact is
+`runtime.startup_cleanup = ["proof"]` followed by a non-overlapping restart. Its blast radius is the
+configured runtime namespace's proof manifests, it may require reproving after clients resubmit, and
+preflight objects remain untouched unless `preflight` is separately selected.
 
 Retain:
 
@@ -271,6 +333,8 @@ so removes ambiguity. The result model must distinguish at least `Removed`, `Mis
 | After manifest delete, before rebuild | Cache miss | Later request recomputes |
 | After content upload, before manifest create | Unreachable immutable content | Later request recomputes; bucket lifecycle removes orphan content |
 | After manifest create | Valid manifest B is visible | Later request validates and reuses B |
+| Incompatible old-version create completes after cutover | Manifest remains under the old version prefix | Current readers cannot address it; after the rollback window, generation-aware old-prefix cleanup removes the manifest and content lifecycle reclaims the payload |
+| Same-version create completes after restart cleanup | Compatible manifest is visible again | Later request validates and may reuse it |
 
 ## Observability
 
@@ -300,6 +364,8 @@ count is a migration metric, not runtime authority.
 - a waiter keeps the keyed mutex alive while another holder exits;
 - dead weak entries are reclaimed without allowing two live mutexes for the same key;
 - registry cleanup never removes an entry that can still be upgraded.
+- the existing runtime cleanup pass invokes registry sweeping even when a retention lane fails;
+- repeated maintenance bounds registry entries to live keys plus keys created since the last sweep.
 
 ### Proof lifecycle
 
@@ -323,6 +389,11 @@ count is a migration metric, not runtime authority.
 - stale deletion reloads and validates the current winner;
 - content written without a manifest is not discoverable as a cache hit;
 - startup preflight cleanup remains generation protected and does not create markers.
+- an incompatible old-version manifest remains unreachable after a delayed create;
+- same-version callers continue to share one single-flight result after restart;
+- changing only the cache compatibility version changes both the key digest and object prefix.
+- old-version cleanup selects only manifests under a frozen old prefix, uses observed generations,
+  and cannot delete current-version manifests.
 
 ### API
 
@@ -335,12 +406,16 @@ count is a migration metric, not runtime authority.
 1. Merge the runtime and API changes with proof/preflight marker reads and writes fully removed.
 2. Verify deployment manifests enforce one replica, `Recreate`, and unique namespaces for parallel
    canary and production services.
-3. Deploy canary, then production, and observe invalidated-record age, exact-delete failures,
+3. Confirm that every release containing an incompatible preflight semantic or format change bumps
+   the canonical preflight cache compatibility version.
+4. Deploy canary, then production, and observe invalidated-record age, exact-delete failures,
    cleanup-pending responses, keyed-lock wait time, and runtime-state CAS failures.
-4. Keep historical tombstones during the binary rollback window. The new binary ignores them.
-5. After the rollback window, remove existing `invalidated/*.tombstone` objects with a scoped,
-   generation-aware operational cleanup.
-6. Remove tombstone-specific bucket lifecycle rules only after historical markers are gone. Keep
+5. Keep historical tombstones and old preflight-version objects during the binary rollback window.
+   The new binary ignores old markers and cannot address old-version preflights.
+6. After the rollback window, remove existing `invalidated/*.tombstone` objects and manifests under
+   each frozen old `preflights/vN/` prefix with scoped, generation-aware operational cleanup. Do not
+   add an age-based lifecycle rule to the active/current preflight manifest prefix.
+7. Remove tombstone-specific bucket lifecycle rules only after historical markers are gone. Keep
    lifecycle rules for immutable proof and preflight content.
 
 Rollback to a tombstone-reading binary after historical markers are deleted is unsupported. Rollback
@@ -349,6 +424,8 @@ before marker cleanup remains possible under the same single-process deployment 
 ## Safety Invariants
 
 - A failed preflight build never creates durable negative state.
+- Incompatible preflight implementations never address the same canonical cache key or object prefix.
+- Same-version delayed preflight publication is compatible and remains subject to canonical validation.
 - Runtime `Invalidated(A)` is durable before manifest A deletion begins.
 - Publication cannot write generation B while the exact key is `Invalidated(A)`.
 - Cleanup-pending is retryable execution state, not a terminal proof result.
@@ -371,3 +448,5 @@ before marker cleanup remains possible under the same single-process deployment 
 - Rehydrating terminal tasks from old proof objects.
 - Changing proof formats, public inputs, guest ELF contents, or verifier behavior.
 - Changing bucket lifecycle policy in the application code.
+- Providing absolute empty-prefix semantics for startup preflight cleanup across delayed same-version
+  GCS requests.

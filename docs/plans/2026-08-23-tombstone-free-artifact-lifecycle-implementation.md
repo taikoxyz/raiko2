@@ -4,13 +4,19 @@
 
 **Goal:** Remove proof and canonical-preflight tombstones while preserving crash recovery, exact GCS deletion, retryable publication, and single-process lifecycle ordering.
 
-**Architecture:** Replace the 64-way artifact lock array with a reclaimable full-key lock registry. Use durable runtime `Invalidated` records as the proof deletion fence, exact generation-CAS manifest deletion as the external operation, and canonical preflight single-flight as the preflight ordering mechanism. Remove the online artifact-invalidation API after the runtime path no longer depends on marker reads.
+**Architecture:** Replace the 64-way artifact lock array with a reclaimable full-key lock registry swept by the existing runtime cleanup loop. Use durable runtime `Invalidated` records as the proof deletion fence, exact generation-CAS manifest deletion as the external operation, and canonical preflight single-flight plus a cache compatibility version as the preflight ordering and cross-restart compatibility boundary. Remove the online artifact-invalidation API after the final runtime path no longer depends on marker reads.
 
 **Tech Stack:** Rust, Tokio, Axum, GCS generation preconditions, serde JSON, bincode, existing raiko2 runtime and pipeline crates.
 
 ---
 
 Read `docs/plans/2026-08-23-tombstone-free-artifact-lifecycle-design.md` before starting. Work from a clean branch based on current `origin/main`. Do not edit generated guest ELF files and do not build guest programs: this change is host/runtime-only.
+
+The PR will be squash-merged. Task commits below are optional local review checkpoints, not
+independently deployable migration stages. The acceptance boundary is the final branch after all
+tasks: it must have the runtime publication fence, exact deletion, three-phase cleanup, and no
+tombstone access at the same time. Temporary overlap between the new runtime fence and old marker
+checks is intentional; do not preserve the compatibility overlap in the final tree.
 
 ### Task 1: Add A Reclaimable Full-Key Lifecycle Lock Registry
 
@@ -20,8 +26,10 @@ Read `docs/plans/2026-08-23-tombstone-free-artifact-lifecycle-design.md` before 
 - Modify: `crates/runtime/src/lib.rs:220-315`
 - Modify: `crates/runtime/src/lib.rs:650-680`
 - Modify: `crates/runtime/src/lib.rs:1236-1265`
+- Modify: `bin/raiko2/src/server/task_cleanup.rs:232-300`
 - Test: `crates/runtime/src/artifact_lock.rs`
 - Test: `crates/runtime/src/lib.rs:5360-5490`
+- Test: `bin/raiko2/src/server/task_cleanup.rs`
 
 **Step 1: Write failing registry tests**
 
@@ -55,10 +63,17 @@ async fn waiter_keeps_the_registry_entry_live() {
 fn dead_weak_entries_are_reclaimed() {
     // Drop all strong handles, sweep under the registry mutex, and assert the entry count is zero.
 }
+
+#[tokio::test]
+async fn cleanup_pass_sweeps_dead_entries_even_when_retention_fails() {
+    // Leave dead entries, inject a retention-lane error, run the existing cleanup pass,
+    // and assert the registry was swept without splitting a live holder/waiter.
+}
 ```
 
 Also retain a regression that finds two keys mapping to the same old 64-way shard and proves they can
-now make progress independently.
+now make progress independently. Repeat resolution and maintenance cycles to prove registry
+cardinality is bounded by live keys plus keys created since the most recent sweep.
 
 **Step 2: Run the focused test and confirm failure**
 
@@ -108,6 +123,12 @@ Replace `artifact_lifecycle_locks: [Mutex<()>; 64]`, `DefaultHasher`, and the sh
 registry. Add a helper returning an owned guard for one `ProofArtifactKey`, plus a deterministic
 sorted-and-deduplicated batch helper for retention admission/finalization.
 
+Expose one process-local `sweep_artifact_lifecycle_locks` method from `RuntimeManager`. Invoke it at
+the end of `run_runtime_cleanup_pass`, including the error path after the inner retention lanes have
+returned. This reuses the existing maintenance loop; do not add a timer, task, or config key. The
+six-hour terminal TTL applies only to terminal root-task retirement. Artifact and pending-publication
+selection remains ownership-driven, and lock sweeping is independent of both TTL and ownership.
+
 **Step 4: Run focused tests**
 
 Run:
@@ -115,6 +136,7 @@ Run:
 ```bash
 cargo test -p raiko2-runtime artifact_lock -- --nocapture
 cargo test -p raiko2-runtime artifact_lifecycle -- --nocapture
+cargo test -p raiko2 --bin raiko2 --no-default-features task_cleanup -- --nocapture
 ```
 
 Expected: all matching tests pass; the old shard-collision test is replaced by the independence test.
@@ -122,11 +144,11 @@ Expected: all matching tests pass; the old shard-collision test is replaced by t
 **Step 5: Commit**
 
 ```bash
-git add crates/runtime/src/artifact_lock.rs crates/runtime/src/lib.rs
+git add crates/runtime/src/artifact_lock.rs crates/runtime/src/lib.rs bin/raiko2/src/server/task_cleanup.rs
 git commit -m "refactor(runtime): use keyed artifact lifecycle locks"
 ```
 
-### Task 2: Replace Proof Tombstones With Exact Manifest Deletion
+### Task 2: Add Descriptor-Aware Exact Proof Manifest Deletion
 
 **Files:**
 - Modify: `crates/runtime/src/artifact_store.rs:55-90`
@@ -144,13 +166,14 @@ git commit -m "refactor(runtime): use keyed artifact lifecycle locks"
 Add tests proving:
 
 - exact current descriptor deletion returns `Removed`;
-- deleting an absent manifest returns `Missing` without consulting a marker;
+- deleting an absent manifest returns `Missing`;
 - deleting descriptor A after descriptor B is current returns `Stale` and preserves B;
-- no object whose name ends in `.tombstone` is created;
-- deleting and recreating the same key permits generation B without marker cleanup.
+- ambiguous transport failure is classified by generation-protected readback;
+- calling the exact-delete operation never creates a marker.
 
-Use a transport spy in GCS tests to assert the write sequence contains content/manifest operations but
-no invalidation-marker create.
+Use a transport spy in GCS tests to assert exact deletion performs only manifest read/delete/readback
+operations. Existing marker APIs remain temporarily available for the publication compatibility
+overlap and are removed in Task 7.
 
 **Step 2: Run focused tests and confirm failure**
 
@@ -160,11 +183,12 @@ Run:
 cargo test -p raiko2-runtime artifact_store -- --nocapture
 ```
 
-Expected: new tests fail against marker-based `invalidate_exact` and `is_invalidated`.
+Expected: new tests fail because the existing `delete_exact` result cannot distinguish `Stale` and
+does not classify ambiguous transport outcomes completely.
 
-**Step 3: Consolidate the proof-store API**
+**Step 3: Extend the proof-store API**
 
-Replace `ExactInvalidationResult` with:
+Add the final descriptor-aware deletion result:
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +199,7 @@ pub enum ExactDeleteResult {
 }
 ```
 
-Keep one descriptor-aware operation:
+Change the existing descriptor-aware operation to:
 
 ```rust
 async fn delete_exact(
@@ -185,8 +209,9 @@ async fn delete_exact(
 ) -> Result<ExactDeleteResult>;
 ```
 
-Remove `invalidate_exact`, `is_invalidated`, `MemoryStoreInner::invalidations`, the GCS
-`invalidation_name` helper, and all marker read/create logic.
+Keep `invalidate_exact`, `is_invalidated`, the in-memory invalidation set, and GCS marker helpers only
+as temporary compatibility surface until the runtime publication and cleanup callers have moved to
+the new protocol. Do not add new marker callers.
 
 The GCS implementation must:
 
@@ -214,12 +239,14 @@ Expected: focused store tests pass and every `ProofObjectStore` implementation c
 
 ```bash
 git add crates/runtime/src bin/raiko2/src/server
-git commit -m "refactor(runtime): delete proof manifests without tombstones"
+git commit -m "refactor(runtime): add exact proof manifest deletion"
 ```
 
-### Task 3: Remove Canonical Preflight Tombstones And Preserve Recompute Semantics
+### Task 3: Version Canonical Preflight Compatibility And Remove Its Tombstones
 
 **Files:**
+- Modify: `crates/pipeline/src/forks/shasta/preflight_cache/types.rs:16-45`
+- Modify: `crates/pipeline/src/forks/shasta/spec.rs:241-325`
 - Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs:20-100`
 - Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs:295-525`
 - Test: `crates/pipeline/src/forks/shasta/preflight_cache.rs:600-980`
@@ -246,10 +273,23 @@ async fn delete_failure_returns_validated_uncached_build_and_skips_publish() { /
 
 #[tokio::test]
 async fn stale_delete_reloads_and_validates_current_winner_once() { /* A observation, B winner */ }
+
+#[tokio::test]
+async fn delayed_old_version_create_is_unreachable_from_current_version() {
+    // Pause a create under an old preflight version prefix, start the current-version
+    // coordinator, release the old create, and prove current lookup/build never reads it.
+}
+
+#[tokio::test]
+async fn same_version_restart_can_validate_and_reuse_a_delayed_create() {
+    // A delayed write from the same compatibility version is not negative state and remains
+    // reusable after normal canonical validation.
+}
 ```
 
 Assert that concurrent waiters share the same leader error or rebuilt value and that a later request
-after a failed build invokes the builder again.
+after a failed build invokes the builder again. Also assert that changing the compatibility version
+changes both the key digest and the `preflights/vN/` object prefix.
 
 **Step 2: Run tests and confirm failure**
 
@@ -260,9 +300,27 @@ cargo test -p raiko2-pipeline preflight_cache -- --nocapture
 cargo test -p raiko2-runtime canonical_preflight -- --nocapture
 ```
 
-Expected: tombstone-oriented result assertions fail.
+Expected: tombstone-oriented result assertions fail and the existing hard-coded `preflights/v1/`
+path does not provide a testable compatibility-version boundary.
 
-**Step 3: Implement tombstone-free preflight deletion**
+**Step 3: Make the existing version the complete cache compatibility boundary**
+
+Keep one canonical preflight version number. Formally define the existing
+`CANONICAL_PREFLIGHT_SCHEMA_V1` value as covering both serialization and semantic compatibility; do
+not add a process-start or deployment epoch. Ensure the value participates in:
+
+- the locator and complete canonical key;
+- the key digest;
+- the GCS prefix, generated as `preflights/v{key.schema}/...` rather than hard-coded `v1`;
+- manifest validation.
+
+Bump this value for incompatible derivation, witness generation, normalization, canonicalization,
+fork interpretation not covered by `chain_rules_fingerprint`, or serialization changes. Same-version
+delayed writes remain valid cache candidates and must still pass the ordinary manifest, content-hash,
+key-binding, and canonical validation. `startup_cleanup = ["preflight"]` remains best-effort eviction,
+not an absolute cross-process empty-prefix fence.
+
+**Step 4: Implement tombstone-free preflight deletion**
 
 Rename `CanonicalPreflightInvalidateResult` and
 `invalidate_canonical_preflight_exact` to deletion terminology with `Removed`, `Missing`, and
@@ -287,7 +345,7 @@ enum CanonicalLoad {
 When `publish` is false, return the validated in-memory core without calling
 `put_canonical_preflight_if_absent`.
 
-**Step 4: Run focused tests**
+**Step 5: Run focused tests**
 
 Run:
 
@@ -298,11 +356,11 @@ cargo test -p raiko2-runtime canonical_preflight -- --nocapture
 
 Expected: all focused tests pass, including failed-build recomputation.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add crates/pipeline/src/forks/shasta/preflight_cache.rs crates/runtime/src/artifact_store.rs crates/runtime/src/artifact_store/gcs.rs crates/runtime/src/artifact_store/gcs_tests.rs crates/runtime/src/lib.rs
-git commit -m "refactor(preflight): rebuild invalid cache entries without tombstones"
+git add crates/pipeline/src/forks/shasta/preflight_cache.rs crates/pipeline/src/forks/shasta/preflight_cache crates/pipeline/src/forks/shasta/spec.rs crates/runtime/src/artifact_store.rs crates/runtime/src/artifact_store/gcs.rs crates/runtime/src/artifact_store/gcs_tests.rs crates/runtime/src/lib.rs
+git commit -m "refactor(preflight): version and rebuild canonical cache entries"
 ```
 
 ### Task 4: Fence Proof Publication With Durable Invalidated State
@@ -325,9 +383,11 @@ Cover:
 - `Invalidated(A)` causes publication to return cleanup-pending before any content/manifest write;
 - cleanup-pending maps to `ProofCommitAttempt::Retryable`, not `Invalidated`;
 - exhausted local publication retries leave the root `Allocated`, never `Cancelled`;
+- cleanup-pending survives more than the observer's local retry count through durable
+  `PublishProof`, then commits after Phase 3 removes the exact runtime fence;
 - a current `Pending` or `Active` matching descriptor is still reusable;
 - an untracked canonical manifest is recorded as `Invalidated` and is not adopted;
-- no publication path reads a tombstone.
+- the local `Invalidated` check happens before any GCS write or marker read.
 
 Use the existing blocking/failure-injection stores to pause publication at pre-write and
 post-manifest boundaries.
@@ -362,8 +422,10 @@ invalidated/cancelled observer path. Map `ProofArtifactCleanupPending` to
 **Step 4: Reorder publication under the keyed lock**
 
 Before `put_if_absent`, inspect the exact local lifecycle. If it is `Invalidated`, return
-`ProofArtifactCleanupPending`. Remove both external `proof_artifact_descriptor_is_invalidated`
-checks from `commit_proof_artifact_publication`.
+`ProofArtifactCleanupPending` before consulting GCS. Temporarily retain the existing external
+`proof_artifact_descriptor_is_invalidated` checks as a redundant compatibility fence while old
+markers and marker-backed callers still exist. Task 7 removes those reads together with the remaining
+marker APIs after retention and pending recovery use exact deletion.
 
 After manifest publication, retain exact local registration and owner checks. If the returned
 manifest has no matching runtime record or recoverable outbox, persist an exact `Invalidated` record
@@ -381,7 +443,8 @@ cargo test -p raiko2-runtime publication -- --nocapture
 cargo test -p raiko2 --bin raiko2 --no-default-features runtime_observer -- --nocapture
 ```
 
-Expected: race tests pass and cleanup-pending preserves retryable root state.
+Expected: race tests pass, cleanup-pending preserves retryable root state, and the local runtime fence
+wins before the temporary external marker fence.
 
 **Step 6: Commit**
 
@@ -467,7 +530,7 @@ Expected: all race, crash, stale-candidate, and batch-write tests pass.
 
 ```bash
 git add crates/runtime/src/lib.rs bin/raiko2/src/server/lifecycle.rs bin/raiko2/src/server/task_cleanup.rs
-git commit -m "fix(runtime): finalize artifact retention without tombstones"
+git commit -m "fix(runtime): finalize retention with exact artifact deletion"
 ```
 
 ### Task 6: Align Pending Publication And Startup Recovery
@@ -528,9 +591,16 @@ git add crates/runtime/src/lib.rs bin/raiko2/src/server/state
 git commit -m "fix(runtime): recover pending publications without markers"
 ```
 
-### Task 7: Remove The Online Artifact Invalidation API
+### Task 7: Remove The Remaining Tombstone Surface And Online Invalidation API
 
 **Files:**
+- Modify: `crates/runtime/src/artifact_store.rs:55-90`
+- Modify: `crates/runtime/src/artifact_store.rs:201-305`
+- Modify: `crates/runtime/src/artifact_store.rs:618-680`
+- Modify: `crates/runtime/src/artifact_store/gcs.rs:300-382`
+- Modify: `crates/runtime/src/artifact_store/gcs.rs:900-1095`
+- Modify: `crates/runtime/src/publication.rs:1-220`
+- Modify test doubles implementing `ProofObjectStore` under `crates/runtime/src/` and `bin/raiko2/src/server/`
 - Modify: `bin/raiko2/src/server/routes/v4.rs:7-23`
 - Modify: `bin/raiko2/src/server/handlers/proof_api/v4.rs:145-810`
 - Modify: `bin/raiko2/src/server/handlers/proof_types/v4.rs:85-150`
@@ -541,10 +611,17 @@ git commit -m "fix(runtime): recover pending publications without markers"
 - Modify: `docs/API.md:130-155`
 - Modify: `docs/API.md:570-650`
 
-**Step 1: Add a failing route-absence test**
+**Step 1: Add final marker-absence and route-absence tests**
 
 Add an API test asserting `POST /v4/prover/invalidate-artifacts` is not registered while
 `POST /v4/prover/clear` remains registered and ACL protected.
+
+Add store/publication tests asserting:
+
+- proof publication never calls `is_invalidated`;
+- exact proof and preflight deletions create no `.tombstone` object;
+- delete followed by same-key publication can create generation B without marker cleanup;
+- memory and GCS stores contain no invalidation set or marker-name behavior.
 
 **Step 2: Run the test and confirm failure**
 
@@ -552,11 +629,18 @@ Run:
 
 ```bash
 cargo test -p raiko2 --bin raiko2 --no-default-features invalidate_artifacts_route_is_absent -- --nocapture
+cargo test -p raiko2-runtime artifact_store -- --nocapture
+cargo test -p raiko2-runtime publication -- --nocapture
 ```
 
-Expected: request reaches the existing route instead of returning not-found.
+Expected: the route still exists and marker-oriented trait methods or publication checks remain.
 
-**Step 3: Remove the route and exclusive implementation surface**
+**Step 3: Remove the complete obsolete surface**
+
+Remove `invalidate_exact`, `is_invalidated`, `ExactInvalidationResult`, proof and preflight
+invalidation sets, GCS invalidation-name helpers, marker read/create logic, and the temporary
+publication marker checks. Consolidate all production callers on descriptor-aware exact deletion and
+runtime `Invalidated` authority.
 
 Delete the handler, request/response structs, selector helpers, range/prefix logic, and tests used only
 by the endpoint. Do not remove `ServerAclFeature::ProverClear` because `/v4/prover/clear` still uses
@@ -565,8 +649,12 @@ it. Do not change active-task clear behavior.
 Update `docs/API.md` so operator guidance points to:
 
 - `/v4/prover/clear` for active work;
-- `runtime.startup_cleanup = ["proof"]` for upgrade-time proof cleanup;
+- `runtime.startup_cleanup = ["proof"]` plus a non-overlapping restart for exceptional terminal-proof cleanup;
 - retention for normal terminal cleanup.
+
+Document that endpoint removal deliberately gives up online range/prefix-selective cleanup and may
+require namespace-wide reproving after clients resubmit. This is an accepted operational tradeoff,
+not a tombstone-free correctness requirement.
 
 **Step 4: Run server tests**
 
@@ -575,15 +663,17 @@ Run:
 ```bash
 cargo test -p raiko2 --bin raiko2 --no-default-features invalidate_artifacts_route_is_absent -- --nocapture
 cargo test -p raiko2 --bin raiko2 --no-default-features clear_prover -- --nocapture
+cargo test -p raiko2-runtime artifact_store -- --nocapture
+cargo test -p raiko2-runtime publication -- --nocapture
 ```
 
-Expected: route-absence and clear behavior tests pass.
+Expected: route-absence, clear behavior, exact deletion, and marker-free publication tests pass.
 
 **Step 5: Commit**
 
 ```bash
-git add bin/raiko2/src/server docs/API.md
-git commit -m "refactor(api): remove online artifact invalidation"
+git add crates/runtime/src bin/raiko2/src/server docs/API.md
+git commit -m "refactor(runtime): remove tombstones and online invalidation"
 ```
 
 ### Task 8: Add Lifecycle Observability And Update Design References
@@ -593,6 +683,7 @@ git commit -m "refactor(api): remove online artifact invalidation"
 - Modify: `bin/raiko2/src/server/telemetry.rs:350-455`
 - Modify: `bin/raiko2/src/server/telemetry.rs:700-end`
 - Modify: `bin/raiko2/src/server/task_cleanup.rs:180-230`
+- Modify: `docs/operations.md:1290-1335`
 - Modify: `docs/plans/2026-08-19-runtime-retention-batch-gc-design.md`
 - Modify: `docs/plans/2026-07-30-canonical-preflight-cache-design.md`
 - Modify: `docs/plans/2026-08-23-tombstone-free-artifact-lifecycle-design.md`
@@ -626,6 +717,17 @@ Expected: new metric names are absent.
 Add counters/gauges/histograms using the existing telemetry registration style. Update older design
 documents where they state tombstones are permanent authority; link to the superseding design rather
 than rewriting their historical context.
+
+Document the old preflight-version cleanup procedure in `docs/operations.md`:
+
+1. keep the previous version prefix intact through the binary rollback window;
+2. after rollback is closed, treat that old `preflights/vN/` prefix as frozen;
+3. list only `manifest.manifest.json` objects and record each observed generation;
+4. delete exactly those generations without touching current-version manifests or immutable content;
+5. let the existing immutable-content lifecycle reclaim newly unreachable payloads.
+
+Explicitly preserve the rule that active/current preflight manifests must not have an age-based GCS
+lifecycle policy. Do not change bucket configuration from this repository.
 
 **Step 4: Run telemetry and documentation checks**
 
@@ -710,8 +812,17 @@ Before merge, record these operator checks in the PR description:
 - one replica per runtime namespace;
 - `Recreate` replacement strategy;
 - canary and production use different namespaces;
+- the canonical preflight compatibility version is bumped for every incompatible host derivation,
+  witness, canonicalization, fork-interpretation, or format change;
+- same-version delayed preflight writes are intentionally compatible, so startup preflight cleanup
+  is not documented as an absolute cross-process empty-prefix fence;
+- old preflight-version manifests remain through the rollback window and are then removed only by a
+  scoped generation-aware cleanup of the frozen old `preflights/vN/` prefix; active/current
+  preflight manifests retain no age-based lifecycle policy;
 - historical tombstones remain during the binary rollback window;
 - after the rollback window, delete old marker objects with a scoped generation-aware operation;
+- removal of online selective invalidation is accepted; exceptional terminal-proof cleanup uses
+  `runtime.startup_cleanup = ["proof"]` and a non-overlapping restart;
 - monitor cleanup-pending, invalidated-record age, exact-delete failures, lock wait, and runtime-state
   CAS failures.
 

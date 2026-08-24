@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use sha2::{Digest, Sha256};
 
+/// Serialization and host-semantics compatibility version for canonical preflight cache entries.
+///
+/// Bump this value whenever cached output from an older host implementation may no longer be a
+/// valid candidate for the current derivation, witness, canonicalization, or validation rules.
 pub const CANONICAL_PREFLIGHT_SCHEMA_V1: u16 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +267,13 @@ mod tests {
 
         let mut changed = key.clone();
         changed.last_anchor_block_number += 1;
+        assert_ne!(
+            key.digest().expect("digest"),
+            changed.digest().expect("digest")
+        );
+
+        changed = key.clone();
+        changed.schema += 1;
         assert_ne!(
             key.digest().expect("digest"),
             changed.digest().expect("digest")

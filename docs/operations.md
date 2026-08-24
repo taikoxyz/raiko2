@@ -1222,8 +1222,8 @@ Operator notes:
   manifests and does not touch proof state. Cleanup runs after the old process exits and before
   recovery, workers, or HTTP admission. GCS requires `storage.objects.list` and
   `storage.objects.delete`, uses generation-protected manifest deletion with bounded concurrency,
-  and aborts startup on failure. Immutable proof/preflight content and invalidation records remain
-  for lifecycle TTL. Treat this as a one-shot cutover setting and remove `startup_cleanup` after the
+  and aborts startup on failure. Immutable proof/preflight content remains for bucket lifecycle
+  reclamation. Treat this as a one-shot cutover setting and remove `startup_cleanup` after the
   replacement starts successfully; otherwise every routine restart repeats the cleanup and can
   discard fresh task state and proof manifests. Keep prefixes non-overlapping so one deployment
   scope cannot contain another.
@@ -1232,6 +1232,14 @@ Operator notes:
   singleflight without deleting runtime state or proof manifests. Restore `"shared"` after the
   incident is understood. This switch is not a replacement for `startup_cleanup = ["preflight"]`
   when cached preflight data is known to be semantically stale.
+- Treat the canonical preflight `vN` prefix as a host-semantics compatibility boundary. Keep the
+  previous version prefix intact through the binary rollback window. After rollback is closed, the
+  old prefix is frozen: list only `manifest.manifest.json` objects under that exact old
+  `preflights/vN/` prefix, record each observed object generation, and conditionally delete only
+  those generations. Do not target the current-version prefix or immutable content in that cleanup;
+  existing lifecycle rules reclaim content made unreachable by manifest removal. Active/current
+  preflight manifests must never receive an age-based GCS lifecycle rule. This repository does not
+  change bucket lifecycle configuration.
 - Correlate `registered shasta proof task` and `completed shasta proof task` logs by `task_id`.
   `proof_type` is the resolved proof lane, while `requested_proof_type` on registration preserves
   the raw request such as `zk_any`. Completion logging is at-least-once because idempotent proof
@@ -1245,7 +1253,7 @@ Operator notes:
 - Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
   complete lifecycle operation. A process-local lifecycle transition gate serializes one short
   active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
-  publication steps, invalidation, reconciliation, and cleanup writes. It waits only for short
+  publication steps, artifact reclamation, reconciliation, and cleanup writes. It waits only for short
   repository commits already admitted and request-ID checkpoints covered by permits acquired while
   active. `Inactive` rejects every write. There is deliberately no owner lease, owner epoch, or
   ownership heartbeat.
@@ -1254,7 +1262,7 @@ Operator notes:
   lease token identifies one execution attempt; a manifest generation performs exact artifact CAS.
   Runtime-state generation, not serialized JSON byte order, is the snapshot CAS identity. None is
   runtime authority, and runtime-state generations remain repository-internal.
-- Submission, cancellation, terminal failure, cleanup, and invalidation commit runtime state first,
+- Submission, cancellation, terminal failure, cleanup, and artifact reclamation commit runtime state first,
   then apply owner-aware execution-projection and exact proof-object effects. A partial effect is
   recovered by reconciliation; operators must not attempt to repair it by reverting the
   authoritative root. If terminal-failure persistence is unavailable, the queue task remains
@@ -1313,8 +1321,8 @@ Operator notes:
   create and pay for a new provider request even if the previous request later completes.
   Active proof and canonical preflight manifests must not have an age-based GCS lifecycle rule.
   Immutable content must remain available until every manifest that references it is gone.
-  Generation-scoped invalidation markers and unreferenced proof/preflight content use a minimum
-  30-day retention window.
+  Unreferenced proof/preflight content is reclaimed by the bucket's immutable-content lifecycle
+  after its manifest is gone; runtime correctness does not depend on immediate content deletion.
 - Proposal requests are sized by `prover.risc0.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`

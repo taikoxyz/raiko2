@@ -6580,18 +6580,20 @@ mod tests {
             )
             .await?
             .expect("cached artifact registration");
-        assert!(matches!(
-            runtime
-                .invalidate_proof_artifact_descriptor_if_unowned(
-                    &submission.pair.key,
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
-                    &proof_ref,
-                    &cached.descriptor(),
-                )
-                .await?,
-            raiko2_runtime::ProofArtifactInvalidationResult::Invalidated(_)
-        ));
+        let prepared = runtime.prepare_artifact_retention_batch(&[cached]).await?;
+        assert_eq!(prepared.newly_invalidated_artifacts, 1);
+        for expectation in &prepared.artifact_invalidations {
+            assert!(matches!(
+                runtime
+                    .finalize_proof_artifact_invalidation(expectation)
+                    .await?,
+                raiko2_runtime::ExactDeleteResult::Removed
+            ));
+        }
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(&[], &prepared.artifact_invalidations, &[])
+            .await?;
+        assert_eq!(finalized.removed_artifacts.len(), 1);
 
         let registration = build_batch_task_registration(&submission, &plan, &fingerprint)
             .map_err(|error| anyhow!(error.message))?;

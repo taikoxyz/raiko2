@@ -1,12 +1,12 @@
 use super::{
-    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDescriptor,
-    CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1, CanonicalPreflightObject,
-    CanonicalPreflightPutResult, CanonicalPreflightStore, ExactInvalidationResult,
-    ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
-    ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult, ProofObjectStore,
-    RuntimeStateObject, RuntimeStateStore, RuntimeStateWriteResult, RuntimeStoreScope,
-    StartupCleanupMask, StartupCleanupReport, StartupCleanupScope, StartupCleanupScopeReport,
-    content_hash, encode_component, validate_scope_component,
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightDescriptor,
+    CanonicalPreflightKeyV1, CanonicalPreflightObject, CanonicalPreflightPutResult,
+    CanonicalPreflightStore, ExactDeleteResult, ProofArtifactConflict, ProofArtifactDeleteResult,
+    ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
+    ProofArtifactPutResult, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
+    RuntimeStateWriteResult, RuntimeStoreScope, StartupCleanupMask, StartupCleanupReport,
+    StartupCleanupScope, StartupCleanupScopeReport, content_hash, encode_component,
+    validate_scope_component,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -319,20 +319,6 @@ impl GcsProofArtifactStore {
         format!("gs://{}/{}", self.bucket_id, self.content_name(key, hash))
     }
 
-    fn invalidation_name(
-        &self,
-        key: &ProofArtifactKey,
-        generation: Option<i64>,
-        hash: &str,
-    ) -> String {
-        format!(
-            "{}/invalidated/{}-{}.tombstone",
-            self.artifact_base_name(key),
-            generation.map_or_else(|| "none".to_string(), |value| value.to_string()),
-            encode_component(hash)
-        )
-    }
-
     fn runtime_state_name(&self) -> String {
         format!("{}/work/runtime-state.runtime.json", self.scope_prefix())
     }
@@ -340,10 +326,14 @@ impl GcsProofArtifactStore {
     fn canonical_preflight_base_name(&self, key: &CanonicalPreflightKeyV1) -> Result<String> {
         Self::validate_canonical_preflight_key(key)?;
         Ok(format!(
-            "{}/preflights/v1/{:x}",
-            self.scope_prefix(),
+            "{}/{:x}",
+            self.canonical_preflight_version_prefix(key.schema),
             key.digest()?
         ))
+    }
+
+    fn canonical_preflight_version_prefix(&self, schema: u16) -> String {
+        format!("{}/preflights/v{schema}", self.scope_prefix())
     }
 
     fn canonical_preflight_manifest_name(&self, key: &CanonicalPreflightKeyV1) -> Result<String> {
@@ -362,21 +352,6 @@ impl GcsProofArtifactStore {
             "{}/content/{}.preflight.bincode",
             self.canonical_preflight_base_name(key)?,
             encode_component(hash)
-        ))
-    }
-
-    fn canonical_preflight_invalidation_name(
-        &self,
-        key: &CanonicalPreflightKeyV1,
-        descriptor: &CanonicalPreflightDescriptor,
-    ) -> Result<String> {
-        Ok(format!(
-            "{}/invalidated/{}-{}.tombstone",
-            self.canonical_preflight_base_name(key)?,
-            descriptor
-                .generation
-                .map_or_else(|| "none".to_string(), |value| value.to_string()),
-            encode_component(&descriptor.content_hash)
         ))
     }
 
@@ -688,15 +663,6 @@ impl GcsProofArtifactStore {
         }))
     }
 
-    async fn canonical_preflight_is_invalidated(
-        &self,
-        key: &CanonicalPreflightKeyV1,
-        descriptor: &CanonicalPreflightDescriptor,
-    ) -> Result<bool> {
-        let name = self.canonical_preflight_invalidation_name(key, descriptor)?;
-        Ok(self.transport.read(&name).await?.is_some())
-    }
-
     async fn remove_corrupt_canonical_preflight_manifest(
         &self,
         name: &str,
@@ -819,27 +785,18 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
         }
     }
 
-    async fn invalidate_canonical_preflight_exact(
+    async fn delete_canonical_preflight_exact(
         &self,
         key: &CanonicalPreflightKeyV1,
         descriptor: &CanonicalPreflightDescriptor,
-    ) -> Result<CanonicalPreflightInvalidateResult> {
+    ) -> Result<CanonicalPreflightDeleteResult> {
         let key_digest = key.digest()?;
         if descriptor.key_digest != key_digest {
-            return Ok(CanonicalPreflightInvalidateResult::Stale);
+            return Ok(CanonicalPreflightDeleteResult::Stale);
         }
         let Some((manifest, generation)) = self.read_canonical_preflight_manifest(key).await?
         else {
-            return Ok(
-                if self
-                    .canonical_preflight_is_invalidated(key, descriptor)
-                    .await?
-                {
-                    CanonicalPreflightInvalidateResult::AlreadyInvalidated
-                } else {
-                    CanonicalPreflightInvalidateResult::Missing
-                },
-            );
+            return Ok(CanonicalPreflightDeleteResult::Missing);
         };
         let current = CanonicalPreflightDescriptor {
             key_digest,
@@ -847,28 +804,19 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
             generation: Some(generation),
         };
         if current != *descriptor {
-            return Ok(CanonicalPreflightInvalidateResult::Stale);
+            return Ok(CanonicalPreflightDeleteResult::Stale);
         }
 
-        let invalidation_name = self.canonical_preflight_invalidation_name(key, descriptor)?;
-        self.transport
-            .create(&invalidation_name, &[])
-            .await
-            .context("failed to publish GCS canonical preflight invalidation marker")?;
         let manifest_name = self.canonical_preflight_manifest_name(key)?;
         match self
             .transport
             .delete_if_generation(&manifest_name, descriptor.generation)
             .await
         {
-            Ok(ProofArtifactDeleteResult::Removed) => {
-                Ok(CanonicalPreflightInvalidateResult::Invalidated)
-            }
-            Ok(ProofArtifactDeleteResult::Missing) => {
-                Ok(CanonicalPreflightInvalidateResult::AlreadyInvalidated)
-            }
+            Ok(ProofArtifactDeleteResult::Removed) => Ok(CanonicalPreflightDeleteResult::Removed),
+            Ok(ProofArtifactDeleteResult::Missing) => Ok(CanonicalPreflightDeleteResult::Missing),
             Err(delete_error) => match self.read_canonical_preflight_manifest(key).await {
-                Ok(None) => Ok(CanonicalPreflightInvalidateResult::AlreadyInvalidated),
+                Ok(None) => Ok(CanonicalPreflightDeleteResult::Removed),
                 Ok(Some((observed, observed_generation))) => {
                     let observed = CanonicalPreflightDescriptor {
                         key_digest,
@@ -877,10 +825,10 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
                     };
                     if observed == *descriptor {
                         Err(delete_error).context(
-                            "canonical preflight manifest delete failed before commit; exact invalidation can be retried",
+                            "canonical preflight manifest delete failed before commit; exact deletion can be retried",
                         )
                     } else {
-                        Ok(CanonicalPreflightInvalidateResult::Stale)
+                        Ok(CanonicalPreflightDeleteResult::Stale)
                     }
                 }
                 Err(read_error) => Err(delete_error).context(format!(
@@ -1017,38 +965,31 @@ impl ProofObjectStore for GcsProofArtifactStore {
         }))
     }
 
-    async fn invalidate_exact(
+    async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
         descriptor: &ProofArtifactDescriptor,
-    ) -> Result<ExactInvalidationResult> {
-        let Some((manifest, generation)) = self.read_manifest(key).await? else {
-            return Ok(if self.is_invalidated(key, descriptor).await? {
-                ExactInvalidationResult::AlreadyInvalidated
-            } else {
-                ExactInvalidationResult::Missing
-            });
+    ) -> Result<ExactDeleteResult> {
+        let Some((manifest, current_generation)) = self.read_manifest(key).await? else {
+            return Ok(ExactDeleteResult::Missing);
         };
         let current = ProofArtifactDescriptor {
             proof_uri: self.content_uri(key, &manifest.content_hash),
             content_hash: manifest.content_hash,
-            generation: Some(generation),
+            generation: Some(current_generation),
         };
         if current != *descriptor {
-            return Ok(ExactInvalidationResult::Stale);
+            return Ok(ExactDeleteResult::Stale);
         }
-        let name = self.invalidation_name(key, descriptor.generation, &descriptor.content_hash);
-        self.transport
-            .create(&name, &[])
-            .await
-            .context("failed to publish GCS invalidation marker")?;
+
         match self
-            .delete_named(&self.manifest_name(key), descriptor.generation)
+            .delete_named(&self.manifest_name(key), Some(current_generation))
             .await
         {
-            Ok(deleted) => Ok(ExactInvalidationResult::Invalidated(deleted)),
+            Ok(ProofArtifactDeleteResult::Removed) => Ok(ExactDeleteResult::Removed),
+            Ok(ProofArtifactDeleteResult::Missing) => Ok(ExactDeleteResult::Missing),
             Err(delete_error) => match self.read_manifest(key).await {
-                Ok(None) => Ok(ExactInvalidationResult::AlreadyInvalidated),
+                Ok(None) => Ok(ExactDeleteResult::Removed),
                 Ok(Some((manifest, generation))) => {
                     let observed = ProofArtifactDescriptor {
                         proof_uri: self.content_uri(key, &manifest.content_hash),
@@ -1057,10 +998,10 @@ impl ProofObjectStore for GcsProofArtifactStore {
                     };
                     if observed == *descriptor {
                         Err(delete_error).context(
-                            "proof manifest delete failed before commit; exact invalidation can be retried",
+                            "proof manifest delete failed before commit; exact deletion can be retried",
                         )
                     } else {
-                        Ok(ExactInvalidationResult::Stale)
+                        Ok(ExactDeleteResult::Stale)
                     }
                 }
                 Err(read_error) => Err(delete_error).context(format!(
@@ -1068,36 +1009,6 @@ impl ProofObjectStore for GcsProofArtifactStore {
                 )),
             },
         }
-    }
-
-    async fn is_invalidated(
-        &self,
-        key: &ProofArtifactKey,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> Result<bool> {
-        let name = self.invalidation_name(key, descriptor.generation, &descriptor.content_hash);
-        Ok(self.transport.read(&name).await?.is_some())
-    }
-
-    async fn delete_exact(
-        &self,
-        key: &ProofArtifactKey,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> Result<ProofArtifactDeleteResult> {
-        let Some((manifest, current_generation)) = self.read_manifest(key).await? else {
-            return Ok(ProofArtifactDeleteResult::Missing);
-        };
-        anyhow::ensure!(
-            manifest.content_hash == descriptor.content_hash
-                && self.content_uri(key, &manifest.content_hash) == descriptor.proof_uri,
-            "proof artifact content changed before conditional delete"
-        );
-        anyhow::ensure!(
-            descriptor.generation == Some(current_generation),
-            "proof artifact generation changed before conditional delete"
-        );
-        self.delete_named(&self.manifest_name(key), Some(current_generation))
-            .await
     }
 }
 

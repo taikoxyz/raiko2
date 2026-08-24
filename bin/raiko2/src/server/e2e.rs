@@ -3,9 +3,6 @@
 //! These tests exercise the HTTP handlers + engine orchestration without relying on
 //! external RPC endpoints. A minimal JSON-RPC server is spun up only for `/ready`.
 
-mod invalidation_prefix;
-mod invalidation_range;
-
 use std::sync::Arc;
 
 use alloy_primitives::{hex, keccak256};
@@ -38,8 +35,8 @@ use super::fixture::{
 };
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
-    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_proof_artifact_refs,
-    proposal_task_ref, publication_proof_artifact_refs, root_proof_artifact_refs,
+    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
+    publication_proof_artifact_refs,
 };
 use crate::config::{Config, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::test_support::{MemoryProofArtifactStore, RuntimeStore};
@@ -202,86 +199,6 @@ async fn write_e2e_proof_artifact(
         .await
         .expect("register proof artifact");
     artifact.proof_uri.clone()
-}
-
-async fn replace_e2e_proof_artifact(
-    state: &AppState,
-    network_pair: &str,
-    proof_ref: &str,
-    pipeline_key: PipelineKey,
-    route: PipelineRoute,
-    proof: &Proof,
-) {
-    let old = state
-        .runtime
-        .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
-        .await
-        .expect("get proof artifact")
-        .expect("existing proof artifact");
-    state
-        .runtime
-        .delete_proof_artifact(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            old.generation,
-            &old.content_hash,
-        )
-        .await
-        .expect("delete proof artifact manifest");
-    state
-        .runtime
-        .remove_proof_artifact_if_descriptor(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            &old.descriptor(),
-        )
-        .await
-        .expect("remove proof artifact record");
-    write_e2e_proof_artifact(state, network_pair, proof_ref, pipeline_key, route, proof).await;
-}
-
-async fn write_e2e_pending_publication(
-    state: &AppState,
-    network_pair: &str,
-    proof_ref: &str,
-    pipeline_key: PipelineKey,
-    route: PipelineRoute,
-) {
-    state
-        .runtime
-        .upsert_pending_proof_publication(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            br#"{"proof":"0xpending"}"#,
-        )
-        .await
-        .expect("write pending proof publication");
-}
-
-async fn assert_e2e_pending_publication(
-    state: &AppState,
-    network_pair: &str,
-    proof_ref: &str,
-    pipeline_key: PipelineKey,
-    route: PipelineRoute,
-    expected: bool,
-) {
-    assert_eq!(
-        state
-            .runtime
-            .get_pending_proof_publication(network_pair, pipeline_key, route, proof_ref)
-            .await
-            .expect("get pending proof publication")
-            .is_some(),
-        expected,
-        "unexpected pending publication state for {proof_ref}"
-    );
 }
 
 async fn report_task_ids(app: &Router) -> Vec<String> {
@@ -1097,67 +1014,19 @@ async fn e2e_v4_clear_rate_limits_acl_key() {
 }
 
 #[tokio::test]
-async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
-    let (app, engine) = v4_sp1_acl_app();
-    let payload = v4_sp1_proposal_request(11);
+async fn e2e_v4_invalidate_artifacts_route_is_not_registered() {
+    let (app, _engine) = v4_sp1_acl_app();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v4/prover/invalidate-artifacts")
+        .body(Body::empty())
+        .expect("build removed-route request");
+    let response = app
+        .oneshot(request)
+        .await
+        .expect("dispatch removed-route request");
 
-    let (status, first) =
-        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload.clone()).await;
-    assert_eq!(status, StatusCode::OK, "{first}");
-    assert_eq!(first["data"]["status"], "registered");
-
-    drive_engine_to_idle(&engine).await;
-
-    let (status, completed) =
-        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload.clone()).await;
-    assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_eq!(completed["data"]["status"], "completed");
-    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
-
-    let request = json!({
-        "proof_type": "sp1",
-        "dry_run": true
-    });
-    let (status, dry_run) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        request,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{dry_run}");
-    assert_eq!(dry_run["status"], "ok");
-    assert_eq!(dry_run["proof_type"], "sp1");
-    assert_eq!(dry_run["data"]["dry_run"], true);
-    assert_eq!(dry_run["data"]["artifacts"]["matched"], 1);
-    assert_eq!(dry_run["data"]["artifacts"]["removed"], 0);
-    assert_eq!(dry_run["data"]["tasks"]["matched"], 1);
-    assert_eq!(dry_run["data"]["tasks"]["removed"], 0);
-
-    let request = json!({
-        "proof_type": "sp1"
-    });
-    let (status, invalidated) = post_json_with_api_key(
-        &app,
-        "/v4/prover/invalidate-artifacts",
-        "clear-secret",
-        request,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{invalidated}");
-    assert_eq!(invalidated["data"]["dry_run"], false);
-    assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
-    assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
-    assert_eq!(invalidated["data"]["artifacts"]["manifests_removed"], 1);
-    assert_eq!(invalidated["data"]["artifacts"]["manifests_missing"], 0);
-    assert_eq!(invalidated["data"]["tasks"]["matched"], 1);
-    assert_eq!(invalidated["data"]["tasks"]["removed"], 1);
-
-    let (status, resubmitted) =
-        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload).await;
-    assert_eq!(status, StatusCode::OK, "{resubmitted}");
-    assert_eq!(resubmitted["data"]["status"], "registered");
-    assert!(resubmitted["data"]["proof"].is_null(), "{resubmitted}");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

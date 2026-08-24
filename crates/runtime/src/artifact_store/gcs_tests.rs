@@ -2,7 +2,7 @@ use super::*;
 use alloy_primitives::B256;
 use raiko2_pipeline::PipelineKey;
 use raiko2_pipeline::forks::shasta::preflight_cache::{
-    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightKeyV1,
     CanonicalPreflightPutResult, CanonicalPreflightStore,
 };
 use raiko2_primitives::{L2BlockRange, ShastaCheckpoint};
@@ -335,12 +335,36 @@ async fn canonical_preflight_publication_roundtrips_and_reuses_identical_content
     );
     let manifest_name = store.canonical_preflight_manifest_name(&key)?;
     assert!(manifest_name.contains("/preflights/v1/"));
+    assert_ne!(
+        store.canonical_preflight_version_prefix(key.schema),
+        store.canonical_preflight_version_prefix(key.schema + 1)
+    );
     let object = first
         .try_object()
         .expect("created canonical preflight object");
     let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
     assert!(content_name.ends_with(".preflight.bincode"));
     assert!(transport.contains(&content_name)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn delayed_incompatible_version_create_is_unreachable_from_current_version() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let incompatible_version = key.schema.saturating_sub(1);
+    let delayed_manifest = format!(
+        "{}/delayed/manifest.manifest.json",
+        store.canonical_preflight_version_prefix(incompatible_version)
+    );
+
+    assert!(matches!(
+        transport.create(&delayed_manifest, b"old-version").await?,
+        GcsCreateResult::Created(_)
+    ));
+    assert!(transport.contains(&delayed_manifest)?);
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     Ok(())
 }
 
@@ -437,9 +461,9 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
 
     assert_eq!(
         store
-            .invalidate_canonical_preflight_exact(&key, &first.descriptor())
+            .delete_canonical_preflight_exact(&key, &first.descriptor())
             .await?,
-        CanonicalPreflightInvalidateResult::Invalidated
+        CanonicalPreflightDeleteResult::Removed
     );
     assert!(
         transport.contains(&store.canonical_preflight_content_name(&key, &first.content_hash)?)?
@@ -454,9 +478,9 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
     assert_ne!(first.generation, second.generation);
     assert_eq!(
         store
-            .invalidate_canonical_preflight_exact(&key, &first.descriptor())
+            .delete_canonical_preflight_exact(&key, &first.descriptor())
             .await?,
-        CanonicalPreflightInvalidateResult::Stale
+        CanonicalPreflightDeleteResult::Stale
     );
     assert_eq!(
         store
@@ -833,7 +857,7 @@ async fn prefix_read_rejects_corrupted_content() -> Result<()> {
 }
 
 #[tokio::test]
-async fn generation_scoped_invalidation_allows_identical_republication() -> Result<()> {
+async fn exact_delete_allows_identical_republication() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(transport)?;
     let key = key();
@@ -845,10 +869,10 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
         .expect("proof publication should materialize content")
         .clone();
 
-    assert!(matches!(
-        store.invalidate_exact(&key, &first.descriptor()).await?,
-        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-    ));
+    assert_eq!(
+        store.delete_exact(&key, &first.descriptor()).await?,
+        ExactDeleteResult::Removed
+    );
     let second = store
         .put_if_absent(&key, proof)
         .await?
@@ -857,10 +881,9 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
         .clone();
 
     assert_ne!(first.generation, second.generation);
-    assert!(store.is_invalidated(&key, &first.descriptor()).await?);
-    assert!(!store.is_invalidated(&key, &second.descriptor()).await?);
-    assert!(
-        store.delete_exact(&key, &first.descriptor()).await.is_err(),
+    assert_eq!(
+        store.delete_exact(&key, &first.descriptor()).await?,
+        ExactDeleteResult::Stale,
         "a stale generation must not delete the replacement manifest"
     );
     assert_eq!(
@@ -875,7 +898,30 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
 }
 
 #[tokio::test]
-async fn exact_invalidation_recovers_commit_then_error_by_readback() -> Result<()> {
+async fn delete_reports_removed_then_missing_through_gcs_seam() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+
+    assert_eq!(
+        store.delete_exact(&key, &object.descriptor()).await?,
+        ExactDeleteResult::Removed
+    );
+    assert_eq!(
+        store.delete_exact(&key, &object.descriptor()).await?,
+        ExactDeleteResult::Missing
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_delete_recovers_commit_then_error_by_readback() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = key();
@@ -888,20 +934,15 @@ async fn exact_invalidation_recovers_commit_then_error_by_readback() -> Result<(
     transport.delete_failure.store(2, Ordering::SeqCst);
 
     assert_eq!(
-        store.invalidate_exact(&key, &object.descriptor()).await?,
-        ExactInvalidationResult::AlreadyInvalidated
+        store.delete_exact(&key, &object.descriptor()).await?,
+        ExactDeleteResult::Removed
     );
-    assert!(store.is_invalidated(&key, &object.descriptor()).await?);
     assert_eq!(store.get_descriptor(&key).await?, None);
-    assert_eq!(
-        store.invalidate_exact(&key, &object.descriptor()).await?,
-        ExactInvalidationResult::AlreadyInvalidated
-    );
     Ok(())
 }
 
 #[tokio::test]
-async fn exact_invalidation_retries_fail_before_commit() -> Result<()> {
+async fn exact_delete_retries_failure_before_commit() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = key();
@@ -914,39 +955,11 @@ async fn exact_invalidation_retries_fail_before_commit() -> Result<()> {
     transport.delete_failure.store(1, Ordering::SeqCst);
 
     let error = store
-        .invalidate_exact(&key, &object.descriptor())
+        .delete_exact(&key, &object.descriptor())
         .await
         .expect_err("a pre-commit delete failure must remain retryable");
     assert!(error.to_string().contains("before commit"));
     assert_eq!(store.get_descriptor(&key).await?, Some(object.descriptor()));
-    assert!(store.is_invalidated(&key, &object.descriptor()).await?);
-    assert!(matches!(
-        store.invalidate_exact(&key, &object.descriptor()).await?,
-        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn delete_reports_removed_then_missing_through_gcs_seam() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(transport)?;
-    let key = key();
-    let object = store
-        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
-        .await?
-        .try_object()
-        .expect("proof publication should materialize content")
-        .clone();
-
-    assert_eq!(
-        store.delete_exact(&key, &object.descriptor()).await?,
-        ProofArtifactDeleteResult::Removed
-    );
-    assert_eq!(
-        store.delete_exact(&key, &object.descriptor()).await?,
-        ProofArtifactDeleteResult::Missing
-    );
     Ok(())
 }
 
@@ -1220,10 +1233,6 @@ async fn namespace_reset_removes_only_the_configured_scope() -> Result<()> {
         .expect("proof publication should materialize content")
         .clone();
     assert!(matches!(
-        store.invalidate_exact(&key, &proof.descriptor()).await?,
-        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-    ));
-    assert!(matches!(
         store.store_runtime_state(b"runtime", None).await?,
         RuntimeStateWriteResult::Stored { .. }
     ));
@@ -1245,11 +1254,6 @@ async fn namespace_reset_removes_only_the_configured_scope() -> Result<()> {
 
     assert_eq!(store.reset_namespace().await?, 5);
     assert!(!transport.contains(&store.content_name(&key, &proof.content_hash))?);
-    assert!(!transport.contains(&store.invalidation_name(
-        &key,
-        proof.generation,
-        &proof.content_hash
-    ))?);
     assert!(!transport.contains(&store.runtime_state_name())?);
     assert!(!transport.contains(&store.content_name(&live_key, &live_proof.content_hash))?);
     assert!(!transport.contains(&store.manifest_name(&live_key))?);

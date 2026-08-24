@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use raiko2_engine::EngineExecutionPlan;
 use raiko2_queue::{DetachMode, DetachOutcome, RootOwner};
 use raiko2_runtime::{
-    ArtifactExpectation, PendingPublicationExpectation, ProofArtifactKey,
+    ArtifactExpectation, ExactDeleteResult, PendingPublicationExpectation, ProofArtifactKey,
     ProofArtifactPrecondition, ProofArtifactRecord, RunnerStatus, RuntimeManager,
     RuntimeMutationOutcome, RuntimeTaskRecord, TaskLifetime, TaskRegistration,
 };
@@ -61,7 +61,6 @@ pub(crate) struct PendingRetentionBatchOutcome {
 #[derive(Debug, Default)]
 struct ArtifactFinalizationBatch {
     finalized: Vec<ArtifactExpectation>,
-    stale: Vec<ArtifactExpectation>,
     retry_artifacts: Vec<ProofArtifactKey>,
     failures: usize,
 }
@@ -440,8 +439,7 @@ impl ProofLifecycle {
         outcome.retained_artifact_failures = artifact_batch.failures;
         outcome.retry_artifacts = artifact_batch.retry_artifacts;
 
-        let mut removable_artifacts = artifact_batch.finalized;
-        removable_artifacts.extend(artifact_batch.stale);
+        let removable_artifacts = artifact_batch.finalized;
         if removable_artifacts.is_empty() {
             return Ok(outcome);
         }
@@ -475,8 +473,7 @@ impl ProofLifecycle {
         .await;
         outcome.retained_artifact_failures = artifact_batch.failures;
         outcome.retry_artifacts = artifact_batch.retry_artifacts;
-        let mut removable_artifacts = artifact_batch.finalized;
-        removable_artifacts.extend(artifact_batch.stale);
+        let removable_artifacts = artifact_batch.finalized;
         if removable_artifacts.is_empty() {
             return Ok(outcome);
         }
@@ -591,17 +588,48 @@ async fn finalize_terminal_retention_artifacts(
             break;
         };
         match finalized {
-            Ok((expectation, Ok(_))) => batch.finalized.push(expectation),
+            Ok((expectation, Ok(ExactDeleteResult::Removed | ExactDeleteResult::Missing))) => {
+                batch.finalized.push(expectation);
+            }
+            Ok((expectation, Ok(ExactDeleteResult::Stale))) => {
+                match runtime
+                    .proof_artifact_invalidation_is_stale(&expectation)
+                    .await
+                {
+                    Ok(true) => {
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            "discarding stale proof artifact cleanup candidate"
+                        );
+                    }
+                    Ok(false) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            "exact proof deletion observed a changed manifest while the invalidation remains authoritative"
+                        );
+                    }
+                    Err(error) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %error,
+                            "failed to recheck stale proof artifact cleanup candidate"
+                        );
+                    }
+                }
+            }
             Ok((expectation, Err(error))) => {
                 match runtime
                     .proof_artifact_invalidation_is_stale(&expectation)
                     .await
                 {
                     Ok(true) => {
-                        batch.stale.push(expectation.clone());
                         warn!(
                             proof_ref = %expectation.key.proof_ref,
-                            "dropping stale local proof artifact invalidation"
+                            "discarding failed cleanup for a stale proof artifact candidate"
                         );
                     }
                     Ok(false) => {

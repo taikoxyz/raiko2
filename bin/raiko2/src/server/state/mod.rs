@@ -62,6 +62,7 @@ use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
 use super::telemetry::{
     PreflightCacheMetricsObserver, record_startup_cleanup_failure, record_startup_cleanup_report,
+    runtime_lifecycle_observer,
 };
 
 /// In-memory sliding-window limiter for ACL-protected endpoints.
@@ -224,7 +225,18 @@ async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result
             );
         }
     }
-    runtime.initialize().await
+    runtime.initialize().await?;
+    let reconciled = runtime
+        .reconcile_invalidated_proof_artifacts()
+        .await
+        .context("failed to reconcile invalidated proof artifacts during startup")?;
+    if reconciled > 0 {
+        tracing::info!(
+            reconciled,
+            "reconciled invalidated proof artifacts during startup"
+        );
+    }
+    Ok(())
 }
 
 struct PipelineResources {
@@ -392,6 +404,7 @@ impl AppState {
         config.validate()?;
         let pipeline_registrations = enabled_pipeline_registrations(&config)?;
         let runtime = Arc::new(build_runtime(&config).await?);
+        runtime.set_lifecycle_observer(runtime_lifecycle_observer());
         let scheduler_config = setup::scheduler_config(&config);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         #[cfg(any(feature = "host", feature = "local-provers"))]
@@ -448,6 +461,7 @@ impl AppState {
         pipelines: Arc<dyn PipelineFactory>,
         runtime: Arc<RuntimeManager>,
     ) -> Self {
+        runtime.set_lifecycle_observer(runtime_lifecycle_observer());
         let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
         let lifecycle = ProofLifecycle::new(Arc::clone(&runtime), Arc::clone(&pipelines));
         Self {
@@ -826,10 +840,8 @@ mod tests {
     use raiko2_primitives::ChainSpec;
     use raiko2_provider::L2ProviderKind;
     use raiko2_runtime::{
-        ProofArtifactKey, ProofArtifactRegistration, TaskRegistration,
-        test_support::{
-            ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStore,
-        },
+        ExactDeleteResult, ProofArtifactKey, ProofArtifactRegistration, TaskRegistration,
+        test_support::{MemoryProofArtifactStore, ProofObjectStore, RuntimeStore},
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1010,6 +1022,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_reconciles_durable_invalidated_proof_before_workers() -> Result<()> {
+        let mut config = Config::default();
+        config.runtime.environment = "test".into();
+        config.runtime.namespace = "startup-invalidated-proof".into();
+        let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
+            config.runtime.environment.clone(),
+            config.runtime.namespace.clone(),
+        )?);
+        let previous = RuntimeManager::with_store(Arc::clone(&store));
+        previous.initialize().await?;
+        let pipeline_key = PipelineKey::ShastaNative;
+        let route = pipeline_key.route();
+        let proof_ref = "startup-invalidated-proof";
+        let object = previous
+            .publish_proof_artifact_bytes(
+                "l1-l2",
+                pipeline_key,
+                route,
+                proof_ref,
+                br#"{"proof":"0x01"}"#,
+            )
+            .await?
+            .try_object()
+            .context("published proof")?
+            .clone();
+        previous
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "l1-l2".into(),
+                proof_ref: proof_ref.into(),
+                pipeline_key,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let record = previous
+            .get_proof_artifact("l1-l2", pipeline_key, route, proof_ref)
+            .await?
+            .context("active proof artifact")?;
+        let prepared = previous.prepare_artifact_retention_batch(&[record]).await?;
+        assert_eq!(prepared.newly_invalidated_artifacts, 1);
+
+        let runtime = RuntimeManager::with_store(store);
+        initialize_runtime(&config, &runtime).await?;
+
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated("l1-l2", pipeline_key, route, proof_ref,)
+                .await?
+                .is_none()
+        );
+        assert!(
+            runtime
+                .read_proof_artifact_bytes("l1-l2", pipeline_key, route, proof_ref)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn startup_retention_does_not_fail_on_stale_invalidated_descriptor() -> Result<()> {
         let store = Arc::new(MemoryProofArtifactStore::new(
             "test".into(),
@@ -1055,10 +1129,10 @@ mod tests {
             route,
             proof_ref: proof_ref.into(),
         };
-        assert!(matches!(
-            store.invalidate_exact(&key, &first.descriptor()).await?,
-            ExactInvalidationResult::Invalidated(_)
-        ));
+        assert_eq!(
+            store.delete_exact(&key, &first.descriptor()).await?,
+            ExactDeleteResult::Removed
+        );
         let second = previous
             .publish_proof_artifact_bytes(
                 "l1-l2",

@@ -233,7 +233,11 @@ async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result
             reconciled
         }
         Err(error) => {
-            record_startup_reconciliation("failure", 0, reconciliation_started.elapsed());
+            tracing::error!(
+                elapsed_ms = reconciliation_started.elapsed().as_millis(),
+                error = %error,
+                "startup invalidated-proof reconciliation failed"
+            );
             return Err(error)
                 .context("failed to reconcile invalidated proof artifacts during startup");
         }

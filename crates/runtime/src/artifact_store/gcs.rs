@@ -15,6 +15,7 @@ use google_cloud_storage::client::{Storage, StorageControl};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProofManifest {
@@ -682,6 +683,11 @@ impl GcsProofArtifactStore {
         generation: i64,
         validation_error: &anyhow::Error,
     ) -> Result<()> {
+        warn!(
+            object_name = name,
+            error = %validation_error,
+            "removing invalid canonical preflight cache entry"
+        );
         self.transport
             .delete_if_generation(name, Some(generation))
             .await

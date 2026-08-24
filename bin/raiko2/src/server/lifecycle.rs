@@ -732,13 +732,82 @@ mod tests {
     use raiko2_engine::{EngineTaskId, EngineTaskKey};
     use raiko2_pipeline::PipelineKey;
     use raiko2_queue::{AttachOutcome, TaskStoreError};
-    use raiko2_runtime::TaskRegistration;
+    use raiko2_runtime::{ProofArtifactRegistration, TaskRegistration};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    #[tokio::test]
+    async fn artifact_finalization_accepts_an_already_missing_manifest() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            format!("missing-finalization-{}", uuid::Uuid::new_v4()),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                "proof-ref",
+                br#"{"proof":"0x01"}"#,
+            )
+            .await?
+            .try_object()
+            .expect("proof publication")
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".into(),
+                proof_ref: "proof-ref".into(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let active = runtime
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, route, "proof-ref")
+            .await?
+            .expect("active artifact");
+        let prepared = runtime.prepare_artifact_retention_batch(&[active]).await?;
+        let expectation = prepared
+            .artifact_invalidations
+            .first()
+            .expect("prepared invalidation")
+            .clone();
+        assert_eq!(
+            runtime
+                .delete_proof_artifact(
+                    &expectation.key.network_pair,
+                    expectation.key.pipeline_key,
+                    expectation.key.route,
+                    &expectation.key.proof_ref,
+                    expectation.descriptor.generation,
+                    &expectation.descriptor.content_hash,
+                )
+                .await?,
+            raiko2_runtime::ProofArtifactDeleteResult::Removed
+        );
+
+        let batch =
+            finalize_terminal_retention_artifacts(Arc::clone(&runtime), vec![expectation.clone()])
+                .await;
+        assert_eq!(batch.finalized, vec![expectation.clone()]);
+        assert_eq!(batch.failures, 0);
+        assert!(batch.retry_artifacts.is_empty());
+
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(&[], &batch.finalized, &[])
+            .await?;
+        assert_eq!(finalized.removed_artifacts, vec![expectation]);
+        Ok(())
+    }
 
     #[derive(Default)]
     struct BlockingProjectionEngine {

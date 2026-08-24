@@ -950,18 +950,15 @@ mod tests {
     #[test]
     fn startup_reconciliation_metrics_use_only_bounded_outcomes() {
         record_startup_reconciliation("success", 2, Duration::from_millis(25));
-        record_startup_reconciliation("failure", 0, Duration::from_millis(50));
 
         let (_, metrics) = render().expect("render metrics");
         let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
-        for outcome in ["success", "failure"] {
-            assert!(metrics.contains(&format!(
-                "raiko2_startup_reconciliation_total{{outcome=\"{outcome}\"}}"
-            )));
-            assert!(metrics.contains(&format!(
-                "raiko2_startup_reconciliation_duration_seconds_count{{outcome=\"{outcome}\"}}"
-            )));
-        }
+        assert!(metrics.contains("raiko2_startup_reconciliation_total{outcome=\"success\"}"));
+        assert!(
+            metrics.contains(
+                "raiko2_startup_reconciliation_duration_seconds_count{outcome=\"success\"}"
+            )
+        );
         assert!(
             metrics.contains("raiko2_startup_reconciliation_artifacts_total{outcome=\"success\"}")
         );

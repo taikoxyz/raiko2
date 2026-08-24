@@ -171,7 +171,7 @@ The keyed mutex is local ordering, not distributed authority. Hash-map collision
 cost but never cause different keys to share one lifecycle mutex because full-key equality remains
 required.
 
-### Do not hold keyed locks across slow manifest deletion
+### Keep external deletion outside locks when durable invalidation fences publication
 
 GCS manifest deletion is a network operation and may time out. Retention therefore uses a durable
 three-phase transition rather than holding a lifecycle lock through external deletion.
@@ -199,6 +199,11 @@ same-key admission and one authoritative state write, not GCS object deletion.
 
 During this phase, a same-key publication may acquire its lifecycle lock, but it observes
 `Invalidated` and returns a retryable cleanup-pending error before writing content or a manifest.
+
+Pending-publication cleanup is the narrow exception. A pending intent has no `Invalidated` lifecycle
+fence, and a new task may adopt identical content without changing its object generation. Its exact
+object deletion therefore holds only that artifact's keyed lock across the delete. Publications for
+other keys remain independent and pending cleanup remains bounded by the retention worker concurrency.
 
 #### Phase 3: runtime finalization
 
@@ -350,7 +355,7 @@ Add or preserve bounded-cardinality metrics for:
 - cleanup-pending publication rejections;
 - proof retention retry queue length;
 - preflight invalid-cache, exact-delete, rebuild, and uncached-fallback outcomes;
-- startup reconciliation failures.
+- startup reconciliation successes as pull metrics and failures as structured startup error logs.
 
 Logs may include task ID, proposal range, proof type, artifact key fields, descriptor generation, and
 content hash as structured fields. Metrics must not use those values as labels.
@@ -435,7 +440,9 @@ before marker cleanup remains possible under the same single-process deployment 
 - Runtime `Invalidated(A)` is durable before manifest A deletion begins.
 - Publication cannot write generation B while the exact key is `Invalidated(A)`.
 - Cleanup-pending is retryable execution state, not a terminal proof result.
-- Manifest deletion never holds a keyed lifecycle lock across slow GCS I/O.
+- Invalidated canonical proof-manifest deletion does not hold a keyed lifecycle lock across GCS I/O.
+- Pending-object deletion holds its keyed lifecycle lock so identical-content owner adoption cannot
+  race an exact delete.
 - Runtime record A is removed only after manifest A is removed or confirmed missing.
 - Every destructive object operation is generation protected.
 - A stale cleanup observation cannot delete a changed descriptor.

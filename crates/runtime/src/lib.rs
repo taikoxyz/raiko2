@@ -2987,14 +2987,7 @@ impl RuntimeManager {
                 }
             }
         }
-        let pending_key = Self::pending_artifact_key(
-            &key.network_pair,
-            key.pipeline_key,
-            key.route,
-            &key.proof_ref,
-        );
-        let pending_descriptor = self.store.get_descriptor(&pending_key).await?;
-        {
+        let pending_deletion = {
             let _artifact_lifecycle = self
                 .artifact_lifecycle_guard(
                     &key.network_pair,
@@ -3005,55 +2998,33 @@ impl RuntimeManager {
                 .await;
             self.validate_pending_publication_before_object_deletion(expectation, &state_key)
                 .await?;
-        }
-        let _commit = self.begin_object_commit()?;
-        let pending_deletion = match pending_descriptor {
-            Some(descriptor) => match self.store.delete_exact(&pending_key, &descriptor).await? {
+            let pending_key = Self::pending_artifact_key(
+                &key.network_pair,
+                key.pipeline_key,
+                key.route,
+                &key.proof_ref,
+            );
+            let Some(pending_descriptor) = self.store.get_descriptor(&pending_key).await? else {
+                return Ok(PendingPublicationRetentionFinalization {
+                    pending_deletion: ProofArtifactDeleteResult::Missing,
+                });
+            };
+            let _commit = self.begin_object_commit()?;
+            match self
+                .store
+                .delete_exact(&pending_key, &pending_descriptor)
+                .await?
+            {
                 ExactDeleteResult::Removed => ProofArtifactDeleteResult::Removed,
                 ExactDeleteResult::Missing => ProofArtifactDeleteResult::Missing,
                 ExactDeleteResult::Stale => {
-                    let still_selected = {
-                        let _artifact_lifecycle = self
-                            .artifact_lifecycle_guard(
-                                &key.network_pair,
-                                key.pipeline_key,
-                                key.route,
-                                &key.proof_ref,
-                            )
-                            .await;
-                        self.pending_publication_is_still_reclaimable(expectation, &state_key)
-                            .await
-                    };
-                    anyhow::ensure!(
-                        !still_selected,
+                    anyhow::bail!(
                         "pending proof artifact changed while its retention selection remained authoritative"
-                    );
-                    ProofArtifactDeleteResult::Missing
+                    )
                 }
-            },
-            None => ProofArtifactDeleteResult::Missing,
+            }
         };
         Ok(PendingPublicationRetentionFinalization { pending_deletion })
-    }
-
-    async fn pending_publication_is_still_reclaimable(
-        &self,
-        expectation: &PendingPublicationExpectation,
-        state_key: &str,
-    ) -> bool {
-        let state = self.state.read().await;
-        state
-            .pending_publications
-            .get(state_key)
-            .is_some_and(|current| current.expectation() == *expectation)
-            && !pending_publication_has_retention_owner(
-                &state,
-                state_key,
-                &expectation.key.network_pair,
-                expectation.key.pipeline_key,
-                expectation.key.route,
-                &expectation.key.proof_ref,
-            )
     }
 
     async fn validate_pending_publication_retention_candidate(
@@ -6734,8 +6705,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_retention_does_not_hold_the_key_lock_across_object_deletion() -> Result<()> {
-        let store = Arc::new(RuntimeStateProbeStore::new("pending-delete-lock-release")?);
+    async fn pending_retention_serializes_same_content_adoption_with_object_deletion() -> Result<()>
+    {
+        let store = Arc::new(RuntimeStateProbeStore::new("pending-delete-adoption")?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
         let route = pipeline.route();
@@ -6756,7 +6728,7 @@ mod tests {
                     route,
                     proof_ref,
                     &[old_owner.incarnation_id],
-                    b"old-pending-proof",
+                    b"pending-proof",
                 )
                 .await?
         );
@@ -6779,9 +6751,7 @@ mod tests {
             .pop()
             .context("reclaimable pending publication")?;
 
-        store
-            .block_next_artifact_delete
-            .store(true, Ordering::SeqCst);
+        store.block_artifact_deletes.store(true, Ordering::SeqCst);
         let cleanup = tokio::spawn({
             let runtime = Arc::clone(&runtime);
             let selected = selected.clone();
@@ -6791,7 +6761,7 @@ mod tests {
                     .await
             }
         });
-        store.artifact_delete_completed.notified().await;
+        store.artifact_deletes_entered.notified().await;
 
         let new_owner = register_retention_task(
             runtime.as_ref(),
@@ -6801,22 +6771,35 @@ mod tests {
             2,
         )
         .await?;
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            runtime.checkpoint_pending_proof_publication(
-                "l1-l2",
-                pipeline,
-                route,
-                proof_ref,
-                &[new_owner.incarnation_id],
-                b"new-pending-proof",
-            ),
-        )
-        .await
-        .context("new publication was blocked by pending object deletion")??;
+        let adoption_started = Arc::new(tokio::sync::Notify::new());
+        let mut adoption = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let adoption_started = Arc::clone(&adoption_started);
+            async move {
+                adoption_started.notify_one();
+                runtime
+                    .checkpoint_pending_proof_publication(
+                        "l1-l2",
+                        pipeline,
+                        route,
+                        proof_ref,
+                        &[new_owner.incarnation_id],
+                        b"pending-proof",
+                    )
+                    .await
+            }
+        });
+        adoption_started.notified().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut adoption)
+                .await
+                .is_err(),
+            "same-content adoption must wait for exact pending deletion"
+        );
 
-        store.allow_artifact_delete_return.notify_one();
+        store.allow_artifact_deletes.add_permits(1);
         cleanup.await??;
+        assert!(adoption.await??);
         let finalized = runtime
             .finalize_terminal_task_retention_batch(&[], &[], &[selected])
             .await?;
@@ -6827,7 +6810,7 @@ mod tests {
                 .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
                 .await?
                 .context("replacement pending proof")?,
-            b"new-pending-proof"
+            b"pending-proof"
         );
         Ok(())
     }

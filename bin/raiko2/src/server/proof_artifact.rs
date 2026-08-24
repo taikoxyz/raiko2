@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_reconciliation_preserves_replacement_registration() -> Result<()> {
+    async fn invalidation_during_load_fences_stale_bytes_and_preserves_replacement() -> Result<()> {
         let namespace = format!("proof-artifact-reconciliation-{}", uuid::Uuid::new_v4());
         let store = Arc::new(PauseAfterArtifactReadStore {
             inner: MemoryProofArtifactStore::new("test".to_string(), namespace.clone())?,

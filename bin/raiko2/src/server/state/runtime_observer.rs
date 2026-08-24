@@ -3887,6 +3887,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_observer_loads_do_not_reuse_an_invalidated_artifact() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-invalidated-read-fence",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = RuntimeObserver::root_task_ref(&task_id);
+        register_observer_task(
+            runtime.as_ref(),
+            "task_invalidated_read_fence",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+        drive_engine_success(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: task_id.clone(),
+            },
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof_fixture(),
+            },
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let (_, invalidated, _) = runtime
+            .update_tasks_and_invalidate_artifact(
+                &proof_ref,
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                |records| {
+                    for record in records {
+                        record.runner_status = RunnerStatus::Cancelled;
+                    }
+                    Ok(((), true))
+                },
+            )
+            .await?;
+        assert!(invalidated);
+
+        assert!(
+            observer
+                .load_completed_proof(
+                    &task_id,
+                    &EngineTask::Proposal {
+                        request: request.clone(),
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        assert!(
+            observer
+                .load_proof_artifact(&ProofArtifactRef {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_ref,
+                })
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_observer_rejects_incomplete_sp1_root_artifact() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-incomplete-sp1-root",

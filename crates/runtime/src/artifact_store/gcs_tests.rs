@@ -807,6 +807,59 @@ async fn descriptor_survives_missing_content_through_gcs_seam() -> Result<()> {
 }
 
 #[tokio::test]
+async fn proof_read_rejects_manifest_with_missing_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    transport.remove(&store.content_name(&key, &object.content_hash))?;
+
+    let error = store
+        .get(&key)
+        .await
+        .expect_err("a manifest must not resolve without its immutable content");
+    assert!(
+        error
+            .to_string()
+            .contains("proof manifest references missing content")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn proof_read_rejects_corrupted_content() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+    transport.replace_bytes(
+        &store.content_name(&key, &object.content_hash),
+        br#"{"proof":"corrupt"}"#,
+    )?;
+
+    let error = store
+        .get(&key)
+        .await
+        .expect_err("content that does not match the manifest hash must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("proof manifest content hash mismatch")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn exact_delete_allows_identical_republication() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(transport)?;

@@ -1,9 +1,9 @@
 use super::net;
 use crate::config::{Config, NetworkPairConfig};
 use raiko2_primitives::ProofType;
+use raiko2_prover::redact::sanitize_url_for_log;
 use serde::Serialize;
 use tracing::info;
-use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StartupSummary {
@@ -128,25 +128,6 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
             message
         ),
     }
-}
-
-fn sanitize_url_for_log(raw: &str) -> String {
-    let Ok(mut url) = Url::parse(raw) else {
-        if raw.contains('@') || raw.contains('?') || raw.contains('#') {
-            return "<redacted-url>".to_string();
-        }
-        return raw.to_string();
-    };
-
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    let mut sanitized = url.to_string();
-    if url.path() == "/" && !raw.ends_with('/') && sanitized.ends_with('/') {
-        sanitized.pop();
-    }
-    sanitized
 }
 
 #[cfg(test)]

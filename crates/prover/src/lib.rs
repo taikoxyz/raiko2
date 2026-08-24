@@ -33,6 +33,7 @@ pub mod boundless_config;
 pub mod gaiko2;
 pub mod native;
 mod pending_recovery;
+pub mod redact;
 pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;

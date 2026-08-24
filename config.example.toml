@@ -59,6 +59,12 @@ compute_units_per_second = 1000
 [runtime]
 environment = "development"
 namespace = "raiko2-development"
+# Terminal task metadata is retained for six hours by default. Artifact cleanup is ownership-driven.
+terminal_task_ttl_secs = 21600
+# Root, artifact, pending-publication, and overdue-active retention is paced independently from
+# queue maintenance. Seven-day orphan management keeps a separate fixed batch bound.
+cleanup_interval_secs = 30
+cleanup_batch_size = 64
 # Shared canonical preflight caching is enabled by default. Set this to "off" only as an
 # incident-response bypass; it disables both persistent cache access and local singleflight.
 preflight_cache = "shared"

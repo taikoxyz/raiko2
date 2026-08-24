@@ -3,13 +3,13 @@ use async_trait::async_trait;
 use raiko2_pipeline::{
     PipelineKey, PipelineRoute,
     forks::shasta::preflight_cache::{
-        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDescriptor,
-        CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1, CanonicalPreflightObject,
+        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult,
+        CanonicalPreflightDescriptor, CanonicalPreflightKeyV1, CanonicalPreflightObject,
         CanonicalPreflightPutResult, CanonicalPreflightStore,
     },
 };
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::BitOr;
 use std::sync::Mutex;
@@ -54,13 +54,6 @@ impl ProofArtifactObject {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProofArtifactPrefix {
-    pub proof_uri: String,
-    pub generation: Option<i64>,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProofArtifactPutResult {
     Created(ProofArtifactObject),
     AlreadyExists(ProofArtifactObject),
@@ -80,11 +73,10 @@ pub enum ProofArtifactDeleteResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExactInvalidationResult {
-    Invalidated(ProofArtifactDeleteResult),
-    AlreadyInvalidated,
-    Stale,
+pub enum ExactDeleteResult {
+    Removed,
     Missing,
+    Stale,
 }
 
 impl ProofArtifactPutResult {
@@ -210,26 +202,11 @@ pub trait ProofObjectStore: RuntimeStoreScope {
         &self,
         key: &ProofArtifactKey,
     ) -> Result<Option<ProofArtifactDescriptor>>;
-    async fn get_prefix(
-        &self,
-        key: &ProofArtifactKey,
-        max_bytes: usize,
-    ) -> Result<Option<ProofArtifactPrefix>>;
-    async fn invalidate_exact(
-        &self,
-        key: &ProofArtifactKey,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> Result<ExactInvalidationResult>;
-    async fn is_invalidated(
-        &self,
-        key: &ProofArtifactKey,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> Result<bool>;
     async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
         descriptor: &ProofArtifactDescriptor,
-    ) -> Result<ProofArtifactDeleteResult>;
+    ) -> Result<ExactDeleteResult>;
 }
 
 #[async_trait]
@@ -283,10 +260,8 @@ struct MemoryStoreInner {
     next_generation: i64,
     manifests: HashMap<ProofArtifactKey, MemoryManifest>,
     contents: HashMap<(ProofArtifactKey, String), Vec<u8>>,
-    invalidations: HashSet<(ProofArtifactKey, Option<i64>, String)>,
     preflight_manifests: HashMap<alloy_primitives::B256, MemoryPreflightManifest>,
     preflight_contents: HashMap<(alloy_primitives::B256, String), Vec<u8>>,
-    preflight_invalidations: HashSet<(alloy_primitives::B256, Option<i64>, String)>,
     runtime_state: Option<RuntimeStateObject>,
 }
 
@@ -457,41 +432,31 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
         ))
     }
 
-    async fn invalidate_canonical_preflight_exact(
+    async fn delete_canonical_preflight_exact(
         &self,
         key: &CanonicalPreflightKeyV1,
         descriptor: &CanonicalPreflightDescriptor,
-    ) -> Result<CanonicalPreflightInvalidateResult> {
+    ) -> Result<CanonicalPreflightDeleteResult> {
         Self::validate_canonical_preflight_key(key)?;
         let key_digest = key.digest()?;
         if descriptor.key_digest != key_digest {
-            return Ok(CanonicalPreflightInvalidateResult::Stale);
+            return Ok(CanonicalPreflightDeleteResult::Stale);
         }
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let invalidation = (
-            key_digest,
-            descriptor.generation,
-            descriptor.content_hash.clone(),
-        );
         let Some(current) = inner.preflight_manifests.get(&key_digest) else {
-            return Ok(if inner.preflight_invalidations.contains(&invalidation) {
-                CanonicalPreflightInvalidateResult::AlreadyInvalidated
-            } else {
-                CanonicalPreflightInvalidateResult::Missing
-            });
+            return Ok(CanonicalPreflightDeleteResult::Missing);
         };
         if current.key != *key
             || Some(current.generation) != descriptor.generation
             || current.content_hash != descriptor.content_hash
         {
-            return Ok(CanonicalPreflightInvalidateResult::Stale);
+            return Ok(CanonicalPreflightDeleteResult::Stale);
         }
-        inner.preflight_invalidations.insert(invalidation);
         inner.preflight_manifests.remove(&key_digest);
-        Ok(CanonicalPreflightInvalidateResult::Invalidated)
+        Ok(CanonicalPreflightDeleteResult::Removed)
     }
 }
 
@@ -599,92 +564,26 @@ impl ProofObjectStore for MemoryProofArtifactStore {
         }))
     }
 
-    async fn get_prefix(
-        &self,
-        key: &ProofArtifactKey,
-        max_bytes: usize,
-    ) -> Result<Option<ProofArtifactPrefix>> {
-        anyhow::ensure!(
-            max_bytes > 0,
-            "proof artifact prefix limit must be positive"
-        );
-        Ok(self.get(key).await?.map(|object| ProofArtifactPrefix {
-            proof_uri: object.proof_uri,
-            generation: object.generation,
-            bytes: object.bytes.into_iter().take(max_bytes).collect(),
-        }))
-    }
-
-    async fn invalidate_exact(
+    async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
         descriptor: &ProofArtifactDescriptor,
-    ) -> Result<ExactInvalidationResult> {
+    ) -> Result<ExactDeleteResult> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let invalidation = (
-            key.clone(),
-            descriptor.generation,
-            descriptor.content_hash.clone(),
-        );
         let Some(current) = inner.manifests.get(key) else {
-            return Ok(if inner.invalidations.contains(&invalidation) {
-                ExactInvalidationResult::AlreadyInvalidated
-            } else {
-                ExactInvalidationResult::Missing
-            });
+            return Ok(ExactDeleteResult::Missing);
         };
         if Some(current.generation) != descriptor.generation
             || current.content_hash != descriptor.content_hash
             || self.content_uri(key, &current.content_hash) != descriptor.proof_uri
         {
-            return Ok(ExactInvalidationResult::Stale);
+            return Ok(ExactDeleteResult::Stale);
         }
-        inner.invalidations.insert(invalidation);
         inner.manifests.remove(key);
-        Ok(ExactInvalidationResult::Invalidated(
-            ProofArtifactDeleteResult::Removed,
-        ))
-    }
-
-    async fn is_invalidated(
-        &self,
-        key: &ProofArtifactKey,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> Result<bool> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        Ok(inner.invalidations.contains(&(
-            key.clone(),
-            descriptor.generation,
-            descriptor.content_hash.clone(),
-        )))
-    }
-
-    async fn delete_exact(
-        &self,
-        key: &ProofArtifactKey,
-        descriptor: &ProofArtifactDescriptor,
-    ) -> Result<ProofArtifactDeleteResult> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let Some(current) = inner.manifests.get(key) else {
-            return Ok(ProofArtifactDeleteResult::Missing);
-        };
-        anyhow::ensure!(
-            Some(current.generation) == descriptor.generation
-                && current.content_hash == descriptor.content_hash
-                && self.content_uri(key, &current.content_hash) == descriptor.proof_uri,
-            "proof artifact changed before conditional delete"
-        );
-        inner.manifests.remove(key);
-        Ok(ProofArtifactDeleteResult::Removed)
+        Ok(ExactDeleteResult::Removed)
     }
 }
 
@@ -771,10 +670,8 @@ impl RuntimeStateStore for MemoryProofArtifactStore {
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
         let cleared = inner.manifests.len()
             + inner.contents.len()
-            + inner.invalidations.len()
             + inner.preflight_manifests.len()
             + inner.preflight_contents.len()
-            + inner.preflight_invalidations.len()
             + usize::from(inner.runtime_state.is_some());
         let next_generation = inner.next_generation;
         *inner = MemoryStoreInner {
@@ -829,8 +726,8 @@ mod tests {
     use raiko2_pipeline::{
         PipelineKey,
         forks::shasta::preflight_cache::{
-            CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightInvalidateResult,
-            CanonicalPreflightKeyV1, CanonicalPreflightPutResult, CanonicalPreflightStore,
+            CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightKeyV1,
+            CanonicalPreflightPutResult, CanonicalPreflightStore,
         },
     };
     use raiko2_primitives::{L2BlockRange, ShastaCheckpoint};
@@ -960,13 +857,10 @@ mod tests {
             CanonicalPreflightStore::put_canonical_preflight_if_absent(&store, &key, b"canonical")
                 .await
                 .expect_err("unknown schema put must fail");
-        let invalidate_error = CanonicalPreflightStore::invalidate_canonical_preflight_exact(
-            &store,
-            &key,
-            &descriptor,
-        )
-        .await
-        .expect_err("unknown schema invalidation must fail");
+        let invalidate_error =
+            CanonicalPreflightStore::delete_canonical_preflight_exact(&store, &key, &descriptor)
+                .await
+                .expect_err("unknown schema invalidation must fail");
 
         for error in [get_error, put_error, invalidate_error] {
             assert!(
@@ -993,13 +887,13 @@ mod tests {
         .clone();
 
         assert_eq!(
-            CanonicalPreflightStore::invalidate_canonical_preflight_exact(
+            CanonicalPreflightStore::delete_canonical_preflight_exact(
                 &store,
                 &key,
                 &first.descriptor(),
             )
             .await?,
-            CanonicalPreflightInvalidateResult::Invalidated
+            CanonicalPreflightDeleteResult::Removed
         );
         assert!(
             CanonicalPreflightStore::get_canonical_preflight(&store, &key)
@@ -1018,13 +912,13 @@ mod tests {
         .clone();
         assert_ne!(first.generation, second.generation);
         assert_eq!(
-            CanonicalPreflightStore::invalidate_canonical_preflight_exact(
+            CanonicalPreflightStore::delete_canonical_preflight_exact(
                 &store,
                 &key,
                 &first.descriptor(),
             )
             .await?,
-            CanonicalPreflightInvalidateResult::Stale
+            CanonicalPreflightDeleteResult::Stale
         );
         assert_eq!(
             CanonicalPreflightStore::get_canonical_preflight(&store, &key)
@@ -1066,7 +960,10 @@ mod tests {
             .expect("proof publication should materialize content")
             .clone();
         assert_ne!(first.proof_uri, second.proof_uri);
-        assert!(store.delete_exact(&key, &first.descriptor()).await.is_err());
+        assert_eq!(
+            store.delete_exact(&key, &first.descriptor()).await?,
+            ExactDeleteResult::Stale
+        );
         assert_eq!(store.get(&key).await?, Some(second));
         Ok(())
     }
@@ -1084,11 +981,11 @@ mod tests {
 
         assert_eq!(
             store.delete_exact(&key, &object.descriptor()).await?,
-            ProofArtifactDeleteResult::Removed
+            ExactDeleteResult::Removed
         );
         assert_eq!(
             store.delete_exact(&key, &object.descriptor()).await?,
-            ProofArtifactDeleteResult::Missing
+            ExactDeleteResult::Missing
         );
         Ok(())
     }
@@ -1110,7 +1007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidation_is_scoped_to_manifest_generation() -> Result<()> {
+    async fn exact_delete_allows_identical_republication() -> Result<()> {
         let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-a".into())?;
         let key = key();
         let first = store
@@ -1119,10 +1016,10 @@ mod tests {
             .try_object()
             .expect("proof publication should materialize content")
             .clone();
-        assert!(matches!(
-            store.invalidate_exact(&key, &first.descriptor()).await?,
-            ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-        ));
+        assert_eq!(
+            store.delete_exact(&key, &first.descriptor()).await?,
+            ExactDeleteResult::Removed
+        );
 
         let second = store
             .put_if_absent(&key, b"deterministic-proof")
@@ -1131,8 +1028,11 @@ mod tests {
             .expect("proof publication should materialize content")
             .clone();
         assert_ne!(first.generation, second.generation);
-        assert!(store.is_invalidated(&key, &first.descriptor()).await?);
-        assert!(!store.is_invalidated(&key, &second.descriptor()).await?);
+        assert_eq!(
+            store.delete_exact(&key, &first.descriptor()).await?,
+            ExactDeleteResult::Stale
+        );
+        assert_eq!(store.get(&key).await?, Some(second));
         Ok(())
     }
 
@@ -1342,19 +1242,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn namespace_reset_removes_runtime_state_artifacts_and_invalidations() -> Result<()> {
+    async fn namespace_reset_removes_runtime_state_and_artifacts() -> Result<()> {
         let store = MemoryProofArtifactStore::new("devnet".into(), "raiko2-reset".into())?;
         let key = key();
-        let proof = store
+        let _proof = store
             .put_if_absent(&key, b"proof")
             .await?
             .try_object()
             .expect("proof publication should materialize content")
             .clone();
-        assert!(matches!(
-            store.invalidate_exact(&key, &proof.descriptor()).await?,
-            ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-        ));
         let RuntimeStateWriteResult::Stored {
             generation: Some(runtime_generation),
         } = store.store_runtime_state(b"runtime", None).await?
@@ -1365,7 +1261,6 @@ mod tests {
         assert_eq!(store.reset_namespace().await?, 3);
         assert_eq!(store.load_runtime_state().await?, None);
         assert_eq!(store.get_descriptor(&key).await?, None);
-        assert!(!store.is_invalidated(&key, &proof.descriptor()).await?);
         assert!(
             store
                 .inner

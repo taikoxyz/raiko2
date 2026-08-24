@@ -4,10 +4,13 @@ use anyhow::{Result, bail};
 use raiko2_engine::EngineExecutionPlan;
 use raiko2_queue::{DetachMode, DetachOutcome, RootOwner};
 use raiko2_runtime::{
-    ProofArtifactPrecondition, RunnerStatus, RuntimeManager, RuntimeMutationOutcome,
-    RuntimeTaskRecord, TaskRegistration,
+    ArtifactExpectation, ExactDeleteResult, PendingPublicationExpectation, ProofArtifactKey,
+    ProofArtifactPrecondition, ProofArtifactRecord, RunnerStatus, RuntimeManager,
+    RuntimeMutationOutcome, RuntimeTaskRecord, TaskLifetime, TaskRegistration,
 };
 use std::sync::Arc;
+use tokio::task::JoinSet;
+use tracing::warn;
 
 use crate::server::state::{EngineHandle, PipelineFactory};
 
@@ -24,6 +27,49 @@ pub(crate) enum RecoveryOutcome {
     Recovered,
     Active,
     TaskChanged,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TerminalRetentionBatchOutcome {
+    pub retired_roots: usize,
+    pub skipped_roots: usize,
+    pub removed_roots: usize,
+    pub retained_root_failures: usize,
+    pub skipped_shared_children: usize,
+    pub invalidated_artifacts: usize,
+    pub removed_artifacts: usize,
+    pub retained_artifact_failures: usize,
+    pub retry_roots: Vec<TaskLifetime>,
+    pub retry_artifacts: Vec<ProofArtifactKey>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ArtifactRetentionBatchOutcome {
+    pub invalidated_artifacts: usize,
+    pub removed_artifacts: usize,
+    pub retained_artifact_failures: usize,
+    pub retry_artifacts: Vec<ProofArtifactKey>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PendingRetentionBatchOutcome {
+    pub removed_pending_publications: usize,
+    pub retained_pending_publication_failures: usize,
+    pub retry_pending_publications: Vec<ProofArtifactKey>,
+}
+
+#[derive(Debug, Default)]
+struct ArtifactFinalizationBatch {
+    finalized: Vec<ArtifactExpectation>,
+    retry_artifacts: Vec<ProofArtifactKey>,
+    failures: usize,
+}
+
+#[derive(Debug, Default)]
+struct PendingPublicationFinalizationBatch {
+    finalized: Vec<PendingPublicationExpectation>,
+    retry_pending_publications: Vec<ProofArtifactKey>,
+    failures: usize,
 }
 
 impl ProofLifecycle {
@@ -306,6 +352,170 @@ impl ProofLifecycle {
         Ok(outcome)
     }
 
+    /// Retires and detaches one bounded terminal-retention batch under the process-local execution
+    /// lifecycle gate, then finalizes exact external artifacts without blocking other lifecycles.
+    pub(crate) async fn remove_terminal_retention_batch(
+        &self,
+        records: &[RuntimeTaskRecord],
+    ) -> Result<TerminalRetentionBatchOutcome> {
+        if records.is_empty() {
+            return Ok(TerminalRetentionBatchOutcome::default());
+        }
+
+        let lifecycle_gate = self.runtime.execution_lifecycle_gate();
+        let lifecycle_gate_guard = lifecycle_gate.lock().await;
+        let prepared = self
+            .runtime
+            .prepare_terminal_task_retention_batch(records)
+            .await?;
+        let mut outcome = TerminalRetentionBatchOutcome {
+            retired_roots: prepared.retired_tasks.len(),
+            skipped_roots: prepared.skipped_tasks,
+            invalidated_artifacts: prepared.artifact_invalidations.len(),
+            ..TerminalRetentionBatchOutcome::default()
+        };
+
+        let mut detached_tasks = Vec::with_capacity(prepared.retired_tasks.len());
+        for record in prepared.retired_tasks {
+            let detached = if let Some(engine) = self
+                .pipelines
+                .get(&record.network_pair, record.pipeline_key)
+            {
+                engine
+                    .detach_execution(
+                        RootOwner::new(record.task_id.clone(), record.incarnation_id),
+                        DetachMode::Remove,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)
+            } else {
+                Ok(DetachOutcome::not_attached(DetachMode::Remove))
+            };
+            match detached {
+                Ok(detached) => {
+                    outcome.skipped_shared_children = outcome
+                        .skipped_shared_children
+                        .saturating_add(detached.retained.len());
+                    detached_tasks.push(record);
+                }
+                Err(error) => {
+                    outcome.retained_root_failures =
+                        outcome.retained_root_failures.saturating_add(1);
+                    outcome.retry_roots.push(record.lifetime());
+                    warn!(
+                        task_id = %record.task_id,
+                        error = %error,
+                        "failed to detach expired runtime task"
+                    );
+                }
+            }
+        }
+        let finalized_roots = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&detached_tasks, &[], &[])
+            .await?;
+        let removed_lifetimes = finalized_roots
+            .removed_tasks
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        for record in &detached_tasks {
+            let lifetime = record.lifetime();
+            if !removed_lifetimes.contains(&lifetime) && !outcome.retry_roots.contains(&lifetime) {
+                outcome.retry_roots.push(lifetime);
+            }
+        }
+        outcome.removed_roots = finalized_roots.removed_tasks.len();
+        outcome.retained_root_failures = outcome
+            .retained_root_failures
+            .saturating_add(finalized_roots.skipped_tasks);
+        drop(lifecycle_gate_guard);
+
+        let artifact_batch = finalize_terminal_retention_artifacts(
+            Arc::clone(&self.runtime),
+            prepared.artifact_invalidations,
+        )
+        .await;
+        outcome.retained_artifact_failures = artifact_batch.failures;
+        outcome.retry_artifacts = artifact_batch.retry_artifacts;
+
+        let removable_artifacts = artifact_batch.finalized;
+        if removable_artifacts.is_empty() {
+            return Ok(outcome);
+        }
+        let finalized = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&[], &removable_artifacts, &[])
+            .await?;
+        outcome.removed_artifacts = finalized.removed_artifacts.len();
+        outcome.retained_artifact_failures = outcome
+            .retained_artifact_failures
+            .saturating_add(finalized.skipped_artifacts);
+        Ok(outcome)
+    }
+
+    pub(crate) async fn remove_artifact_retention_batch(
+        &self,
+        records: &[ProofArtifactRecord],
+    ) -> Result<ArtifactRetentionBatchOutcome> {
+        let prepared = self
+            .runtime
+            .prepare_artifact_retention_batch(records)
+            .await?;
+        let mut outcome = ArtifactRetentionBatchOutcome {
+            invalidated_artifacts: prepared.newly_invalidated_artifacts,
+            ..ArtifactRetentionBatchOutcome::default()
+        };
+        let artifact_batch = finalize_terminal_retention_artifacts(
+            Arc::clone(&self.runtime),
+            prepared.artifact_invalidations,
+        )
+        .await;
+        outcome.retained_artifact_failures = artifact_batch.failures;
+        outcome.retry_artifacts = artifact_batch.retry_artifacts;
+        let removable_artifacts = artifact_batch.finalized;
+        if removable_artifacts.is_empty() {
+            return Ok(outcome);
+        }
+        let finalized = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&[], &removable_artifacts, &[])
+            .await?;
+        outcome.removed_artifacts = finalized.removed_artifacts.len();
+        outcome.retained_artifact_failures = outcome
+            .retained_artifact_failures
+            .saturating_add(finalized.skipped_artifacts);
+        Ok(outcome)
+    }
+
+    pub(crate) async fn remove_pending_retention_batch(
+        &self,
+        expectations: &[PendingPublicationExpectation],
+    ) -> Result<PendingRetentionBatchOutcome> {
+        let pending_batch = finalize_terminal_retention_pending_publications(
+            Arc::clone(&self.runtime),
+            expectations.to_vec(),
+        )
+        .await;
+        let mut outcome = PendingRetentionBatchOutcome {
+            retained_pending_publication_failures: pending_batch.failures,
+            retry_pending_publications: pending_batch.retry_pending_publications,
+            ..PendingRetentionBatchOutcome::default()
+        };
+        if pending_batch.finalized.is_empty() {
+            return Ok(outcome);
+        }
+        let finalized = self
+            .runtime
+            .finalize_terminal_task_retention_batch(&[], &[], &pending_batch.finalized)
+            .await?;
+        outcome.removed_pending_publications = finalized.removed_pending_publications.len();
+        outcome.retained_pending_publication_failures = outcome
+            .retained_pending_publication_failures
+            .saturating_add(finalized.skipped_pending_publications);
+        Ok(outcome)
+    }
+
     /// Removes one unchanged root and its exact queue projection as one lifecycle transition.
     pub(crate) async fn remove(
         &self,
@@ -352,6 +562,159 @@ impl ProofLifecycle {
     }
 }
 
+async fn finalize_terminal_retention_artifacts(
+    runtime: Arc<RuntimeManager>,
+    expectations: Vec<ArtifactExpectation>,
+) -> ArtifactFinalizationBatch {
+    const CONCURRENCY: usize = 8;
+
+    let mut queue = expectations.into_iter();
+    let mut workers = JoinSet::new();
+    let mut batch = ArtifactFinalizationBatch::default();
+    loop {
+        while workers.len() < CONCURRENCY {
+            let Some(expectation) = queue.next() else {
+                break;
+            };
+            let runtime = Arc::clone(&runtime);
+            workers.spawn(async move {
+                let result = runtime
+                    .finalize_proof_artifact_invalidation(&expectation)
+                    .await;
+                (expectation, result)
+            });
+        }
+        let Some(finalized) = workers.join_next().await else {
+            break;
+        };
+        match finalized {
+            Ok((expectation, Ok(ExactDeleteResult::Removed | ExactDeleteResult::Missing))) => {
+                batch.finalized.push(expectation);
+            }
+            Ok((expectation, Ok(ExactDeleteResult::Stale))) => {
+                match runtime
+                    .proof_artifact_invalidation_is_stale(&expectation)
+                    .await
+                {
+                    Ok(true) => {
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            "discarding stale proof artifact cleanup candidate"
+                        );
+                    }
+                    Ok(false) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            "exact proof deletion observed a changed manifest while the invalidation remains authoritative"
+                        );
+                    }
+                    Err(error) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %error,
+                            "failed to recheck stale proof artifact cleanup candidate"
+                        );
+                    }
+                }
+            }
+            Ok((expectation, Err(error))) => {
+                match runtime
+                    .proof_artifact_invalidation_is_stale(&expectation)
+                    .await
+                {
+                    Ok(true) => {
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            "discarding failed cleanup for a stale proof artifact candidate"
+                        );
+                    }
+                    Ok(false) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %error,
+                            "failed to finalize expired proof artifact invalidation"
+                        );
+                    }
+                    Err(stale_check_error) => {
+                        batch.failures = batch.failures.saturating_add(1);
+                        batch.retry_artifacts.push(expectation.key.clone());
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %stale_check_error,
+                            "failed to inspect proof artifact descriptor after finalization error"
+                        );
+                        warn!(
+                            proof_ref = %expectation.key.proof_ref,
+                            error = %error,
+                            "failed to finalize expired proof artifact invalidation"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                batch.failures = batch.failures.saturating_add(1);
+                warn!(error = %error, "proof artifact invalidation worker failed");
+            }
+        }
+    }
+    batch
+}
+
+async fn finalize_terminal_retention_pending_publications(
+    runtime: Arc<RuntimeManager>,
+    expectations: Vec<PendingPublicationExpectation>,
+) -> PendingPublicationFinalizationBatch {
+    const CONCURRENCY: usize = 8;
+
+    let mut queue = expectations.into_iter();
+    let mut workers = JoinSet::new();
+    let mut batch = PendingPublicationFinalizationBatch::default();
+    loop {
+        while workers.len() < CONCURRENCY {
+            let Some(expectation) = queue.next() else {
+                break;
+            };
+            let runtime = Arc::clone(&runtime);
+            workers.spawn(async move {
+                let result = runtime
+                    .finalize_pending_publication_retention(&expectation)
+                    .await;
+                (expectation, result)
+            });
+        }
+        let Some(finalized) = workers.join_next().await else {
+            break;
+        };
+        match finalized {
+            Ok((expectation, Ok(_))) => {
+                batch.finalized.push(expectation);
+            }
+            Ok((expectation, Err(error))) => {
+                batch.failures = batch.failures.saturating_add(1);
+                batch
+                    .retry_pending_publications
+                    .push(expectation.key.clone());
+                warn!(
+                    proof_ref = %expectation.key.proof_ref,
+                    error = %error,
+                    "failed to finalize expired pending proof publication"
+                );
+            }
+            Err(error) => {
+                batch.failures = batch.failures.saturating_add(1);
+                warn!(error = %error, "pending proof publication finalization worker failed");
+            }
+        }
+    }
+    batch
+}
+
 fn finish_lifecycle_effect<T>(effect: Result<T>, publication_cleanup: Result<()>) -> Result<T> {
     match (effect, publication_cleanup) {
         (Ok(output), Ok(())) => Ok(output),
@@ -369,13 +732,82 @@ mod tests {
     use raiko2_engine::{EngineTaskId, EngineTaskKey};
     use raiko2_pipeline::PipelineKey;
     use raiko2_queue::{AttachOutcome, TaskStoreError};
-    use raiko2_runtime::TaskRegistration;
+    use raiko2_runtime::{ProofArtifactRegistration, TaskRegistration};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    #[tokio::test]
+    async fn artifact_finalization_accepts_an_already_missing_manifest() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new_memory(
+            "test".into(),
+            format!("missing-finalization-{}", uuid::Uuid::new_v4()),
+        )?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                "proof-ref",
+                br#"{"proof":"0x01"}"#,
+            )
+            .await?
+            .try_object()
+            .expect("proof publication")
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".into(),
+                proof_ref: "proof-ref".into(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let active = runtime
+            .get_proof_artifact("taiko_dev/ethereum", pipeline, route, "proof-ref")
+            .await?
+            .expect("active artifact");
+        let prepared = runtime.prepare_artifact_retention_batch(&[active]).await?;
+        let expectation = prepared
+            .artifact_invalidations
+            .first()
+            .expect("prepared invalidation")
+            .clone();
+        assert_eq!(
+            runtime
+                .delete_proof_artifact(
+                    &expectation.key.network_pair,
+                    expectation.key.pipeline_key,
+                    expectation.key.route,
+                    &expectation.key.proof_ref,
+                    expectation.descriptor.generation,
+                    &expectation.descriptor.content_hash,
+                )
+                .await?,
+            raiko2_runtime::ProofArtifactDeleteResult::Removed
+        );
+
+        let batch =
+            finalize_terminal_retention_artifacts(Arc::clone(&runtime), vec![expectation.clone()])
+                .await;
+        assert_eq!(batch.finalized, vec![expectation.clone()]);
+        assert_eq!(batch.failures, 0);
+        assert!(batch.retry_artifacts.is_empty());
+
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(&[], &batch.finalized, &[])
+            .await?;
+        assert_eq!(finalized.removed_artifacts, vec![expectation]);
+        Ok(())
+    }
 
     #[derive(Default)]
     struct BlockingProjectionEngine {

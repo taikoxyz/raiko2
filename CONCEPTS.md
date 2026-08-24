@@ -62,8 +62,10 @@ readback, and returns explicit lifecycle outcomes. Its storage revision is inter
 
 ### Proof Object Repository
 The boundary for immutable pending and canonical proof bytes, create-only manifests, validated
-reads, tombstones, and exact conditional deletion. It owns all use of artifact object generations
-and content hashes. GCS and memory are alternative adapters, not concurrent backends.
+reads, and exact conditional deletion. Durable `Invalidated` runtime records fence proof reuse while
+the repository conditionally deletes the selected manifest generation. It owns all use of artifact
+object generations and content hashes. GCS and memory are alternative adapters, not concurrent
+backends.
 
 ### Execution Projection
 The in-memory owner-aware task graph derived from authoritative runtime state. Attaching a root owner
@@ -103,7 +105,8 @@ lifetimes; both the lease and lifetime must still match before a callback is acc
 
 ### Artifact Descriptor
 The exact selected artifact version: logical key, content hash, and manifest object generation. It
-identifies one publication for reads, activation, tombstones, and conditional manifest deletion.
+identifies one publication for reads, activation, durable runtime invalidation, and conditional
+manifest deletion.
 
 ### Artifact Expectation
 A typed precondition containing an artifact key, expected descriptor, and expected lifecycle state.

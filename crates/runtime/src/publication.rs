@@ -1,39 +1,38 @@
 use crate::{
-    ArtifactExpectation, ProofArtifactKey, ProofArtifactLifecycle, ProofArtifactPutResult,
-    ProofArtifactRegistration, RuntimeManager,
+    ProofArtifactLifecycle, ProofArtifactPutResult, ProofArtifactRegistration, RuntimeManager,
 };
 use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
 
 #[derive(Debug)]
-pub struct ProofArtifactPublicationInvalidated {
+pub struct ProofArtifactCleanupPending {
     proof_ref: String,
 }
 
-impl std::fmt::Display for ProofArtifactPublicationInvalidated {
+impl std::fmt::Display for ProofArtifactCleanupPending {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "canonical proof artifact {} was invalidated during publication",
+            "canonical proof artifact {} is waiting for cleanup",
             self.proof_ref
         )
     }
 }
 
-impl std::error::Error for ProofArtifactPublicationInvalidated {}
+impl std::error::Error for ProofArtifactCleanupPending {}
 
 impl RuntimeManager {
     /// Publishes a checkpointed proof and records a durable, unreadable pending lifecycle.
     ///
-    /// The canonical object remains first-write-wins. Publication is rejected when invalidation
-    /// races either side of the local registration. Root success activates the exact descriptor
-    /// in a later single runtime-state CAS; this method never clears the shared outbox.
+    /// The canonical object remains first-write-wins. Durable local invalidation fences publication
+    /// before the object-store write. Root success activates the exact descriptor in a later single
+    /// runtime-state CAS; this method never clears the shared outbox.
     ///
     /// # Errors
     ///
-    /// Returns [`ProofArtifactPublicationInvalidated`] when invalidation wins the publication
-    /// race, or the underlying storage/database error when the commit can be retried.
+    /// Returns [`ProofArtifactCleanupPending`] while an exact invalidation is pending, or the
+    /// underlying storage/database error when the commit can be retried.
     pub async fn commit_proof_artifact_publication(
         &self,
         network_pair: &str,
@@ -43,10 +42,16 @@ impl RuntimeManager {
         proof_bytes: &[u8],
     ) -> Result<ProofArtifactPutResult> {
         let _artifact_lifecycle = self
-            .artifact_lifecycle_lock(network_pair, pipeline_key, route, proof_ref)
-            .lock()
+            .artifact_lifecycle_guard(network_pair, pipeline_key, route, proof_ref)
             .await;
         validate_canonical_proof(proof_bytes)?;
+        if self
+            .get_proof_artifact_including_invalidated(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .is_some_and(|record| record.lifecycle == ProofArtifactLifecycle::Invalidated)
+        {
+            return Err(self.publication_cleanup_pending(proof_ref));
+        }
         let publication = self
             .publish_proof_artifact_bytes_locked(
                 network_pair,
@@ -60,25 +65,7 @@ impl RuntimeManager {
         let artifact = publication
             .try_object()
             .context("canonical proof conflict references missing content")?;
-        let descriptor = artifact.descriptor();
         validate_canonical_proof(&artifact.bytes)?;
-
-        if self
-            .proof_artifact_descriptor_is_invalidated(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                &descriptor,
-            )
-            .await
-            .context("failed to check published proof invalidation state")?
-        {
-            return Err(ProofArtifactPublicationInvalidated {
-                proof_ref: proof_ref.to_string(),
-            }
-            .into());
-        }
 
         let registration = ProofArtifactRegistration {
             network_pair: network_pair.to_string(),
@@ -91,29 +78,6 @@ impl RuntimeManager {
         };
         self.register_publication_lifecycle(&publication, &registration)
             .await?;
-
-        if self
-            .proof_artifact_descriptor_is_invalidated(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                &descriptor,
-            )
-            .await
-            .context("failed to recheck published proof invalidation state")?
-        {
-            self.mark_proof_artifact_descriptor_invalidated(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                &descriptor,
-            )
-            .await
-            .context("failed to retain local proof invalidation state")?;
-            return Err(publication_invalidated(proof_ref));
-        }
 
         Ok(publication)
     }
@@ -135,19 +99,7 @@ impl RuntimeManager {
                     .await
                     .context("failed to register pending proof artifact")?;
                 if lifecycle == ProofArtifactLifecycle::Invalidated {
-                    self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
-                        key: ProofArtifactKey {
-                            network_pair: network_pair.clone(),
-                            pipeline_key,
-                            route,
-                            proof_ref: proof_ref.clone(),
-                        },
-                        descriptor: descriptor.clone(),
-                        lifecycle: ProofArtifactLifecycle::Invalidated,
-                    })
-                    .await
-                    .context("failed to invalidate detached proof manifest")?;
-                    return Err(publication_invalidated(proof_ref));
+                    return Err(self.publication_cleanup_pending(proof_ref));
                 }
             }
             ProofArtifactPutResult::AlreadyExists(_) | ProofArtifactPutResult::Conflict(_) => {
@@ -191,31 +143,20 @@ impl RuntimeManager {
                     self.register_invalidated_proof_artifact(registration.clone())
                         .await
                         .context("failed to record orphan proof invalidation")?;
-                    self.finalize_proof_artifact_invalidation(&ArtifactExpectation {
-                        key: ProofArtifactKey {
-                            network_pair: network_pair.clone(),
-                            pipeline_key,
-                            route,
-                            proof_ref: proof_ref.clone(),
-                        },
-                        descriptor: descriptor.clone(),
-                        lifecycle: ProofArtifactLifecycle::Invalidated,
-                    })
-                    .await
-                    .context("failed to invalidate orphan proof manifest")?;
-                    return Err(publication_invalidated(proof_ref));
+                    return Err(self.publication_cleanup_pending(proof_ref));
                 }
             }
         }
         Ok(())
     }
-}
 
-fn publication_invalidated(proof_ref: &str) -> anyhow::Error {
-    ProofArtifactPublicationInvalidated {
-        proof_ref: proof_ref.to_string(),
+    fn publication_cleanup_pending(&self, proof_ref: &str) -> anyhow::Error {
+        self.lifecycle_observer().record_cleanup_pending();
+        ProofArtifactCleanupPending {
+            proof_ref: proof_ref.to_string(),
+        }
+        .into()
     }
-    .into()
 }
 
 fn validate_canonical_proof(bytes: &[u8]) -> Result<()> {
@@ -231,9 +172,69 @@ fn validate_canonical_proof(bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MemoryProofArtifactStore;
+    use crate::{MemoryProofArtifactStore, RuntimeLifecycleObserver};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Debug, Default)]
+    struct TestLifecycleObserver {
+        cleanup_pending: AtomicUsize,
+    }
+
+    impl RuntimeLifecycleObserver for TestLifecycleObserver {
+        fn record_cleanup_pending(&self) {
+            self.cleanup_pending.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidated_runtime_record_fences_publication_before_store_write() -> Result<()> {
+        let runtime = RuntimeManager::new("publication-cleanup-pending")?;
+        let observer = Arc::new(TestLifecycleObserver::default());
+        runtime.set_lifecycle_observer(observer.clone());
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "proposal-cleanup-pending";
+        runtime
+            .register_invalidated_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: "memory://stale-proof".to_string(),
+                content_hash: "stale-content".to_string(),
+                generation: Some(7),
+            })
+            .await?;
+
+        let error = runtime
+            .commit_proof_artifact_publication(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                br#"{"proof":"0x01"}"#,
+            )
+            .await
+            .expect_err("invalidated runtime state must fence publication");
+
+        assert!(
+            error
+                .downcast_ref::<ProofArtifactCleanupPending>()
+                .is_some()
+        );
+        assert_eq!(observer.cleanup_pending.load(Ordering::SeqCst), 1);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(network_pair, pipeline, route, proof_ref)
+                .await?
+                .is_none(),
+            "cleanup-pending publication wrote a canonical manifest"
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn invalid_canonical_conflict_does_not_commit_or_clear_outbox() -> Result<()> {

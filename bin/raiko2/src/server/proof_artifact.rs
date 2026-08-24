@@ -63,20 +63,6 @@ pub(crate) async fn load_proof_artifact_material(
     if record.descriptor() != descriptor {
         return Ok(None);
     }
-    if runtime
-        .proof_artifact_descriptor_is_invalidated(
-            network_pair,
-            pipeline_key,
-            route,
-            proof_ref,
-            &descriptor,
-        )
-        .await
-        .context("failed to check proof artifact invalidation state")?
-    {
-        return Ok(None);
-    }
-
     let proof: Proof = match serde_json::from_slice(&object.bytes) {
         Ok(proof) => proof,
         Err(err) => {
@@ -109,12 +95,12 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use raiko2_runtime::test_support::{
-        ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
-        RuntimeStateStore, RuntimeStateWriteResult, RuntimeStoreScope,
+        MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
+        RuntimeStateWriteResult, RuntimeStoreScope,
     };
     use raiko2_runtime::{
-        ProofArtifactDeleteResult, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-        ProofArtifactPutResult, ProofArtifactRegistration,
+        ExactDeleteResult, ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult,
+        ProofArtifactRegistration,
     };
     use std::sync::{
         Arc,
@@ -145,8 +131,73 @@ mod tests {
         assert!(ProofArtifactPayload::Final.accepts(PipelineKey::ShastaSp1, &final_proof));
     }
 
+    #[tokio::test]
+    async fn invalidated_runtime_record_fences_readable_proof_bytes() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".to_string(), "invalidated-reader-fence".to_string())?;
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline_key = PipelineKey::ShastaNative;
+        let route = pipeline_key.route();
+        let proof_ref = "proof-ref";
+        let proof_bytes = serde_json::to_vec(&Proof {
+            proof: Some("0x01".to_string()),
+            ..Proof::default()
+        })?;
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                &proof_bytes,
+            )
+            .await?
+            .try_object()
+            .context("proof publication")?
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let record = runtime
+            .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .context("active proof record")?;
+
+        let prepared = runtime.prepare_artifact_retention_batch(&[record]).await?;
+        assert_eq!(prepared.artifact_invalidations.len(), 1);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref)
+                .await?
+                .is_some(),
+            "object bytes remain visible until exact deletion finishes"
+        );
+        assert!(
+            load_proof_artifact_material(
+                &runtime,
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                ProofArtifactPayload::Final,
+            )
+            .await?
+            .is_none(),
+            "Invalidated runtime records must fence proof reuse"
+        );
+        Ok(())
+    }
+
     #[derive(Debug)]
-    struct PauseAfterInvalidationCheckStore {
+    struct PauseAfterArtifactReadStore {
         inner: MemoryProofArtifactStore,
         checks: AtomicUsize,
         check_completed: tokio::sync::Notify,
@@ -154,7 +205,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl RuntimeStoreScope for PauseAfterInvalidationCheckStore {
+    impl RuntimeStoreScope for PauseAfterArtifactReadStore {
         fn environment(&self) -> &str {
             self.inner.environment()
         }
@@ -169,7 +220,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ProofObjectStore for PauseAfterInvalidationCheckStore {
+    impl ProofObjectStore for PauseAfterArtifactReadStore {
         async fn put_if_absent(
             &self,
             key: &ProofArtifactKey,
@@ -179,7 +230,12 @@ mod tests {
         }
 
         async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
-            self.inner.get(key).await
+            let object = self.inner.get(key).await?;
+            if self.checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.check_completed.notify_one();
+                self.allow_return.notified().await;
+            }
+            Ok(object)
         }
 
         async fn get_descriptor(
@@ -189,46 +245,17 @@ mod tests {
             self.inner.get_descriptor(key).await
         }
 
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
-        }
-
-        async fn invalidate_exact(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &raiko2_runtime::ProofArtifactDescriptor,
-        ) -> Result<ExactInvalidationResult> {
-            self.inner.invalidate_exact(key, descriptor).await
-        }
-
-        async fn is_invalidated(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &raiko2_runtime::ProofArtifactDescriptor,
-        ) -> Result<bool> {
-            let invalidated = self.inner.is_invalidated(key, descriptor).await?;
-            if self.checks.fetch_add(1, Ordering::SeqCst) == 0 {
-                self.check_completed.notify_one();
-                self.allow_return.notified().await;
-            }
-            Ok(invalidated)
-        }
-
         async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
             descriptor: &raiko2_runtime::ProofArtifactDescriptor,
-        ) -> Result<ProofArtifactDeleteResult> {
+        ) -> Result<ExactDeleteResult> {
             self.inner.delete_exact(key, descriptor).await
         }
     }
 
     #[async_trait]
-    impl RuntimeStateStore for PauseAfterInvalidationCheckStore {
+    impl RuntimeStateStore for PauseAfterArtifactReadStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             self.inner.load_runtime_state().await
         }
@@ -245,9 +272,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_reconciliation_preserves_replacement_registration() -> Result<()> {
+    async fn invalidation_during_load_fences_stale_bytes_and_preserves_replacement() -> Result<()> {
         let namespace = format!("proof-artifact-reconciliation-{}", uuid::Uuid::new_v4());
-        let store = Arc::new(PauseAfterInvalidationCheckStore {
+        let store = Arc::new(PauseAfterArtifactReadStore {
             inner: MemoryProofArtifactStore::new("test".to_string(), namespace.clone())?,
             checks: AtomicUsize::new(0),
             check_completed: tokio::sync::Notify::new(),
@@ -294,33 +321,19 @@ mod tests {
         });
         store.check_completed.notified().await;
 
+        let record = runtime
+            .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .context("old proof record")?;
+        let prepared = runtime.prepare_artifact_retention_batch(&[record]).await?;
+        assert_eq!(
+            runtime
+                .finalize_proof_artifact_invalidation(&prepared.artifact_invalidations[0])
+                .await?,
+            ExactDeleteResult::Removed
+        );
         runtime
-            .mark_proof_artifact_descriptor_invalidated(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                &old.descriptor(),
-            )
-            .await?;
-        runtime
-            .delete_proof_artifact(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                old.generation,
-                &old.content_hash,
-            )
-            .await?;
-        runtime
-            .remove_proof_artifact_if_descriptor(
-                network_pair,
-                pipeline_key,
-                route,
-                proof_ref,
-                &old.descriptor(),
-            )
+            .finalize_terminal_task_retention_batch(&[], &prepared.artifact_invalidations, &[])
             .await?;
 
         let new_bytes = serde_json::to_vec(&Proof {

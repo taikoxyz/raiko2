@@ -26,8 +26,13 @@ mod server;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::info;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{Level, info};
+use tracing_subscriber::{
+    EnvFilter,
+    filter::{FilterExt, filter_fn},
+    fmt,
+    prelude::*,
+};
 
 use crate::cli::Cli;
 #[cfg(feature = "fixture-server")]
@@ -75,10 +80,68 @@ fn init_logging(cli: &Cli) {
         }
     });
 
-    let registry = tracing_subscriber::registry().with(env_filter);
+    // These dependencies can render the configured provider URL before Raiko2
+    // receives the error and can redact it. Keep this safety filter independent
+    // of `RUST_LOG` so verbose logging cannot opt back into credential exposure.
+    let dependency_filter =
+        filter_fn(|metadata| credential_safe_dependency_log(metadata.target(), *metadata.level()));
+    let log_filter = env_filter.and(dependency_filter);
+
     if cli.json_logs {
-        registry.with(fmt::layer().json()).init();
+        tracing_subscriber::registry()
+            .with(fmt::layer().json().with_filter(log_filter))
+            .init();
     } else {
-        registry.with(fmt::layer().with_ansi(false)).init();
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_ansi(false).with_filter(log_filter))
+            .init();
+    }
+}
+
+fn credential_safe_dependency_log(target: &str, level: Level) -> bool {
+    if target.starts_with("boundless_market") {
+        return false;
+    }
+
+    !target.starts_with("alloy_transport_http") || !matches!(level, Level::DEBUG | Level::TRACE)
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::Level;
+
+    use super::credential_safe_dependency_log;
+
+    #[test]
+    fn credential_safety_filter_cannot_be_bypassed_by_verbose_dependency_logs() {
+        for level in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
+            assert!(!credential_safe_dependency_log(
+                "boundless_market::request_builder",
+                level
+            ));
+        }
+
+        assert!(!credential_safe_dependency_log(
+            "alloy_transport_http::reqwest_transport",
+            Level::DEBUG
+        ));
+        assert!(!credential_safe_dependency_log(
+            "alloy_transport_http::reqwest_transport",
+            Level::TRACE
+        ));
+        assert!(credential_safe_dependency_log(
+            "alloy_transport_http::reqwest_transport",
+            Level::INFO
+        ));
+        assert!(credential_safe_dependency_log(
+            "raiko2_prover::boundless",
+            Level::TRACE
+        ));
     }
 }

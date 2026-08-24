@@ -994,9 +994,11 @@ userinfo or as a query parameter: neither the alloy transport nor the Boundless 
 per-request header hook. Supply the whole URL through a `{ env = "..." }` reference so the token
 never reaches a plaintext config file. Raiko2 strips credentials, query, and fragment from every URL
 it renders into a Boundless error message or log field, so a failing request logs the endpoint but
-not the token. That protects raiko2's own output only: the credential still appears in the request
-line of any proxy or gateway in front of the endpoint, so rotate it on the same schedule as the
-signer key.
+not the token. Its logging filter also suppresses Boundless SDK output and Alloy HTTP debug/trace
+output because those dependencies can render the provider URL before raiko2 receives and scrubs the
+error; `RUST_LOG` and `--verbose` cannot override this safety boundary. That protects raiko2's own
+output only: the credential still appears in the request line of any proxy or gateway in front of
+the endpoint, so rotate it on the same schedule as the signer key.
 
 Keep the signer wallet funded for the peak `attached_value` plus transaction gas. Monitor the
 structured `Prepared Boundless funding decision` event (`reserved_count`, `market_balance`,

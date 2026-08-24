@@ -19,12 +19,6 @@ use url::Url;
 /// separately so the table stays limited to printable exclusions.
 const URL_TERMINATORS: &[char] = &['"', '<', '>', '\\', '^', '`', '{', '|', '}'];
 
-/// Trailing punctuation that is prose rather than part of the URL.
-///
-/// `reqwest` renders errors as `error sending request for url (https://host/)`,
-/// so the closing parenthesis would otherwise be swallowed into the URL span.
-const TRAILING_PUNCTUATION: &[char] = &[')', ']', '}', '.', ',', ';', ':', '!', '\'', '"'];
-
 /// Strip credentials, query, and fragment from a single URL.
 ///
 /// Falls back to `<redacted-url>` when `raw` cannot be parsed but still looks
@@ -77,7 +71,7 @@ pub fn redact_urls(text: &str) -> String {
         // `max(cursor)` keeps the scheme walk inside the unconsumed remainder so
         // the slices below can never run backwards.
         let start = scheme_start(text, separator).max(cursor);
-        let end = url_end(text, separator + "://".len());
+        let end = url_end(text, start, separator + "://".len());
 
         // `start == separator` means the "://" had no scheme in front of it, so
         // there is no URL to redact here; emit the span verbatim and move on.
@@ -114,22 +108,23 @@ fn scheme_start(text: &str, separator: usize) -> usize {
 }
 
 /// Walk forward from `from` to the end of the URL span.
-fn url_end(text: &str, from: usize) -> usize {
+fn url_end(text: &str, start: usize, from: usize) -> usize {
     let span_len = text[from..]
         .find(|ch: char| ch.is_whitespace() || ch.is_control() || URL_TERMINATORS.contains(&ch))
         .unwrap_or(text.len() - from);
     let mut end = from + span_len;
 
-    // Give trailing prose punctuation back to the surrounding text. Trimming can
-    // only ever shorten the credential-bearing span, never split it open.
-    while end > from {
-        let Some(ch) = text[..end].chars().next_back() else {
-            break;
-        };
-        if !TRAILING_PUNCTUATION.contains(&ch) {
-            break;
-        }
-        end -= ch.len_utf8();
+    // Preserve a confirmed paired wrapper such as reqwest's `url (https://...)`.
+    // Other punctuation is valid URI data and must stay inside the span so query
+    // credentials made only of punctuation cannot be copied back verbatim.
+    let opener = text[..start].chars().next_back();
+    let closer = text[..end].chars().next_back();
+    if matches!(
+        (opener, closer),
+        (Some('('), Some(')')) | (Some('['), Some(']'))
+    ) && let Some(closer) = closer
+    {
+        end -= closer.len_utf8();
     }
 
     end
@@ -223,5 +218,24 @@ mod tests {
         let redacted = redact_urls("for url (https://rpc.test/?secret=YWJj==)");
 
         assert!(!redacted.contains("YWJj"), "{redacted}");
+    }
+
+    #[test]
+    fn redact_urls_keeps_url_valid_query_punctuation_inside_the_redacted_span() {
+        for (credential, punctuation) in [("!!!!", "!"), (",,,,", ","), (";;;;", ";")] {
+            let rendered = format!("for url (https://rpc.test/?secret={credential})");
+
+            let redacted = redact_urls(&rendered);
+
+            assert_eq!(redacted, "for url (https://rpc.test/)");
+            assert!(!redacted.contains(punctuation), "{redacted}");
+        }
+    }
+
+    #[test]
+    fn redact_urls_preserves_a_bracketed_ipv6_endpoint() {
+        let rendered = "for url (http://user:pass@[2001:db8::1])";
+
+        assert_eq!(redact_urls(rendered), "for url (http://[2001:db8::1]/)");
     }
 }

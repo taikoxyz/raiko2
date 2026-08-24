@@ -5,12 +5,15 @@ use prometheus::{
     register_histogram_vec, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
 use raiko2_pipeline::forks::shasta::preflight_cache::{
-    PreflightCacheResult, PreflightCacheStage, PreflightObserver, PreflightSingleFlightEvent,
-    PreflightSingleFlightPhase,
+    PreflightCacheRecoveryEvent, PreflightCacheResult, PreflightCacheStage, PreflightObserver,
+    PreflightSingleFlightEvent, PreflightSingleFlightPhase,
 };
 use raiko2_primitives::ProofType;
-use raiko2_runtime::{RuntimeStateStats, StartupCleanupReport, StartupCleanupScope};
-use std::{sync::LazyLock, time::Duration};
+use raiko2_runtime::{
+    RuntimeArtifactDeleteOutcome, RuntimeLifecycleObserver, RuntimeStateStats,
+    StartupCleanupReport, StartupCleanupScope,
+};
+use std::{sync::Arc, sync::LazyLock, time::Duration};
 
 static REQUEST_REGISTRATIONS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
@@ -182,6 +185,15 @@ static PREFLIGHT_SINGLEFLIGHT_WAITERS: LazyLock<IntGaugeVec> = LazyLock::new(|| 
     .expect("register raiko2_preflight_singleflight_waiters")
 });
 
+static PREFLIGHT_CACHE_RECOVERY_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_preflight_cache_recovery_total",
+        "Canonical preflight invalid-cache recovery outcomes",
+        &["pair", "outcome"]
+    )
+    .expect("register raiko2_preflight_cache_recovery_total")
+});
+
 static STARTUP_CLEANUP_OBJECTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "raiko2_startup_cleanup_objects_total",
@@ -201,6 +213,36 @@ static STARTUP_CLEANUP_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(
         &["scope"]
     )
     .expect("register raiko2_startup_cleanup_duration_seconds")
+});
+
+static STARTUP_RECONCILIATION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_startup_reconciliation_total",
+        "Startup invalidated-proof reconciliation attempts",
+        &["outcome"]
+    )
+    .expect("register raiko2_startup_reconciliation_total")
+});
+
+static STARTUP_RECONCILIATION_ARTIFACTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_startup_reconciliation_artifacts_total",
+        "Invalidated proof artifacts finalized during startup reconciliation",
+        &["outcome"]
+    )
+    .expect("register raiko2_startup_reconciliation_artifacts_total")
+});
+
+static STARTUP_RECONCILIATION_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_startup_reconciliation_duration_seconds",
+            "Startup invalidated-proof reconciliation duration in seconds",
+            vec![0.01, 0.1, 0.5, 1.0, 5.0, 30.0, 120.0, 300.0]
+        ),
+        &["outcome"]
+    )
+    .expect("register raiko2_startup_reconciliation_duration_seconds")
 });
 
 static RUNTIME_STATE_SERIALIZED_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -265,6 +307,104 @@ static RUNTIME_RETENTION_OUTCOMES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new
     .expect("register raiko2_runtime_retention_outcomes_total")
 });
 
+static ARTIFACT_LIFECYCLE_LOCK_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_artifact_lifecycle_lock_duration_seconds",
+            "Artifact lifecycle keyed-lock wait and hold durations in seconds",
+            vec![0.000_1, 0.001, 0.01, 0.1, 1.0, 5.0, 30.0, 120.0]
+        ),
+        &["phase"]
+    )
+    .expect("register raiko2_artifact_lifecycle_lock_duration_seconds")
+});
+
+static ARTIFACT_LIFECYCLE_LOCK_REGISTRY: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "raiko2_artifact_lifecycle_lock_registry",
+        "Artifact lifecycle keyed-lock registry entries",
+        &["state"]
+    )
+    .expect("register raiko2_artifact_lifecycle_lock_registry")
+});
+
+static ARTIFACT_LIFECYCLE_LOCK_SWEPT_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_artifact_lifecycle_lock_swept_total",
+        "Dead artifact lifecycle keyed-lock entries swept",
+        &[]
+    )
+    .expect("register raiko2_artifact_lifecycle_lock_swept_total")
+});
+
+static PROOF_EXACT_DELETE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_proof_exact_delete_total",
+        "Proof manifest exact-delete outcomes",
+        &["outcome"]
+    )
+    .expect("register raiko2_proof_exact_delete_total")
+});
+
+static PROOF_PUBLICATION_CLEANUP_PENDING_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_proof_publication_cleanup_pending_total",
+        "Proof publications rejected while exact cleanup is pending",
+        &[]
+    )
+    .expect("register raiko2_proof_publication_cleanup_pending_total")
+});
+
+static RUNTIME_INVALIDATED_ARTIFACTS: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "raiko2_runtime_invalidated_artifacts",
+        "Current proof artifacts in the durable Invalidated lifecycle"
+    )
+    .expect("register raiko2_runtime_invalidated_artifacts")
+});
+
+#[derive(Debug)]
+struct RuntimeLifecycleMetricsObserver;
+
+impl RuntimeLifecycleObserver for RuntimeLifecycleMetricsObserver {
+    fn record_lock_duration(&self, phase: &'static str, duration: Duration) {
+        ARTIFACT_LIFECYCLE_LOCK_DURATION_SECONDS
+            .with_label_values(&[phase])
+            .observe(duration.as_secs_f64());
+    }
+
+    fn record_lock_registry(&self, live: usize, dead: usize, swept: usize) {
+        for (state, count) in [("live", live), ("dead", dead)] {
+            ARTIFACT_LIFECYCLE_LOCK_REGISTRY
+                .with_label_values(&[state])
+                .set(i64::try_from(count).unwrap_or(i64::MAX));
+        }
+        ARTIFACT_LIFECYCLE_LOCK_SWEPT_TOTAL
+            .with_label_values(&[])
+            .inc_by(u64::try_from(swept).unwrap_or(u64::MAX));
+    }
+
+    fn record_exact_delete(&self, outcome: RuntimeArtifactDeleteOutcome) {
+        let outcome = match outcome {
+            RuntimeArtifactDeleteOutcome::Removed => "removed",
+            RuntimeArtifactDeleteOutcome::Missing => "missing",
+            RuntimeArtifactDeleteOutcome::Stale => "stale",
+            RuntimeArtifactDeleteOutcome::Failure => "failure",
+        };
+        PROOF_EXACT_DELETE_TOTAL.with_label_values(&[outcome]).inc();
+    }
+
+    fn record_cleanup_pending(&self) {
+        PROOF_PUBLICATION_CLEANUP_PENDING_TOTAL
+            .with_label_values(&[])
+            .inc();
+    }
+}
+
+pub(crate) fn runtime_lifecycle_observer() -> Arc<dyn RuntimeLifecycleObserver> {
+    Arc::new(RuntimeLifecycleMetricsObserver)
+}
+
 #[derive(Debug)]
 pub(crate) struct PreflightCacheMetricsObserver {
     pair: String,
@@ -287,6 +427,12 @@ impl PreflightObserver for PreflightCacheMetricsObserver {
         PREFLIGHT_CACHE_DURATION_SECONDS
             .with_label_values(&[self.pair.as_str(), stage.as_str()])
             .observe(duration.as_secs_f64());
+    }
+
+    fn record_recovery(&self, event: PreflightCacheRecoveryEvent) {
+        PREFLIGHT_CACHE_RECOVERY_TOTAL
+            .with_label_values(&[self.pair.as_str(), event.as_str()])
+            .inc();
     }
 
     fn record_serialized_size(&self, bytes: usize) {
@@ -349,6 +495,22 @@ pub(crate) fn record_startup_cleanup_failure(scope: StartupCleanupScope) {
         .inc();
 }
 
+pub(crate) fn record_startup_reconciliation(
+    outcome: &'static str,
+    reconciled: usize,
+    duration: Duration,
+) {
+    STARTUP_RECONCILIATION_TOTAL
+        .with_label_values(&[outcome])
+        .inc();
+    STARTUP_RECONCILIATION_ARTIFACTS_TOTAL
+        .with_label_values(&[outcome])
+        .inc_by(u64::try_from(reconciled).unwrap_or(u64::MAX));
+    STARTUP_RECONCILIATION_DURATION_SECONDS
+        .with_label_values(&[outcome])
+        .observe(duration.as_secs_f64());
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RuntimeStateMetricValues {
     serialized_bytes: i64,
@@ -378,6 +540,8 @@ pub(crate) fn record_runtime_state_stats(stats: RuntimeStateStats) {
     for (kind, count) in values.records {
         RUNTIME_STATE_RECORDS.with_label_values(&[kind]).set(count);
     }
+    RUNTIME_INVALIDATED_ARTIFACTS
+        .set(i64::try_from(stats.invalidated_artifacts).unwrap_or(i64::MAX));
 }
 
 pub(crate) fn record_runtime_cleanup_stats(
@@ -711,6 +875,17 @@ mod tests {
             PreflightSingleFlightPhase::Core,
             PreflightSingleFlightEvent::WaiterFinished,
         );
+        for event in [
+            PreflightCacheRecoveryEvent::InvalidEntry,
+            PreflightCacheRecoveryEvent::Rebuild,
+            PreflightCacheRecoveryEvent::ExactDeleteRemoved,
+            PreflightCacheRecoveryEvent::ExactDeleteMissing,
+            PreflightCacheRecoveryEvent::ExactDeleteStale,
+            PreflightCacheRecoveryEvent::ExactDeleteFailure,
+            PreflightCacheRecoveryEvent::UncachedFallback,
+        ] {
+            observer.record_recovery(event);
+        }
 
         let (_, metrics) = render().expect("render metrics");
         let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
@@ -727,6 +902,19 @@ mod tests {
         assert!(metrics.contains(
             "raiko2_preflight_singleflight_waiters{pair=\"metrics_test/l1\",phase=\"core\"} 0"
         ));
+        for outcome in [
+            "invalid_entry",
+            "rebuild",
+            "exact_delete_removed",
+            "exact_delete_missing",
+            "exact_delete_stale",
+            "exact_delete_failure",
+            "uncached_fallback",
+        ] {
+            assert!(metrics.contains(&format!(
+                "raiko2_preflight_cache_recovery_total{{outcome=\"{outcome}\",pair=\"metrics_test/l1\"}}"
+            )));
+        }
         assert!(!metrics.contains("proposal_id="));
         assert!(!metrics.contains("key_hash="));
         assert!(!metrics.contains("verifier="));
@@ -760,11 +948,30 @@ mod tests {
     }
 
     #[test]
+    fn startup_reconciliation_metrics_use_only_bounded_outcomes() {
+        record_startup_reconciliation("success", 2, Duration::from_millis(25));
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        assert!(metrics.contains("raiko2_startup_reconciliation_total{outcome=\"success\"}"));
+        assert!(
+            metrics.contains(
+                "raiko2_startup_reconciliation_duration_seconds_count{outcome=\"success\"}"
+            )
+        );
+        assert!(
+            metrics.contains("raiko2_startup_reconciliation_artifacts_total{outcome=\"success\"}")
+        );
+        assert!(!metrics.contains("proof_ref="));
+    }
+
+    #[test]
     fn runtime_retention_metrics_use_only_bounded_dimensions() {
         let state_stats = RuntimeStateStats {
             serialized_bytes: 12_345,
             tasks: 7,
             artifacts: 5,
+            invalidated_artifacts: 2,
             pending_publications: 2,
         };
         assert_eq!(
@@ -797,6 +1004,7 @@ mod tests {
         let (_, metrics) = render().expect("render metrics");
         let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
         assert!(metrics.contains("raiko2_runtime_state_serialized_bytes "));
+        assert!(metrics.contains("raiko2_runtime_invalidated_artifacts 2"));
         for kind in ["tasks", "artifacts", "pending_publications"] {
             assert!(metrics.contains(&format!("raiko2_runtime_state_records{{kind=\"{kind}\"}}")));
         }
@@ -852,5 +1060,44 @@ mod tests {
         let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
         assert!(metrics.contains("raiko2_runtime_retention_blocked{lane=\"orphan\"}"));
         assert!(!metrics.contains("task_id="));
+    }
+
+    #[test]
+    fn artifact_lifecycle_metrics_use_only_bounded_outcomes() {
+        let observer = RuntimeLifecycleMetricsObserver;
+        observer.record_lock_duration("wait", Duration::from_millis(1));
+        observer.record_lock_duration("hold", Duration::from_millis(2));
+        observer.record_lock_registry(3, 2, 2);
+        for outcome in [
+            RuntimeArtifactDeleteOutcome::Removed,
+            RuntimeArtifactDeleteOutcome::Missing,
+            RuntimeArtifactDeleteOutcome::Stale,
+            RuntimeArtifactDeleteOutcome::Failure,
+        ] {
+            observer.record_exact_delete(outcome);
+        }
+        observer.record_cleanup_pending();
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        for phase in ["wait", "hold"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_artifact_lifecycle_lock_duration_seconds_count{{phase=\"{phase}\"}}"
+            )));
+        }
+        for state in ["live", "dead"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_artifact_lifecycle_lock_registry{{state=\"{state}\"}}"
+            )));
+        }
+        for outcome in ["removed", "missing", "stale", "failure"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_proof_exact_delete_total{{outcome=\"{outcome}\"}}"
+            )));
+        }
+        assert!(metrics.contains("raiko2_artifact_lifecycle_lock_swept_total"));
+        assert!(metrics.contains("raiko2_proof_publication_cleanup_pending_total"));
+        assert!(!metrics.contains("proof_ref="));
+        assert!(!metrics.contains("generation="));
     }
 }

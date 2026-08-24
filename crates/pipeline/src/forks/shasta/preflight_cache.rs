@@ -66,11 +66,10 @@ impl CanonicalPreflightPutResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CanonicalPreflightInvalidateResult {
-    Invalidated,
-    AlreadyInvalidated,
-    Stale,
+pub enum CanonicalPreflightDeleteResult {
+    Removed,
     Missing,
+    Stale,
 }
 
 #[async_trait]
@@ -86,11 +85,11 @@ pub trait CanonicalPreflightStore: std::fmt::Debug + Send + Sync {
         bytes: &[u8],
     ) -> Result<CanonicalPreflightPutResult>;
 
-    async fn invalidate_canonical_preflight_exact(
+    async fn delete_canonical_preflight_exact(
         &self,
         key: &CanonicalPreflightKeyV1,
         descriptor: &CanonicalPreflightDescriptor,
-    ) -> Result<CanonicalPreflightInvalidateResult>;
+    ) -> Result<CanonicalPreflightDeleteResult>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +117,32 @@ pub enum PreflightCacheStage {
     Load,
     Build,
     Validate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreflightCacheRecoveryEvent {
+    InvalidEntry,
+    Rebuild,
+    ExactDeleteRemoved,
+    ExactDeleteMissing,
+    ExactDeleteStale,
+    ExactDeleteFailure,
+    UncachedFallback,
+}
+
+impl PreflightCacheRecoveryEvent {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidEntry => "invalid_entry",
+            Self::Rebuild => "rebuild",
+            Self::ExactDeleteRemoved => "exact_delete_removed",
+            Self::ExactDeleteMissing => "exact_delete_missing",
+            Self::ExactDeleteStale => "exact_delete_stale",
+            Self::ExactDeleteFailure => "exact_delete_failure",
+            Self::UncachedFallback => "uncached_fallback",
+        }
+    }
 }
 
 impl PreflightCacheStage {
@@ -154,6 +179,11 @@ pub enum PreflightSingleFlightEvent {
     WaiterFinished,
 }
 
+enum CanonicalLoad {
+    Hit(Box<CanonicalShastaPreflightV1>),
+    Miss { publish: bool },
+}
+
 pub trait PreflightObserver: std::fmt::Debug + Send + Sync {
     fn record_cache_result(&self, _result: PreflightCacheResult) {}
     fn record_stage_duration(&self, _stage: PreflightCacheStage, _duration: Duration) {}
@@ -164,6 +194,7 @@ pub trait PreflightObserver: std::fmt::Debug + Send + Sync {
         _event: PreflightSingleFlightEvent,
     ) {
     }
+    fn record_recovery(&self, _event: PreflightCacheRecoveryEvent) {}
 }
 
 #[derive(Debug)]
@@ -303,10 +334,13 @@ impl PreflightCoordinator {
         BuildFuture: Future<Output = RaikoResult<CanonicalShastaPreflightV1>> + Send,
         Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()> + Send + Sync,
     {
-        if let Some(core) = self.try_load_canonical(key, validate).await {
-            return Ok(core);
-        }
+        let publish = match self.try_load_canonical(key, validate).await {
+            CanonicalLoad::Hit(core) => return Ok(*core),
+            CanonicalLoad::Miss { publish } => publish,
+        };
 
+        self.observer
+            .record_recovery(PreflightCacheRecoveryEvent::Rebuild);
         let build_started_at = Instant::now();
         let build_result = build().await;
         self.observer
@@ -319,7 +353,11 @@ impl PreflightCoordinator {
             validation_started_at.elapsed(),
         );
         validation_result?;
-        let Some(store) = self.store.as_ref() else {
+        let Some(store) = self.store.as_ref().filter(|_| publish) else {
+            if self.store.is_some() && !publish {
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::UncachedFallback);
+            }
             return Ok(core);
         };
         let bytes = match bincode::serialize(&core) {
@@ -330,6 +368,8 @@ impl PreflightCoordinator {
                     error = %error,
                     "canonical preflight serialization failed; continuing without cache publication"
                 );
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::UncachedFallback);
                 return Ok(core);
             }
         };
@@ -343,14 +383,14 @@ impl PreflightCoordinator {
         &self,
         key: &CanonicalPreflightKeyV1,
         validate: &Validate,
-    ) -> Option<CanonicalShastaPreflightV1>
+    ) -> CanonicalLoad
     where
         Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
     {
         let Some(store) = self.store.as_ref() else {
             self.observer
                 .record_cache_result(PreflightCacheResult::Bypass);
-            return None;
+            return CanonicalLoad::Miss { publish: false };
         };
         let load_started_at = Instant::now();
         let loaded = store.get_canonical_preflight(key).await;
@@ -361,24 +401,26 @@ impl PreflightCoordinator {
                 Ok(core) => {
                     self.observer.record_cache_result(PreflightCacheResult::Hit);
                     self.observer.record_serialized_size(object.bytes.len());
-                    Some(core)
+                    CanonicalLoad::Hit(Box::new(core))
                 }
                 Err(error) => {
                     self.observer
                         .record_cache_result(PreflightCacheResult::Error);
+                    self.observer
+                        .record_recovery(PreflightCacheRecoveryEvent::InvalidEntry);
                     warn!(
                         proposal_id = key.proposal_id,
                         error = %error,
                         "invalidating unusable canonical preflight cache entry"
                     );
-                    Self::invalidate_unusable(store, key, &object).await;
-                    None
+                    self.delete_unusable_and_resolve(store, key, &object, validate)
+                        .await
                 }
             },
             Ok(None) => {
                 self.observer
                     .record_cache_result(PreflightCacheResult::Miss);
-                None
+                CanonicalLoad::Miss { publish: true }
             }
             Err(error) => {
                 self.observer
@@ -388,7 +430,7 @@ impl PreflightCoordinator {
                     error = %error,
                     "canonical preflight cache read failed; rebuilding"
                 );
-                None
+                CanonicalLoad::Miss { publish: false }
             }
         }
     }
@@ -415,7 +457,7 @@ impl PreflightCoordinator {
                             error = %error,
                             "discarding unusable canonical preflight publication winner"
                         );
-                        Self::invalidate_unusable(store, key, &object).await;
+                        self.delete_unusable(store, key, &object).await;
                         core
                     }
                 }
@@ -430,6 +472,8 @@ impl PreflightCoordinator {
                     error = %error,
                     "canonical preflight cache publication failed; continuing"
                 );
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::UncachedFallback);
                 core
             }
         }
@@ -455,7 +499,7 @@ impl PreflightCoordinator {
                         error = %error,
                         "discarding invalid conflicting canonical preflight winner"
                     );
-                    Self::invalidate_unusable(store, key, &winner).await;
+                    self.delete_unusable(store, key, &winner).await;
                     core
                 }
             },
@@ -465,6 +509,8 @@ impl PreflightCoordinator {
                     content_hash = %descriptor.content_hash,
                     "canonical preflight publication conflicted but winner disappeared"
                 );
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::UncachedFallback);
                 core
             }
             Err(error) => {
@@ -473,6 +519,8 @@ impl PreflightCoordinator {
                     error = %error,
                     "failed to load canonical preflight publication winner"
                 );
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::UncachedFallback);
                 core
             }
         }
@@ -507,20 +555,101 @@ impl PreflightCoordinator {
         Ok(core)
     }
 
-    async fn invalidate_unusable(
+    async fn delete_unusable_and_resolve<Validate>(
+        &self,
+        store: &Arc<dyn CanonicalPreflightStore>,
+        key: &CanonicalPreflightKeyV1,
+        object: &CanonicalPreflightObject,
+        validate: &Validate,
+    ) -> CanonicalLoad
+    where
+        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
+    {
+        match store
+            .delete_canonical_preflight_exact(key, &object.descriptor())
+            .await
+        {
+            Ok(CanonicalPreflightDeleteResult::Removed) => {
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteRemoved);
+                CanonicalLoad::Miss { publish: true }
+            }
+            Ok(CanonicalPreflightDeleteResult::Missing) => {
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteMissing);
+                CanonicalLoad::Miss { publish: true }
+            }
+            Ok(CanonicalPreflightDeleteResult::Stale) => {
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteStale);
+                match store.get_canonical_preflight(key).await {
+                    Ok(Some(winner)) => match self.decode_and_validate(key, &winner, validate) {
+                        Ok(core) => CanonicalLoad::Hit(Box::new(core)),
+                        Err(error) => {
+                            warn!(
+                                proposal_id = key.proposal_id,
+                                error = %error,
+                                "replacement canonical preflight cache entry is unusable; rebuilding without publication"
+                            );
+                            CanonicalLoad::Miss { publish: false }
+                        }
+                    },
+                    Ok(None) => CanonicalLoad::Miss { publish: true },
+                    Err(error) => {
+                        warn!(
+                            proposal_id = key.proposal_id,
+                            error = %error,
+                            "failed to reload canonical preflight after stale exact deletion"
+                        );
+                        CanonicalLoad::Miss { publish: false }
+                    }
+                }
+            }
+            Err(error) => {
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteFailure);
+                warn!(
+                    proposal_id = key.proposal_id,
+                    error = %error,
+                    "failed to delete unusable canonical preflight cache entry; rebuilding without publication"
+                );
+                CanonicalLoad::Miss { publish: false }
+            }
+        }
+    }
+
+    async fn delete_unusable(
+        &self,
         store: &Arc<dyn CanonicalPreflightStore>,
         key: &CanonicalPreflightKeyV1,
         object: &CanonicalPreflightObject,
     ) {
-        if let Err(error) = store
-            .invalidate_canonical_preflight_exact(key, &object.descriptor())
+        self.observer
+            .record_recovery(PreflightCacheRecoveryEvent::InvalidEntry);
+        self.observer
+            .record_recovery(PreflightCacheRecoveryEvent::UncachedFallback);
+        match store
+            .delete_canonical_preflight_exact(key, &object.descriptor())
             .await
         {
-            warn!(
-                proposal_id = key.proposal_id,
-                error = %error,
-                "failed to invalidate unusable canonical preflight cache entry"
-            );
+            Ok(CanonicalPreflightDeleteResult::Removed) => self
+                .observer
+                .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteRemoved),
+            Ok(CanonicalPreflightDeleteResult::Missing) => self
+                .observer
+                .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteMissing),
+            Ok(CanonicalPreflightDeleteResult::Stale) => self
+                .observer
+                .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteStale),
+            Err(error) => {
+                self.observer
+                    .record_recovery(PreflightCacheRecoveryEvent::ExactDeleteFailure);
+                warn!(
+                    proposal_id = key.proposal_id,
+                    error = %error,
+                    "failed to delete unusable canonical preflight cache entry"
+                );
+            }
         }
     }
 }
@@ -807,10 +936,10 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDescriptor,
-        CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
-        CanonicalPreflightLocatorKeyV1, CanonicalPreflightLocatorV1, CanonicalPreflightObject,
-        CanonicalPreflightPutResult, CanonicalPreflightStore, CanonicalShastaPreflightV1,
+        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult,
+        CanonicalPreflightDescriptor, CanonicalPreflightKeyV1, CanonicalPreflightLocatorKeyV1,
+        CanonicalPreflightLocatorV1, CanonicalPreflightObject, CanonicalPreflightPutResult,
+        CanonicalPreflightStore, CanonicalShastaPreflightV1, PreflightCacheRecoveryEvent,
         PreflightCacheResult, PreflightCoordinator, PreflightObserver, SingleFlight,
     };
     use alloy_primitives::B256;
@@ -828,12 +957,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct TestCanonicalPreflightStore {
         object: Mutex<Option<CanonicalPreflightObject>>,
-        invalidations: AtomicUsize,
+        deletions: AtomicUsize,
+        puts: AtomicUsize,
+        fail_delete: std::sync::atomic::AtomicBool,
+        replacement_on_delete: Mutex<Option<CanonicalPreflightObject>>,
     }
 
     #[derive(Debug, Default)]
     struct TestPreflightObserver {
         cache_results: Mutex<Vec<PreflightCacheResult>>,
+        recovery_events: Mutex<Vec<PreflightCacheRecoveryEvent>>,
     }
 
     impl PreflightObserver for TestPreflightObserver {
@@ -842,6 +975,13 @@ mod tests {
                 .lock()
                 .expect("test observer lock")
                 .push(result);
+        }
+
+        fn record_recovery(&self, event: PreflightCacheRecoveryEvent) {
+            self.recovery_events
+                .lock()
+                .expect("test observer lock")
+                .push(event);
         }
     }
 
@@ -859,6 +999,7 @@ mod tests {
             key: &CanonicalPreflightKeyV1,
             bytes: &[u8],
         ) -> Result<CanonicalPreflightPutResult> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
             let mut object = self.object.lock().expect("test store lock");
             if let Some(existing) = object.as_ref() {
                 return Ok(CanonicalPreflightPutResult::AlreadyExists(existing.clone()));
@@ -873,21 +1014,33 @@ mod tests {
             Ok(CanonicalPreflightPutResult::Created(created))
         }
 
-        async fn invalidate_canonical_preflight_exact(
+        async fn delete_canonical_preflight_exact(
             &self,
             _key: &CanonicalPreflightKeyV1,
             descriptor: &CanonicalPreflightDescriptor,
-        ) -> Result<CanonicalPreflightInvalidateResult> {
+        ) -> Result<CanonicalPreflightDeleteResult> {
+            if self.fail_delete.swap(false, Ordering::SeqCst) {
+                anyhow::bail!("injected canonical preflight delete failure");
+            }
             let mut object = self.object.lock().expect("test store lock");
             let Some(current) = object.as_ref() else {
-                return Ok(CanonicalPreflightInvalidateResult::Missing);
+                return Ok(CanonicalPreflightDeleteResult::Missing);
             };
             if current.descriptor() != *descriptor {
-                return Ok(CanonicalPreflightInvalidateResult::Stale);
+                return Ok(CanonicalPreflightDeleteResult::Stale);
+            }
+            if let Some(replacement) = self
+                .replacement_on_delete
+                .lock()
+                .expect("replacement lock")
+                .take()
+            {
+                *object = Some(replacement);
+                return Ok(CanonicalPreflightDeleteResult::Stale);
             }
             object.take();
-            self.invalidations.fetch_add(1, Ordering::SeqCst);
-            Ok(CanonicalPreflightInvalidateResult::Invalidated)
+            self.deletions.fetch_add(1, Ordering::SeqCst);
+            Ok(CanonicalPreflightDeleteResult::Removed)
         }
     }
 
@@ -1197,6 +1350,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_version_restart_reuses_validated_publication() -> Result<()> {
+        let store = Arc::new(TestCanonicalPreflightStore::default());
+        let key = canonical_key();
+        let mut published = CanonicalShastaPreflightV1::default();
+        published.manifest.proposal_id = key.proposal_id;
+
+        PreflightCoordinator::new(store.clone())
+            .canonical(key.clone(), || async { Ok(published.clone()) }, |_| Ok(()))
+            .await?;
+
+        let restarted = PreflightCoordinator::new(store);
+        let builds = AtomicUsize::new(0);
+        let loaded = restarted
+            .canonical(
+                key.clone(),
+                || async {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    Ok(CanonicalShastaPreflightV1::default())
+                },
+                |core| {
+                    if core.manifest.proposal_id == key.proposal_id {
+                        Ok(())
+                    } else {
+                        Err(RaikoError::Preflight(
+                            "unexpected canonical proposal".to_string(),
+                        ))
+                    }
+                },
+            )
+            .await?;
+
+        assert_eq!(loaded.manifest.proposal_id, key.proposal_id);
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn coordinator_invalidates_undecodable_core_before_rebuild() -> Result<()> {
         let store = Arc::new(TestCanonicalPreflightStore {
             object: Mutex::new(Some(CanonicalPreflightObject {
@@ -1205,7 +1395,7 @@ mod tests {
                 generation: Some(7),
                 bytes: b"not-bincode".to_vec(),
             })),
-            invalidations: AtomicUsize::new(0),
+            ..TestCanonicalPreflightStore::default()
         });
         let coordinator = PreflightCoordinator::new(store.clone());
         let builds = AtomicUsize::new(0);
@@ -1225,7 +1415,7 @@ mod tests {
 
         assert_eq!(core.manifest.proposal_id, 42);
         assert_eq!(builds.load(Ordering::SeqCst), 1);
-        assert_eq!(store.invalidations.load(Ordering::SeqCst), 1);
+        assert_eq!(store.deletions.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
@@ -1257,6 +1447,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinator_failed_build_is_not_negative_cached() -> Result<()> {
+        let store = Arc::new(TestCanonicalPreflightStore::default());
+        let coordinator = PreflightCoordinator::new(store.clone());
+        let calls = AtomicUsize::new(0);
+
+        let error = coordinator
+            .canonical(
+                canonical_key(),
+                || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(RaikoError::Preflight("injected build failure".to_string()))
+                },
+                |_| Ok(()),
+            )
+            .await
+            .expect_err("first build must fail");
+        assert!(error.to_string().contains("injected build failure"));
+
+        let core = coordinator
+            .canonical(
+                canonical_key(),
+                || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let mut core = CanonicalShastaPreflightV1::default();
+                    core.manifest.proposal_id = 42;
+                    Ok(core)
+                },
+                |_| Ok(()),
+            )
+            .await?;
+        assert_eq!(core.manifest.proposal_id, 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(store.puts.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_failure_rebuilds_without_cache_publication() -> Result<()> {
+        let key = canonical_key();
+        let stale = CanonicalPreflightObject {
+            key_digest: key.digest()?,
+            content_hash: "corrupt".to_string(),
+            generation: Some(7),
+            bytes: b"not-bincode".to_vec(),
+        };
+        let store = Arc::new(TestCanonicalPreflightStore {
+            object: Mutex::new(Some(stale.clone())),
+            fail_delete: std::sync::atomic::AtomicBool::new(true),
+            ..TestCanonicalPreflightStore::default()
+        });
+        let observer = Arc::new(TestPreflightObserver::default());
+        let coordinator = PreflightCoordinator::with_observer(store.clone(), observer.clone());
+
+        let core = coordinator
+            .canonical(
+                key,
+                || async {
+                    let mut core = CanonicalShastaPreflightV1::default();
+                    core.manifest.proposal_id = 42;
+                    Ok(core)
+                },
+                |_| Ok(()),
+            )
+            .await?;
+
+        assert_eq!(core.manifest.proposal_id, 42);
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(*store.object.lock().expect("test store lock"), Some(stale));
+        assert_eq!(
+            *observer.recovery_events.lock().expect("test observer lock"),
+            vec![
+                PreflightCacheRecoveryEvent::InvalidEntry,
+                PreflightCacheRecoveryEvent::ExactDeleteFailure,
+                PreflightCacheRecoveryEvent::Rebuild,
+                PreflightCacheRecoveryEvent::UncachedFallback,
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_delete_reloads_and_uses_current_winner_once() -> Result<()> {
+        let key = canonical_key();
+        let stale = CanonicalPreflightObject {
+            key_digest: key.digest()?,
+            content_hash: "corrupt".to_string(),
+            generation: Some(7),
+            bytes: b"not-bincode".to_vec(),
+        };
+        let mut winner_core = CanonicalShastaPreflightV1::default();
+        winner_core.manifest.proposal_id = 42;
+        let winner = CanonicalPreflightObject {
+            key_digest: key.digest()?,
+            content_hash: "winner".to_string(),
+            generation: Some(8),
+            bytes: bincode::serialize(&winner_core)?,
+        };
+        let store = Arc::new(TestCanonicalPreflightStore {
+            object: Mutex::new(Some(stale)),
+            replacement_on_delete: Mutex::new(Some(winner)),
+            ..TestCanonicalPreflightStore::default()
+        });
+        let coordinator = PreflightCoordinator::new(store.clone());
+        let builds = AtomicUsize::new(0);
+
+        let core = coordinator
+            .canonical(
+                key,
+                || async {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    Ok(CanonicalShastaPreflightV1::default())
+                },
+                |core| {
+                    if core.manifest.proposal_id == 42 {
+                        Ok(())
+                    } else {
+                        Err(RaikoError::Preflight("unexpected proposal".to_string()))
+                    }
+                },
+            )
+            .await?;
+
+        assert_eq!(core.manifest.proposal_id, 42);
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn coordinator_invalidates_semantically_invalid_core_before_rebuild() -> Result<()> {
         let key = canonical_key();
         let mut stale = CanonicalShastaPreflightV1::default();
@@ -1268,7 +1587,7 @@ mod tests {
                 generation: Some(7),
                 bytes: bincode::serialize(&stale)?,
             })),
-            invalidations: AtomicUsize::new(0),
+            ..TestCanonicalPreflightStore::default()
         });
         let coordinator = PreflightCoordinator::new(store.clone());
         let builds = AtomicUsize::new(0);
@@ -1295,7 +1614,7 @@ mod tests {
 
         assert_eq!(core.manifest.proposal_id, 42);
         assert_eq!(builds.load(Ordering::SeqCst), 1);
-        assert_eq!(store.invalidations.load(Ordering::SeqCst), 1);
+        assert_eq!(store.deletions.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }

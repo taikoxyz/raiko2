@@ -21,7 +21,6 @@ The public API surface is:
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
-- `POST /v4/prover/invalidate-artifacts`
 - `GET /health`
 - `GET /metrics`
 - `GET /ready`
@@ -34,7 +33,6 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `GET /v4/tasks/{id}` requires `prover.submit` when a `prover.submit` or `admin` ACL
   key is configured
 - `POST /v4/prover/clear` requires `prover.clear`
-- `POST /v4/prover/invalidate-artifacts` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
 
@@ -87,6 +85,13 @@ The canonical minimal metric families are:
 - `raiko2_runtime_retention_blocked`
 - `raiko2_runtime_retention_attempts_total`
 - `raiko2_runtime_retention_outcomes_total`
+- `raiko2_preflight_cache_recovery_total`
+- `raiko2_artifact_lifecycle_lock_duration_seconds`
+- `raiko2_artifact_lifecycle_lock_registry`
+- `raiko2_artifact_lifecycle_lock_swept_total`
+- `raiko2_proof_exact_delete_total`
+- `raiko2_proof_publication_cleanup_pending_total`
+- `raiko2_runtime_invalidated_artifacts`
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
@@ -105,6 +110,11 @@ labels such as `selected_tasks`, `removed_tasks`, `retained_task_failures`,
 metric labels. `raiko2_runtime_retention_blocked{lane="orphan"}` reports whether the most recent
 orphan pass returned an error before later retention lanes could run: it is `1` after a blocked pass
 and returns to `0` after a successful pass. Alert on a sustained value; one transient pass can set it.
+Preflight recovery outcomes distinguish invalid entries, rebuilds, exact-delete results, failures,
+and uncached fallback. Artifact lifecycle metrics expose bounded `wait`/`hold` phases, the latest
+lock-registry sweep's live/dead observations, swept entries, exact proof delete outcomes, durable
+`Invalidated` records, and publication rejected while exact cleanup is pending. Artifact keys,
+generations, hashes, task IDs, and proposal IDs are deliberately excluded from metric labels.
 
 ## Admin Ballot
 
@@ -132,7 +142,6 @@ V4 routes:
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
-- `POST /v4/prover/invalidate-artifacts`
 
 Endpoint responsibilities:
 
@@ -140,8 +149,6 @@ Endpoint responsibilities:
   one proposal. `aggregate=true` accepts one or more contiguous proposals and registers the
   aggregation stage for that same proposal batch.
 - `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
-- `POST /v4/prover/invalidate-artifacts` removes terminal local runtime tasks and matching proof
-  artifacts for a concrete proof type.
 
 V4 success envelope:
 
@@ -568,95 +575,23 @@ Scope:
   original `zk_any` request and are cleared through the legacy `POST /v3/prover/clear` route in that
   legacy build.
 
-### Invalidate V4 Proof Artifacts
+### Terminal Proof Cleanup
 
-```http
-POST /v4/prover/invalidate-artifacts
-Content-Type: application/json
-x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
-```
+Terminal proof artifacts are reclaimed automatically after their runtime owners are removed. Use
+`POST /v4/prover/clear` only to cancel active work; it is not a terminal-artifact deletion API.
 
-Request:
+For an exceptional SGX/ZK guest, image, verifier, or proving-key cutover, stop the old process and
+start one non-overlapping replacement with `runtime.startup_cleanup = ["proof"]`. Startup cleanup
+first deletes the namespace's sole runtime-state snapshot, including every task, artifact record,
+pending publication, and Boundless/SP1 provider-request checkpoint, then generation-conditionally
+deletes proof manifests before recovery or admission. Existing remote requests are not cancelled;
+client resubmission can therefore create and pay for replacement provider work while an old request
+still settles. Remove the setting after the successful cutover.
 
-```json
-{
-  "proof_type": "sgxgeth",
-  "proof_prefix": "0x00000005",
-  "proposal_id_start": 15950,
-  "proposal_id_end": 15980,
-  "dry_run": true
-}
-```
-
-Request fields:
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`. |
-| `proof_prefix` | string | no | Optional `0x`-prefixed hex prefix matched against cached proof payloads. Maximum length is 130 characters, including `0x`. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
-| `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
-| `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |
-| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof manifests. |
-
-Response:
-
-```json
-{
-  "status": "ok",
-  "proof_type": "sgxgeth",
-  "data": {
-    "dry_run": true,
-    "artifacts": {
-      "matched": 10,
-      "removed": 0,
-      "manifests_removed": 0,
-      "manifests_missing": 0,
-      "failed": 0
-    },
-    "tasks": {
-      "matched": 10,
-      "removed": 0,
-      "skipped_non_terminal": 0,
-      "invalid_metadata": 0,
-      "failed": 0
-    }
-  }
-}
-```
-
-`manifests_removed` and `manifests_missing` report the exact result of deleting the canonical
-manifest. Immutable content objects are retained and are not counted as removed files.
-The response envelope uses `status="partial_failure"` when either `data.artifacts.failed` or
-`data.tasks.failed` is non-zero; clients must not treat that response as a complete invalidation.
-
-Scope:
-
-- The endpoint invalidates completed, failed, or cancelled local runtime tasks and matching proof
-  artifacts for the selected concrete proof type. It also removes completed child tasks from the local
-  engine so a retried aggregate does not reuse stale child-proof state.
-- It does not cancel or delete non-terminal tasks. Use `POST /v4/prover/clear` first if active work
-  must be cancelled.
-- If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
-  are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
-  are linked to a matched runtime task.
-- If deleting a proof manifest fails, `failed` is incremented and the artifact remains
-  tombstoned for a later invalidation retry. Tombstoned artifacts are not eligible for proof reuse.
-- When `dry_run=false`, runtime state reserves invalidation for the exact artifact descriptor before
-  any object-store effect. A matching live root returns a blocked result and retains its artifact.
-  An accepted reservation creates a tombstone for `(logical key, manifest generation, content
-  hash)`, removes only that manifest generation conditionally, and cleans up only the matching
-  pending publication. Immutable content bytes are retained. A dry run performs selection and
-  validation without reserving state or mutating objects.
-
-Validation:
-
-- Unknown request body fields return `400 invalid_request`.
-- `proposal_id_start` and `proposal_id_end` must be supplied together, and start must be less than or
-  equal to end.
-- `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string no longer than 130
-  characters including `0x`. Prefix matching validates the complete manifest-selected content hash
-  before examining the bounded prefix; corrupt or missing content fails the request instead of being
-  treated as a non-match.
+There is intentionally no online range- or prefix-selective terminal-artifact invalidation endpoint.
+The operational tradeoff is a namespace-wide runtime reset, possible duplicate provider spend, and
+reproving rather than a distributed negative-marker protocol. Add `"preflight"` to startup cleanup
+only when derivation, fork, or witness-generation rules changed.
 
 ## Legacy V3 Submit Shasta Batch Proof
 
@@ -1135,8 +1070,8 @@ Returns the root-task view derived from the original batch request.
   them; object-store failure never retains a successfully detached root. Active manifests must not have a
   bucket age rule, and immutable proof or program content must remain available until every manifest
   that references it is gone. Retention admission preserves the terminal runner status, proof URI,
-  error, and timestamp until exact task removal commits. Generation-scoped tombstones and unreferenced
-  content use a minimum thirty-day retention window. Active root tasks are never removed by terminal
+  error, and timestamp until exact task removal commits. Unreferenced immutable content uses the
+  configured bucket lifecycle window. Active root tasks are never removed by terminal
   cleanup. The terminal TTL also applies to failed or cancelled roots that carry remote submission
   progress. Once that checkpoint expires, a later resubmission may create and pay for a new provider
   request even if the old provider request eventually completes.
@@ -1214,14 +1149,17 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
   bypasses both layers and rebuilds preflight independently for each request; use it only as an
   incident-response control while preserving proof storage and runtime state.
-- `runtime.startup_cleanup` defaults to an empty list. `["proof"]` clears authoritative runtime task
-  state first and then deletes active proposal and aggregate proof manifests. Use it for SGX/ZK guest,
-  image, verifier, or proving-key changes. `["preflight"]` deletes only active canonical preflight
+- `runtime.startup_cleanup` defaults to an empty list. `["proof"]` deletes the sole authoritative
+  runtime-state snapshot, including all tasks, artifact records, pending publications, and durable
+  Boundless/SP1 provider-request checkpoints, then deletes active proposal and aggregate proof
+  manifests. Existing provider requests continue independently, so resubmitted work can incur
+  duplicate proving cost. Use this broad reset only for an exceptional SGX/ZK guest, image, verifier,
+  or proving-key cutover. `["preflight"]` deletes only active canonical preflight
   manifests. Use `["proof", "preflight"]` when derivation, fork, or witness-generation rules changed.
   The scopes are exact: neither implies the other, and there is no `input` scope because materialized
   `GuestInput` values are not persisted. GCS pages through matching manifest objects and deletes their
-  listed generations with bounded concurrency; immutable proof/preflight content and invalidation
-  records remain unreachable until bucket lifecycle TTL removes them. Any listing or deletion failure
+  listed generations with bounded concurrency; immutable proof/preflight content remains unreachable
+  until bucket lifecycle TTL removes it. Any listing or deletion failure
   aborts startup. Cleanup runs before recovery, workers, or HTTP admission and only after the previous
   process has stopped. Configured scopes run again on every restart, so remove `startup_cleanup`
   immediately after the cutover succeeds; leaving it configured can discard fresh task state and
@@ -1252,10 +1190,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   state and do not roll an authoritative transition back.
 - Proof bytes are immutable `*.proof.json` objects selected by a create-only `*.manifest.json`
   pointer. Runtime snapshots use `*.runtime.json`; the suffixes let operations distinguish
-  authoritative state, active manifests, generation-scoped tombstones, and unreferenced content.
-  Terminal roots use the configurable six-hour default in runtime state. Tombstones and unreferenced
-  content use a minimum thirty-day object lifecycle, while active manifests must not be deleted by
-  age and immutable content must remain available while any active manifest references it.
+  authoritative state, active manifests, and unreferenced content. Terminal roots use the
+  configurable six-hour default in runtime state. Unreferenced content uses the configured object
+  lifecycle, while active manifests must not be deleted by age and immutable content must remain
+  available while any active manifest references it.
 - Canonical preflight cores are bincode-serialized into immutable `*.preflight.bincode` objects.
   The typed suffix identifies their payload format and supports suffix-scoped storage operations
   without treating every binary object as the same artifact class.
@@ -1272,13 +1210,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   pending blob materialized. State updates do not rewrite large proofs. A failed intent write creates
   no object, while a failed blob write leaves a durable retry intent. Recovery uses the same intent
   and pending blob after restart, and in-process publication retries do not run the prover again.
-- Invalidation first reserves the exact artifact expectation in authoritative runtime state and
-  verifies that no live matching owner remains. It then writes a tombstone for `(logical key,
-  manifest generation, content hash)`, conditionally deletes only that manifest generation, and
-  removes only the exact pending blob. Immutable proof content is retained. Recovery checks the
-  exact marker during reconciliation and publication finalization, so a failed manifest deletion
-  cannot make that descriptor reusable. A later lifecycle may publish identical or different
-  content under a new manifest generation.
+- Retention first records the exact artifact expectation as `Invalidated` in authoritative runtime
+  state after verifying that no live matching owner remains. It conditionally deletes only that
+  manifest generation, then removes the matching runtime artifact record and pending publication.
+  A crash leaves the durable `Invalidated` record as recovery authority; publication for that key is
+  rejected until exact deletion and state finalization converge. Immutable proof content is retained,
+  and a later lifecycle may publish identical or different content under a new manifest generation.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.

@@ -6,6 +6,12 @@ Approved design for implementation. This document defines the cache identity, tr
 storage lifecycle, startup cleanup behavior, and verification requirements. It does not change the
 guest input wire format, guest ELF files, proof formats, public inputs, or on-chain verification.
 
+> **Superseded lifecycle details:** The canonical cache motivation and key model remain historical
+> context, but the fixed `v1` prefix, marker-backed deletion, and online artifact-invalidation API
+> described here are no longer current. Use
+> [Tombstone-Free Artifact Lifecycle Design](2026-08-23-tombstone-free-artifact-lifecycle-design.md)
+> for compatibility-version prefixes, exact deletion, startup cleanup, and operator procedures.
+
 ## Problem
 
 Every enabled Shasta proof lane currently owns a separate `ShastaSpec` and independently performs

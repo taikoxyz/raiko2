@@ -8629,6 +8629,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "google-cloud-gax",
  "google-cloud-storage",
  "raiko2-pipeline",
  "raiko2-primitives",

@@ -14,8 +14,8 @@ use raiko2_prover::{
 };
 use raiko2_queue::RootOwner;
 use raiko2_runtime::{
-    ProofArtifactDescriptor, ProofArtifactPublicationInvalidated, ProofArtifactPutResult,
-    ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord,
+    ProofArtifactDescriptor, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
+    RuntimeManager, RuntimeTaskRecord,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,9 +121,6 @@ impl std::error::Error for ProofInvalidatedError {}
 fn publication_observer_error(error: &anyhow::Error) -> EngineObserverError {
     let message = format!("{error:#}");
     if error.downcast_ref::<ProofInvalidatedError>().is_some()
-        || error
-            .downcast_ref::<ProofArtifactPublicationInvalidated>()
-            .is_some()
         || error
             .downcast_ref::<raiko2_runtime::PendingProofPublicationRemoved>()
             .is_some()
@@ -1056,16 +1053,6 @@ impl RuntimeObserver {
                     publication: None,
                 };
             }
-            Err(error)
-                if error
-                    .downcast_ref::<ProofArtifactPublicationInvalidated>()
-                    .is_some() =>
-            {
-                return ProofCommitAttempt::Invalidated {
-                    error,
-                    publication: None,
-                };
-            }
             Err(error) => return ProofCommitAttempt::Retryable(error),
         };
         match self
@@ -1152,18 +1139,19 @@ impl RuntimeObserver {
         publication.synchronized_roots = synchronized_roots;
         match self
             .runtime
-            .proof_artifact_descriptor_is_invalidated(
+            .get_proof_artifact(
                 &self.network_pair,
                 id.0.pipeline_key(),
                 self.route,
                 &publication.root_ref,
-                &publication.descriptor,
             )
             .await
             .context("failed to fence completed proof against invalidation")
         {
-            Ok(false) => ProofCommitAttempt::Committed(publication),
-            Ok(true) => ProofCommitAttempt::Invalidated {
+            Ok(Some(record)) if record.descriptor() == publication.descriptor => {
+                ProofCommitAttempt::Committed(publication)
+            }
+            Ok(_) => ProofCommitAttempt::Invalidated {
                 error: anyhow::anyhow!(
                     "canonical proof artifact {} was invalidated during completion",
                     publication.root_ref
@@ -2246,14 +2234,14 @@ mod tests {
         Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
     };
     use raiko2_runtime::test_support::{
-        ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject,
-        RuntimeStateStore, RuntimeStateWriteResult, RuntimeStore, RuntimeStoreScope,
+        MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
+        RuntimeStateWriteResult, RuntimeStoreScope,
     };
     use raiko2_runtime::{
-        ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, TaskRegistration,
+        ExactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
+        ProofArtifactPutResult, ProofArtifactRegistration, TaskRegistration,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn proof_task_log_context_uses_public_proposal_shape() {
@@ -2505,17 +2493,9 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct InvalidatesDuringPublicationStore {
-        inner: MemoryProofArtifactStore,
-        checks: AtomicUsize,
-        block_on_check: usize,
-        recheck_entered: tokio::sync::Notify,
-        allow_recheck: tokio::sync::Notify,
-    }
-
-    #[derive(Debug)]
     struct BlocksCanonicalPutStore {
         inner: MemoryProofArtifactStore,
+        block_next_put: AtomicBool,
         put_entered: tokio::sync::Notify,
         allow_put: tokio::sync::Notify,
     }
@@ -2541,7 +2521,9 @@ mod tests {
             key: &ProofArtifactKey,
             bytes: &[u8],
         ) -> Result<ProofArtifactPutResult> {
-            if !key.proof_ref.starts_with("__pending__:") {
+            if !key.proof_ref.starts_with("__pending__:")
+                && self.block_next_put.swap(false, Ordering::SeqCst)
+            {
                 self.put_entered.notify_one();
                 self.allow_put.notified().await;
             }
@@ -2559,130 +2541,17 @@ mod tests {
             self.inner.get_descriptor(key).await
         }
 
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
-        }
-
-        async fn invalidate_exact(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ExactInvalidationResult> {
-            self.inner.invalidate_exact(key, descriptor).await
-        }
-
-        async fn is_invalidated(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<bool> {
-            self.inner.is_invalidated(key, descriptor).await
-        }
-
         async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ProofArtifactDeleteResult> {
+        ) -> Result<ExactDeleteResult> {
             self.inner.delete_exact(key, descriptor).await
         }
     }
 
     #[async_trait]
     impl RuntimeStateStore for BlocksCanonicalPutStore {
-        async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
-            self.inner.load_runtime_state().await
-        }
-
-        async fn store_runtime_state(
-            &self,
-            bytes: &[u8],
-            expected_generation: Option<i64>,
-        ) -> Result<RuntimeStateWriteResult> {
-            self.inner
-                .store_runtime_state(bytes, expected_generation)
-                .await
-        }
-    }
-
-    impl RuntimeStoreScope for InvalidatesDuringPublicationStore {
-        fn environment(&self) -> &str {
-            self.inner.environment()
-        }
-
-        fn namespace(&self) -> &str {
-            self.inner.namespace()
-        }
-
-        fn backend_name(&self) -> &'static str {
-            "test"
-        }
-    }
-
-    #[async_trait]
-    impl ProofObjectStore for InvalidatesDuringPublicationStore {
-        async fn put_if_absent(
-            &self,
-            key: &ProofArtifactKey,
-            bytes: &[u8],
-        ) -> Result<ProofArtifactPutResult> {
-            self.inner.put_if_absent(key, bytes).await
-        }
-
-        async fn get(&self, key: &ProofArtifactKey) -> Result<Option<ProofArtifactObject>> {
-            self.inner.get(key).await
-        }
-
-        async fn get_descriptor(
-            &self,
-            key: &ProofArtifactKey,
-        ) -> Result<Option<ProofArtifactDescriptor>> {
-            self.inner.get_descriptor(key).await
-        }
-
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
-        }
-
-        async fn invalidate_exact(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ExactInvalidationResult> {
-            self.inner.invalidate_exact(key, descriptor).await
-        }
-
-        async fn is_invalidated(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<bool> {
-            if self.checks.fetch_add(1, Ordering::SeqCst) == self.block_on_check {
-                self.recheck_entered.notify_one();
-                self.allow_recheck.notified().await;
-            }
-            self.inner.is_invalidated(key, descriptor).await
-        }
-
-        async fn delete_exact(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ProofArtifactDeleteResult> {
-            self.inner.delete_exact(key, descriptor).await
-        }
-    }
-
-    #[async_trait]
-    impl RuntimeStateStore for InvalidatesDuringPublicationStore {
         async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>> {
             self.inner.load_runtime_state().await
         }
@@ -2734,36 +2603,12 @@ mod tests {
             Ok(None)
         }
 
-        async fn get_prefix(
-            &self,
-            _key: &ProofArtifactKey,
-            _max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            Ok(None)
-        }
-
-        async fn invalidate_exact(
-            &self,
-            _key: &ProofArtifactKey,
-            _descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ExactInvalidationResult> {
-            Ok(ExactInvalidationResult::AlreadyInvalidated)
-        }
-
-        async fn is_invalidated(
-            &self,
-            _key: &ProofArtifactKey,
-            _descriptor: &ProofArtifactDescriptor,
-        ) -> Result<bool> {
-            Ok(false)
-        }
-
         async fn delete_exact(
             &self,
             _key: &ProofArtifactKey,
             _descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ProofArtifactDeleteResult> {
-            Ok(ProofArtifactDeleteResult::Missing)
+        ) -> Result<ExactDeleteResult> {
+            Ok(ExactDeleteResult::Missing)
         }
     }
 
@@ -2848,6 +2693,46 @@ mod tests {
             kzg_proof: None,
             extra_data: None,
         }
+    }
+
+    async fn install_cleanup_pending_artifact(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        pipeline: PipelineKey,
+        route: PipelineRoute,
+        proof_ref: &str,
+    ) -> Result<()> {
+        let publication = runtime
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline,
+                route,
+                proof_ref,
+                br#"{"proof":"0xstale"}"#,
+            )
+            .await?;
+        let object = publication
+            .try_object()
+            .context("published cleanup-pending proof")?
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: pipeline,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let record = runtime
+            .get_proof_artifact(network_pair, pipeline, route, proof_ref)
+            .await?
+            .context("active cleanup-pending proof")?;
+        let prepared = runtime.prepare_artifact_retention_batch(&[record]).await?;
+        assert_eq!(prepared.newly_invalidated_artifacts, 1);
+        Ok(())
     }
 
     fn compressed_sp1_proof_fixture() -> raiko2_primitives::Proof {
@@ -4002,6 +3887,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_observer_loads_do_not_reuse_an_invalidated_artifact() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-invalidated-read-fence",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = RuntimeObserver::root_task_ref(&task_id);
+        register_observer_task(
+            runtime.as_ref(),
+            "task_invalidated_read_fence",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "taiko_dev/ethereum".to_string(),
+            route,
+        );
+        drive_engine_success(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request: request.clone(),
+                input_task: task_id.clone(),
+            },
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof_fixture(),
+            },
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let (_, invalidated, _) = runtime
+            .update_tasks_and_invalidate_artifact(
+                &proof_ref,
+                "taiko_dev/ethereum",
+                pipeline,
+                route,
+                |records| {
+                    for record in records {
+                        record.runner_status = RunnerStatus::Cancelled;
+                    }
+                    Ok(((), true))
+                },
+            )
+            .await?;
+        assert!(invalidated);
+
+        assert!(
+            observer
+                .load_completed_proof(
+                    &task_id,
+                    &EngineTask::Proposal {
+                        request: request.clone(),
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        assert!(
+            observer
+                .load_proof_artifact(&ProofArtifactRef {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_ref,
+                })
+                .await
+                .map_err(anyhow::Error::msg)?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_observer_rejects_incomplete_sp1_root_artifact() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-incomplete-sp1-root",
@@ -4096,6 +4066,152 @@ mod tests {
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proposal_cleanup_pending_keeps_root_nonterminal() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-proposal-cleanup-pending",
+        ))?);
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = proposal_request();
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+        let proof_ref = proposal_task_ref(pipeline, &request);
+        install_cleanup_pending_artifact(
+            runtime.as_ref(),
+            network_pair,
+            pipeline,
+            route,
+            &proof_ref,
+        )
+        .await?;
+        register_observer_task(
+            runtime.as_ref(),
+            "task_proposal_cleanup_pending",
+            network_pair,
+            pipeline,
+            &request,
+            RunnerStatus::Running,
+        )
+        .await?;
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string(), route);
+
+        let error = drive_engine_success(
+            &observer,
+            &task_id,
+            &EngineTask::ProveProposal {
+                request,
+                input_task: task_id.clone(),
+            },
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Prove,
+                proof: proof_fixture(),
+            },
+        )
+        .await
+        .expect_err("cleanup-pending proposal publication must retry");
+
+        assert!(matches!(error, EngineObserverError::ProofPublication(_)));
+        let record = runtime
+            .get_task("task_proposal_cleanup_pending")
+            .await?
+            .context("proposal cleanup-pending root")?;
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_cleanup_pending_keeps_root_nonterminal() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-aggregate-cleanup-pending",
+        ))?);
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let request = AggregationTaskRequest {
+            request_id: "cleanup-pending-aggregate".to_string(),
+            proposal_ids: vec![42, 43],
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proof_ref = aggregate_task_ref(pipeline, &request);
+        install_cleanup_pending_artifact(
+            runtime.as_ref(),
+            network_pair,
+            pipeline,
+            route,
+            &proof_ref,
+        )
+        .await?;
+        let metadata = TaskMetadata {
+            network_pair: network_pair.to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(proof_ref.clone()),
+            aggregate_request: Some(request.clone()),
+            aggregate_input_artifacts: vec![
+                AggregateInputProofArtifact {
+                    proof_ref: "aggregate-cleanup-pending-input-42".to_string(),
+                },
+                AggregateInputProofArtifact {
+                    proof_ref: "aggregate-cleanup-pending-input-43".to_string(),
+                },
+            ],
+            runtime: RuntimeMetadata::default(),
+        };
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_aggregate_cleanup_pending".to_string(),
+                pipeline_key: pipeline,
+                route,
+                task_kind: "hoodi_batch".to_string(),
+                network_pair: network_pair.to_string(),
+                artifact_refs: publication_proof_artifact_refs(&metadata, pipeline),
+                metadata: serde_json::to_value(metadata)?,
+                request_fingerprint: "aggregate-cleanup-pending".to_string(),
+            })
+            .await?;
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string(), route);
+        let task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline,
+            request: request.clone(),
+        });
+
+        let error = drive_engine_success(
+            &observer,
+            &task_id,
+            &EngineTask::Aggregate {
+                request,
+                source: raiko2_engine::AggregationSource::Inputs(Vec::new()),
+            },
+            &EngineTaskSuccess::Proof {
+                stage: raiko2_pipeline::PipelineStage::Aggregate,
+                proof: proof_fixture(),
+            },
+        )
+        .await
+        .expect_err("cleanup-pending aggregate publication must retry");
+
+        assert!(
+            matches!(error, EngineObserverError::ProofPublication(_)),
+            "{error:?}"
+        );
+        let record = runtime
+            .get_task("task_aggregate_cleanup_pending")
+            .await?
+            .context("aggregate cleanup-pending root")?;
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
         Ok(())
     }
 
@@ -4215,7 +4331,7 @@ mod tests {
     #[tokio::test]
     async fn transient_success_sync_failure_stays_in_publication_retry_loop() -> Result<()> {
         let artifact_root = unique_runtime_root("runtime-observer-sync-retry-artifacts");
-        let store = Arc::new(InvalidatesDuringPublicationStore {
+        let store = Arc::new(BlocksCanonicalPutStore {
             inner: MemoryProofArtifactStore::new(
                 "shared-environment".to_string(),
                 artifact_root
@@ -4224,10 +4340,9 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             )?,
-            checks: AtomicUsize::new(0),
-            block_on_check: 0,
-            recheck_entered: tokio::sync::Notify::new(),
-            allow_recheck: tokio::sync::Notify::new(),
+            block_next_put: AtomicBool::new(true),
+            put_entered: tokio::sync::Notify::new(),
+            allow_put: tokio::sync::Notify::new(),
         });
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let pipeline = PipelineKey::ShastaNative;
@@ -4276,7 +4391,7 @@ mod tests {
             .await
         });
 
-        store.recheck_entered.notified().await;
+        store.put_entered.notified().await;
         let mut record = runtime
             .get_task("task_sync_retry")
             .await?
@@ -4284,7 +4399,7 @@ mod tests {
         let valid_metadata = record.metadata.clone();
         record.metadata = serde_json::json!({"invalid": true});
         runtime.upsert_task(&record).await?;
-        store.allow_recheck.notify_one();
+        store.allow_put.notify_one();
         tokio::time::sleep(Duration::from_millis(25)).await;
         record.metadata = valid_metadata;
         runtime.upsert_task(&record).await?;
@@ -4313,6 +4428,7 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             )?,
+            block_next_put: AtomicBool::new(true),
             put_entered: tokio::sync::Notify::new(),
             allow_put: tokio::sync::Notify::new(),
         });
@@ -4393,6 +4509,7 @@ mod tests {
                 "test".to_string(),
                 "global-drain-store-write".to_string(),
             )?,
+            block_next_put: AtomicBool::new(true),
             put_entered: tokio::sync::Notify::new(),
             allow_put: tokio::sync::Notify::new(),
         });
@@ -4428,419 +4545,6 @@ mod tests {
         assert!(format!("{error:#}").contains("runtime is draining"));
         Ok(())
     }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn publication_rechecks_shared_tombstone_before_clearing_outbox() -> Result<()> {
-        let artifact_root = unique_runtime_root("runtime-observer-publication-race-artifacts");
-        let store = Arc::new(InvalidatesDuringPublicationStore {
-            inner: MemoryProofArtifactStore::new(
-                "shared-environment".to_string(),
-                artifact_root
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            )?,
-            checks: AtomicUsize::new(0),
-            block_on_check: 1,
-            recheck_entered: tokio::sync::Notify::new(),
-            allow_recheck: tokio::sync::Notify::new(),
-        });
-        let first = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-        let proof_ref = proposal_task_ref(pipeline, &request);
-        let proof = proof_fixture();
-        register_observer_task(
-            first.as_ref(),
-            "task_publication_race",
-            "taiko_dev/ethereum",
-            pipeline,
-            &request,
-            RunnerStatus::Running,
-        )
-        .await?;
-        first
-            .upsert_pending_proof_publication(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &serde_json::to_vec(&proof)?,
-            )
-            .await?;
-        let observer =
-            RuntimeObserver::new(Arc::clone(&first), "taiko_dev/ethereum".to_string(), route);
-
-        let publication = tokio::spawn(async move {
-            drive_engine_success(
-                &observer,
-                &task_id,
-                &EngineTask::ProveProposal {
-                    request,
-                    input_task: task_id.clone(),
-                },
-                &EngineTaskSuccess::Proof {
-                    stage: raiko2_pipeline::PipelineStage::Prove,
-                    proof,
-                },
-            )
-            .await
-        });
-        tokio::time::timeout(Duration::from_secs(1), store.recheck_entered.notified())
-            .await
-            .with_context(|| {
-                format!(
-                    "publication never reached invalidation recheck; observed {} checks",
-                    store.checks.load(Ordering::SeqCst)
-                )
-            })?;
-        let canonical = first
-            .read_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref)
-            .await?
-            .expect("published canonical artifact");
-        first
-            .mark_proof_artifact_descriptor_invalidated(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &canonical.descriptor(),
-            )
-            .await?;
-        store.allow_recheck.notify_one();
-        let error = publication
-            .await?
-            .expect_err("concurrent invalidation must reject publication");
-
-        assert!(matches!(error, EngineObserverError::ProofInvalidated(_)));
-        assert!(
-            first
-                .get_pending_proof_publication("taiko_dev/ethereum", pipeline, route, &proof_ref,)
-                .await?
-                .is_none()
-        );
-        assert!(
-            first
-                .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
-                .await?
-                .is_none()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn artifact_reconciliation_treats_concurrent_local_invalidation_as_cache_miss()
-    -> Result<()> {
-        let artifact_root = unique_runtime_root("runtime-observer-reconcile-race-artifacts");
-        let store = Arc::new(InvalidatesDuringPublicationStore {
-            inner: MemoryProofArtifactStore::new(
-                "shared-environment".to_string(),
-                artifact_root
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            )?,
-            checks: AtomicUsize::new(0),
-            block_on_check: 0,
-            recheck_entered: tokio::sync::Notify::new(),
-            allow_recheck: tokio::sync::Notify::new(),
-        });
-        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let request = proposal_request();
-        let proof_ref = proposal_task_ref(pipeline, &request);
-        let bytes = serde_json::to_vec(&proof_fixture())?;
-        let publication = runtime
-            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
-            .await?;
-        let object = publication
-            .try_object()
-            .expect("proof publication should materialize content")
-            .clone();
-        runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: proof_ref.clone(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: object.proof_uri.clone(),
-                content_hash: object.content_hash.clone(),
-                generation: object.generation,
-            })
-            .await?;
-        let loading_runtime = Arc::clone(&runtime);
-        let loading_ref = proof_ref.clone();
-        let loading = tokio::spawn(async move {
-            crate::server::proof_artifact::load_proof_artifact_material(
-                &loading_runtime,
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &loading_ref,
-                ProofArtifactPayload::Final,
-            )
-            .await
-        });
-        store.recheck_entered.notified().await;
-        runtime
-            .mark_proof_artifact_descriptor_invalidated(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &object.descriptor(),
-            )
-            .await?;
-        store.allow_recheck.notify_one();
-
-        assert!(loading.await??.is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn artifact_reconciliation_tolerates_concurrent_full_invalidation() -> Result<()> {
-        let artifact_root = unique_runtime_root("runtime-observer-full-invalidation-artifacts");
-        let store = Arc::new(InvalidatesDuringPublicationStore {
-            inner: MemoryProofArtifactStore::new(
-                "shared-environment".to_string(),
-                artifact_root
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            )?,
-            checks: AtomicUsize::new(0),
-            block_on_check: 0,
-            recheck_entered: tokio::sync::Notify::new(),
-            allow_recheck: tokio::sync::Notify::new(),
-        });
-        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let proof_ref = proposal_task_ref(pipeline, &proposal_request());
-        let bytes = serde_json::to_vec(&proof_fixture())?;
-        let publication = runtime
-            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
-            .await?;
-        let object = publication
-            .try_object()
-            .expect("proof publication should materialize content")
-            .clone();
-        runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: proof_ref.clone(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: object.proof_uri.clone(),
-                content_hash: object.content_hash.clone(),
-                generation: object.generation,
-            })
-            .await?;
-        let loading_runtime = Arc::clone(&runtime);
-        let loading_ref = proof_ref.clone();
-        let loading = tokio::spawn(async move {
-            crate::server::proof_artifact::load_proof_artifact_material(
-                &loading_runtime,
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &loading_ref,
-                ProofArtifactPayload::Final,
-            )
-            .await
-        });
-
-        store.recheck_entered.notified().await;
-        runtime
-            .mark_proof_artifact_descriptor_invalidated(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &object.descriptor(),
-            )
-            .await?;
-        runtime
-            .delete_proof_artifact(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                object.generation,
-                &object.content_hash,
-            )
-            .await?;
-        runtime
-            .remove_proof_artifact_if_descriptor(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &object.descriptor(),
-            )
-            .await?;
-        store.allow_recheck.notify_one();
-
-        assert!(loading.await??.is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn engine_artifact_loaders_honor_tombstones() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
-            "runtime-observer-tombstone-recovery",
-        ))?);
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-        let proof_ref = proposal_task_ref(pipeline, &request);
-        let bytes = serde_json::to_vec(&proof_fixture())?;
-        let publication = runtime
-            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
-            .await?;
-        let object = publication
-            .try_object()
-            .expect("proof publication should materialize content");
-        runtime
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: proof_ref.clone(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: object.proof_uri.clone(),
-                content_hash: object.content_hash.clone(),
-                generation: object.generation,
-            })
-            .await?;
-        runtime
-            .mark_proof_artifact_descriptor_invalidated(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &object.descriptor(),
-            )
-            .await?;
-        let observer = RuntimeObserver::new(
-            Arc::clone(&runtime),
-            "taiko_dev/ethereum".to_string(),
-            route,
-        );
-
-        assert!(
-            observer
-                .load_completed_proof(
-                    &task_id,
-                    &EngineTask::Proposal {
-                        request: request.clone(),
-                    },
-                )
-                .await
-                .map_err(anyhow::Error::msg)?
-                .is_none()
-        );
-        assert!(
-            observer
-                .load_proof_artifact(&ProofArtifactRef {
-                    network_pair: "taiko_dev/ethereum".to_string(),
-                    pipeline_key: pipeline,
-                    route,
-                    proof_ref,
-                })
-                .await
-                .map_err(anyhow::Error::msg)?
-                .is_none()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn engine_recovery_honors_tombstone_after_restart() -> Result<()> {
-        let artifact_root = unique_runtime_root("runtime-observer-restarted-artifacts");
-        let store: Arc<dyn RuntimeStore> = Arc::new(MemoryProofArtifactStore::new(
-            "shared-environment".to_string(),
-            artifact_root
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        )?);
-        let first = Arc::new(RuntimeManager::with_store(Arc::clone(&store)));
-        let pipeline = PipelineKey::ShastaNative;
-        let route = pipeline.route();
-        let request = proposal_request();
-        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request: request.clone(),
-        });
-        let proof_ref = proposal_task_ref(pipeline, &request);
-        let bytes = serde_json::to_vec(&proof_fixture())?;
-        let publication = first
-            .publish_proof_artifact_bytes("taiko_dev/ethereum", pipeline, route, &proof_ref, &bytes)
-            .await?;
-        let object = publication
-            .try_object()
-            .expect("proof publication should materialize content");
-        first
-            .upsert_proof_artifact(ProofArtifactRegistration {
-                network_pair: "taiko_dev/ethereum".to_string(),
-                proof_ref: proof_ref.clone(),
-                pipeline_key: pipeline,
-                route,
-                proof_uri: object.proof_uri.clone(),
-                content_hash: object.content_hash.clone(),
-                generation: object.generation,
-            })
-            .await?;
-        first
-            .mark_proof_artifact_descriptor_invalidated(
-                "taiko_dev/ethereum",
-                pipeline,
-                route,
-                &proof_ref,
-                &object.descriptor(),
-            )
-            .await?;
-        drop(first);
-
-        let restarted = Arc::new(RuntimeManager::with_store(store));
-        restarted.initialize().await?;
-        let observer = RuntimeObserver::new(
-            Arc::clone(&restarted),
-            "taiko_dev/ethereum".to_string(),
-            route,
-        );
-
-        assert!(
-            observer
-                .load_completed_proof(&task_id, &EngineTask::Proposal { request })
-                .await
-                .map_err(anyhow::Error::msg)?
-                .is_none()
-        );
-        assert!(
-            restarted
-                .get_proof_artifact("taiko_dev/ethereum", pipeline, route, &proof_ref)
-                .await?
-                .is_none()
-        );
-        Ok(())
-    }
-
     #[tokio::test]
     async fn runtime_observer_filters_matching_task_refs_by_network_pair() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(

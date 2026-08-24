@@ -2,7 +2,7 @@ use super::*;
 use alloy_primitives::B256;
 use raiko2_pipeline::PipelineKey;
 use raiko2_pipeline::forks::shasta::preflight_cache::{
-    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightInvalidateResult, CanonicalPreflightKeyV1,
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightKeyV1,
     CanonicalPreflightPutResult, CanonicalPreflightStore,
 };
 use raiko2_primitives::{L2BlockRange, ShastaCheckpoint};
@@ -14,6 +14,17 @@ use std::{
     },
 };
 use tokio::sync::{Barrier, Notify};
+
+#[test]
+fn grpc_not_found_is_classified_as_a_missing_gcs_object() {
+    use google_cloud_gax::error::{
+        Error,
+        rpc::{Code, Status},
+    };
+
+    let error = Error::service(Status::default().set_code(Code::NotFound));
+    assert!(gcs_error_is_not_found(&error));
+}
 
 #[derive(Debug)]
 struct FakeGcsTransport {
@@ -335,12 +346,39 @@ async fn canonical_preflight_publication_roundtrips_and_reuses_identical_content
     );
     let manifest_name = store.canonical_preflight_manifest_name(&key)?;
     assert!(manifest_name.contains("/preflights/v1/"));
+    assert_ne!(
+        store.canonical_preflight_version_prefix(key.schema),
+        store.canonical_preflight_version_prefix(key.schema + 1)
+    );
     let object = first
         .try_object()
         .expect("created canonical preflight object");
     let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
     assert!(content_name.ends_with(".preflight.bincode"));
     assert!(transport.contains(&content_name)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn delayed_incompatible_version_create_is_unreachable_from_current_version() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let incompatible_version = key.schema.saturating_sub(1);
+    let delayed_manifest = format!(
+        "{}/{:x}/manifest.manifest.json",
+        store.canonical_preflight_version_prefix(incompatible_version),
+        key.digest()?
+    );
+    let current_manifest = store.canonical_preflight_manifest_name(&key)?;
+
+    assert_ne!(delayed_manifest, current_manifest);
+    assert!(matches!(
+        transport.create(&delayed_manifest, b"old-version").await?,
+        GcsCreateResult::Created(_)
+    ));
+    assert!(transport.contains(&delayed_manifest)?);
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     Ok(())
 }
 
@@ -437,9 +475,9 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
 
     assert_eq!(
         store
-            .invalidate_canonical_preflight_exact(&key, &first.descriptor())
+            .delete_canonical_preflight_exact(&key, &first.descriptor())
             .await?,
-        CanonicalPreflightInvalidateResult::Invalidated
+        CanonicalPreflightDeleteResult::Removed
     );
     assert!(
         transport.contains(&store.canonical_preflight_content_name(&key, &first.content_hash)?)?
@@ -454,9 +492,9 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
     assert_ne!(first.generation, second.generation);
     assert_eq!(
         store
-            .invalidate_canonical_preflight_exact(&key, &first.descriptor())
+            .delete_canonical_preflight_exact(&key, &first.descriptor())
             .await?,
-        CanonicalPreflightInvalidateResult::Stale
+        CanonicalPreflightDeleteResult::Stale
     );
     assert_eq!(
         store
@@ -480,17 +518,14 @@ async fn canonical_preflight_read_cas_removes_malformed_manifest() -> Result<()>
     let manifest_name = store.canonical_preflight_manifest_name(&key)?;
     transport.replace_bytes(&manifest_name, b"{not-json")?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("malformed manifest must be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("invalid canonical preflight manifest")
-    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&manifest_name)?);
+    assert!(matches!(
+        store
+            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+            .await?,
+        CanonicalPreflightPutResult::Created(_)
+    ));
     Ok(())
 }
 
@@ -508,14 +543,15 @@ async fn canonical_preflight_read_cas_removes_manifest_for_corrupt_content() -> 
     let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
     transport.replace_bytes(&content_name, b"corrupt")?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("corrupt canonical content must be rejected");
-
-    assert!(error.to_string().contains("content hash mismatch"));
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
-    assert!(transport.contains(&content_name)?);
+    assert!(!transport.contains(&content_name)?);
+    assert!(matches!(
+        store
+            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+            .await?,
+        CanonicalPreflightPutResult::Created(_)
+    ));
     Ok(())
 }
 
@@ -556,16 +592,7 @@ async fn canonical_preflight_legacy_manifest_is_removed_and_republished() -> Res
     manifest["content_name"] = serde_json::json!(legacy_content_name);
     transport.replace_bytes(&manifest_name, &serde_json::to_vec(&manifest)?)?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("legacy content name must be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("canonical preflight content object mismatch")
-    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&manifest_name)?);
     assert!(transport.contains(&legacy_content_name)?);
 
@@ -587,7 +614,7 @@ async fn canonical_preflight_legacy_manifest_is_removed_and_republished() -> Res
 }
 
 #[tokio::test]
-async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Result<()> {
+async fn canonical_preflight_read_removes_manifest_with_another_full_key() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = canonical_preflight_key();
@@ -607,17 +634,14 @@ async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Re
         &serde_json::to_vec(&manifest)?,
     )?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("full-key mismatch must be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("canonical preflight key mismatch")
-    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
+    assert!(matches!(
+        store
+            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+            .await?,
+        CanonicalPreflightPutResult::Created(_)
+    ));
     Ok(())
 }
 
@@ -655,8 +679,7 @@ async fn runtime_drain_waits_for_admitted_gcs_preflight_read_repair() -> Result<
         };
 
     transport.allow_delete.notify_one();
-    read.await?
-        .expect_err("malformed manifest must be rejected after fenced repair");
+    assert!(read.await??.is_none());
     if !drained_early {
         draining.await?;
     }
@@ -784,56 +807,60 @@ async fn descriptor_survives_missing_content_through_gcs_seam() -> Result<()> {
 }
 
 #[tokio::test]
-async fn prefix_read_rejects_manifest_with_missing_content() -> Result<()> {
+async fn proof_read_rejects_manifest_with_missing_content() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = key();
-    let proof = br#"{"proof":"0x01"}"#;
-    let first = store
-        .put_if_absent(&key, proof)
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
         .await?
         .try_object()
         .expect("proof publication should materialize content")
         .clone();
-
-    transport.remove(&store.content_name(&key, &first.content_hash))?;
+    transport.remove(&store.content_name(&key, &object.content_hash))?;
 
     let error = store
-        .get_prefix(&key, 64)
+        .get(&key)
         .await
-        .expect_err("dangling manifest must be reported as corruption");
-    assert!(error.to_string().contains("missing content"));
+        .expect_err("a manifest must not resolve without its immutable content");
+    assert!(
+        error
+            .to_string()
+            .contains("proof manifest references missing content")
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn prefix_read_rejects_corrupted_content() -> Result<()> {
+async fn proof_read_rejects_corrupted_content() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = key();
-    let proof = br#"{"proof":"0x01"}"#;
-    let first = store
-        .put_if_absent(&key, proof)
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
         .await?
         .try_object()
         .expect("proof publication should materialize content")
         .clone();
-
     transport.replace_bytes(
-        &store.content_name(&key, &first.content_hash),
-        br#"{"proof":"corrupted"}"#,
+        &store.content_name(&key, &object.content_hash),
+        br#"{"proof":"corrupt"}"#,
     )?;
 
     let error = store
-        .get_prefix(&key, 4)
+        .get(&key)
         .await
-        .expect_err("prefix reads must validate the complete immutable content");
-    assert!(error.to_string().contains("content hash mismatch"));
+        .expect_err("content that does not match the manifest hash must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("proof manifest content hash mismatch")
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn generation_scoped_invalidation_allows_identical_republication() -> Result<()> {
+async fn exact_delete_allows_identical_republication() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(transport)?;
     let key = key();
@@ -845,10 +872,10 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
         .expect("proof publication should materialize content")
         .clone();
 
-    assert!(matches!(
-        store.invalidate_exact(&key, &first.descriptor()).await?,
-        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-    ));
+    assert_eq!(
+        store.delete_exact(&key, &first.descriptor()).await?,
+        ExactDeleteResult::Removed
+    );
     let second = store
         .put_if_absent(&key, proof)
         .await?
@@ -857,10 +884,9 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
         .clone();
 
     assert_ne!(first.generation, second.generation);
-    assert!(store.is_invalidated(&key, &first.descriptor()).await?);
-    assert!(!store.is_invalidated(&key, &second.descriptor()).await?);
-    assert!(
-        store.delete_exact(&key, &first.descriptor()).await.is_err(),
+    assert_eq!(
+        store.delete_exact(&key, &first.descriptor()).await?,
+        ExactDeleteResult::Stale,
         "a stale generation must not delete the replacement manifest"
     );
     assert_eq!(
@@ -875,7 +901,30 @@ async fn generation_scoped_invalidation_allows_identical_republication() -> Resu
 }
 
 #[tokio::test]
-async fn exact_invalidation_recovers_commit_then_error_by_readback() -> Result<()> {
+async fn delete_reports_removed_then_missing_through_gcs_seam() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = key();
+    let object = store
+        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
+        .await?
+        .try_object()
+        .expect("proof publication should materialize content")
+        .clone();
+
+    assert_eq!(
+        store.delete_exact(&key, &object.descriptor()).await?,
+        ExactDeleteResult::Removed
+    );
+    assert_eq!(
+        store.delete_exact(&key, &object.descriptor()).await?,
+        ExactDeleteResult::Missing
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_delete_recovers_commit_then_error_by_readback() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = key();
@@ -888,20 +937,15 @@ async fn exact_invalidation_recovers_commit_then_error_by_readback() -> Result<(
     transport.delete_failure.store(2, Ordering::SeqCst);
 
     assert_eq!(
-        store.invalidate_exact(&key, &object.descriptor()).await?,
-        ExactInvalidationResult::AlreadyInvalidated
+        store.delete_exact(&key, &object.descriptor()).await?,
+        ExactDeleteResult::Removed
     );
-    assert!(store.is_invalidated(&key, &object.descriptor()).await?);
     assert_eq!(store.get_descriptor(&key).await?, None);
-    assert_eq!(
-        store.invalidate_exact(&key, &object.descriptor()).await?,
-        ExactInvalidationResult::AlreadyInvalidated
-    );
     Ok(())
 }
 
 #[tokio::test]
-async fn exact_invalidation_retries_fail_before_commit() -> Result<()> {
+async fn exact_delete_retries_failure_before_commit() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = key();
@@ -914,39 +958,11 @@ async fn exact_invalidation_retries_fail_before_commit() -> Result<()> {
     transport.delete_failure.store(1, Ordering::SeqCst);
 
     let error = store
-        .invalidate_exact(&key, &object.descriptor())
+        .delete_exact(&key, &object.descriptor())
         .await
         .expect_err("a pre-commit delete failure must remain retryable");
     assert!(error.to_string().contains("before commit"));
     assert_eq!(store.get_descriptor(&key).await?, Some(object.descriptor()));
-    assert!(store.is_invalidated(&key, &object.descriptor()).await?);
-    assert!(matches!(
-        store.invalidate_exact(&key, &object.descriptor()).await?,
-        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn delete_reports_removed_then_missing_through_gcs_seam() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(transport)?;
-    let key = key();
-    let object = store
-        .put_if_absent(&key, br#"{"proof":"0x01"}"#)
-        .await?
-        .try_object()
-        .expect("proof publication should materialize content")
-        .clone();
-
-    assert_eq!(
-        store.delete_exact(&key, &object.descriptor()).await?,
-        ProofArtifactDeleteResult::Removed
-    );
-    assert_eq!(
-        store.delete_exact(&key, &object.descriptor()).await?,
-        ProofArtifactDeleteResult::Missing
-    );
     Ok(())
 }
 
@@ -1220,10 +1236,6 @@ async fn namespace_reset_removes_only_the_configured_scope() -> Result<()> {
         .expect("proof publication should materialize content")
         .clone();
     assert!(matches!(
-        store.invalidate_exact(&key, &proof.descriptor()).await?,
-        ExactInvalidationResult::Invalidated(ProofArtifactDeleteResult::Removed)
-    ));
-    assert!(matches!(
         store.store_runtime_state(b"runtime", None).await?,
         RuntimeStateWriteResult::Stored { .. }
     ));
@@ -1245,11 +1257,6 @@ async fn namespace_reset_removes_only_the_configured_scope() -> Result<()> {
 
     assert_eq!(store.reset_namespace().await?, 5);
     assert!(!transport.contains(&store.content_name(&key, &proof.content_hash))?);
-    assert!(!transport.contains(&store.invalidation_name(
-        &key,
-        proof.generation,
-        &proof.content_hash
-    ))?);
     assert!(!transport.contains(&store.runtime_state_name())?);
     assert!(!transport.contains(&store.content_name(&live_key, &live_proof.content_hash))?);
     assert!(!transport.contains(&store.manifest_name(&live_key))?);

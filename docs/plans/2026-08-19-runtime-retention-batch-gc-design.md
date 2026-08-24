@@ -1,5 +1,10 @@
 # Runtime Retention Batch GC Design
 
+> **Superseded artifact-lifecycle details:** The root-retention and batch-selection context remains
+> useful, but its marker-backed artifact invalidation and finalization protocol is no longer current.
+> Use [Tombstone-Free Artifact Lifecycle Design](2026-08-23-tombstone-free-artifact-lifecycle-design.md)
+> for proof reclamation, pending-publication recovery, exact deletion, and restart behavior.
+
 ## Context
 
 The GCS runtime backend persists one authoritative JSON snapshot containing runtime tasks, proof

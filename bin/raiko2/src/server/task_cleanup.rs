@@ -288,6 +288,7 @@ pub(crate) async fn run_runtime_cleanup_pass(
         cleanup_state,
     )
     .await;
+    runtime.sweep_artifact_lifecycle_locks();
     crate::server::telemetry::record_runtime_cleanup_pass(if result.is_ok() {
         "success"
     } else {
@@ -1000,12 +1001,12 @@ mod tests {
     use raiko2_pipeline::PipelineKey;
     use raiko2_queue::{RootOwner, TaskStoreError, decode_task_id, encode_task_id};
     use raiko2_runtime::{
-        ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
-        RuntimeManager, TaskRegistration, TaskRetentionState,
+        ExactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
+        ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
+        TaskRegistration, TaskRetentionState,
         test_support::{
-            ExactInvalidationResult, MemoryProofArtifactStore, ProofObjectStore,
-            RuntimeStateObject, RuntimeStateStore, RuntimeStateWriteResult, RuntimeStoreScope,
+            MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
+            RuntimeStateWriteResult, RuntimeStoreScope,
         },
     };
     use std::collections::HashSet;
@@ -1305,6 +1306,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_pass_sweeps_dead_artifact_lifecycle_locks() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "artifact-lock-sweep",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let route = pipeline.route();
+
+        runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, "control", b"control")
+            .await?;
+        assert_eq!(runtime.sweep_artifact_lifecycle_locks(), 1);
+
+        runtime
+            .publish_proof_artifact_bytes("l1-l2", pipeline, route, "swept", b"swept")
+            .await?;
+        run_runtime_cleanup_pass(
+            runtime.clone(),
+            Arc::new(build_factory(Arc::new(MockEngine::default()))),
+            14_400,
+            7_200,
+            0,
+            &mut RuntimeCleanupLoopState::default(),
+        )
+        .await?;
+
+        assert_eq!(runtime.sweep_artifact_lifecycle_locks(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn orphan_cursor_rolls_back_when_a_page_fails() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphan-cursor"))?);
         let stale = now_ts().saturating_sub(7_201);
@@ -1341,6 +1372,15 @@ mod tests {
         let mut cleanup_state = RuntimeCleanupLoopState::default();
 
         for _ in 0..2 {
+            runtime
+                .publish_proof_artifact_bytes(
+                    "l1-l2",
+                    PipelineKey::ShastaSp1,
+                    PipelineKey::ShastaSp1.route(),
+                    "failed-pass-lock",
+                    b"proof",
+                )
+                .await?;
             let error = run_runtime_cleanup_pass(
                 runtime.clone(),
                 Arc::new(build_factory(failing.clone())),
@@ -1357,6 +1397,7 @@ mod tests {
                     .contains("orphan retention blocked while reconciling task a-orphan")
             );
             assert!(cleanup_state.orphan_cursor.is_none());
+            assert_eq!(runtime.sweep_artifact_lifecycle_locks(), 0);
             assert!(
                 runtime.get_task("terminal-behind-orphan").await?.is_some(),
                 "later retention lanes must remain frozen"
@@ -1702,50 +1743,27 @@ mod tests {
             self.inner.get_descriptor(key).await
         }
 
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
-        }
-
-        async fn invalidate_exact(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ExactInvalidationResult> {
-            if self
-                .fail_invalidation_for
-                .as_deref()
-                .is_some_and(|proof_ref| proof_ref == key.proof_ref)
-            {
-                anyhow::bail!("injected persistent proof artifact invalidation failure");
-            }
-            if self.fail_next_invalidation.swap(false, Ordering::AcqRel) {
-                anyhow::bail!("injected proof artifact invalidation failure");
-            }
-            if self.block_next_invalidation.swap(false, Ordering::AcqRel) {
-                self.invalidation_started.notify_one();
-                self.allow_invalidation.notified().await;
-            }
-            self.inner.invalidate_exact(key, descriptor).await
-        }
-
-        async fn is_invalidated(
-            &self,
-            key: &ProofArtifactKey,
-            descriptor: &ProofArtifactDescriptor,
-        ) -> Result<bool> {
-            self.inner.is_invalidated(key, descriptor).await
-        }
-
         async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
-        ) -> Result<ProofArtifactDeleteResult> {
-            if self.fail_next_delete.swap(false, Ordering::AcqRel) {
+        ) -> Result<ExactDeleteResult> {
+            let is_pending = key.proof_ref.starts_with("__pending__:");
+            if self
+                .fail_invalidation_for
+                .as_deref()
+                .is_some_and(|proof_ref| !is_pending && proof_ref == key.proof_ref)
+            {
+                anyhow::bail!("injected persistent proof artifact deletion failure");
+            }
+            if !is_pending && self.fail_next_invalidation.swap(false, Ordering::AcqRel) {
+                anyhow::bail!("injected proof artifact deletion failure");
+            }
+            if !is_pending && self.block_next_invalidation.swap(false, Ordering::AcqRel) {
+                self.invalidation_started.notify_one();
+                self.allow_invalidation.notified().await;
+            }
+            if is_pending && self.fail_next_delete.swap(false, Ordering::AcqRel) {
                 anyhow::bail!("injected pending proof publication deletion failure");
             }
             self.inner.delete_exact(key, descriptor).await
@@ -2043,8 +2061,7 @@ mod tests {
             .artifact_refs
             .first()
             .context("expired proof reference")?;
-        let artifact =
-            register_runtime_proof_artifact(runtime.as_ref(), &expired, proof_ref).await?;
+        register_runtime_proof_artifact(runtime.as_ref(), &expired, proof_ref).await?;
 
         let mut cleanup_state = RuntimeCleanupLoopState::default();
         let stats = run_runtime_cleanup_pass(
@@ -2069,17 +2086,6 @@ mod tests {
                 .await?
                 .is_none()
         );
-        assert!(
-            runtime
-                .proof_artifact_descriptor_is_invalidated(
-                    &expired.network_pair,
-                    expired.pipeline_key,
-                    expired.route,
-                    proof_ref,
-                    &artifact.descriptor(),
-                )
-                .await?
-        );
         Ok(())
     }
 
@@ -2103,7 +2109,7 @@ mod tests {
             .artifact_refs
             .first()
             .context("legacy proof reference")?;
-        let artifact = register_runtime_proof_artifact(runtime.as_ref(), &root, proof_ref).await?;
+        register_runtime_proof_artifact(runtime.as_ref(), &root, proof_ref).await?;
         assert!(matches!(
             runtime.retire_task_if_unchanged(&root, None).await?,
             raiko2_runtime::RuntimeMutationOutcome::Applied
@@ -2141,17 +2147,6 @@ mod tests {
                 )
                 .await?
                 .is_none()
-        );
-        assert!(
-            runtime
-                .proof_artifact_descriptor_is_invalidated(
-                    &root.network_pair,
-                    root.pipeline_key,
-                    root.route,
-                    proof_ref,
-                    &artifact.descriptor(),
-                )
-                .await?
         );
         Ok(())
     }
@@ -2471,12 +2466,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cleanup_batches_terminal_state_writes() -> Result<()> {
+    async fn runtime_cleanup_batches_roots_while_fencing_each_untracked_canonical() -> Result<()> {
+        const ROOT_COUNT: usize = 3;
         let store = Arc::new(FailOnceInvalidationStore::counting()?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let engine = Arc::new(MockEngine::default());
         let factory = Arc::new(build_factory(engine));
-        for proposal_id in 20..23 {
+        for proposal_id in 20_u64..23 {
             let task_id = format!("expired-{proposal_id}");
             register_runtime_task(
                 runtime.as_ref(),
@@ -2532,9 +2528,12 @@ mod tests {
         .await?;
 
         let writes_after = store.runtime_state_writes.load(Ordering::Acquire);
-        assert_eq!(stats.removed_roots, 3);
-        assert_eq!(stats.removed_pending_publications, 3);
-        assert_eq!(writes_after - writes_before, 2);
+        assert_eq!(stats.removed_roots, ROOT_COUNT);
+        assert_eq!(stats.removed_pending_publications, ROOT_COUNT);
+        // Root and pending-intent removal are each batched once. Every untracked canonical
+        // recovery needs one durable Invalidated write before exact deletion and one exact
+        // finalization write afterwards.
+        assert_eq!(writes_after - writes_before, 2 * ROOT_COUNT + 2);
         Ok(())
     }
 

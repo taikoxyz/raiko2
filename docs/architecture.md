@@ -23,15 +23,14 @@ The architecture is organized around these invariants:
    synchronized to its runtime root.
 4. Proof manifests are create-only and first-valid-wins. Content objects are immutable and addressed
    by SHA-256; a conflicting publication cannot replace the canonical proof.
-5. Invalidation targets one manifest generation and content hash. A later proof lifecycle may publish
-   identical or different bytes under a new manifest generation without reactivating the invalidated
-   generation.
+5. Reclamation targets one manifest generation and content hash. Durable runtime state fences that
+   exact descriptor until conditional deletion and state finalization complete; only then may a
+   later lifecycle publish identical or different bytes under a new manifest generation.
 6. Remote request identifiers are resumable only after their submission checkpoint is durably stored.
    Request-level SP1 retry configuration may lower, but never raise, the operator limit.
 7. One running instance owns one namespace, and old and replacement instances never overlap.
-   Namespaces are isolated persistence domains and never share tasks, artifacts, checkpoints, or
-   invalidation markers. Multiple roots inside the same namespace may reference the same canonical
-   proof artifact.
+   Namespaces are isolated persistence domains and never share tasks, artifacts, or checkpoints.
+   Multiple roots inside the same namespace may reference the same canonical proof artifact.
 8. The namespace fence is global to the instance and namespace, never scoped to an individual task.
    It controls admission to short authoritative commits and external writes. Draining closes that
    admission immediately and waits only for commits already in progress plus pre-authorized provider
@@ -43,7 +42,7 @@ The architecture is organized around these invariants:
 10. Runtime-state revisions and GCS object generations belong to storage. A runtime-state generation
     is the CAS identity for one snapshot; serialized JSON byte order is not identity. Runtime-state
     generations are repository-internal, while an artifact manifest generation is exposed only
-    inside an exact artifact descriptor for conditional invalidation or deletion. Neither grants
+    inside an exact artifact descriptor for conditional deletion. Neither grants
     runtime authority.
 11. Durable execution metadata is a hard-cut schema. Canonical proposal and aggregate requests are
     required; proposal fields, task references, aggregate flags, and artifact indexes are validated
@@ -422,11 +421,9 @@ The GCS backend uses this runtime object layout:
   proofs/<pipeline>/<route>/<network-pair>/<proof-ref>/
     manifest.manifest.json
     content/<sha256>.proof.json
-    invalidated/<manifest-generation>-<sha256>.tombstone
-  preflights/v1/<key-hash>/
+  preflights/v<compatibility-version>/<key-hash>/
     manifest.manifest.json
     content/<sha256>.preflight.bincode
-    invalidated/<manifest-generation>-<sha256>.tombstone
 ```
 
 Components are encoded before becoming object-name segments. The manifest contains only the selected
@@ -496,9 +493,10 @@ sequenceDiagram
     Publish->>State: Remove unowned publication intent
     Publish->>Queue: Finish lease
   else No eligible owner remains
-    Publish->>Objects: Invalidate exact canonical descriptor and pending blob
-    Publish->>State: Remove unowned publication intent
-    Publish->>Queue: Finish as invalidated
+    Publish->>State: Persist Invalidated(exact descriptor)
+    Publish->>Objects: Delete exact manifest and pending blob
+    Publish->>State: Remove exact invalidated record and unowned intent
+    Publish->>Queue: Finish without publishing
   end
   alt A transient step fails
     Publish-->>Engine: Retry publication from checkpointed payload
@@ -509,14 +507,15 @@ Any transient error before convergence leaves enough state to retry. Publication
 and retain the proof in the queue payload. A proof publication invalidated by cancellation is a real
 terminal outcome and is not retried as a successful artifact.
 
-## Cancellation And Exact Invalidation
+## Cancellation And Exact Reclamation
 
 Cancellation is authoritative-state first. `ProofLifecycle` conditionally moves the exact root
 `TaskLifetime` to `Cancelled`; a stale or terminal lifetime is left unchanged. Only after that commit
 does it detach the `RootOwner` from the execution projection. Shared nodes retain their other owners,
 while nodes whose last owner left are cancelled or removed. A detach or object-store failure is
 recorded as an incomplete effect for reconciliation and never causes the cancelled root to be rolled
-back.
+back. A retained terminal task continues to own its artifact until terminal-task retention removes
+the exact task record; cancellation does not directly delete a shared proof manifest.
 
 ```mermaid
 sequenceDiagram
@@ -525,7 +524,6 @@ sequenceDiagram
   participant Lifecycle as ProofLifecycle
   participant State as RuntimeStateRepository
   participant Queue as ExecutionProjection
-  participant Objects as ProofObjectRepository
 
   Caller->>Lifecycle: cancel(TaskLifetime)
   Lifecycle->>State: cancel_if_current(TaskLifetime)
@@ -533,53 +531,38 @@ sequenceDiagram
   alt Applied or AlreadyApplied
     Lifecycle->>Queue: detach(RootOwner)
     Queue-->>Lifecycle: Detached or AlreadyDetached
-    Lifecycle->>State: reserve_invalidation_if_unowned(expectation)
-    alt No live owner remains
-      State-->>Lifecycle: Applied with exact descriptor
-      Lifecycle->>Objects: invalidate_exact(descriptor)
-    else Artifact is still shared
-      State-->>Lifecycle: BlockedByLiveOwner
-    end
   end
   Lifecycle-->>Caller: Converged or retryable partial effect
 ```
 
-Administrative invalidation uses the same exact protocol but is a distinct command. Runtime state
-first reserves invalidation for an `ArtifactExpectation` and proves that no live root owns it. Only
-an `Applied` or `AlreadyApplied` reservation may create a tombstone and conditionally remove the
-manifest and pending blob. Immutable content bytes are retained; invalidation is never a content-wide
-delete or ban.
+Proof artifact reclamation is an ownership-driven three-phase operation. There is no online
+administrative endpoint for range- or prefix-selective artifact deletion.
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Admin
-  participant Lifecycle as ProofLifecycle
+  participant Cleanup as Retention/Reconciliation
+  participant Locks as Keyed lifecycle locks
   participant State as RuntimeStateRepository
   participant Objects as ProofObjectRepository
 
-  Admin->>Lifecycle: invalidate(ArtifactExpectation)
-  Lifecycle->>State: reserve_invalidation(expectation)
-  alt A live matching root exists
-    State-->>Lifecycle: BlockedByLiveOwner
-    Lifecycle-->>Admin: Not invalidated
-  else Exact descriptor is reserved
-    State-->>Lifecycle: Applied or AlreadyApplied
-    Lifecycle->>Objects: Create tombstone(key, generation, sha256)
-    Lifecycle->>Objects: Delete manifest with generation precondition
-    Lifecycle->>Objects: Delete exact pending blob if present
-    Lifecycle->>State: finalize_invalidation(expectation)
-    State-->>Lifecycle: Applied or AlreadyApplied
-    Lifecycle-->>Admin: Invalidated
-  end
+  Cleanup->>Locks: Acquire selected keys in deterministic order
+  Cleanup->>State: Recheck ownership and mark Invalidated(exact descriptor)
+  State-->>Cleanup: Prepared exact expectations
+  Cleanup->>Locks: Release keys
+  Cleanup->>Objects: Delete exact manifest generations
+  Objects-->>Cleanup: Removed, Missing, Stale, or Failure
+  Cleanup->>Locks: Reacquire successfully finalized keys
+  Cleanup->>State: Remove unchanged Invalidated records and unowned intents
+  Cleanup->>Locks: Release keys
 ```
 
-If generation A is invalidated, a later lifecycle may create generation B with identical or different
-content. Reads of A remain invalidated because its exact `(logical key, manifest generation,
-content hash)` descriptor differs from B. Conditional deletion prevents delayed cancellation or
-cleanup from deleting a replacement manifest. If the pending blob is already missing while its
-durable intent remains, cancellation still reconciles the canonical manifest by its exact descriptor
-before invalidating it.
+Keyed locks cover only the authoritative state transitions, never slow object-store I/O. While
+generation A is `Invalidated`, same-key publication returns a retryable cleanup-pending outcome and
+does not write content or a manifest. `Removed` and `Missing` permit Phase 3; `Stale` and transport
+failure retain the exact runtime record for retry. Only after Phase 3 removes that record may a later
+lifecycle publish generation B. Conditional deletion prevents an old cleanup candidate from deleting
+a changed manifest.
 
 ## Restart And Failure Recovery
 
@@ -599,12 +582,12 @@ flowchart TD
   Canonical -->|no| Publish[Retry canonical publication]
   Canonical -->|yes| Activated{Exact descriptor activated?}
   Activated -->|no, live owner| Activate[Activate and complete current owner]
-  Activated -->|no owner| Invalidate[Invalidate exact descriptor]
+  Activated -->|no owner| Reclaim[Persist Invalidated, exact-delete, then finalize]
   Activated -->|yes| Validate[Validate readable active descriptor]
   GC --> Project
   Publish --> Project
   Activate --> Project
-  Invalidate --> Project
+  Reclaim --> Project
   Validate --> Project[Rebuild owner-aware task graph from active roots]
   Project --> Resume[Resume durable provider checkpoints and work]
   Resume --> Start[Start workers and maintenance]
@@ -619,13 +602,13 @@ Important recovery cases are:
 | Root cancelled or failed, projection still attached | Detach its owner; remove only nodes with no remaining owner |
 | Publication intent exists, pending blob missing | Re-materialize it from the retained queue payload, or re-run the proof after restart |
 | Publication intent exists, canonical manifest missing | Retry create-only publication from the retained payload |
-| Canonical manifest exists, activation missing | Activate for still-current exact intent owners, or invalidate when none remain |
+| Canonical manifest exists, activation missing | Activate for still-current exact intent owners, or persist `Invalidated` and reclaim it when none remain |
 | Activation exists, queue completion missing | Finish or remove the queue projection idempotently |
 | Canonical artifact exists, registration missing | Validate and restore registration before considering reproof |
 | Proof is computed, publication incomplete | Retry `PublishProof` with the retained normalized proof |
 | Runtime root non-terminal, engine state terminal or missing | Re-enqueue if no active engine state blocks it |
 | Remote request checkpoint exists | Resume the recorded request and attempt budget |
-| Cancellation raced a committed artifact | Invalidate and conditionally remove the committed generation |
+| Cancellation raced a committed artifact | Preserve retained-root ownership, then reclaim the exact generation when ownership expires |
 | Manifest references missing content | Surface integrity failure; identical publication may repair content |
 
 ## Remote Prover Checkpoints And Cost Policy
@@ -772,8 +755,8 @@ operator can identify the failed boundary without inferring it from the aggregat
 - Terminal root records use a configurable retention window with a six-hour default. Artifact
   manifests and pending publication intents, including external aggregation inputs, have independent
   ownership-driven reclamation and retry lifecycles.
-- Generation-scoped invalidation markers and unreferenced content must outlive the longest retry,
-  recovery, and cleanup window; the current operational minimum is 30 days.
+- Unreferenced immutable content must outlive the longest retry, recovery, and cleanup window and is
+  eventually reclaimed by bucket lifecycle after its manifest is gone.
 - Runtime state is control-plane data and must not share artifact garbage-collection rules.
 - GCS and memory are alternative authoritative backends. The server does not dual-write or fail over
   automatically between them.

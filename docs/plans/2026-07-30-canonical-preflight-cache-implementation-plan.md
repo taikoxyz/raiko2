@@ -1,5 +1,11 @@
 # Canonical Preflight Cache Implementation Plan
 
+> **Superseded artifact invalidation guidance:** The canonical-cache architecture remains historical
+> context, but `POST /v4/prover/invalidate-artifacts` and its range/prefix workflow were removed by
+> `docs/plans/2026-08-23-tombstone-free-artifact-lifecycle-design.md`. Current operations use automatic
+> retention or an explicitly broad, one-shot startup cleanup with the documented runtime-state blast
+> radius.
+
 **Goal:** Share one validated Shasta preflight result across all proof lanes and replace full startup namespace deletion with exact `proof` and `preflight` cleanup scopes.
 
 **Architecture:** Add a versioned, lane-independent canonical preflight core and deterministic key

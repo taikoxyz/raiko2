@@ -83,6 +83,9 @@ python scripts/regression/stress_shasta_proposal.py \
 For a known proposal-id range against the devnet host, discover full metadata first and then submit
 to the local `raiko2` API:
 
+For real v4 proposal plus aggregate service validation, use the repository-local
+`raiko2-service-regression` skill. The commands below show base-proof requests only.
+
 ```bash
 ids=$(seq -s, 203 302)
 
@@ -107,6 +110,8 @@ python3 scripts/regression/stress_shasta_proposal.py \
   --raiko-rpc http://127.0.0.1:18080 \
   --proposal-ids "$ids" \
   --prove-type sgx \
+  --api-version v4 \
+  --prover 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --polling-interval 5 \
   --log-file /tmp/devnet-sgx-203-302.log
 
@@ -118,6 +123,8 @@ python3 scripts/regression/stress_shasta_proposal.py \
   --raiko-rpc http://127.0.0.1:18080 \
   --proposal-ids "$ids" \
   --prove-type sgxgeth \
+  --api-version v4 \
+  --prover 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --polling-interval 5 \
   --log-file /tmp/devnet-sgxgeth-203-302.log
 ```

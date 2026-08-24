@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -17,10 +18,12 @@ if not hasattr(web3_middleware, "ExtraDataToPOAMiddleware"):
 from stress_shasta_proposal import (
     BatchMonitor,
     DEFAULT_CHAIN_SPEC_LIST,
+    DEFAULT_PROVER,
     DEFAULT_SHASTA_ANCHOR_ABI,
     DEFAULT_SHASTA_IINBOX_ABI,
     MAX_BLOCKS_PER_PROPOSAL,
     ProposalGroup,
+    RaikoResponse,
     build_discovered_proposal_record,
     parse_proposal_ids,
     resolve_monitor_config,
@@ -162,8 +165,10 @@ class TestBatchMonitorPayload(unittest.TestCase):
     def make_monitor(self, prove_type):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.prove_type = prove_type
+        monitor.prover = DEFAULT_PROVER
         monitor.network = "taiko_hoodi"
         monitor.l1_network = "hoodi"
+        monitor.api_version = "v3"
         return monitor
 
     def test_payload_includes_network_pair(self):
@@ -187,6 +192,15 @@ class TestBatchMonitorPayload(unittest.TestCase):
 
         self.assertEqual(payload["proof_type"], "sp1")
         self.assertIn("sp1", payload)
+
+    def test_v4_payload_uses_configured_prover(self):
+        monitor = self.make_monitor("sgx")
+        monitor.api_version = "v4"
+        monitor.prover = "0x1111111111111111111111111111111111111111"
+
+        payload = monitor.generate_post_data([], aggregate=False)
+
+        self.assertEqual(payload["prover"], monitor.prover)
 
 
 class TestBatchMonitorProposalIdSearch(unittest.IsolatedAsyncioTestCase):
@@ -386,8 +400,10 @@ class TestBatchMonitorRequestPayload(unittest.TestCase):
     def test_generate_post_data_omits_legacy_public_prover_args_for_sgx(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.prove_type = "sgx"
+        monitor.prover = DEFAULT_PROVER
         monitor.network = "taiko_hoodi"
         monitor.l1_network = "hoodi"
+        monitor.api_version = "v3"
 
         payload = monitor.generate_post_data(
             [
@@ -412,8 +428,10 @@ class TestBatchMonitorRequestPayload(unittest.TestCase):
     def test_generate_post_data_keeps_sp1_public_prover_args_for_sp1(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.prove_type = "sp1"
+        monitor.prover = DEFAULT_PROVER
         monitor.network = "taiko_hoodi"
         monitor.l1_network = "hoodi"
+        monitor.api_version = "v3"
 
         payload = monitor.generate_post_data(
             [
@@ -430,6 +448,139 @@ class TestBatchMonitorRequestPayload(unittest.TestCase):
 
         self.assertEqual(payload["proof_type"], "sp1")
         self.assertIn("sp1", payload)
+
+
+class TestBatchMonitorProposalResults(unittest.IsolatedAsyncioTestCase):
+    def make_monitor(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.watch_mode = False
+        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.log_file = None
+        monitor.running_count = 1
+        monitor.timeout = 1
+        monitor.max_retries = 1
+        monitor.task_polling_interval = 0
+        monitor.aggregate = 0
+        monitor.pending_proposals = []
+        monitor.network = "taiko_test"
+        monitor.l1_network = "l1_test"
+        return monitor
+
+    async def test_process_proposal_group_reports_failure(self):
+        monitor = self.make_monitor()
+        monitor.submit_to_raiko = mock.AsyncMock()
+        monitor.query_raiko_status = mock.AsyncMock(
+            return_value=RaikoResponse(status="error", message="remote failed")
+        )
+
+        completed = await monitor.process_proposal_group(
+            ProposalGroup(proposal_id=41, anchor_number=90, l2_block_numbers=[100]),
+            l1_inclusion_block=80,
+            last_anchor_block_number=99,
+        )
+
+        self.assertFalse(completed)
+
+    async def test_process_proposal_group_stops_on_terminal_task_status(self):
+        monitor = self.make_monitor()
+        monitor.submit_to_raiko = mock.AsyncMock()
+        monitor.query_raiko_status = mock.AsyncMock(
+            return_value=RaikoResponse(
+                status="ok",
+                data={"status": "failed", "error": "remote rejected proof"},
+            )
+        )
+
+        completed = await monitor.process_proposal_group(
+            ProposalGroup(proposal_id=41, anchor_number=90, l2_block_numbers=[100]),
+            l1_inclusion_block=80,
+            last_anchor_block_number=99,
+        )
+
+        self.assertFalse(completed)
+        monitor.query_raiko_status.assert_awaited_once()
+
+    async def test_process_proposal_group_reports_completion(self):
+        monitor = self.make_monitor()
+        monitor.submit_to_raiko = mock.AsyncMock()
+        monitor.query_raiko_status = mock.AsyncMock(
+            return_value=RaikoResponse(
+                status="ok",
+                data={"status": "completed", "proof": "0x1234"},
+            )
+        )
+
+        completed = await monitor.process_proposal_group(
+            ProposalGroup(proposal_id=41, anchor_number=90, l2_block_numbers=[100]),
+            l1_inclusion_block=80,
+            last_anchor_block_number=99,
+        )
+
+        self.assertTrue(completed)
+
+    async def test_process_proposal_group_rejects_unknown_status_with_proof(self):
+        monitor = self.make_monitor()
+        monitor.submit_to_raiko = mock.AsyncMock()
+        monitor.query_raiko_status = mock.AsyncMock(
+            return_value=RaikoResponse(
+                status="ok",
+                data={"status": "unexpected", "proof": "0x1234"},
+            )
+        )
+
+        completed = await monitor.process_proposal_group(
+            ProposalGroup(proposal_id=41, anchor_number=90, l2_block_numbers=[100]),
+            l1_inclusion_block=80,
+            last_anchor_block_number=99,
+        )
+
+        self.assertFalse(completed)
+        monitor.query_raiko_status.assert_awaited_once()
+
+    async def test_process_proposal_group_accepts_completed_without_inline_proof(self):
+        monitor = self.make_monitor()
+        monitor.submit_to_raiko = mock.AsyncMock()
+        monitor.query_raiko_status = mock.AsyncMock(
+            return_value=RaikoResponse(
+                status="ok",
+                data={"status": "completed", "proof": None},
+            )
+        )
+
+        completed = await monitor.process_proposal_group(
+            ProposalGroup(proposal_id=41, anchor_number=90, l2_block_numbers=[100]),
+            l1_inclusion_block=80,
+            last_anchor_block_number=99,
+        )
+
+        self.assertTrue(completed)
+        monitor.query_raiko_status.assert_awaited_once()
+
+    async def test_process_proposal_ids_rejects_partial_discovery(self):
+        monitor = self.make_monitor()
+        monitor.anchor_info_cache = {}
+        monitor.proposal_ids = [41, 42]
+        monitor.discover_only = True
+        monitor.discovered_proposals = []
+        monitor.proposal_out = None
+
+        async def discover(proposal_id):
+            if proposal_id == 41:
+                return ProposalGroup(
+                    proposal_id=41,
+                    anchor_number=90,
+                    l2_block_numbers=[100],
+                )
+            return None
+
+        monitor.discover_proposal_group_by_id = discover
+        monitor.find_l1_inclusion_block_by_indexed_proposal_id = lambda _proposal_id: 80
+        monitor.get_last_anchor_block_number = mock.AsyncMock(return_value=99)
+
+        with mock.patch("builtins.print"):
+            completed = await monitor.process_proposal_ids()
+
+        self.assertFalse(completed)
 
 
 class TestStressDiscoveryOutput(unittest.TestCase):

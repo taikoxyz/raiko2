@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).with_name("v4_aggregate.py")
@@ -84,15 +85,25 @@ class V4AggregateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "contiguous"):
             MODULE.load_discovered_proposals(path)
 
+    def test_rejects_incomplete_discovery(self):
+        path = self.write_discovery(discovery_payload(41, 42))
+
+        with self.assertRaisesRegex(ValueError, "requested proposal IDs"):
+            MODULE.load_discovered_proposals(path, expected_proposal_ids=[41, 42, 43])
+
     def test_polls_same_v4_aggregate_request_until_completed(self):
         AggregateHandler.requests = []
         AggregateHandler.responses = [
             {
                 "status": "ok",
+                "proposal_id_start": 41,
+                "proposal_id_end": 42,
                 "data": {"task_id": "task_example", "status": "registered", "proof": None},
             },
             {
                 "status": "ok",
+                "proposal_id_start": 41,
+                "proposal_id_end": 42,
                 "data": {
                     "task_id": "task_example",
                     "status": "completed",
@@ -120,11 +131,15 @@ class V4AggregateTests(unittest.TestCase):
                 poll_interval=0,
                 timeout=5,
                 request_timeout=2,
+                expected_proposal_ids=[41, 42],
+                transport_retries=0,
+                retry_backoff=0,
             )
 
         self.assertEqual("completed", result["status"])
         self.assertEqual("task_example", result["task_id"])
         self.assertEqual(2, result["proof_bytes"])
+        self.assertGreaterEqual(result["elapsed_seconds"], 0)
         self.assertEqual(2, len(AggregateHandler.requests))
         self.assertTrue(
             all(request["path"] == "/v4/proof/proposal" for request in AggregateHandler.requests)
@@ -137,6 +152,146 @@ class V4AggregateTests(unittest.TestCase):
         )
         self.assertEqual(AggregateHandler.requests[0]["body"], AggregateHandler.requests[1]["body"])
         self.assertNotIn("secret-value", output.getvalue())
+
+    def test_retries_transient_transport_failure(self):
+        path = self.write_discovery(discovery_payload(41, 42))
+        completed = {
+            "status": "ok",
+            "proposal_id_start": 41,
+            "proposal_id_end": 42,
+            "data": {
+                "task_id": "task_example",
+                "status": "completed",
+                "proof": "0x1234",
+            },
+        }
+
+        with redirect_stdout(StringIO()):
+            with mock.patch.object(
+                MODULE,
+                "_post_json",
+                side_effect=[MODULE.TransportError("connection reset"), completed],
+            ) as post:
+                result = MODULE.run_aggregate(
+                    raiko_rpc="http://127.0.0.1:1",
+                    proposal_file=path,
+                    proof_type="sgx",
+                    prover="0x0000000000000000000000000000000000000000",
+                    api_key_env="",
+                    poll_interval=0,
+                    timeout=5,
+                    request_timeout=2,
+                    expected_proposal_ids=[41, 42],
+                    transport_retries=1,
+                    retry_backoff=0,
+                )
+
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(2, post.call_count)
+
+    def test_transport_retry_does_not_cross_overall_deadline(self):
+        path = self.write_discovery(discovery_payload(41, 42))
+        completed = {
+            "status": "ok",
+            "proposal_id_start": 41,
+            "proposal_id_end": 42,
+            "data": {
+                "task_id": "task_example",
+                "status": "completed",
+                "proof": "0x1234",
+            },
+        }
+        clock = [0.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with redirect_stdout(StringIO()):
+            with mock.patch.object(MODULE.time, "monotonic", side_effect=lambda: clock[0]):
+                with mock.patch.object(MODULE.time, "sleep", side_effect=sleep):
+                    with mock.patch.object(
+                        MODULE,
+                        "_post_json",
+                        side_effect=[MODULE.TransportError("connection reset"), completed],
+                    ) as post:
+                        with self.assertRaisesRegex(TimeoutError, "timed out"):
+                            MODULE.run_aggregate(
+                                raiko_rpc="http://127.0.0.1:1",
+                                proposal_file=path,
+                                proof_type="sgx",
+                                prover="0x0000000000000000000000000000000000000000",
+                                api_key_env="",
+                                poll_interval=0,
+                                timeout=5,
+                                request_timeout=2,
+                                expected_proposal_ids=[41, 42],
+                                transport_retries=1,
+                                retry_backoff=5,
+                            )
+
+        self.assertEqual(1, post.call_count)
+
+    def test_progress_output_is_flushed(self):
+        path = self.write_discovery(discovery_payload(41, 42))
+        completed = {
+            "status": "ok",
+            "proposal_id_start": 41,
+            "proposal_id_end": 42,
+            "data": {
+                "task_id": "task_example",
+                "status": "completed",
+                "proof": "0x1234",
+            },
+        }
+
+        with mock.patch.object(MODULE, "_post_json", return_value=completed):
+            with mock.patch("builtins.print") as printer:
+                MODULE.run_aggregate(
+                    raiko_rpc="http://127.0.0.1:1",
+                    proposal_file=path,
+                    proof_type="sgx",
+                    prover="0x0000000000000000000000000000000000000000",
+                    api_key_env="",
+                    poll_interval=0,
+                    timeout=5,
+                    request_timeout=2,
+                    expected_proposal_ids=[41, 42],
+                    transport_retries=0,
+                    retry_backoff=0,
+                )
+
+        self.assertTrue(printer.call_args_list)
+        self.assertTrue(all(call.kwargs.get("flush") is True for call in printer.call_args_list))
+
+    def test_rejects_server_echoed_proposal_range_mismatch(self):
+        path = self.write_discovery(discovery_payload(41, 42))
+        mismatched = {
+            "status": "ok",
+            "proposal_id_start": 41,
+            "proposal_id_end": 43,
+            "data": {
+                "task_id": "task_example",
+                "status": "completed",
+                "proof": "0x1234",
+            },
+        }
+
+        with redirect_stdout(StringIO()):
+            with mock.patch.object(MODULE, "_post_json", return_value=mismatched):
+                with self.assertRaisesRegex(RuntimeError, "proposal_id_end"):
+                    MODULE.run_aggregate(
+                        raiko_rpc="http://127.0.0.1:1",
+                        proposal_file=path,
+                        proof_type="sgx",
+                        prover="0x0000000000000000000000000000000000000000",
+                        api_key_env="",
+                        poll_interval=0,
+                        timeout=5,
+                        request_timeout=2,
+                        expected_proposal_ids=[41, 42],
+                        transport_retries=0,
+                        retry_backoff=0,
+                    )
 
 
 if __name__ == "__main__":

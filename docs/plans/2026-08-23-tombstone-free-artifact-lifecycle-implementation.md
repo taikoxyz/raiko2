@@ -649,12 +649,14 @@ it. Do not change active-task clear behavior.
 Update `docs/API.md` so operator guidance points to:
 
 - `/v4/prover/clear` for active work;
-- `runtime.startup_cleanup = ["proof"]` plus a non-overlapping restart for exceptional terminal-proof cleanup;
+- `runtime.startup_cleanup = ["proof"]` plus a non-overlapping restart for exceptional
+  namespace-wide runtime-state and terminal-proof cleanup;
 - retention for normal terminal cleanup.
 
-Document that endpoint removal deliberately gives up online range/prefix-selective cleanup and may
-require namespace-wide reproving after clients resubmit. This is an accepted operational tradeoff,
-not a tombstone-free correctness requirement.
+Document that endpoint removal deliberately gives up online range/prefix-selective cleanup. The
+replacement startup scope deletes every task and provider checkpoint with the runtime-state snapshot
+before proof manifests, so client resubmission may both reprove and duplicate paid provider work.
+This is an accepted operational tradeoff, not a tombstone-free correctness requirement.
 
 **Step 4: Run server tests**
 
@@ -724,10 +726,13 @@ Document the old preflight-version cleanup procedure in `docs/operations.md`:
 2. after rollback is closed, treat that old `preflights/vN/` prefix as frozen;
 3. list only `manifest.manifest.json` objects and record each observed generation;
 4. delete exactly those generations without touching current-version manifests or immutable content;
-5. let the existing immutable-content lifecycle reclaim newly unreachable payloads.
+5. let the explicitly configured `.preflight.bincode` immutable-content lifecycle reclaim newly
+   unreachable payloads.
 
 Explicitly preserve the rule that active/current preflight manifests must not have an age-based GCS
-lifecycle policy. Do not change bucket configuration from this repository.
+lifecycle policy. Record a rollout gate that rejects a generic `.json` age rule covering those
+manifests and requires an explicit finite-retention rule for `.preflight.bincode` content. Do not
+change bucket configuration from this repository.
 
 **Step 4: Run telemetry and documentation checks**
 
@@ -822,7 +827,8 @@ Before merge, record these operator checks in the PR description:
 - historical tombstones remain during the binary rollback window;
 - after the rollback window, delete old marker objects with a scoped generation-aware operation;
 - removal of online selective invalidation is accepted; exceptional terminal-proof cleanup uses
-  `runtime.startup_cleanup = ["proof"]` and a non-overlapping restart;
+  `runtime.startup_cleanup = ["proof"]` and a non-overlapping restart, with the accepted blast radius
+  of all runtime tasks, artifact records, pending publications, and provider checkpoints;
 - monitor cleanup-pending, invalidated-record age, exact-delete failures, lock wait, and runtime-state
   CAS failures.
 

@@ -120,8 +120,9 @@ window, retain manifests under the old version prefix. After that window closes 
 frozen, an operator lists only `manifest.manifest.json` objects under the old
 `preflights/vN/` prefix and deletes the observed generations conditionally. Active/current-version
 preflight manifests must never receive an age-based lifecycle rule. Immutable content made
-unreachable by old-manifest removal is reclaimed by its existing bucket lifecycle rule; read
-correctness never depends on deleting old-version objects first.
+unreachable by old-manifest removal is reclaimed by a bucket lifecycle rule configured before
+rollout for the exact `.preflight.bincode` suffix; read correctness never depends on deleting
+old-version objects first.
 
 ### Keep proof invalidation authority in runtime state
 
@@ -297,8 +298,10 @@ Remove:
 Removing the endpoint is an explicit operational simplification, not a requirement of removing
 tombstones. The accepted incident path for a bad terminal artifact is
 `runtime.startup_cleanup = ["proof"]` followed by a non-overlapping restart. Its blast radius is the
-configured runtime namespace's proof manifests, it may require reproving after clients resubmit, and
-preflight objects remain untouched unless `preflight` is separately selected.
+configured namespace's entire runtime-state snapshot plus proof manifests: all tasks, artifact
+records, pending publications, and Boundless/SP1 provider-request checkpoints are discarded. Existing
+remote requests continue, so client resubmission may duplicate paid proving work. Preflight objects
+remain untouched unless `preflight` is separately selected.
 
 Retain:
 
@@ -406,16 +409,19 @@ count is a migration metric, not runtime authority.
 1. Merge the runtime and API changes with proof/preflight marker reads and writes fully removed.
 2. Verify deployment manifests enforce one replica, `Recreate`, and unique namespaces for parallel
    canary and production services.
-3. Confirm that every release containing an incompatible preflight semantic or format change bumps
+3. Inspect the target bucket lifecycle policy before enabling shared preflight caching. Remove or
+   narrow any generic `.json` age rule that reaches the active `preflights/vN/` manifest prefix, and
+   add a finite-retention rule that explicitly matches immutable `.preflight.bincode` content.
+4. Confirm that every release containing an incompatible preflight semantic or format change bumps
    the canonical preflight cache compatibility version.
-4. Deploy canary, then production, and observe invalidated-record age, exact-delete failures,
+5. Deploy canary, then production, and observe invalidated-record age, exact-delete failures,
    cleanup-pending responses, keyed-lock wait time, and runtime-state CAS failures.
-5. Keep historical tombstones and old preflight-version objects during the binary rollback window.
+6. Keep historical tombstones and old preflight-version objects during the binary rollback window.
    The new binary ignores old markers and cannot address old-version preflights.
-6. After the rollback window, remove existing `invalidated/*.tombstone` objects and manifests under
+7. After the rollback window, remove existing `invalidated/*.tombstone` objects and manifests under
    each frozen old `preflights/vN/` prefix with scoped, generation-aware operational cleanup. Do not
    add an age-based lifecycle rule to the active/current preflight manifest prefix.
-7. Remove tombstone-specific bucket lifecycle rules only after historical markers are gone. Keep
+8. Remove tombstone-specific bucket lifecycle rules only after historical markers are gone. Keep
    lifecycle rules for immutable proof and preflight content.
 
 Rollback to a tombstone-reading binary after historical markers are deleted is unsupported. Rollback

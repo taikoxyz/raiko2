@@ -54,13 +54,6 @@ impl ProofArtifactObject {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProofArtifactPrefix {
-    pub proof_uri: String,
-    pub generation: Option<i64>,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProofArtifactPutResult {
     Created(ProofArtifactObject),
     AlreadyExists(ProofArtifactObject),
@@ -209,11 +202,6 @@ pub trait ProofObjectStore: RuntimeStoreScope {
         &self,
         key: &ProofArtifactKey,
     ) -> Result<Option<ProofArtifactDescriptor>>;
-    async fn get_prefix(
-        &self,
-        key: &ProofArtifactKey,
-        max_bytes: usize,
-    ) -> Result<Option<ProofArtifactPrefix>>;
     async fn delete_exact(
         &self,
         key: &ProofArtifactKey,
@@ -573,22 +561,6 @@ impl ProofObjectStore for MemoryProofArtifactStore {
             proof_uri: self.content_uri(key, &manifest.content_hash),
             content_hash: manifest.content_hash.clone(),
             generation: Some(manifest.generation),
-        }))
-    }
-
-    async fn get_prefix(
-        &self,
-        key: &ProofArtifactKey,
-        max_bytes: usize,
-    ) -> Result<Option<ProofArtifactPrefix>> {
-        anyhow::ensure!(
-            max_bytes > 0,
-            "proof artifact prefix limit must be positive"
-        );
-        Ok(self.get(key).await?.map(|object| ProofArtifactPrefix {
-            proof_uri: object.proof_uri,
-            generation: object.generation,
-            bytes: object.bytes.into_iter().take(max_bytes).collect(),
         }))
     }
 

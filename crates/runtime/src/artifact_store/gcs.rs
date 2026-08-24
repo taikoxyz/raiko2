@@ -2,15 +2,15 @@ use super::{
     CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightDescriptor,
     CanonicalPreflightKeyV1, CanonicalPreflightObject, CanonicalPreflightPutResult,
     CanonicalPreflightStore, ExactDeleteResult, ProofArtifactConflict, ProofArtifactDeleteResult,
-    ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-    ProofArtifactPutResult, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
-    RuntimeStateWriteResult, RuntimeStoreScope, StartupCleanupMask, StartupCleanupReport,
-    StartupCleanupScope, StartupCleanupScopeReport, content_hash, encode_component,
-    validate_scope_component,
+    ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult,
+    ProofObjectStore, RuntimeStateObject, RuntimeStateStore, RuntimeStateWriteResult,
+    RuntimeStoreScope, StartupCleanupMask, StartupCleanupReport, StartupCleanupScope,
+    StartupCleanupScopeReport, content_hash, encode_component, validate_scope_component,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use google_cloud_gax::error::rpc::Code;
 use google_cloud_storage::client::{Storage, StorageControl};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -51,6 +51,13 @@ struct GcsObjectPage {
 const RESET_DELETE_CONCURRENCY: usize = 16;
 const RESET_LIST_PAGE_SIZE: i32 = 1_000;
 const STARTUP_CLEANUP_DELETE_CONCURRENCY: usize = 64;
+
+fn gcs_error_is_not_found(error: &google_cloud_storage::Error) -> bool {
+    error.http_status_code() == Some(404)
+        || error
+            .status()
+            .is_some_and(|status| status.code == Code::NotFound)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GcsCreateResult {
@@ -216,9 +223,7 @@ impl GcsTransport for GoogleGcsTransport {
         }
         match request.send().await {
             Ok(()) => Ok(ProofArtifactDeleteResult::Removed),
-            Err(error) if error.http_status_code() == Some(404) => {
-                Ok(ProofArtifactDeleteResult::Missing)
-            }
+            Err(error) if gcs_error_is_not_found(&error) => Ok(ProofArtifactDeleteResult::Missing),
             Err(error) => Err(error).context("failed to conditionally delete GCS object"),
         }
     }
@@ -620,7 +625,7 @@ impl GcsProofArtifactStore {
             Err(error) => {
                 self.remove_corrupt_canonical_preflight_manifest(&name, object.generation, &error)
                     .await?;
-                Err(error)
+                Ok(None)
             }
         }
     }
@@ -634,27 +639,35 @@ impl GcsProofArtifactStore {
             return Ok(None);
         };
         let object = self.transport.read(&manifest.content_name).await?;
-        let validation = (|| -> Result<GcsObject> {
-            let object =
-                object.context("canonical preflight manifest references missing content")?;
-            anyhow::ensure!(
-                content_hash(&object.bytes) == manifest.content_hash,
-                "canonical preflight content hash mismatch"
-            );
-            Ok(object)
-        })();
-        let object = match validation {
-            Ok(object) => object,
-            Err(error) => {
-                self.remove_corrupt_canonical_preflight_manifest(
-                    &self.canonical_preflight_manifest_name(key)?,
-                    generation,
-                    &error,
-                )
-                .await?;
-                return Err(error);
+        let validation_error = match object.as_ref() {
+            None => Some(anyhow::anyhow!(
+                "canonical preflight manifest references missing content"
+            )),
+            Some(object) if content_hash(&object.bytes) != manifest.content_hash => {
+                Some(anyhow::anyhow!("canonical preflight content hash mismatch"))
             }
+            Some(_) => None,
         };
+        if let Some(error) = validation_error {
+            if let Some(object) = object {
+                self.transport
+                    .delete_if_generation(&manifest.content_name, Some(object.generation))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to CAS-remove corrupt canonical preflight content after validation error: {error:#}"
+                        )
+                    })?;
+            }
+            self.remove_corrupt_canonical_preflight_manifest(
+                &self.canonical_preflight_manifest_name(key)?,
+                generation,
+                &error,
+            )
+            .await?;
+            return Ok(None);
+        }
+        let object = object.context("validated canonical preflight content disappeared")?;
         Ok(Some(CanonicalPreflightObject {
             key_digest: manifest.key_digest,
             content_hash: manifest.content_hash,
@@ -943,25 +956,6 @@ impl ProofObjectStore for GcsProofArtifactStore {
             proof_uri: self.content_uri(key, &manifest.content_hash),
             content_hash: manifest.content_hash,
             generation: Some(generation),
-        }))
-    }
-
-    async fn get_prefix(
-        &self,
-        key: &ProofArtifactKey,
-        max_bytes: usize,
-    ) -> Result<Option<ProofArtifactPrefix>> {
-        anyhow::ensure!(
-            max_bytes > 0,
-            "proof artifact prefix limit must be positive"
-        );
-        let Some(object) = self.read_manifest_object(key).await? else {
-            return Ok(None);
-        };
-        Ok(Some(ProofArtifactPrefix {
-            proof_uri: object.proof_uri,
-            generation: object.generation,
-            bytes: object.bytes.into_iter().take(max_bytes).collect(),
         }))
     }
 

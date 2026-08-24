@@ -62,7 +62,7 @@ use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
 use super::telemetry::{
     PreflightCacheMetricsObserver, record_startup_cleanup_failure, record_startup_cleanup_report,
-    runtime_lifecycle_observer,
+    record_startup_reconciliation, runtime_lifecycle_observer,
 };
 
 /// In-memory sliding-window limiter for ACL-protected endpoints.
@@ -226,10 +226,18 @@ async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result
         }
     }
     runtime.initialize().await?;
-    let reconciled = runtime
-        .reconcile_invalidated_proof_artifacts()
-        .await
-        .context("failed to reconcile invalidated proof artifacts during startup")?;
+    let reconciliation_started = Instant::now();
+    let reconciled = match runtime.reconcile_invalidated_proof_artifacts().await {
+        Ok(reconciled) => {
+            record_startup_reconciliation("success", reconciled, reconciliation_started.elapsed());
+            reconciled
+        }
+        Err(error) => {
+            record_startup_reconciliation("failure", 0, reconciliation_started.elapsed());
+            return Err(error)
+                .context("failed to reconcile invalidated proof artifacts during startup");
+        }
+    };
     if reconciled > 0 {
         tracing::info!(
             reconciled,

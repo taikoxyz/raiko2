@@ -36,15 +36,12 @@ impl ArtifactLifecycleLocks {
             .lock()
             .expect("artifact lifecycle lock registry poisoned");
         let before = entries.len();
-        let dead = entries
-            .values()
-            .filter(|lock| lock.strong_count() == 0)
-            .count();
         entries.retain(|_, lock| lock.strong_count() > 0);
+        let swept = before.saturating_sub(entries.len());
         ArtifactLifecycleLockRegistryStats {
             live: entries.len(),
-            dead,
-            swept: before.saturating_sub(entries.len()),
+            dead: swept,
+            swept,
         }
     }
 

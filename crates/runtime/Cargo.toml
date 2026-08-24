@@ -17,6 +17,7 @@ async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 google-cloud-storage.workspace = true
+google-cloud-gax.workspace = true
 raiko2-pipeline.workspace = true
 raiko2-primitives.workspace = true
 rustls.workspace = true

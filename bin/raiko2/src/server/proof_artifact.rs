@@ -99,8 +99,8 @@ mod tests {
         RuntimeStateWriteResult, RuntimeStoreScope,
     };
     use raiko2_runtime::{
-        ExactDeleteResult, ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix,
-        ProofArtifactPutResult, ProofArtifactRegistration,
+        ExactDeleteResult, ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult,
+        ProofArtifactRegistration,
     };
     use std::sync::{
         Arc,
@@ -129,6 +129,71 @@ mod tests {
         assert!(!ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaRisc0, &compressed_sp1));
         assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaSp1, &final_proof));
         assert!(ProofArtifactPayload::Final.accepts(PipelineKey::ShastaSp1, &final_proof));
+    }
+
+    #[tokio::test]
+    async fn invalidated_runtime_record_fences_readable_proof_bytes() -> Result<()> {
+        let runtime =
+            RuntimeManager::new_memory("test".to_string(), "invalidated-reader-fence".to_string())?;
+        let network_pair = "taiko_dev/ethereum";
+        let pipeline_key = PipelineKey::ShastaNative;
+        let route = pipeline_key.route();
+        let proof_ref = "proof-ref";
+        let proof_bytes = serde_json::to_vec(&Proof {
+            proof: Some("0x01".to_string()),
+            ..Proof::default()
+        })?;
+        let object = runtime
+            .publish_proof_artifact_bytes(
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                &proof_bytes,
+            )
+            .await?
+            .try_object()
+            .context("proof publication")?
+            .clone();
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key,
+                route,
+                proof_uri: object.proof_uri,
+                content_hash: object.content_hash,
+                generation: object.generation,
+            })
+            .await?;
+        let record = runtime
+            .get_proof_artifact(network_pair, pipeline_key, route, proof_ref)
+            .await?
+            .context("active proof record")?;
+
+        let prepared = runtime.prepare_artifact_retention_batch(&[record]).await?;
+        assert_eq!(prepared.artifact_invalidations.len(), 1);
+        assert!(
+            runtime
+                .read_proof_artifact_bytes(network_pair, pipeline_key, route, proof_ref)
+                .await?
+                .is_some(),
+            "object bytes remain visible until exact deletion finishes"
+        );
+        assert!(
+            load_proof_artifact_material(
+                &runtime,
+                network_pair,
+                pipeline_key,
+                route,
+                proof_ref,
+                ProofArtifactPayload::Final,
+            )
+            .await?
+            .is_none(),
+            "Invalidated runtime records must fence proof reuse"
+        );
+        Ok(())
     }
 
     #[derive(Debug)]
@@ -178,14 +243,6 @@ mod tests {
             key: &ProofArtifactKey,
         ) -> Result<Option<raiko2_runtime::ProofArtifactDescriptor>> {
             self.inner.get_descriptor(key).await
-        }
-
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
         }
 
         async fn delete_exact(

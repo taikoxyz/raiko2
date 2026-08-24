@@ -1215,9 +1215,11 @@ Operator notes:
   publication saga to finish; restart reconciliation resumes durable work. Namespace changes are hard
   cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
   from GCS rather than Redis.
-- `runtime.startup_cleanup = ["proof"]` is the normal cutover for SGX/ZK guest, image, verifier, or
-  proving-key upgrades. It removes authoritative runtime task state before active proof manifests,
-  so stale completed tasks cannot resolve removed proofs. Add `"preflight"` only when derivation,
+- `runtime.startup_cleanup = ["proof"]` is an exceptional namespace-wide cutover for SGX/ZK guest,
+  image, verifier, or proving-key upgrades. It deletes the sole runtime-state snapshot, including all
+  tasks, artifact records, pending publications, and durable Boundless/SP1 provider-request
+  checkpoints, before deleting active proof manifests. Existing remote requests are not cancelled;
+  client resubmission may create duplicate paid provider work. Add `"preflight"` only when derivation,
   fork, or witness-generation rules changed; that scope deletes active canonical preflight
   manifests and does not touch proof state. Cleanup runs after the old process exits and before
   recovery, workers, or HTTP admission. GCS requires `storage.objects.list` and
@@ -1237,9 +1239,14 @@ Operator notes:
   old prefix is frozen: list only `manifest.manifest.json` objects under that exact old
   `preflights/vN/` prefix, record each observed object generation, and conditionally delete only
   those generations. Do not target the current-version prefix or immutable content in that cleanup;
-  existing lifecycle rules reclaim content made unreachable by manifest removal. Active/current
-  preflight manifests must never receive an age-based GCS lifecycle rule. This repository does not
-  change bucket lifecycle configuration.
+  the explicitly configured `.preflight.bincode` lifecycle rule reclaims content made unreachable
+  by manifest removal. Active/current preflight manifests must never receive an age-based GCS
+  lifecycle rule. This repository does not change bucket lifecycle configuration.
+- Before enabling `runtime.preflight_cache = "shared"`, inspect the live bucket policy as a rollout
+  gate. A generic `.json` age rule matches active `manifest.manifest.json` objects and must be removed
+  or narrowed away from the current `preflights/vN/` prefix. A `.bin` suffix rule does not match
+  immutable `.preflight.bincode` content; add an explicit finite-retention rule for that exact suffix.
+  Do not deploy shared preflight caching until both rules are correct in the target bucket.
 - Correlate `registered shasta proof task` and `completed shasta proof task` logs by `task_id`.
   `proof_type` is the resolved proof lane, while `requested_proof_type` on registration preserves
   the raw request such as `zk_any`. Completion logging is at-least-once because idempotent proof
@@ -1314,8 +1321,9 @@ Operator notes:
   cancellation error intentionally blocks all later retention lanes and sets
   `raiko2_runtime_retention_blocked{lane="orphan"}` to `1` after each blocked pass; the next successful
   orphan pass resets it to `0`. Alert on a sustained value, then repair the external state or use
-  one-shot `runtime.startup_cleanup = ["proof"]`; ordinary failed proof tasks are terminal records and
-  do not trigger this fail-stop. Root retention admission preserves each task's client-visible
+  one-shot `runtime.startup_cleanup = ["proof"]`, accepting that it also discards provider checkpoints
+  and can cause duplicate paid work; ordinary failed proof tasks are terminal records and do not
+  trigger this fail-stop. Root retention admission preserves each task's client-visible
   terminal status, proof URI, error, and timestamp until exact removal commits. The same terminal TTL
   applies to failed or cancelled roots with remote submission progress; after expiry, resubmission may
   create and pay for a new provider request even if the previous request later completes.

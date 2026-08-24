@@ -11,9 +11,8 @@ mod publication;
 
 pub use artifact_store::{
     ExactDeleteResult, ProofArtifactConflict, ProofArtifactDeleteResult, ProofArtifactDescriptor,
-    ProofArtifactKey, ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult,
-    StartupCleanupMask, StartupCleanupReport, StartupCleanupScope, StartupCleanupScopeReport,
-    validate_scope_component,
+    ProofArtifactKey, ProofArtifactObject, ProofArtifactPutResult, StartupCleanupMask,
+    StartupCleanupReport, StartupCleanupScope, StartupCleanupScopeReport, validate_scope_component,
 };
 pub use publication::ProofArtifactCleanupPending;
 
@@ -27,7 +26,7 @@ pub mod test_support {
     };
     pub use crate::{
         ExactDeleteResult, ProofArtifactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey,
-        ProofArtifactObject, ProofArtifactPrefix, ProofArtifactPutResult,
+        ProofArtifactObject, ProofArtifactPutResult,
     };
 }
 
@@ -39,6 +38,7 @@ use artifact_store::{
 };
 #[cfg(test)]
 use artifact_store::{ProofObjectStore, RuntimeStateStore, RuntimeStoreScope};
+use futures::{StreamExt, stream};
 #[cfg(test)]
 use raiko2_pipeline::forks::shasta::preflight_cache::CANONICAL_PREFLIGHT_SCHEMA_V1;
 use raiko2_pipeline::forks::shasta::preflight_cache::{
@@ -56,6 +56,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, watch};
 use tracing::warn;
+
+const INVALIDATED_ARTIFACT_RECONCILIATION_CONCURRENCY: usize = 8;
 
 #[derive(Debug)]
 pub struct PendingProofPublicationRemoved {
@@ -1332,6 +1334,8 @@ impl RuntimeManager {
     ) -> Vec<ArtifactLifecycleGuard> {
         let mut keys = keys.into_iter().collect::<Vec<_>>();
         keys.sort_by(compare_artifact_keys);
+        // Finalization can name one key through both artifact and pending-publication lists.
+        // Deduplication prevents re-entering the same non-reentrant keyed mutex in this batch.
         keys.dedup();
 
         let mut guards = Vec::with_capacity(keys.len());
@@ -1537,22 +1541,6 @@ impl RuntimeManager {
                 route,
                 proof_ref,
             ))
-            .await
-    }
-
-    pub async fn read_proof_artifact_prefix(
-        &self,
-        network_pair: &str,
-        pipeline_key: PipelineKey,
-        route: PipelineRoute,
-        proof_ref: &str,
-        max_bytes: usize,
-    ) -> Result<Option<ProofArtifactPrefix>> {
-        self.store
-            .get_prefix(
-                &Self::artifact_key(network_pair, pipeline_key, route, proof_ref),
-                max_bytes,
-            )
             .await
     }
 
@@ -1944,40 +1932,10 @@ impl RuntimeManager {
         let proof_ref = registration.proof_ref.clone();
         let (key, record) =
             self.proof_artifact_record(registration, ProofArtifactLifecycle::Pending);
-        let replaced_invalidated_descriptor = self
-            .state
-            .read()
-            .await
-            .artifacts
-            .get(&key)
-            .filter(|existing| {
-                existing.lifecycle == ProofArtifactLifecycle::Invalidated
-                    && existing.descriptor() != record.descriptor()
-            })
-            .map(ProofArtifactRecord::descriptor);
-        let may_replace_invalidated = if replaced_invalidated_descriptor.is_some() {
-            self.proof_artifact_descriptor_is_current(
-                &record.network_pair,
-                record.pipeline_key,
-                record.route,
-                &record.proof_ref,
-                &record.descriptor(),
-            )
-            .await?
-        } else {
-            false
-        };
         self.mutate(move |state| {
             if let Some(existing) = state.artifacts.get(&key) {
                 if existing.descriptor() != record.descriptor() {
-                    let replacement_is_current = may_replace_invalidated
-                        && existing.lifecycle == ProofArtifactLifecycle::Invalidated
-                        && replaced_invalidated_descriptor
-                            .as_ref()
-                            .is_some_and(|expected| existing.descriptor() == *expected);
-                    if !replacement_is_current {
-                        return Ok(ProofArtifactLifecycle::Invalidated);
-                    }
+                    return Ok(ProofArtifactLifecycle::Invalidated);
                 }
                 if existing.lifecycle == ProofArtifactLifecycle::Invalidated
                     && existing.descriptor() == record.descriptor()
@@ -2496,23 +2454,31 @@ impl RuntimeManager {
             .filter(|record| record.lifecycle == ProofArtifactLifecycle::Invalidated)
             .cloned()
             .collect::<Vec<_>>();
-        let mut finalized = Vec::with_capacity(invalidated.len());
-        for record in &invalidated {
-            let expectation = record.expectation();
-            match self
-                .finalize_proof_artifact_invalidation(&expectation)
-                .await?
-            {
-                ExactDeleteResult::Removed | ExactDeleteResult::Missing => {
-                    finalized.push(expectation);
+        let mut deletions = stream::iter(invalidated)
+            .map(|record| async move {
+                let expectation = record.expectation();
+                match self
+                    .finalize_proof_artifact_invalidation(&expectation)
+                    .await?
+                {
+                    ExactDeleteResult::Removed | ExactDeleteResult::Missing => {
+                        Ok(Some(expectation))
+                    }
+                    ExactDeleteResult::Stale => {
+                        anyhow::ensure!(
+                            self.proof_artifact_invalidation_is_stale(&expectation)
+                                .await?,
+                            "canonical proof changed while its exact invalidation remains authoritative"
+                        );
+                        Ok(None)
+                    }
                 }
-                ExactDeleteResult::Stale => {
-                    anyhow::ensure!(
-                        self.proof_artifact_invalidation_is_stale(&expectation)
-                            .await?,
-                        "canonical proof changed while its exact invalidation remains authoritative"
-                    );
-                }
+            })
+            .buffer_unordered(INVALIDATED_ARTIFACT_RECONCILIATION_CONCURRENCY);
+        let mut finalized = Vec::new();
+        while let Some(expectation) = deletions.next().await {
+            if let Some(expectation) = expectation? {
+                finalized.push(expectation);
             }
         }
         let finalized_state = self
@@ -3021,7 +2987,14 @@ impl RuntimeManager {
                 }
             }
         }
-        let pending_deletion = {
+        let pending_key = Self::pending_artifact_key(
+            &key.network_pair,
+            key.pipeline_key,
+            key.route,
+            &key.proof_ref,
+        );
+        let pending_descriptor = self.store.get_descriptor(&pending_key).await?;
+        {
             let _artifact_lifecycle = self
                 .artifact_lifecycle_guard(
                     &key.network_pair,
@@ -3032,9 +3005,55 @@ impl RuntimeManager {
                 .await;
             self.validate_pending_publication_before_object_deletion(expectation, &state_key)
                 .await?;
-            self.delete_pending_publication_object(expectation).await?
+        }
+        let _commit = self.begin_object_commit()?;
+        let pending_deletion = match pending_descriptor {
+            Some(descriptor) => match self.store.delete_exact(&pending_key, &descriptor).await? {
+                ExactDeleteResult::Removed => ProofArtifactDeleteResult::Removed,
+                ExactDeleteResult::Missing => ProofArtifactDeleteResult::Missing,
+                ExactDeleteResult::Stale => {
+                    let still_selected = {
+                        let _artifact_lifecycle = self
+                            .artifact_lifecycle_guard(
+                                &key.network_pair,
+                                key.pipeline_key,
+                                key.route,
+                                &key.proof_ref,
+                            )
+                            .await;
+                        self.pending_publication_is_still_reclaimable(expectation, &state_key)
+                            .await
+                    };
+                    anyhow::ensure!(
+                        !still_selected,
+                        "pending proof artifact changed while its retention selection remained authoritative"
+                    );
+                    ProofArtifactDeleteResult::Missing
+                }
+            },
+            None => ProofArtifactDeleteResult::Missing,
         };
         Ok(PendingPublicationRetentionFinalization { pending_deletion })
+    }
+
+    async fn pending_publication_is_still_reclaimable(
+        &self,
+        expectation: &PendingPublicationExpectation,
+        state_key: &str,
+    ) -> bool {
+        let state = self.state.read().await;
+        state
+            .pending_publications
+            .get(state_key)
+            .is_some_and(|current| current.expectation() == *expectation)
+            && !pending_publication_has_retention_owner(
+                &state,
+                state_key,
+                &expectation.key.network_pair,
+                expectation.key.pipeline_key,
+                expectation.key.route,
+                &expectation.key.proof_ref,
+            )
     }
 
     async fn validate_pending_publication_retention_candidate(
@@ -3168,30 +3187,6 @@ impl RuntimeManager {
             "pending proof publication gained a retained owner before object deletion"
         );
         Ok(())
-    }
-
-    async fn delete_pending_publication_object(
-        &self,
-        expectation: &PendingPublicationExpectation,
-    ) -> Result<ProofArtifactDeleteResult> {
-        let key = &expectation.key;
-        let pending_key = Self::pending_artifact_key(
-            &key.network_pair,
-            key.pipeline_key,
-            key.route,
-            &key.proof_ref,
-        );
-        let Some(descriptor) = self.store.get_descriptor(&pending_key).await? else {
-            return Ok(ProofArtifactDeleteResult::Missing);
-        };
-        let _commit = self.begin_object_commit()?;
-        match self.store.delete_exact(&pending_key, &descriptor).await? {
-            ExactDeleteResult::Removed => Ok(ProofArtifactDeleteResult::Removed),
-            ExactDeleteResult::Missing => Ok(ProofArtifactDeleteResult::Missing),
-            ExactDeleteResult::Stale => {
-                anyhow::bail!("pending proof artifact changed before conditional delete")
-            }
-        }
     }
 
     async fn remove_pending_proof_publication_if_unowned_locked(
@@ -5161,6 +5156,10 @@ mod tests {
         allow_artifact_put: tokio::sync::Notify,
         fail_next_artifact_delete: AtomicBool,
         block_next_artifact_delete: AtomicBool,
+        block_artifact_deletes: AtomicBool,
+        artifact_deletes_started: AtomicUsize,
+        artifact_deletes_entered: tokio::sync::Notify,
+        allow_artifact_deletes: tokio::sync::Semaphore,
         artifact_delete_completed: tokio::sync::Notify,
         allow_artifact_delete_return: tokio::sync::Notify,
         dangling_artifacts: StdMutex<HashSet<ProofArtifactKey>>,
@@ -5186,6 +5185,10 @@ mod tests {
                 allow_artifact_put: tokio::sync::Notify::new(),
                 fail_next_artifact_delete: AtomicBool::new(false),
                 block_next_artifact_delete: AtomicBool::new(false),
+                block_artifact_deletes: AtomicBool::new(false),
+                artifact_deletes_started: AtomicUsize::new(0),
+                artifact_deletes_entered: tokio::sync::Notify::new(),
+                allow_artifact_deletes: tokio::sync::Semaphore::new(0),
                 artifact_delete_completed: tokio::sync::Notify::new(),
                 allow_artifact_delete_return: tokio::sync::Notify::new(),
                 dangling_artifacts: StdMutex::new(HashSet::new()),
@@ -5251,19 +5254,20 @@ mod tests {
             self.inner.get_descriptor(key).await
         }
 
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
-        }
-
         async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
             descriptor: &ProofArtifactDescriptor,
         ) -> Result<ExactDeleteResult> {
+            if self.block_artifact_deletes.load(Ordering::SeqCst) {
+                self.artifact_deletes_started.fetch_add(1, Ordering::SeqCst);
+                self.artifact_deletes_entered.notify_waiters();
+                self.allow_artifact_deletes
+                    .acquire()
+                    .await
+                    .expect("artifact delete test semaphore closed")
+                    .forget();
+            }
             if self.fail_next_artifact_delete.swap(false, Ordering::SeqCst) {
                 anyhow::bail!("injected artifact delete failure before commit");
             }
@@ -6730,6 +6734,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_retention_does_not_hold_the_key_lock_across_object_deletion() -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new("pending-delete-lock-release")?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        let proof_ref = "pending-proof";
+        let old_owner = register_retention_task(
+            runtime.as_ref(),
+            "old-root",
+            &[proof_ref],
+            RunnerStatus::Running,
+            1,
+        )
+        .await?;
+        assert!(
+            runtime
+                .checkpoint_pending_proof_publication(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    &[old_owner.incarnation_id],
+                    b"old-pending-proof",
+                )
+                .await?
+        );
+        runtime
+            .mutate(|state| {
+                state.tasks.remove("old-root").context("old root")?;
+                state
+                    .pending_publications
+                    .values_mut()
+                    .next()
+                    .context("old pending publication")?
+                    .owner_incarnations
+                    .clear();
+                Ok(())
+            })
+            .await?;
+        let selected = runtime
+            .list_reclaimable_pending_publications(None, 1)
+            .await?
+            .pop()
+            .context("reclaimable pending publication")?;
+
+        store
+            .block_next_artifact_delete
+            .store(true, Ordering::SeqCst);
+        let cleanup = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let selected = selected.clone();
+            async move {
+                runtime
+                    .finalize_pending_publication_retention(&selected)
+                    .await
+            }
+        });
+        store.artifact_delete_completed.notified().await;
+
+        let new_owner = register_retention_task(
+            runtime.as_ref(),
+            "new-root",
+            &[proof_ref],
+            RunnerStatus::Running,
+            2,
+        )
+        .await?;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.checkpoint_pending_proof_publication(
+                "l1-l2",
+                pipeline,
+                route,
+                proof_ref,
+                &[new_owner.incarnation_id],
+                b"new-pending-proof",
+            ),
+        )
+        .await
+        .context("new publication was blocked by pending object deletion")??;
+
+        store.allow_artifact_delete_return.notify_one();
+        cleanup.await??;
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(&[], &[], &[selected])
+            .await?;
+        assert!(finalized.removed_pending_publications.is_empty());
+        assert_eq!(finalized.skipped_pending_publications, 1);
+        assert_eq!(
+            runtime
+                .get_pending_proof_publication("l1-l2", pipeline, route, proof_ref)
+                .await?
+                .context("replacement pending proof")?,
+            b"new-pending-proof"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn artifact_retention_selects_and_invalidates_legacy_orphan() -> Result<()> {
         let runtime =
             RuntimeManager::new_memory("test".into(), "artifact-retention-orphan".into())?;
@@ -6879,6 +6982,57 @@ mod tests {
             .await?;
         assert_eq!(finalized.removed_artifacts.len(), 1);
         assert!(runtime.get_task("failed-root").await?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_retention_finalizes_when_manifest_is_already_missing() -> Result<()> {
+        let runtime = RuntimeManager::new_memory(
+            "test".into(),
+            "artifact-retention-missing-manifest".into(),
+        )?;
+        let active = register_retention_artifact(&runtime, "missing-proof").await?;
+        let prepared = runtime.prepare_artifact_retention_batch(&[active]).await?;
+        let expectation = prepared
+            .artifact_invalidations
+            .first()
+            .context("prepared invalidation")?;
+
+        assert_eq!(
+            runtime
+                .delete_proof_artifact(
+                    &expectation.key.network_pair,
+                    expectation.key.pipeline_key,
+                    expectation.key.route,
+                    &expectation.key.proof_ref,
+                    expectation.descriptor.generation,
+                    &expectation.descriptor.content_hash,
+                )
+                .await?,
+            ProofArtifactDeleteResult::Removed
+        );
+        assert_eq!(
+            runtime
+                .finalize_proof_artifact_invalidation(expectation)
+                .await?,
+            ExactDeleteResult::Missing
+        );
+        let finalized = runtime
+            .finalize_terminal_task_retention_batch(&[], &[expectation.clone()], &[])
+            .await?;
+
+        assert_eq!(finalized.removed_artifacts, vec![expectation.clone()]);
+        assert!(
+            runtime
+                .get_proof_artifact_including_invalidated(
+                    &expectation.key.network_pair,
+                    expectation.key.pipeline_key,
+                    expectation.key.route,
+                    &expectation.key.proof_ref,
+                )
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -7546,6 +7700,62 @@ mod tests {
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidated_artifact_reconciliation_deletes_multiple_objects_concurrently()
+    -> Result<()> {
+        let store = Arc::new(RuntimeStateProbeStore::new(
+            "concurrent-artifact-reconciliation",
+        )?);
+        let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
+        let pipeline = PipelineKey::ShastaNative;
+        let route = pipeline.route();
+        for proof_ref in ["proof-a", "proof-b"] {
+            let object = runtime
+                .publish_proof_artifact_bytes(
+                    "l1-l2",
+                    pipeline,
+                    route,
+                    proof_ref,
+                    proof_ref.as_bytes(),
+                )
+                .await?
+                .try_object()
+                .context("invalidated proof object")?
+                .clone();
+            runtime
+                .register_invalidated_proof_artifact(ProofArtifactRegistration {
+                    network_pair: "l1-l2".into(),
+                    proof_ref: proof_ref.into(),
+                    pipeline_key: pipeline,
+                    route,
+                    proof_uri: object.proof_uri,
+                    content_hash: object.content_hash,
+                    generation: object.generation,
+                })
+                .await?;
+        }
+
+        store.block_artifact_deletes.store(true, Ordering::SeqCst);
+        let reconciliation = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.reconcile_invalidated_proof_artifacts().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store.artifact_deletes_started.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                store.artifact_deletes_entered.notified().await;
+            }
+        })
+        .await
+        .context("startup reconciliation deleted invalidated artifacts sequentially")?;
+
+        store.allow_artifact_deletes.add_permits(2);
+        assert_eq!(reconciliation.await??, 2);
         Ok(())
     }
 

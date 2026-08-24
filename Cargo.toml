@@ -167,6 +167,7 @@ async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
 google-cloud-storage = "1.11.0"
+google-cloud-gax = "1.10.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 auto_impl = "1"
 op-alloy-flz = { version = "0.13.1", default-features = false }

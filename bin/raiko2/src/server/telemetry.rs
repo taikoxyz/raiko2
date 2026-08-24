@@ -215,6 +215,36 @@ static STARTUP_CLEANUP_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(
     .expect("register raiko2_startup_cleanup_duration_seconds")
 });
 
+static STARTUP_RECONCILIATION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_startup_reconciliation_total",
+        "Startup invalidated-proof reconciliation attempts",
+        &["outcome"]
+    )
+    .expect("register raiko2_startup_reconciliation_total")
+});
+
+static STARTUP_RECONCILIATION_ARTIFACTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "raiko2_startup_reconciliation_artifacts_total",
+        "Invalidated proof artifacts finalized during startup reconciliation",
+        &["outcome"]
+    )
+    .expect("register raiko2_startup_reconciliation_artifacts_total")
+});
+
+static STARTUP_RECONCILIATION_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        histogram_opts!(
+            "raiko2_startup_reconciliation_duration_seconds",
+            "Startup invalidated-proof reconciliation duration in seconds",
+            vec![0.01, 0.1, 0.5, 1.0, 5.0, 30.0, 120.0, 300.0]
+        ),
+        &["outcome"]
+    )
+    .expect("register raiko2_startup_reconciliation_duration_seconds")
+});
+
 static RUNTIME_STATE_SERIALIZED_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
         "raiko2_runtime_state_serialized_bytes",
@@ -463,6 +493,22 @@ pub(crate) fn record_startup_cleanup_failure(scope: StartupCleanupScope) {
     STARTUP_CLEANUP_OBJECTS_TOTAL
         .with_label_values(&[scope.as_str(), "failed"])
         .inc();
+}
+
+pub(crate) fn record_startup_reconciliation(
+    outcome: &'static str,
+    reconciled: usize,
+    duration: Duration,
+) {
+    STARTUP_RECONCILIATION_TOTAL
+        .with_label_values(&[outcome])
+        .inc();
+    STARTUP_RECONCILIATION_ARTIFACTS_TOTAL
+        .with_label_values(&[outcome])
+        .inc_by(u64::try_from(reconciled).unwrap_or(u64::MAX));
+    STARTUP_RECONCILIATION_DURATION_SECONDS
+        .with_label_values(&[outcome])
+        .observe(duration.as_secs_f64());
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -899,6 +945,27 @@ mod tests {
             "raiko2_startup_cleanup_objects_total{outcome=\"failed\",scope=\"preflight\"}"
         ));
         assert!(metrics.contains("raiko2_startup_cleanup_duration_seconds_count{scope=\"proof\"}"));
+    }
+
+    #[test]
+    fn startup_reconciliation_metrics_use_only_bounded_outcomes() {
+        record_startup_reconciliation("success", 2, Duration::from_millis(25));
+        record_startup_reconciliation("failure", 0, Duration::from_millis(50));
+
+        let (_, metrics) = render().expect("render metrics");
+        let metrics = String::from_utf8(metrics).expect("metrics are UTF-8");
+        for outcome in ["success", "failure"] {
+            assert!(metrics.contains(&format!(
+                "raiko2_startup_reconciliation_total{{outcome=\"{outcome}\"}}"
+            )));
+            assert!(metrics.contains(&format!(
+                "raiko2_startup_reconciliation_duration_seconds_count{{outcome=\"{outcome}\"}}"
+            )));
+        }
+        assert!(
+            metrics.contains("raiko2_startup_reconciliation_artifacts_total{outcome=\"success\"}")
+        );
+        assert!(!metrics.contains("proof_ref="));
     }
 
     #[test]

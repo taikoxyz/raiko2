@@ -2239,7 +2239,7 @@ mod tests {
     };
     use raiko2_runtime::{
         ExactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, TaskRegistration,
+        ProofArtifactPutResult, ProofArtifactRegistration, TaskRegistration,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -2541,14 +2541,6 @@ mod tests {
             self.inner.get_descriptor(key).await
         }
 
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
-        }
-
         async fn delete_exact(
             &self,
             key: &ProofArtifactKey,
@@ -2608,14 +2600,6 @@ mod tests {
             &self,
             _key: &ProofArtifactKey,
         ) -> Result<Option<ProofArtifactDescriptor>> {
-            Ok(None)
-        }
-
-        async fn get_prefix(
-            &self,
-            _key: &ProofArtifactKey,
-            _max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
             Ok(None)
         }
 

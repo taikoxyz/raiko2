@@ -582,13 +582,16 @@ Terminal proof artifacts are reclaimed automatically after their runtime owners 
 
 For an exceptional SGX/ZK guest, image, verifier, or proving-key cutover, stop the old process and
 start one non-overlapping replacement with `runtime.startup_cleanup = ["proof"]`. Startup cleanup
-deletes the namespace's proof manifests with generation preconditions before recovery or admission,
-then clients may resubmit work for reproving. Remove the setting after the successful cutover.
+first deletes the namespace's sole runtime-state snapshot, including every task, artifact record,
+pending publication, and Boundless/SP1 provider-request checkpoint, then generation-conditionally
+deletes proof manifests before recovery or admission. Existing remote requests are not cancelled;
+client resubmission can therefore create and pay for replacement provider work while an old request
+still settles. Remove the setting after the successful cutover.
 
 There is intentionally no online range- or prefix-selective terminal-artifact invalidation endpoint.
-The operational tradeoff is a namespace-wide proof cleanup and possible reproving rather than a
-distributed negative-marker protocol. Add `"preflight"` to startup cleanup only when derivation, fork, or
-witness-generation rules changed.
+The operational tradeoff is a namespace-wide runtime reset, possible duplicate provider spend, and
+reproving rather than a distributed negative-marker protocol. Add `"preflight"` to startup cleanup
+only when derivation, fork, or witness-generation rules changed.
 
 ## Legacy V3 Submit Shasta Batch Proof
 
@@ -1146,9 +1149,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   persistent canonical preflight cache and process-local singleflight across proof lanes. Off mode
   bypasses both layers and rebuilds preflight independently for each request; use it only as an
   incident-response control while preserving proof storage and runtime state.
-- `runtime.startup_cleanup` defaults to an empty list. `["proof"]` clears authoritative runtime task
-  state first and then deletes active proposal and aggregate proof manifests. Use it for SGX/ZK guest,
-  image, verifier, or proving-key changes. `["preflight"]` deletes only active canonical preflight
+- `runtime.startup_cleanup` defaults to an empty list. `["proof"]` deletes the sole authoritative
+  runtime-state snapshot, including all tasks, artifact records, pending publications, and durable
+  Boundless/SP1 provider-request checkpoints, then deletes active proposal and aggregate proof
+  manifests. Existing provider requests continue independently, so resubmitted work can incur
+  duplicate proving cost. Use this broad reset only for an exceptional SGX/ZK guest, image, verifier,
+  or proving-key cutover. `["preflight"]` deletes only active canonical preflight
   manifests. Use `["proof", "preflight"]` when derivation, fork, or witness-generation rules changed.
   The scopes are exact: neither implies the other, and there is no `input` scope because materialized
   `GuestInput` values are not persisted. GCS pages through matching manifest objects and deletes their

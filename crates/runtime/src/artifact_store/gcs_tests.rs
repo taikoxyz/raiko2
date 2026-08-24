@@ -15,6 +15,17 @@ use std::{
 };
 use tokio::sync::{Barrier, Notify};
 
+#[test]
+fn grpc_not_found_is_classified_as_a_missing_gcs_object() {
+    use google_cloud_gax::error::{
+        Error,
+        rpc::{Code, Status},
+    };
+
+    let error = Error::service(Status::default().set_code(Code::NotFound));
+    assert!(gcs_error_is_not_found(&error));
+}
+
 #[derive(Debug)]
 struct FakeGcsTransport {
     objects: Mutex<BTreeMap<String, GcsObject>>,
@@ -355,10 +366,13 @@ async fn delayed_incompatible_version_create_is_unreachable_from_current_version
     let key = canonical_preflight_key();
     let incompatible_version = key.schema.saturating_sub(1);
     let delayed_manifest = format!(
-        "{}/delayed/manifest.manifest.json",
-        store.canonical_preflight_version_prefix(incompatible_version)
+        "{}/{:x}/manifest.manifest.json",
+        store.canonical_preflight_version_prefix(incompatible_version),
+        key.digest()?
     );
+    let current_manifest = store.canonical_preflight_manifest_name(&key)?;
 
+    assert_ne!(delayed_manifest, current_manifest);
     assert!(matches!(
         transport.create(&delayed_manifest, b"old-version").await?,
         GcsCreateResult::Created(_)
@@ -504,17 +518,14 @@ async fn canonical_preflight_read_cas_removes_malformed_manifest() -> Result<()>
     let manifest_name = store.canonical_preflight_manifest_name(&key)?;
     transport.replace_bytes(&manifest_name, b"{not-json")?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("malformed manifest must be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("invalid canonical preflight manifest")
-    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&manifest_name)?);
+    assert!(matches!(
+        store
+            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+            .await?,
+        CanonicalPreflightPutResult::Created(_)
+    ));
     Ok(())
 }
 
@@ -532,14 +543,15 @@ async fn canonical_preflight_read_cas_removes_manifest_for_corrupt_content() -> 
     let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
     transport.replace_bytes(&content_name, b"corrupt")?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("corrupt canonical content must be rejected");
-
-    assert!(error.to_string().contains("content hash mismatch"));
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
-    assert!(transport.contains(&content_name)?);
+    assert!(!transport.contains(&content_name)?);
+    assert!(matches!(
+        store
+            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+            .await?,
+        CanonicalPreflightPutResult::Created(_)
+    ));
     Ok(())
 }
 
@@ -580,16 +592,7 @@ async fn canonical_preflight_legacy_manifest_is_removed_and_republished() -> Res
     manifest["content_name"] = serde_json::json!(legacy_content_name);
     transport.replace_bytes(&manifest_name, &serde_json::to_vec(&manifest)?)?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("legacy content name must be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("canonical preflight content object mismatch")
-    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&manifest_name)?);
     assert!(transport.contains(&legacy_content_name)?);
 
@@ -611,7 +614,7 @@ async fn canonical_preflight_legacy_manifest_is_removed_and_republished() -> Res
 }
 
 #[tokio::test]
-async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Result<()> {
+async fn canonical_preflight_read_removes_manifest_with_another_full_key() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let key = canonical_preflight_key();
@@ -631,17 +634,14 @@ async fn canonical_preflight_read_rejects_manifest_with_another_full_key() -> Re
         &serde_json::to_vec(&manifest)?,
     )?;
 
-    let error = store
-        .get_canonical_preflight(&key)
-        .await
-        .expect_err("full-key mismatch must be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("canonical preflight key mismatch")
-    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
     assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
+    assert!(matches!(
+        store
+            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+            .await?,
+        CanonicalPreflightPutResult::Created(_)
+    ));
     Ok(())
 }
 
@@ -679,8 +679,7 @@ async fn runtime_drain_waits_for_admitted_gcs_preflight_read_repair() -> Result<
         };
 
     transport.allow_delete.notify_one();
-    read.await?
-        .expect_err("malformed manifest must be rejected after fenced repair");
+    assert!(read.await??.is_none());
     if !drained_early {
         draining.await?;
     }
@@ -804,55 +803,6 @@ async fn descriptor_survives_missing_content_through_gcs_seam() -> Result<()> {
     transport.remove(&store.content_name(&key, &first.content_hash))?;
 
     assert_eq!(store.get_descriptor(&key).await?, Some(first.descriptor()));
-    Ok(())
-}
-
-#[tokio::test]
-async fn prefix_read_rejects_manifest_with_missing_content() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(Arc::clone(&transport))?;
-    let key = key();
-    let proof = br#"{"proof":"0x01"}"#;
-    let first = store
-        .put_if_absent(&key, proof)
-        .await?
-        .try_object()
-        .expect("proof publication should materialize content")
-        .clone();
-
-    transport.remove(&store.content_name(&key, &first.content_hash))?;
-
-    let error = store
-        .get_prefix(&key, 64)
-        .await
-        .expect_err("dangling manifest must be reported as corruption");
-    assert!(error.to_string().contains("missing content"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn prefix_read_rejects_corrupted_content() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(Arc::clone(&transport))?;
-    let key = key();
-    let proof = br#"{"proof":"0x01"}"#;
-    let first = store
-        .put_if_absent(&key, proof)
-        .await?
-        .try_object()
-        .expect("proof publication should materialize content")
-        .clone();
-
-    transport.replace_bytes(
-        &store.content_name(&key, &first.content_hash),
-        br#"{"proof":"corrupted"}"#,
-    )?;
-
-    let error = store
-        .get_prefix(&key, 4)
-        .await
-        .expect_err("prefix reads must validate the complete immutable content");
-    assert!(error.to_string().contains("content hash mismatch"));
     Ok(())
 }
 

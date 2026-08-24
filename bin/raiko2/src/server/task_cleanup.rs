@@ -1002,8 +1002,8 @@ mod tests {
     use raiko2_queue::{RootOwner, TaskStoreError, decode_task_id, encode_task_id};
     use raiko2_runtime::{
         ExactDeleteResult, ProofArtifactDescriptor, ProofArtifactKey, ProofArtifactObject,
-        ProofArtifactPrefix, ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus,
-        RuntimeManager, TaskRegistration, TaskRetentionState,
+        ProofArtifactPutResult, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
+        TaskRegistration, TaskRetentionState,
         test_support::{
             MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
             RuntimeStateWriteResult, RuntimeStoreScope,
@@ -1741,14 +1741,6 @@ mod tests {
             key: &ProofArtifactKey,
         ) -> Result<Option<ProofArtifactDescriptor>> {
             self.inner.get_descriptor(key).await
-        }
-
-        async fn get_prefix(
-            &self,
-            key: &ProofArtifactKey,
-            max_bytes: usize,
-        ) -> Result<Option<ProofArtifactPrefix>> {
-            self.inner.get_prefix(key, max_bytes).await
         }
 
         async fn delete_exact(

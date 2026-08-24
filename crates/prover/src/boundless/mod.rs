@@ -51,6 +51,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use url::Url;
 
+use crate::redact::redact_urls;
 use crate::{
     BoundlessSubmissionProgress, BoundlessSubmissionResume, PendingProofCheckpointIdentity,
     ProverProgress, ProverProgressObserver, encode_risc0_aggregation_seal_payload,
@@ -83,6 +84,18 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = RaikoResult<T>>,
 {
+    retry_external_with_attempt_limit(operation, EXTERNAL_RETRY_ATTEMPTS, &mut run).await
+}
+
+async fn retry_external_with_attempt_limit<T, F, Fut>(
+    operation: &str,
+    max_attempts: u32,
+    mut run: F,
+) -> RaikoResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = RaikoResult<T>>,
+{
     let mut attempt = 1_u32;
     let mut delay = EXTERNAL_RETRY_INITIAL_DELAY;
 
@@ -94,20 +107,30 @@ where
                 }
                 return Ok(value);
             }
-            Err(err) if attempt < EXTERNAL_RETRY_ATTEMPTS => {
+            Err(err) if attempt < max_attempts => {
                 tracing::warn!(
                     operation,
                     attempt,
                     delay_ms = delay.as_millis(),
-                    error = %err,
+                    error = %redact_urls(&err.to_string()),
                     "Retrying Boundless external operation"
                 );
                 tokio::time::sleep(delay).await;
                 attempt = attempt.saturating_add(1);
                 delay = delay.saturating_mul(2).min(EXTERNAL_RETRY_MAX_DELAY);
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(redact_retry_error(err)),
         }
+    }
+}
+
+fn redact_retry_error(error: RaikoError) -> RaikoError {
+    match error {
+        RaikoError::InvalidRequestConfig(message) => {
+            RaikoError::InvalidRequestConfig(redact_urls(&message))
+        }
+        RaikoError::Guest(message) => RaikoError::Guest(redact_urls(&message)),
+        other => other,
     }
 }
 
@@ -346,7 +369,11 @@ impl BoundlessStatusSource {
         let block_snapshot = match self.fetch_latest_block_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(err) => {
-                return boundless_poll_error_statuses(submissions, err.to_string(), &self.registry);
+                return boundless_poll_error_statuses(
+                    submissions,
+                    &err.to_string(),
+                    &self.registry,
+                );
             }
         };
         let batch = self.build_batch_request(&pollable_submissions, block_snapshot.hash);
@@ -355,7 +382,7 @@ impl BoundlessStatusSource {
             Err(err) => {
                 return boundless_poll_error_statuses(
                     submissions,
-                    format!("boundless status rpc: {err}"),
+                    &format!("boundless status rpc: {}", redact_urls(&err.to_string())),
                     &self.registry,
                 );
             }
@@ -365,7 +392,7 @@ impl BoundlessStatusSource {
             Err(err) => {
                 return boundless_poll_error_statuses(
                     submissions,
-                    format!("boundless status rpc: {err}"),
+                    &format!("boundless status rpc: {}", redact_urls(&err.to_string())),
                     &self.registry,
                 );
             }
@@ -375,7 +402,10 @@ impl BoundlessStatusSource {
             Err(err) => {
                 return boundless_poll_error_statuses(
                     submissions,
-                    format!("decode boundless status rpc response: {err}"),
+                    &format!(
+                        "decode boundless status rpc response: {}",
+                        redact_urls(&err.to_string())
+                    ),
                     &self.registry,
                 );
             }
@@ -421,14 +451,25 @@ impl BoundlessStatusSource {
             .json(&request)
             .send()
             .await
-            .map_err(|err| RemotePollError::Transient(format!("boundless status rpc: {err}")))?
+            .map_err(|err| {
+                RemotePollError::Transient(format!(
+                    "boundless status rpc: {}",
+                    redact_urls(&err.to_string())
+                ))
+            })?
             .error_for_status()
-            .map_err(|err| RemotePollError::Transient(format!("boundless status rpc: {err}")))?
+            .map_err(|err| {
+                RemotePollError::Transient(format!(
+                    "boundless status rpc: {}",
+                    redact_urls(&err.to_string())
+                ))
+            })?
             .json::<JsonRpcResponse>()
             .await
             .map_err(|err| {
                 RemotePollError::Transient(format!(
-                    "decode boundless reference block response: {err}"
+                    "decode boundless reference block response: {}",
+                    redact_urls(&err.to_string())
                 ))
             })?;
         let mut by_id = HashMap::from([(response.id, response)]);
@@ -617,7 +658,8 @@ fn take_rpc_result(
     if let Some(error) = response.error {
         return Err(RemotePollError::Transient(format!(
             "boundless status rpc id {id} error {}: {}",
-            error.code, error.message
+            error.code,
+            redact_urls(&error.message)
         )));
     }
     response.result.ok_or_else(|| {
@@ -804,9 +846,10 @@ fn unrecoverable_boundless_status(
 
 fn boundless_poll_error_statuses(
     submissions: Vec<RemoteSubmission>,
-    error: String,
+    error: &str,
     registry: &BoundlessStatusRegistry,
 ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
+    let error = redact_urls(error);
     let mut has_terminal_status = false;
     let statuses = submissions
         .into_iter()
@@ -838,6 +881,7 @@ fn boundless_single_poll_error_status(
     error: &str,
     registry: &BoundlessStatusRegistry,
 ) -> RemoteSubmissionStatus {
+    let error = redact_urls(error);
     let local_now = now_secs();
     let metadata = match boundless_submission_metadata(registry, submission.id) {
         Ok(Some(metadata)) => metadata,
@@ -1325,7 +1369,7 @@ async fn checkpoint_boundless_tx_hash(
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(
             provider_request_id = %submission.provider_request_id,
-            error = %error,
+            error = %redact_urls(&error.to_string()),
             "Boundless request id is durable but its optional transaction hash was not checkpointed"
         ),
         Err(_) => tracing::warn!(
@@ -1371,7 +1415,7 @@ where
         Err(error) => {
             tracing::warn!(
                 provider_request_id = %submission.provider_request_id,
-                error = %error,
+                error = %redact_urls(&error.to_string()),
                 "Boundless offchain submission returned an uncertain error; polling checkpointed request id"
             );
             Ok(submission)
@@ -2024,7 +2068,8 @@ impl BoundlessProver {
             .await
             .map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!(
-                    "Failed to configure boundless storage downloader: {e}"
+                    "Failed to configure boundless storage downloader: {}",
+                    redact_urls(&e.to_string())
                 ))
             })?;
         Client::builder()
@@ -2034,7 +2079,8 @@ impl BoundlessProver {
             .await
             .map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!(
-                    "Failed to configure boundless storage uploader: {e}"
+                    "Failed to configure boundless storage uploader: {}",
+                    redact_urls(&e.to_string())
                 ))
             })?
             .with_private_key(signer)
@@ -2042,7 +2088,10 @@ impl BoundlessProver {
             .build()
             .await
             .map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Failed to build boundless client: {e}"))
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to build boundless client: {}",
+                    redact_urls(&e.to_string())
+                ))
             })
     }
 
@@ -2062,7 +2111,12 @@ impl BoundlessProver {
                 .map_err(|_| {
                     RaikoError::Guest("Boundless market balance query timed out".to_string())
                 })?
-                .map_err(|e| RaikoError::Guest(format!("Failed to query boundless balance: {e}")))
+                .map_err(|e| {
+                    RaikoError::Guest(format!(
+                        "Failed to query boundless balance: {}",
+                        redact_urls(&e.to_string())
+                    ))
+                })
             },
         )
         .await
@@ -2084,7 +2138,10 @@ impl BoundlessProver {
                     RaikoError::Guest("Boundless latest nonce query timed out".to_string())
                 })?
                 .map_err(|error| {
-                    RaikoError::Guest(format!("Failed to query Boundless latest nonce: {error}"))
+                    RaikoError::Guest(format!(
+                        "Failed to query Boundless latest nonce: {}",
+                        redact_urls(&error.to_string())
+                    ))
                 })?;
                 let pending = tokio::time::timeout(
                     BOUNDLESS_RPC_REQUEST_TIMEOUT,
@@ -2095,7 +2152,10 @@ impl BoundlessProver {
                     RaikoError::Guest("Boundless pending nonce query timed out".to_string())
                 })?
                 .map_err(|error| {
-                    RaikoError::Guest(format!("Failed to query Boundless pending nonce: {error}"))
+                    RaikoError::Guest(format!(
+                        "Failed to query Boundless pending nonce: {}",
+                        redact_urls(&error.to_string())
+                    ))
                 })?;
                 Ok((latest, pending))
             },
@@ -2137,7 +2197,10 @@ impl BoundlessProver {
 
         let url = retry_external("upload boundless program", || async {
             client.upload_program(elf).await.map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless program: {e}"))
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to upload boundless program: {}",
+                    redact_urls(&e.to_string())
+                ))
             })
         })
         .await?;
@@ -2181,7 +2244,10 @@ impl BoundlessProver {
             })?;
         let url = retry_external("upload boundless input", || async {
             client.upload_input(&guest_env_bytes).await.map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to upload boundless input: {}",
+                    redact_urls(&e.to_string())
+                ))
             })
         })
         .await?;
@@ -2312,7 +2378,8 @@ impl BoundlessProver {
                     .await
                     .map_err(|e| {
                         RaikoError::InvalidRequestConfig(format!(
-                            "Failed to build boundless request: {e:?}"
+                            "Failed to build boundless request: {}",
+                            redact_urls(&format!("{e:?}"))
                         ))
                     })
             }
@@ -2413,7 +2480,10 @@ impl BoundlessProver {
                 .await
                 .map_err(|_| RaikoError::Guest("Boundless chain id query timed out".to_string()))?
                 .map_err(|error| {
-                    RaikoError::Guest(format!("Failed to query boundless chain id: {error}"))
+                    RaikoError::Guest(format!(
+                        "Failed to query boundless chain id: {}",
+                        redact_urls(&error.to_string())
+                    ))
                 })
             },
         )
@@ -2455,8 +2525,9 @@ impl BoundlessProver {
             })?
             .map_err(|error| {
                 RaikoError::Guest(format!(
-                    "Boundless submitRequest at nonce {} returned an uncertain error: {error}",
-                    uncertain.nonce
+                    "Boundless submitRequest at nonce {} returned an uncertain error: {}",
+                    uncertain.nonce,
+                    redact_urls(&error.to_string())
                 ))
             })
     }
@@ -2476,7 +2547,8 @@ impl BoundlessProver {
                     })?
                     .map_err(|error| {
                         RaikoError::Guest(format!(
-                            "Failed to query Boundless confirmation head: {error}"
+                            "Failed to query Boundless confirmation head: {}",
+                            redact_urls(&error.to_string())
                         ))
                     })?;
             let target_head = observed_head
@@ -2493,7 +2565,8 @@ impl BoundlessProver {
                 })?
                 .map_err(|error| {
                     RaikoError::Guest(format!(
-                        "Failed to query Boundless confirmation head: {error}"
+                        "Failed to query Boundless confirmation head: {}",
+                        redact_urls(&error.to_string())
                     ))
                 })?;
                 if head >= target_head {
@@ -2569,7 +2642,7 @@ impl BoundlessProver {
                                     tracing::warn!(
                                         provider_request_id = %uncertain.submission.provider_request_id,
                                         nonce = uncertain.nonce,
-                                        error = %error,
+                                        error = %redact_urls(&error.to_string()),
                                         "Recovered Boundless submission from its consumed nonce without a transaction hash"
                                     );
                                     return Ok(None);
@@ -2578,13 +2651,13 @@ impl BoundlessProver {
                             BoundlessNonceStatus::Pending => tracing::warn!(
                                 provider_request_id = %uncertain.submission.provider_request_id,
                                 nonce = uncertain.nonce,
-                                error = %error,
+                                error = %redact_urls(&error.to_string()),
                                 "Boundless submission is pending without an acknowledged transaction hash; retrying the same request and nonce"
                             ),
                             BoundlessNonceStatus::Available => tracing::warn!(
                                 provider_request_id = %uncertain.submission.provider_request_id,
                                 nonce = uncertain.nonce,
-                                error = %error,
+                                error = %redact_urls(&error.to_string()),
                                 "Boundless submission nonce remains available; retrying the same request and nonce"
                             ),
                         }
@@ -2632,7 +2705,7 @@ impl BoundlessProver {
                 tracing::warn!(
                     provider_request_id = %submission.provider_request_id,
                     remote_tx_hash = ?submission.remote_tx_hash,
-                    error = %error,
+                    error = %redact_urls(&error.to_string()),
                     "Boundless submitRequest receipt is uncertain; retaining its local funding reservation"
                 );
                 BoundlessReceiptOutcome::Uncertain
@@ -2727,7 +2800,7 @@ impl BoundlessProver {
             Err(error) => tracing::warn!(
                 provider_request_id = %submission.provider_request_id,
                 nonce,
-                error = %error,
+                error = %redact_urls(&error.to_string()),
                 "Boundless submitRequest remains uncertain; retaining its nonce and funding reservation"
             ),
         }
@@ -3031,7 +3104,10 @@ impl BoundlessProver {
                 .get_request_fulfillment(submission.market_request_id, None, None)
                 .await
                 .map_err(|error| {
-                    RaikoError::Guest(format!("Failed to read boundless fulfillment: {error}"))
+                    RaikoError::Guest(format!(
+                        "Failed to read boundless fulfillment: {}",
+                        redact_urls(&error.to_string())
+                    ))
                 })
         })
         .await
@@ -3739,10 +3815,10 @@ mod tests {
         exceeds_submission_budget, no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
         parse_bool_result, parse_env_bool, parse_env_url, publish_boundless_progress,
         quote_batch_mcycles, reserve_boundless_funding_before_dispatch, retry_external_bounded,
-        run_after_submission_permit, should_defer_boundless_poll_timeout,
-        should_rebid_unlocked_request, storage_uploader_config_from_env,
-        terminalize_boundless_checkpoint, user_cycles_to_mcycles, validate_offer_params,
-        validate_resume_context,
+        retry_external_with_attempt_limit, run_after_submission_permit,
+        should_defer_boundless_poll_timeout, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, take_rpc_result, terminalize_boundless_checkpoint,
+        user_cycles_to_mcycles, validate_offer_params, validate_resume_context,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{Address, B256, Bloom, Bytes, U256, address, utils::parse_ether};
@@ -3764,7 +3840,7 @@ mod tests {
     use httpmock::{Method::POST, MockServer};
     use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_remote_poller::{
-        RemoteStatus, RemoteStatusReason, RemoteSubmission, RemoteSubmissionId,
+        RemotePollError, RemoteStatus, RemoteStatusReason, RemoteSubmission, RemoteSubmissionId,
     };
     use raiko2_runtime::RuntimeManager;
     use std::{
@@ -4179,6 +4255,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_external_redacts_the_final_error_without_changing_its_variant() {
+        const TOKEN: &str = "SENTINEL-RPC-TOKEN";
+
+        let error = retry_external_with_attempt_limit("credential-bearing fixture", 1, || async {
+            Err::<(), _>(RaikoError::InvalidRequestConfig(format!(
+                "request failed for url (https://rpc.test/?secret={TOKEN})"
+            )))
+        })
+        .await
+        .expect_err("retry exhaustion must return the final error");
+
+        assert!(matches!(error, RaikoError::InvalidRequestConfig(_)));
+        let message = error.to_string();
+        assert!(!message.contains(TOKEN), "{message}");
+        assert!(!message.contains("secret="), "{message}");
+        assert!(message.contains("https://rpc.test/"), "{message}");
+    }
+
+    #[tokio::test]
     async fn boundless_checkpoint_stops_on_permanent_runtime_fence() {
         let observer = Arc::new(PermanentProgressObserver {
             calls: AtomicUsize::new(0),
@@ -4494,12 +4589,8 @@ mod tests {
             },
         )])));
 
-        let statuses = boundless_poll_error_statuses(
-            vec![submission],
-            "missing rpc id".to_string(),
-            &registry,
-        )
-        .expect("poll timeout status");
+        let statuses = boundless_poll_error_statuses(vec![submission], "missing rpc id", &registry)
+            .expect("poll timeout status");
 
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].status, RemoteStatus::Failed);
@@ -4514,6 +4605,56 @@ mod tests {
                 rotate_request_id: false
             })
         ));
+    }
+
+    #[test]
+    fn boundless_poll_error_sinks_redact_echoed_authenticated_urls() {
+        const TOKEN: &str = "SENTINEL-RPC-TOKEN";
+        let error = format!("gateway rejected https://rpc.test/?secret={TOKEN}");
+        let now = now_secs();
+
+        let pending = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x1".to_string(),
+            timeout_at: None,
+        };
+        let pending_registry = Arc::new(Mutex::new(HashMap::from([(
+            pending.id,
+            boundless_submission_state(
+                now,
+                BoundlessTimeoutAction::Rebid,
+                60,
+                Instant::now() + Duration::from_secs(60),
+            ),
+        )])));
+
+        let transient = boundless_poll_error_statuses(vec![pending], &error, &pending_registry)
+            .expect_err("a pending submission must retain a transient poll error")
+            .to_string();
+        assert!(!transient.contains(TOKEN), "{transient}");
+        assert!(!transient.contains("secret="), "{transient}");
+        assert!(transient.contains("https://rpc.test/"), "{transient}");
+
+        let expired = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x2".to_string(),
+            timeout_at: None,
+        };
+        let expired_registry = Arc::new(Mutex::new(HashMap::from([(
+            expired.id,
+            boundless_submission_state(now, BoundlessTimeoutAction::Rebid, -1, Instant::now()),
+        )])));
+
+        let terminal = boundless_single_poll_error_status(&expired, &error, &expired_registry);
+        let reason = &terminal
+            .reason
+            .expect("terminal error must carry a reason")
+            .message;
+        assert!(!reason.contains(TOKEN), "{reason}");
+        assert!(!reason.contains("secret="), "{reason}");
+        assert!(reason.contains("https://rpc.test/"), "{reason}");
     }
 
     #[test]
@@ -4548,7 +4689,7 @@ mod tests {
 
         let statuses = boundless_poll_error_statuses(
             vec![invalid.clone(), valid.clone()],
-            "rpc unavailable".to_string(),
+            "rpc unavailable",
             &registry,
         )
         .expect("invalid id status should be returned with valid pending status");
@@ -4593,6 +4734,25 @@ mod tests {
                 message: message.to_string(),
             }),
         }
+    }
+
+    #[test]
+    fn json_rpc_error_message_redacts_an_echoed_authenticated_url() {
+        const TOKEN: &str = "SENTINEL-RPC-TOKEN";
+        let mut by_id = HashMap::from([(
+            7,
+            rpc_error(
+                7,
+                "gateway rejected https://rpc.test/?secret=SENTINEL-RPC-TOKEN",
+            ),
+        )]);
+
+        let error = take_rpc_result(&mut by_id, 7).expect_err("rpc error response must fail");
+        let message = error.to_string();
+
+        assert!(!message.contains(TOKEN), "{message}");
+        assert!(!message.contains("secret="), "{message}");
+        assert!(message.contains("https://rpc.test/"), "{message}");
     }
 
     fn boundless_submission_state(
@@ -4760,6 +4920,98 @@ mod tests {
             boundless_terminal_outcome(&source.registry, statuses[0].submission_id),
             Ok(None)
         ));
+    }
+
+    /// The market RPC token travels in the URL query, and `reqwest` renders the
+    /// full URL into its error `Display`. Both the transient error (which the
+    /// remote poller logs) and the terminal status reason (which is persisted)
+    /// must come back with the credential stripped.
+    #[tokio::test]
+    async fn boundless_status_poll_errors_redact_the_market_rpc_credential() {
+        const TOKEN: &str = "SENTINEL-MARKET-TOKEN";
+
+        let server = MockServer::start();
+        let failing = server.mock(|when, then| {
+            when.method(POST);
+            then.status(500).body("upstream unavailable");
+        });
+        let rpc_url = format!("{}?secret={TOKEN}", server.url("/"));
+
+        let pending = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x1".to_string(),
+            timeout_at: None,
+        };
+        let source = BoundlessStatusSource {
+            rpc_url: rpc_url.clone(),
+            market_address: "0x0000000000000000000000000000000000000000".to_string(),
+            http: reqwest::Client::new(),
+            registry: Arc::new(Mutex::new(HashMap::from([(
+                pending.id,
+                boundless_submission_state(
+                    now_secs(),
+                    BoundlessTimeoutAction::Rebid,
+                    1,
+                    Instant::now() + Duration::from_secs(30),
+                ),
+            )]))),
+        };
+
+        let transient = source
+            .poll_batch(vec![pending])
+            .await
+            .expect_err("a failing market rpc must surface a poll error");
+
+        failing.assert();
+        let RemotePollError::Transient(message) = transient else {
+            panic!("a 500 from the market rpc must be transient");
+        };
+        assert!(!message.contains(TOKEN), "{message}");
+        assert!(!message.contains("secret="), "{message}");
+        // The endpoint itself must survive: redaction removes the credential, not
+        // the operator's ability to tell which endpoint failed.
+        assert!(message.contains(&server.url("/")), "{message}");
+
+        // A submission past its poll deadline takes the terminal branch, whose
+        // reason string is persisted with the task rather than only logged.
+        let expired = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x2".to_string(),
+            timeout_at: None,
+        };
+        let expiring_source = BoundlessStatusSource {
+            rpc_url,
+            market_address: "0x0000000000000000000000000000000000000000".to_string(),
+            http: reqwest::Client::new(),
+            registry: Arc::new(Mutex::new(HashMap::from([(
+                expired.id,
+                boundless_submission_state(
+                    now_secs(),
+                    BoundlessTimeoutAction::Rebid,
+                    -1,
+                    // Instant is monotonic, so this deadline is already in the
+                    // past by the time poll_batch reads it.
+                    Instant::now(),
+                ),
+            )]))),
+        };
+
+        let statuses = expiring_source
+            .poll_batch(vec![expired])
+            .await
+            .expect("an expired submission returns a terminal status");
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, RemoteStatus::Failed);
+        let reason = &statuses[0]
+            .reason
+            .as_ref()
+            .expect("a terminal status carries its last polling error")
+            .message;
+        assert!(!reason.contains(TOKEN), "{reason}");
+        assert!(!reason.contains("secret="), "{reason}");
     }
 
     #[test]

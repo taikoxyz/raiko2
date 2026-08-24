@@ -989,6 +989,17 @@ load balancer, remove nodes that lag the previously served head; a stale balance
 understate the required top-up. Local reservations remain for 60 seconds after `lock_expires_at` so
 small local-clock and chain-time differences stay conservative.
 
+An authenticated market RPC carries its credential inside `prover.risc0.boundless.rpc_url`, as
+userinfo or as a query parameter: neither the alloy transport nor the Boundless SDK exposes a
+per-request header hook. Supply the whole URL through a `{ env = "..." }` reference so the token
+never reaches a plaintext config file. Raiko2 strips credentials, query, and fragment from every URL
+it renders into a Boundless error message or log field, so a failing request logs the endpoint but
+not the token. Its logging filter also suppresses Boundless SDK output and Alloy HTTP debug/trace
+output because those dependencies can render the provider URL before raiko2 receives and scrubs the
+error; `RUST_LOG` and `--verbose` cannot override this safety boundary. That protects raiko2's own
+output only: the credential still appears in the request line of any proxy or gateway in front of
+the endpoint, so rotate it on the same schedule as the signer key.
+
 Keep the signer wallet funded for the peak `attached_value` plus transaction gas. Monitor the
 structured `Prepared Boundless funding decision` event (`reserved_count`, `market_balance`,
 `required_total`, and `attached_value`) and alert before the required top-up approaches available

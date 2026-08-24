@@ -1,0 +1,4 @@
+interface:
+  display_name: "Raiko2 Service Regression"
+  short_description: "Run isolated v4 proposal and aggregate regressions"
+  default_prompt: "Use $raiko2-service-regression to validate a v4 raiko2 service without disrupting live traffic."

@@ -106,9 +106,11 @@ The runtime is governed by these invariants:
 8. Durable deployments use separate state and proof-object repository semantics over one configured
    GCS namespace; memory mode is explicitly ephemeral and requires an opt-in outside local
    environments. The service does not dual-write or automatically fail over between backends.
-   `runtime.startup_cleanup` optionally invalidates active `proof` and `preflight` manifests in one
-   non-overlapping namespace before initialization. It preserves immutable content for GCS lifecycle
-   cleanup and is never an automatic recovery or failover mechanism.
+   `runtime.startup_cleanup` optionally invalidates active proof manifests or deletes canonical
+   preflight cache objects in one non-overlapping namespace before initialization. Proof cleanup
+   preserves immutable proof content for GCS lifecycle reclamation, while preflight cleanup deletes
+   the single cache objects directly. Startup cleanup is never an automatic recovery or failover
+   mechanism.
 9. A replacement starts only after the old process has stopped admissions, completed its bounded
    fence drain, stopped and joined workers, and exited. The drain does not wait for all proof tasks;
    deployment configuration must enforce the non-overlapping replacement sequence.

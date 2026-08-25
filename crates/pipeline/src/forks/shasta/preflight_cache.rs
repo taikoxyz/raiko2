@@ -33,6 +33,9 @@ pub struct CanonicalPreflightObject {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalPreflightDescriptor {
     pub key_digest: B256,
+    /// Identifies the payload for conflict reporting and observability. Exact
+    /// deletion is fenced by `key_digest` plus the storage generation, so a
+    /// remote store does not need to download the payload before a CAS delete.
     pub content_hash: String,
     pub generation: Option<i64>,
 }

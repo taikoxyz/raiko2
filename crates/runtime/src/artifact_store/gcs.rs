@@ -15,20 +15,10 @@ use google_cloud_storage::client::{Storage, StorageControl};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProofManifest {
     content_hash: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct CanonicalPreflightManifest {
-    schema: u16,
-    key_digest: alloy_primitives::B256,
-    key: CanonicalPreflightKeyV1,
-    content_hash: String,
-    content_name: String,
 }
 
 #[derive(Debug)]
@@ -342,22 +332,10 @@ impl GcsProofArtifactStore {
         format!("{}/preflights/v{schema}", self.scope_prefix())
     }
 
-    fn canonical_preflight_manifest_name(&self, key: &CanonicalPreflightKeyV1) -> Result<String> {
+    fn canonical_preflight_object_name(&self, key: &CanonicalPreflightKeyV1) -> Result<String> {
         Ok(format!(
-            "{}/manifest.manifest.json",
+            "{}.preflight.bincode",
             self.canonical_preflight_base_name(key)?
-        ))
-    }
-
-    fn canonical_preflight_content_name(
-        &self,
-        key: &CanonicalPreflightKeyV1,
-        hash: &str,
-    ) -> Result<String> {
-        Ok(format!(
-            "{}/content/{}.preflight.bincode",
-            self.canonical_preflight_base_name(key)?,
-            encode_component(hash)
         ))
     }
 
@@ -591,112 +569,22 @@ impl GcsProofArtifactStore {
         }))
     }
 
-    async fn read_canonical_preflight_manifest(
-        &self,
-        key: &CanonicalPreflightKeyV1,
-    ) -> Result<Option<(CanonicalPreflightManifest, i64)>> {
-        Self::validate_canonical_preflight_key(key)?;
-        let name = self.canonical_preflight_manifest_name(key)?;
-        let Some(object) = self.transport.read(&name).await? else {
-            return Ok(None);
-        };
-        let key_digest = key.digest()?;
-        let validation = (|| -> Result<CanonicalPreflightManifest> {
-            let manifest: CanonicalPreflightManifest = serde_json::from_slice(&object.bytes)
-                .context("invalid canonical preflight manifest")?;
-            anyhow::ensure!(
-                manifest.schema == CANONICAL_PREFLIGHT_SCHEMA_V1
-                    && manifest.key.schema == CANONICAL_PREFLIGHT_SCHEMA_V1,
-                "canonical preflight manifest schema mismatch"
-            );
-            anyhow::ensure!(manifest.key == *key, "canonical preflight key mismatch");
-            anyhow::ensure!(
-                manifest.key_digest == key_digest && manifest.key.digest()? == key_digest,
-                "canonical preflight key digest mismatch"
-            );
-            anyhow::ensure!(
-                manifest.content_name
-                    == self.canonical_preflight_content_name(key, &manifest.content_hash)?,
-                "canonical preflight content object mismatch"
-            );
-            Ok(manifest)
-        })();
-        match validation {
-            Ok(manifest) => Ok(Some((manifest, object.generation))),
-            Err(error) => {
-                self.remove_corrupt_canonical_preflight_manifest(&name, object.generation, &error)
-                    .await?;
-                Ok(None)
-            }
-        }
-    }
-
     async fn read_canonical_preflight_object(
         &self,
         key: &CanonicalPreflightKeyV1,
     ) -> Result<Option<CanonicalPreflightObject>> {
-        let Some((manifest, generation)) = self.read_canonical_preflight_manifest(key).await?
-        else {
+        Self::validate_canonical_preflight_key(key)?;
+        let name = self.canonical_preflight_object_name(key)?;
+        let Some(object) = self.transport.read(&name).await? else {
             return Ok(None);
         };
-        let object = self.transport.read(&manifest.content_name).await?;
-        let validation_error = match object.as_ref() {
-            None => Some(anyhow::anyhow!(
-                "canonical preflight manifest references missing content"
-            )),
-            Some(object) if content_hash(&object.bytes) != manifest.content_hash => {
-                Some(anyhow::anyhow!("canonical preflight content hash mismatch"))
-            }
-            Some(_) => None,
-        };
-        if let Some(error) = validation_error {
-            if let Some(object) = object {
-                self.transport
-                    .delete_if_generation(&manifest.content_name, Some(object.generation))
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to CAS-remove corrupt canonical preflight content after validation error: {error:#}"
-                        )
-                    })?;
-            }
-            self.remove_corrupt_canonical_preflight_manifest(
-                &self.canonical_preflight_manifest_name(key)?,
-                generation,
-                &error,
-            )
-            .await?;
-            return Ok(None);
-        }
-        let object = object.context("validated canonical preflight content disappeared")?;
+        let hash = content_hash(&object.bytes);
         Ok(Some(CanonicalPreflightObject {
-            key_digest: manifest.key_digest,
-            content_hash: manifest.content_hash,
-            generation: Some(generation),
+            key_digest: key.digest()?,
+            content_hash: hash,
+            generation: Some(object.generation),
             bytes: object.bytes,
         }))
-    }
-
-    async fn remove_corrupt_canonical_preflight_manifest(
-        &self,
-        name: &str,
-        generation: i64,
-        validation_error: &anyhow::Error,
-    ) -> Result<()> {
-        warn!(
-            object_name = name,
-            error = %validation_error,
-            "removing invalid canonical preflight cache entry"
-        );
-        self.transport
-            .delete_if_generation(name, Some(generation))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to CAS-remove corrupt canonical preflight manifest after validation error: {validation_error:#}"
-                )
-            })?;
-        Ok(())
     }
 }
 
@@ -731,57 +619,12 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
         Self::validate_canonical_preflight_key(key)?;
         let key_digest = key.digest()?;
         let hash = content_hash(bytes);
-
-        if let Some((manifest, generation)) = self.read_canonical_preflight_manifest(key).await? {
-            let descriptor = CanonicalPreflightDescriptor {
-                key_digest,
-                content_hash: manifest.content_hash.clone(),
-                generation: Some(generation),
-            };
-            if manifest.content_hash != hash {
-                return Ok(CanonicalPreflightPutResult::Conflict(descriptor));
-            }
-            let content_name = self.canonical_preflight_content_name(key, &hash)?;
-            self.transport
-                .create(&content_name, bytes)
-                .await
-                .context("failed to repair immutable GCS canonical preflight content")?;
-            let existing = self.read_canonical_preflight_object(key).await?.context(
-                "canonical preflight manifest exists but content is missing after repair",
-            )?;
-            return Ok(CanonicalPreflightPutResult::AlreadyExists(existing));
-        }
-
-        let content_name = self.canonical_preflight_content_name(key, &hash)?;
-        let content_creation = self
-            .transport
-            .create(&content_name, bytes)
-            .await
-            .context("failed to publish immutable GCS canonical preflight content")?;
-        if content_creation == GcsCreateResult::AlreadyExists {
-            let existing = self.transport.read(&content_name).await?.context(
-                "immutable GCS canonical preflight content disappeared after create conflict",
-            )?;
-            anyhow::ensure!(
-                content_hash(&existing.bytes) == hash,
-                "immutable GCS canonical preflight content hash mismatch"
-            );
-        }
-
-        let manifest = serde_json::to_vec(&CanonicalPreflightManifest {
-            schema: CANONICAL_PREFLIGHT_SCHEMA_V1,
-            key_digest,
-            key: key.clone(),
-            content_hash: hash.clone(),
-            content_name,
-        })
-        .context("failed to serialize canonical preflight manifest")?;
-        let manifest_name = self.canonical_preflight_manifest_name(key)?;
+        let object_name = self.canonical_preflight_object_name(key)?;
         match self
             .transport
-            .create(&manifest_name, &manifest)
+            .create(&object_name, bytes)
             .await
-            .context("failed to publish GCS canonical preflight manifest")?
+            .context("failed to publish GCS canonical preflight object")?
         {
             GcsCreateResult::Created(generation) => Ok(CanonicalPreflightPutResult::Created(
                 CanonicalPreflightObject {
@@ -793,7 +636,7 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
             )),
             GcsCreateResult::AlreadyExists => {
                 let existing = self.read_canonical_preflight_object(key).await?.context(
-                    "GCS canonical preflight manifest precondition failed but manifest is missing",
+                    "GCS canonical preflight create precondition failed but object is missing",
                 )?;
                 if existing.content_hash == hash {
                     Ok(CanonicalPreflightPutResult::AlreadyExists(existing))
@@ -813,45 +656,31 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
         if descriptor.key_digest != key_digest {
             return Ok(CanonicalPreflightDeleteResult::Stale);
         }
-        let Some((manifest, generation)) = self.read_canonical_preflight_manifest(key).await?
-        else {
-            return Ok(CanonicalPreflightDeleteResult::Missing);
-        };
-        let current = CanonicalPreflightDescriptor {
-            key_digest,
-            content_hash: manifest.content_hash,
-            generation: Some(generation),
-        };
-        if current != *descriptor {
+        if descriptor.generation.is_none() {
             return Ok(CanonicalPreflightDeleteResult::Stale);
         }
 
-        let manifest_name = self.canonical_preflight_manifest_name(key)?;
+        let object_name = self.canonical_preflight_object_name(key)?;
         match self
             .transport
-            .delete_if_generation(&manifest_name, descriptor.generation)
+            .delete_if_generation(&object_name, descriptor.generation)
             .await
         {
             Ok(ProofArtifactDeleteResult::Removed) => Ok(CanonicalPreflightDeleteResult::Removed),
             Ok(ProofArtifactDeleteResult::Missing) => Ok(CanonicalPreflightDeleteResult::Missing),
-            Err(delete_error) => match self.read_canonical_preflight_manifest(key).await {
+            Err(delete_error) => match self.read_canonical_preflight_object(key).await {
                 Ok(None) => Ok(CanonicalPreflightDeleteResult::Removed),
-                Ok(Some((observed, observed_generation))) => {
-                    let observed = CanonicalPreflightDescriptor {
-                        key_digest,
-                        content_hash: observed.content_hash,
-                        generation: Some(observed_generation),
-                    };
-                    if observed == *descriptor {
+                Ok(Some(observed)) => {
+                    if observed.descriptor() == *descriptor {
                         Err(delete_error).context(
-                            "canonical preflight manifest delete failed before commit; exact deletion can be retried",
+                            "canonical preflight object delete failed before commit; exact deletion can be retried",
                         )
                     } else {
                         Ok(CanonicalPreflightDeleteResult::Stale)
                     }
                 }
                 Err(read_error) => Err(delete_error).context(format!(
-                    "canonical preflight manifest delete outcome is unknown and read-back failed: {read_error:#}"
+                    "canonical preflight object delete outcome is unknown and read-back failed: {read_error:#}"
                 )),
             },
         }
@@ -1090,6 +919,7 @@ impl RuntimeStateStore for GcsProofArtifactStore {
             let (matched, removed) = self
                 .clear_cleanup_prefix(&scope_prefix, &preflights_prefix, |object| {
                     Self::is_manifest_object(&object.name)
+                        || object.name.ends_with(".preflight.bincode")
                 })
                 .await?;
             report.scopes.push(StartupCleanupScopeReport {

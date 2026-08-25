@@ -87,6 +87,17 @@ impl FakeGcsTransport {
             .contains_key(name))
     }
 
+    fn names_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .objects
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?
+            .keys()
+            .filter(|name| name.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+
     fn replace_bytes(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let mut objects = self
             .objects
@@ -344,18 +355,18 @@ async fn canonical_preflight_publication_roundtrips_and_reuses_identical_content
             .bytes,
         bytes
     );
-    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
-    assert!(manifest_name.contains("/preflights/v1/"));
+    let object_name = store.canonical_preflight_object_name(&key)?;
+    assert!(object_name.contains("/preflights/v1/"));
+    assert!(object_name.ends_with(&format!("{:x}.preflight.bincode", key.digest()?)));
     assert_ne!(
         store.canonical_preflight_version_prefix(key.schema),
         store.canonical_preflight_version_prefix(key.schema + 1)
     );
-    let object = first
-        .try_object()
-        .expect("created canonical preflight object");
-    let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
-    assert!(content_name.ends_with(".preflight.bincode"));
-    assert!(transport.contains(&content_name)?);
+    assert!(transport.contains(&object_name)?);
+    assert_eq!(
+        transport.names_with_prefix(&format!("{}/preflights/", store.scope_prefix()))?,
+        vec![object_name]
+    );
     Ok(())
 }
 
@@ -365,25 +376,25 @@ async fn delayed_incompatible_version_create_is_unreachable_from_current_version
     let store = store(Arc::clone(&transport))?;
     let key = canonical_preflight_key();
     let incompatible_version = key.schema.saturating_sub(1);
-    let delayed_manifest = format!(
-        "{}/{:x}/manifest.manifest.json",
+    let delayed_object = format!(
+        "{}/{:x}.preflight.bincode",
         store.canonical_preflight_version_prefix(incompatible_version),
         key.digest()?
     );
-    let current_manifest = store.canonical_preflight_manifest_name(&key)?;
+    let current_object = store.canonical_preflight_object_name(&key)?;
 
-    assert_ne!(delayed_manifest, current_manifest);
+    assert_ne!(delayed_object, current_object);
     assert!(matches!(
-        transport.create(&delayed_manifest, b"old-version").await?,
+        transport.create(&delayed_object, b"old-version").await?,
         GcsCreateResult::Created(_)
     ));
-    assert!(transport.contains(&delayed_manifest)?);
+    assert!(transport.contains(&delayed_object)?);
     assert!(store.get_canonical_preflight(&key).await?.is_none());
     Ok(())
 }
 
 #[tokio::test]
-async fn canonical_preflight_manifest_is_first_write_wins() -> Result<()> {
+async fn canonical_preflight_object_is_first_write_wins() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(transport)?;
     let key = canonical_preflight_key();
@@ -472,16 +483,16 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
         .try_object()
         .expect("first publication")
         .clone();
+    let mut first_version = first.descriptor();
+    first_version.content_hash = "diagnostic-hash-is-not-the-delete-fence".to_string();
 
     assert_eq!(
         store
-            .delete_canonical_preflight_exact(&key, &first.descriptor())
+            .delete_canonical_preflight_exact(&key, &first_version)
             .await?,
         CanonicalPreflightDeleteResult::Removed
     );
-    assert!(
-        transport.contains(&store.canonical_preflight_content_name(&key, &first.content_hash)?)?
-    );
+    assert!(!transport.contains(&store.canonical_preflight_object_name(&key)?)?);
     let second = store
         .put_canonical_preflight_if_absent(&key, b"second")
         .await?
@@ -508,160 +519,27 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
 }
 
 #[tokio::test]
-async fn canonical_preflight_read_cas_removes_malformed_manifest() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(Arc::clone(&transport))?;
-    let key = canonical_preflight_key();
-    store
-        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-        .await?;
-    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
-    transport.replace_bytes(&manifest_name, b"{not-json")?;
-
-    assert!(store.get_canonical_preflight(&key).await?.is_none());
-    assert!(!transport.contains(&manifest_name)?);
-    assert!(matches!(
-        store
-            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-            .await?,
-        CanonicalPreflightPutResult::Created(_)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn canonical_preflight_read_cas_removes_manifest_for_corrupt_content() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(Arc::clone(&transport))?;
-    let key = canonical_preflight_key();
-    let object = store
-        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-        .await?
-        .try_object()
-        .expect("canonical preflight object")
-        .clone();
-    let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
-    transport.replace_bytes(&content_name, b"corrupt")?;
-
-    assert!(store.get_canonical_preflight(&key).await?.is_none());
-    assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
-    assert!(!transport.contains(&content_name)?);
-    assert!(matches!(
-        store
-            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-            .await?,
-        CanonicalPreflightPutResult::Created(_)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn canonical_preflight_legacy_manifest_is_removed_and_republished() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(Arc::clone(&transport))?;
-    let key = canonical_preflight_key();
-    let bytes = b"canonical-preflight";
-    let object = store
-        .put_canonical_preflight_if_absent(&key, bytes)
-        .await?
-        .try_object()
-        .expect("canonical preflight object")
-        .clone();
-    let content_name = store.canonical_preflight_content_name(&key, &object.content_hash)?;
-    let legacy_content_name = format!(
-        "{}.bin",
-        content_name
-            .strip_suffix(".preflight.bincode")
-            .expect("typed preflight suffix")
-    );
-    assert!(matches!(
-        transport.create(&legacy_content_name, bytes).await?,
-        GcsCreateResult::Created(_)
-    ));
-    transport.remove(&content_name)?;
-    assert!(!transport.contains(&content_name)?);
-
-    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
-    let mut manifest: serde_json::Value = serde_json::from_slice(
-        &transport
-            .read(&manifest_name)
-            .await?
-            .expect("canonical manifest")
-            .bytes,
-    )?;
-    manifest["content_name"] = serde_json::json!(legacy_content_name);
-    transport.replace_bytes(&manifest_name, &serde_json::to_vec(&manifest)?)?;
-
-    assert!(store.get_canonical_preflight(&key).await?.is_none());
-    assert!(!transport.contains(&manifest_name)?);
-    assert!(transport.contains(&legacy_content_name)?);
-
-    let replacement = store.put_canonical_preflight_if_absent(&key, bytes).await?;
-    assert!(matches!(
-        replacement,
-        CanonicalPreflightPutResult::Created(_)
-    ));
-    assert!(transport.contains(&content_name)?);
-    let replacement_manifest: serde_json::Value = serde_json::from_slice(
-        &transport
-            .read(&manifest_name)
-            .await?
-            .expect("replacement canonical manifest")
-            .bytes,
-    )?;
-    assert_eq!(replacement_manifest["content_name"], content_name);
-    Ok(())
-}
-
-#[tokio::test]
-async fn canonical_preflight_read_removes_manifest_with_another_full_key() -> Result<()> {
-    let transport = Arc::new(FakeGcsTransport::default());
-    let store = store(Arc::clone(&transport))?;
-    let key = canonical_preflight_key();
-    store
-        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-        .await?;
-    let mut manifest: serde_json::Value = serde_json::from_slice(
-        &transport
-            .read(&store.canonical_preflight_manifest_name(&key)?)
-            .await?
-            .expect("canonical manifest")
-            .bytes,
-    )?;
-    manifest["key"]["proposal_id"] = serde_json::json!(key.proposal_id + 1);
-    transport.replace_bytes(
-        &store.canonical_preflight_manifest_name(&key)?,
-        &serde_json::to_vec(&manifest)?,
-    )?;
-
-    assert!(store.get_canonical_preflight(&key).await?.is_none());
-    assert!(!transport.contains(&store.canonical_preflight_manifest_name(&key)?)?);
-    assert!(matches!(
-        store
-            .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-            .await?,
-        CanonicalPreflightPutResult::Created(_)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn runtime_drain_waits_for_admitted_gcs_preflight_read_repair() -> Result<()> {
+async fn runtime_drain_waits_for_admitted_gcs_preflight_exact_delete() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = Arc::new(store(Arc::clone(&transport))?);
     let runtime = Arc::new(crate::RuntimeManager::from_shared_store(Arc::clone(&store)));
     let key = canonical_preflight_key();
-    runtime
+    let object = runtime
         .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-        .await?;
-    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
-    transport.replace_bytes(&manifest_name, b"{not-json")?;
+        .await?
+        .try_object()
+        .expect("canonical preflight object")
+        .clone();
     transport.block_next_delete();
 
-    let read = tokio::spawn({
+    let deletion = tokio::spawn({
         let runtime = Arc::clone(&runtime);
         let key = key.clone();
-        async move { runtime.get_canonical_preflight(&key).await }
+        async move {
+            runtime
+                .delete_canonical_preflight_exact(&key, &object.descriptor())
+                .await
+        }
     });
     transport.delete_entered.notified().await;
 
@@ -679,39 +557,40 @@ async fn runtime_drain_waits_for_admitted_gcs_preflight_read_repair() -> Result<
         };
 
     transport.allow_delete.notify_one();
-    assert!(read.await??.is_none());
+    assert_eq!(deletion.await??, CanonicalPreflightDeleteResult::Removed);
     if !drained_early {
         draining.await?;
     }
 
     assert!(
         !drained_early,
-        "draining completed while an admitted GCS repair delete was in flight"
+        "draining completed while an admitted GCS exact delete was in flight"
     );
-    assert!(!transport.contains(&manifest_name)?);
+    assert!(!transport.contains(&store.canonical_preflight_object_name(&key)?)?);
     Ok(())
 }
 
 #[tokio::test]
-async fn gcs_preflight_read_repair_is_rejected_after_draining_starts() -> Result<()> {
+async fn gcs_preflight_exact_delete_is_rejected_after_draining_starts() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = Arc::new(store(Arc::clone(&transport))?);
     let runtime = crate::RuntimeManager::from_shared_store(Arc::clone(&store));
     let key = canonical_preflight_key();
-    runtime
+    let object = runtime
         .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
-        .await?;
-    let manifest_name = store.canonical_preflight_manifest_name(&key)?;
-    transport.replace_bytes(&manifest_name, b"{not-json")?;
+        .await?
+        .try_object()
+        .expect("canonical preflight object")
+        .clone();
 
     runtime.start_draining();
     let error = runtime
-        .get_canonical_preflight(&key)
+        .delete_canonical_preflight_exact(&key, &object.descriptor())
         .await
-        .expect_err("read-triggered repair must be rejected while draining");
+        .expect_err("exact deletion must be rejected while draining");
 
     assert!(error.to_string().contains("runtime is draining"));
-    assert!(transport.contains(&manifest_name)?);
+    assert!(transport.contains(&store.canonical_preflight_object_name(&key)?)?);
     Ok(())
 }
 
@@ -1009,12 +888,9 @@ async fn proof_startup_cleanup_keeps_preflight_and_immutable_content() -> Result
         .expect("proof publication")
         .clone();
     let preflight_key = canonical_preflight_key();
-    let preflight = store
+    store
         .put_canonical_preflight_if_absent(&preflight_key, b"preflight")
-        .await?
-        .try_object()
-        .expect("preflight publication")
-        .clone();
+        .await?;
     store.store_runtime_state(b"runtime", None).await?;
 
     let report = store
@@ -1041,9 +917,7 @@ async fn proof_startup_cleanup_keeps_preflight_and_immutable_content() -> Result
             .is_some()
     );
     assert!(transport.contains(&store.content_name(&proof_key, &proof.content_hash))?);
-    assert!(transport.contains(
-        &store.canonical_preflight_content_name(&preflight_key, &preflight.content_hash)?
-    )?);
+    assert!(transport.contains(&store.canonical_preflight_object_name(&preflight_key)?)?);
     Ok(())
 }
 
@@ -1059,12 +933,22 @@ async fn preflight_startup_cleanup_keeps_runtime_and_proof() -> Result<()> {
         .expect("proof publication")
         .clone();
     let preflight_key = canonical_preflight_key();
-    let preflight = store
+    store
         .put_canonical_preflight_if_absent(&preflight_key, b"preflight")
-        .await?
-        .try_object()
-        .expect("preflight publication")
-        .clone();
+        .await?;
+    let legacy_base = store.canonical_preflight_base_name(&preflight_key)?;
+    let legacy_manifest = format!("{legacy_base}/manifest.manifest.json");
+    let legacy_content = format!("{legacy_base}/content/legacy.preflight.bincode");
+    assert!(matches!(
+        transport
+            .create(&legacy_manifest, b"legacy-manifest")
+            .await?,
+        GcsCreateResult::Created(_)
+    ));
+    assert!(matches!(
+        transport.create(&legacy_content, b"legacy-content").await?,
+        GcsCreateResult::Created(_)
+    ));
     store.store_runtime_state(b"runtime", None).await?;
 
     let report = store
@@ -1080,7 +964,7 @@ async fn preflight_startup_cleanup_keeps_runtime_and_proof() -> Result<()> {
             preflight_report.removed,
             preflight_report.failed
         ),
-        (1, 1, 0)
+        (3, 3, 0)
     );
     assert!(store.load_runtime_state().await?.is_some());
     assert_eq!(
@@ -1093,9 +977,9 @@ async fn preflight_startup_cleanup_keeps_runtime_and_proof() -> Result<()> {
             .await?
             .is_none()
     );
-    assert!(transport.contains(
-        &store.canonical_preflight_content_name(&preflight_key, &preflight.content_hash)?
-    )?);
+    assert!(!transport.contains(&store.canonical_preflight_object_name(&preflight_key)?)?);
+    assert!(!transport.contains(&legacy_manifest)?);
+    assert!(!transport.contains(&legacy_content)?);
     Ok(())
 }
 
@@ -1197,7 +1081,7 @@ async fn startup_cleanup_retry_is_idempotent_after_unknown_delete_outcome() -> R
 }
 
 #[tokio::test]
-async fn all_startup_cleanup_removes_both_manifest_scopes_in_order() -> Result<()> {
+async fn all_startup_cleanup_removes_proof_and_preflight_scopes_in_order() -> Result<()> {
     let transport = Arc::new(FakeGcsTransport::default());
     let store = store(Arc::clone(&transport))?;
     let proof_key = key();
@@ -1220,7 +1104,7 @@ async fn all_startup_cleanup_removes_both_manifest_scopes_in_order() -> Result<(
     );
     assert!(!transport.contains(&store.runtime_state_name())?);
     assert!(!transport.contains(&store.manifest_name(&proof_key))?);
-    assert!(!transport.contains(&store.canonical_preflight_manifest_name(&preflight_key)?)?);
+    assert!(!transport.contains(&store.canonical_preflight_object_name(&preflight_key)?)?);
     Ok(())
 }
 

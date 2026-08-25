@@ -898,7 +898,8 @@ impl RuntimeManager {
         Ok(cleared)
     }
 
-    /// Invalidates selected active cache manifests before runtime initialization.
+    /// Invalidates selected proof manifests or canonical preflight cache objects
+    /// before runtime initialization.
     pub async fn cleanup_before_start(
         &self,
         scopes: StartupCleanupMask,

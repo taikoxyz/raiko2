@@ -38,6 +38,7 @@ struct FakeGcsTransport {
     active_deletes: AtomicUsize,
     max_active_deletes: AtomicUsize,
     block_next_delete: AtomicBool,
+    remove_on_create_conflict: AtomicBool,
     delete_entered: Notify,
     allow_delete: Notify,
 }
@@ -55,6 +56,7 @@ impl Default for FakeGcsTransport {
             active_deletes: AtomicUsize::new(0),
             max_active_deletes: AtomicUsize::new(0),
             block_next_delete: AtomicBool::new(false),
+            remove_on_create_conflict: AtomicBool::new(false),
             delete_entered: Notify::new(),
             allow_delete: Notify::new(),
         }
@@ -139,6 +141,10 @@ impl FakeGcsTransport {
     fn block_next_delete(&self) {
         self.block_next_delete.store(true, Ordering::SeqCst);
     }
+
+    fn remove_on_next_create_conflict(&self) {
+        self.remove_on_create_conflict.store(true, Ordering::SeqCst);
+    }
 }
 
 struct ActiveDeleteGuard<'a>(&'a AtomicUsize);
@@ -210,6 +216,9 @@ impl GcsTransport for FakeGcsTransport {
             .lock()
             .map_err(|_| anyhow::anyhow!("fake object lock poisoned"))?;
         if objects.contains_key(name) {
+            if self.remove_on_create_conflict.swap(false, Ordering::SeqCst) {
+                objects.remove(name);
+            }
             return Ok(GcsCreateResult::AlreadyExists);
         }
         let generation = self.generation()?;
@@ -514,6 +523,99 @@ async fn canonical_preflight_invalidation_is_generation_scoped() -> Result<()> {
             .expect("replacement canonical preflight")
             .bytes,
         b"second"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_delete_retries_precommit_error_by_storage_version() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let object = store
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?
+        .try_object()
+        .expect("canonical preflight object")
+        .clone();
+    let mut version = object.descriptor();
+    version.content_hash = "diagnostic-hash-is-not-the-delete-fence".to_string();
+    transport.delete_failure.store(1, Ordering::SeqCst);
+
+    let error = store
+        .delete_canonical_preflight_exact(&key, &version)
+        .await
+        .expect_err("a pre-commit delete failure must remain retryable");
+
+    assert!(error.to_string().contains("before commit"));
+    assert!(store.get_canonical_preflight(&key).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_delete_recovers_postcommit_error_by_readback() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    let object = store
+        .put_canonical_preflight_if_absent(&key, b"canonical-preflight")
+        .await?
+        .try_object()
+        .expect("canonical preflight object")
+        .clone();
+    transport.delete_failure.store(2, Ordering::SeqCst);
+
+    assert_eq!(
+        store
+            .delete_canonical_preflight_exact(&key, &object.descriptor())
+            .await?,
+        CanonicalPreflightDeleteResult::Removed
+    );
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_preflight_create_conflict_reports_disappeared_object() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(Arc::clone(&transport))?;
+    let key = canonical_preflight_key();
+    store
+        .put_canonical_preflight_if_absent(&key, b"first")
+        .await?;
+    transport.remove_on_next_create_conflict();
+
+    let error = store
+        .put_canonical_preflight_if_absent(&key, b"second")
+        .await
+        .expect_err("a create conflict whose winner disappears must be explicit");
+
+    assert!(error.to_string().contains("object is missing"));
+    assert!(store.get_canonical_preflight(&key).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn gcs_canonical_preflight_rejects_unknown_schema_before_delete_fences() -> Result<()> {
+    let transport = Arc::new(FakeGcsTransport::default());
+    let store = store(transport)?;
+    let mut key = canonical_preflight_key();
+    key.schema = CANONICAL_PREFLIGHT_SCHEMA_V1 + 1;
+    let descriptor = CanonicalPreflightDescriptor {
+        key_digest: B256::ZERO,
+        content_hash: "unused".to_string(),
+        generation: None,
+    };
+
+    let error = store
+        .delete_canonical_preflight_exact(&key, &descriptor)
+        .await
+        .expect_err("unknown schema must fail before stale descriptor checks");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported canonical preflight key schema")
     );
     Ok(())
 }

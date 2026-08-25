@@ -652,6 +652,7 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
         key: &CanonicalPreflightKeyV1,
         descriptor: &CanonicalPreflightDescriptor,
     ) -> Result<CanonicalPreflightDeleteResult> {
+        Self::validate_canonical_preflight_key(key)?;
         let key_digest = key.digest()?;
         if descriptor.key_digest != key_digest {
             return Ok(CanonicalPreflightDeleteResult::Stale);
@@ -671,7 +672,10 @@ impl CanonicalPreflightStore for GcsProofArtifactStore {
             Err(delete_error) => match self.read_canonical_preflight_object(key).await {
                 Ok(None) => Ok(CanonicalPreflightDeleteResult::Removed),
                 Ok(Some(observed)) => {
-                    if observed.descriptor() == *descriptor {
+                    if observed
+                        .descriptor()
+                        .same_storage_version(descriptor)
+                    {
                         Err(delete_error).context(
                             "canonical preflight object delete failed before commit; exact deletion can be retried",
                         )

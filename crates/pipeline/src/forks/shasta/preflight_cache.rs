@@ -40,6 +40,15 @@ pub struct CanonicalPreflightDescriptor {
     pub generation: Option<i64>,
 }
 
+impl CanonicalPreflightDescriptor {
+    #[must_use]
+    pub fn same_storage_version(&self, other: &Self) -> bool {
+        self.key_digest == other.key_digest
+            && self.generation.is_some()
+            && self.generation == other.generation
+    }
+}
+
 impl CanonicalPreflightObject {
     #[must_use]
     pub fn descriptor(&self) -> CanonicalPreflightDescriptor {
@@ -1029,7 +1038,7 @@ mod tests {
             let Some(current) = object.as_ref() else {
                 return Ok(CanonicalPreflightDeleteResult::Missing);
             };
-            if current.descriptor() != *descriptor {
+            if !current.descriptor().same_storage_version(descriptor) {
                 return Ok(CanonicalPreflightDeleteResult::Stale);
             }
             if let Some(replacement) = self

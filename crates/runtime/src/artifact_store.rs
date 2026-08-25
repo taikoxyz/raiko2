@@ -273,6 +273,7 @@ struct MemoryManifest {
 #[derive(Clone, Debug)]
 struct MemoryPreflightObject {
     key: CanonicalPreflightKeyV1,
+    content_hash: String,
     bytes: Vec<u8>,
     generation: i64,
 }
@@ -352,7 +353,7 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
         let bytes = object.bytes.clone();
         Ok(Some(CanonicalPreflightObject {
             key_digest,
-            content_hash: content_hash(&bytes),
+            content_hash: object.content_hash.clone(),
             generation: Some(object.generation),
             bytes,
         }))
@@ -375,7 +376,7 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
                 existing.key == *key,
                 "canonical preflight key digest collision"
             );
-            let existing_hash = content_hash(&existing.bytes);
+            let existing_hash = existing.content_hash;
             if existing_hash == hash {
                 return Ok(CanonicalPreflightPutResult::AlreadyExists(
                     CanonicalPreflightObject {
@@ -400,6 +401,7 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
             key_digest,
             MemoryPreflightObject {
                 key: key.clone(),
+                content_hash: hash.clone(),
                 bytes: bytes.to_vec(),
                 generation,
             },

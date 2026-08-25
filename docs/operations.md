@@ -1248,10 +1248,16 @@ Operator notes:
   when cached preflight data is known to be semantically stale.
 - Treat the canonical preflight `vN` prefix as a host-semantics compatibility boundary. Each complete
   typed key maps directly to one create-only `<key-hash>.preflight.bincode` object under that prefix;
-  there is no preflight manifest. Old and current versions may coexist, and an explicit finite-age
-  `.preflight.bincode` bucket lifecycle rule may reclaim either version. Expiration is a cache miss:
-  the compatible binary recomputes and republishes the entry. This repository does not change bucket
-  lifecycle configuration.
+  there is no preflight manifest. Compatibility versions using this single-object layout may coexist,
+  and an explicit finite-age `.preflight.bincode` bucket lifecycle rule may reclaim any of them.
+  Expiration is a cache miss: the compatible binary recomputes and republishes the entry. This
+  repository does not change bucket lifecycle configuration.
+- When upgrading a namespace that previously used the manifest/content preflight layout, start the
+  replacement once with `runtime.startup_cleanup = ["preflight"]`, then remove the setting after the
+  replacement is healthy. The preflight-only scope removes legacy manifests and typed content plus
+  current single-object entries; it preserves runtime state, provider checkpoints, and proof
+  manifests. Older immutable `.bin` content is not an active cache entry and remains until its bucket
+  lifecycle rule reclaims it.
 - Before enabling `runtime.preflight_cache = "shared"`, inspect the live bucket policy as a rollout
   gate. Add an explicit finite-retention rule for the exact `.preflight.bincode` suffix; a `.bin`
   suffix rule does not match it. Generic JSON age rules still must not reach authoritative runtime

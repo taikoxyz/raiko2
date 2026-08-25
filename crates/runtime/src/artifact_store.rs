@@ -260,8 +260,7 @@ struct MemoryStoreInner {
     next_generation: i64,
     manifests: HashMap<ProofArtifactKey, MemoryManifest>,
     contents: HashMap<(ProofArtifactKey, String), Vec<u8>>,
-    preflight_manifests: HashMap<alloy_primitives::B256, MemoryPreflightManifest>,
-    preflight_contents: HashMap<(alloy_primitives::B256, String), Vec<u8>>,
+    preflights: HashMap<alloy_primitives::B256, MemoryPreflightObject>,
     runtime_state: Option<RuntimeStateObject>,
 }
 
@@ -272,9 +271,10 @@ struct MemoryManifest {
 }
 
 #[derive(Clone, Debug)]
-struct MemoryPreflightManifest {
+struct MemoryPreflightObject {
     key: CanonicalPreflightKeyV1,
     content_hash: String,
+    bytes: Vec<u8>,
     generation: i64,
 }
 
@@ -343,28 +343,18 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let Some(manifest) = inner.preflight_manifests.get(&key_digest) else {
+        let Some(object) = inner.preflights.get(&key_digest) else {
             return Ok(None);
         };
         anyhow::ensure!(
-            manifest.key == *key,
-            "canonical preflight manifest key does not match requested full key"
+            object.key == *key,
+            "canonical preflight object key does not match requested full key"
         );
-        let bytes = inner
-            .preflight_contents
-            .get(&(key_digest, manifest.content_hash.clone()))
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!("canonical preflight manifest references missing content")
-            })?;
-        anyhow::ensure!(
-            content_hash(&bytes) == manifest.content_hash,
-            "canonical preflight content hash mismatch"
-        );
+        let bytes = object.bytes.clone();
         Ok(Some(CanonicalPreflightObject {
             key_digest,
-            content_hash: manifest.content_hash.clone(),
-            generation: Some(manifest.generation),
+            content_hash: object.content_hash.clone(),
+            generation: Some(object.generation),
             bytes,
         }))
     }
@@ -381,44 +371,38 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        if let Some(existing) = inner.preflight_manifests.get(&key_digest).cloned() {
+        if let Some(existing) = inner.preflights.get(&key_digest).cloned() {
             anyhow::ensure!(
                 existing.key == *key,
                 "canonical preflight key digest collision"
             );
-            if existing.content_hash == hash {
-                inner
-                    .preflight_contents
-                    .entry((key_digest, hash.clone()))
-                    .or_insert_with(|| bytes.to_vec());
+            let existing_hash = existing.content_hash;
+            if existing_hash == hash {
                 return Ok(CanonicalPreflightPutResult::AlreadyExists(
                     CanonicalPreflightObject {
                         key_digest,
                         content_hash: hash,
                         generation: Some(existing.generation),
-                        bytes: bytes.to_vec(),
+                        bytes: existing.bytes,
                     },
                 ));
             }
             return Ok(CanonicalPreflightPutResult::Conflict(
                 CanonicalPreflightDescriptor {
                     key_digest,
-                    content_hash: existing.content_hash,
+                    content_hash: existing_hash,
                     generation: Some(existing.generation),
                 },
             ));
         }
 
-        inner
-            .preflight_contents
-            .entry((key_digest, hash.clone()))
-            .or_insert_with(|| bytes.to_vec());
         let generation = Self::next_generation(&mut inner);
-        inner.preflight_manifests.insert(
+        inner.preflights.insert(
             key_digest,
-            MemoryPreflightManifest {
+            MemoryPreflightObject {
                 key: key.clone(),
                 content_hash: hash.clone(),
+                bytes: bytes.to_vec(),
                 generation,
             },
         );
@@ -446,16 +430,13 @@ impl CanonicalPreflightStore for MemoryProofArtifactStore {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        let Some(current) = inner.preflight_manifests.get(&key_digest) else {
+        let Some(current) = inner.preflights.get(&key_digest) else {
             return Ok(CanonicalPreflightDeleteResult::Missing);
         };
-        if current.key != *key
-            || Some(current.generation) != descriptor.generation
-            || current.content_hash != descriptor.content_hash
-        {
+        if current.key != *key || Some(current.generation) != descriptor.generation {
             return Ok(CanonicalPreflightDeleteResult::Stale);
         }
-        inner.preflight_manifests.remove(&key_digest);
+        inner.preflights.remove(&key_digest);
         Ok(CanonicalPreflightDeleteResult::Removed)
     }
 }
@@ -650,8 +631,8 @@ impl RuntimeStateStore for MemoryProofArtifactStore {
         }
         if scopes.contains(StartupCleanupMask::PREFLIGHT) {
             let started_at = std::time::Instant::now();
-            let matched = inner.preflight_manifests.len();
-            inner.preflight_manifests.clear();
+            let matched = inner.preflights.len();
+            inner.preflights.clear();
             report.scopes.push(StartupCleanupScopeReport {
                 scope: StartupCleanupScope::Preflight,
                 matched,
@@ -670,8 +651,7 @@ impl RuntimeStateStore for MemoryProofArtifactStore {
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
         let cleared = inner.manifests.len()
             + inner.contents.len()
-            + inner.preflight_manifests.len()
-            + inner.preflight_contents.len()
+            + inner.preflights.len()
             + usize::from(inner.runtime_state.is_some());
         let next_generation = inner.next_generation;
         *inner = MemoryStoreInner {
@@ -885,12 +865,14 @@ mod tests {
         .try_object()
         .expect("created object")
         .clone();
+        let mut first_version = first.descriptor();
+        first_version.content_hash = "diagnostic-hash-is-not-the-delete-fence".to_string();
 
         assert_eq!(
             CanonicalPreflightStore::delete_canonical_preflight_exact(
                 &store,
                 &key,
-                &first.descriptor(),
+                &first_version,
             )
             .await?,
             CanonicalPreflightDeleteResult::Removed
@@ -1158,7 +1140,7 @@ mod tests {
                 .contents
                 .contains_key(&(proof_key, proof.content_hash))
         );
-        assert_eq!(inner.preflight_contents.len(), 1);
+        assert_eq!(inner.preflights.len(), 1);
         Ok(())
     }
 
@@ -1210,7 +1192,7 @@ mod tests {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("memory store poisoned"))?;
-        assert_eq!(inner.preflight_contents.len(), 1);
+        assert!(inner.preflights.is_empty());
         Ok(())
     }
 

@@ -1231,12 +1231,13 @@ Operator notes:
   tasks, artifact records, pending publications, and durable Boundless/SP1 provider-request
   checkpoints, before deleting active proof manifests. Existing remote requests are not cancelled;
   client resubmission may create duplicate paid provider work. Add `"preflight"` only when derivation,
-  fork, or witness-generation rules changed; that scope deletes active canonical preflight
-  manifests and does not touch proof state. Cleanup runs after the old process exits and before
+  fork, or witness-generation rules changed; that scope deletes canonical preflight cache objects
+  and does not touch proof state. Cleanup runs after the old process exits and before
   recovery, workers, or HTTP admission. GCS requires `storage.objects.list` and
-  `storage.objects.delete`, uses generation-protected manifest deletion with bounded concurrency,
-  and aborts startup on failure. Immutable proof/preflight content remains for bucket lifecycle
-  reclamation. Treat this as a one-shot cutover setting and remove `startup_cleanup` after the
+  `storage.objects.delete`, uses generation-protected deletion with bounded concurrency, and aborts
+  startup on failure. Immutable proof content remains for bucket lifecycle reclamation; preflight
+  objects are removed directly. Treat this as a one-shot cutover setting and remove
+  `startup_cleanup` after the
   replacement starts successfully; otherwise every routine restart repeats the cleanup and can
   discard fresh task state and proof manifests. Keep prefixes non-overlapping so one deployment
   scope cannot contain another.
@@ -1245,19 +1246,23 @@ Operator notes:
   singleflight without deleting runtime state or proof manifests. Restore `"shared"` after the
   incident is understood. This switch is not a replacement for `startup_cleanup = ["preflight"]`
   when cached preflight data is known to be semantically stale.
-- Treat the canonical preflight `vN` prefix as a host-semantics compatibility boundary. Keep the
-  previous version prefix intact through the binary rollback window. After rollback is closed, the
-  old prefix is frozen: list only `manifest.manifest.json` objects under that exact old
-  `preflights/vN/` prefix, record each observed object generation, and conditionally delete only
-  those generations. Do not target the current-version prefix or immutable content in that cleanup;
-  the explicitly configured `.preflight.bincode` lifecycle rule reclaims content made unreachable
-  by manifest removal. Active/current preflight manifests must never receive an age-based GCS
-  lifecycle rule. This repository does not change bucket lifecycle configuration.
+- Treat the canonical preflight `vN` prefix as a host-semantics compatibility boundary. Each complete
+  typed key maps directly to one create-only `<key-hash>.preflight.bincode` object under that prefix;
+  there is no preflight manifest. Compatibility versions using this single-object layout may coexist,
+  and an explicit finite-age `.preflight.bincode` bucket lifecycle rule may reclaim any of them.
+  Expiration is a cache miss: the compatible binary recomputes and republishes the entry. This
+  repository does not change bucket lifecycle configuration.
+- When upgrading a namespace that previously used the manifest/content preflight layout, start the
+  replacement once with `runtime.startup_cleanup = ["preflight"]`, then remove the setting after the
+  replacement is healthy. The preflight-only scope removes legacy manifests and typed content plus
+  current single-object entries; it preserves runtime state, provider checkpoints, and proof
+  manifests. Older immutable `.bin` content is not an active cache entry and remains until its bucket
+  lifecycle rule reclaims it.
 - Before enabling `runtime.preflight_cache = "shared"`, inspect the live bucket policy as a rollout
-  gate. A generic `.json` age rule matches active `manifest.manifest.json` objects and must be removed
-  or narrowed away from the current `preflights/vN/` prefix. A `.bin` suffix rule does not match
-  immutable `.preflight.bincode` content; add an explicit finite-retention rule for that exact suffix.
-  Do not deploy shared preflight caching until both rules are correct in the target bucket.
+  gate. Add an explicit finite-retention rule for the exact `.preflight.bincode` suffix; a `.bin`
+  suffix rule does not match it. Generic JSON age rules still must not reach authoritative runtime
+  state or active proof manifests, but preflight caching no longer creates JSON objects. Do not deploy
+  shared preflight caching until these rules are correct in the target bucket.
 - Correlate `registered shasta proof task` and `completed shasta proof task` logs by `task_id`.
   `proof_type` is the resolved proof lane, while `requested_proof_type` on registration preserves
   the raw request such as `zk_any`. Completion logging is at-least-once because idempotent proof
@@ -1338,10 +1343,10 @@ Operator notes:
   terminal status, proof URI, error, and timestamp until exact removal commits. The same terminal TTL
   applies to failed or cancelled roots with remote submission progress; after expiry, resubmission may
   create and pay for a new provider request even if the previous request later completes.
-  Active proof and canonical preflight manifests must not have an age-based GCS lifecycle rule.
-  Immutable content must remain available until every manifest that references it is gone.
-  Unreferenced proof/preflight content is reclaimed by the bucket's immutable-content lifecycle
-  after its manifest is gone; runtime correctness does not depend on immediate content deletion.
+  Active proof manifests must not have an age-based GCS lifecycle rule. Immutable proof content must
+  remain available until every manifest that references it is gone, then the bucket lifecycle may
+  reclaim it. Canonical preflight objects have an independent finite-age lifecycle because expiration
+  is handled as a cache miss and rebuild.
 - Proposal requests are sized by `prover.risc0.boundless.batch_quote`. The default
   `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
   `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`

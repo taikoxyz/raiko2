@@ -1154,12 +1154,13 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   Boundless/SP1 provider-request checkpoints, then deletes active proposal and aggregate proof
   manifests. Existing provider requests continue independently, so resubmitted work can incur
   duplicate proving cost. Use this broad reset only for an exceptional SGX/ZK guest, image, verifier,
-  or proving-key cutover. `["preflight"]` deletes only active canonical preflight
-  manifests. Use `["proof", "preflight"]` when derivation, fork, or witness-generation rules changed.
+  or proving-key cutover. `["preflight"]` deletes only canonical preflight cache objects. Use
+  `["proof", "preflight"]` when derivation, fork, or witness-generation rules changed.
   The scopes are exact: neither implies the other, and there is no `input` scope because materialized
-  `GuestInput` values are not persisted. GCS pages through matching manifest objects and deletes their
-  listed generations with bounded concurrency; immutable proof/preflight content remains unreachable
-  until bucket lifecycle TTL removes it. Any listing or deletion failure
+  `GuestInput` values are not persisted. GCS pages through matching proof manifests or preflight
+  objects and deletes their listed generations with bounded concurrency. Immutable proof content
+  remains unreachable until bucket lifecycle TTL removes it; preflight objects are deleted directly.
+  Any listing or deletion failure
   aborts startup. Cleanup runs before recovery, workers, or HTTP admission and only after the previous
   process has stopped. Configured scopes run again on every restart, so remove `startup_cleanup`
   immediately after the cutover succeeds; leaving it configured can discard fresh task state and
@@ -1194,9 +1195,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   configurable six-hour default in runtime state. Unreferenced content uses the configured object
   lifecycle, while active manifests must not be deleted by age and immutable content must remain
   available while any active manifest references it.
-- Canonical preflight cores are bincode-serialized into immutable `*.preflight.bincode` objects.
-  The typed suffix identifies their payload format and supports suffix-scoped storage operations
-  without treating every binary object as the same artifact class.
+- Canonical preflight cores are bincode-serialized directly into create-only
+  `preflights/vN/<key-hash>.preflight.bincode` objects. They have no manifest or second content object.
+  The complete typed key digest selects the object, GCS generation fences exact deletion, and the
+  typed suffix supports an independent cache TTL without treating every binary object as the same
+  artifact class. Expiration is a normal cache miss and rebuild.
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and satisfies its task-identity payload contract. Proposal tasks accept a
   non-null `proof`, plus the complete Compressed SP1 tuple (`quote`, `input`, `uuid`, `extra_data`)

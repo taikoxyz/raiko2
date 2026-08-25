@@ -898,7 +898,8 @@ impl RuntimeManager {
         Ok(cleared)
     }
 
-    /// Invalidates selected active cache manifests before runtime initialization.
+    /// Invalidates selected proof manifests or canonical preflight cache objects
+    /// before runtime initialization.
     pub async fn cleanup_before_start(
         &self,
         scopes: StartupCleanupMask,
@@ -4519,7 +4520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draining_fences_canonical_preflight_manifest_mutations() -> Result<()> {
+    async fn draining_fences_canonical_preflight_object_mutations() -> Result<()> {
         let backing_store = Arc::new(MemoryProofArtifactStore::new(
             "test".into(),
             "preflight-drain-fence".into(),

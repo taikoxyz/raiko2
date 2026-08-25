@@ -421,15 +421,16 @@ The GCS backend uses this runtime object layout:
   proofs/<pipeline>/<route>/<network-pair>/<proof-ref>/
     manifest.manifest.json
     content/<sha256>.proof.json
-  preflights/v<compatibility-version>/<key-hash>/
-    manifest.manifest.json
-    content/<sha256>.preflight.bincode
+  preflights/v<compatibility-version>/<key-hash>.preflight.bincode
 ```
 
-Components are encoded before becoming object-name segments. The manifest contains only the selected
-content hash; the manifest object's native GCS generation identifies that publication generation.
+Components are encoded before becoming object-name segments. A proof manifest contains only the
+selected content hash; the manifest object's native GCS generation identifies that proof publication
+generation. A canonical preflight is a single create-only bincode object whose name is derived from
+the complete typed key digest. Its GCS generation fences exact deletion, and its compatibility-version
+prefix isolates host-semantics changes.
 
-Publication has three storage outcomes:
+Proof publication has three storage outcomes:
 
 - `Created`: content and manifest were created.
 - `AlreadyExists`: the manifest already selected the same content hash; missing identical content is
@@ -442,6 +443,11 @@ content object as corruption. Metadata-only manifest reads are used for repair a
 so a dangling manifest remains inspectable even when normal proof reads fail. Prefix selection also
 validates the complete immutable content before returning a bounded prefix; it does not trust an
 unchecked GCS range read.
+
+Canonical preflight publication has the same `Created`, `AlreadyExists`, and `Conflict` outcomes but
+does not use a manifest. The first object created for a complete key digest wins. Reads calculate its
+content hash from the stored bytes, while decoding and guest-equivalent semantic validation happen
+before the cache value is consumed. Invalid entries are generation-conditionally deleted and rebuilt.
 
 ## Publication Transaction
 

@@ -70,7 +70,8 @@ cleanup_batch_size = 64
 preflight_cache = "shared"
 # Optional active-cache invalidation before recovery or serving begins.
 # Guest, image, or verifier upgrades normally need only "proof". Add "preflight" when derivation,
-# fork, or witness-generation rules changed. Immutable content remains for the bucket lifecycle TTL.
+# fork, or witness-generation rules changed. Proof content remains for the bucket lifecycle TTL;
+# canonical preflight cache objects are deleted directly.
 # Cleanup repeats on every startup while configured; remove this setting after a successful cutover.
 # startup_cleanup = ["proof"]
 # startup_cleanup = ["proof", "preflight"]

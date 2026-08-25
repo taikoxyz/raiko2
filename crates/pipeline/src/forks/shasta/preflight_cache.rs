@@ -33,8 +33,20 @@ pub struct CanonicalPreflightObject {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalPreflightDescriptor {
     pub key_digest: B256,
+    /// Identifies the payload for conflict reporting and observability. Exact
+    /// deletion is fenced by `key_digest` plus the storage generation, so a
+    /// remote store does not need to download the payload before a CAS delete.
     pub content_hash: String,
     pub generation: Option<i64>,
+}
+
+impl CanonicalPreflightDescriptor {
+    #[must_use]
+    pub fn same_storage_version(&self, other: &Self) -> bool {
+        self.key_digest == other.key_digest
+            && self.generation.is_some()
+            && self.generation == other.generation
+    }
 }
 
 impl CanonicalPreflightObject {
@@ -1026,7 +1038,7 @@ mod tests {
             let Some(current) = object.as_ref() else {
                 return Ok(CanonicalPreflightDeleteResult::Missing);
             };
-            if current.descriptor() != *descriptor {
+            if !current.descriptor().same_storage_version(descriptor) {
                 return Ok(CanonicalPreflightDeleteResult::Stale);
             }
             if let Some(replacement) = self

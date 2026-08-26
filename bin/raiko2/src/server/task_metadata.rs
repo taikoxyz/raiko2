@@ -10,7 +10,7 @@ use raiko2_prover::{
     Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
     boundless::BoundlessAccountBlocker, sp1_config::ExecutionMode,
 };
-use raiko2_runtime::{ProofArtifactDescriptor, RuntimeTaskRecord};
+use raiko2_runtime::{ProofArtifactDescriptor, RunnerStatus, RuntimeTaskRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -126,7 +126,14 @@ impl RuntimeMetadata {
 }
 
 impl TaskMetadata {
-    pub(crate) fn boundless_account_blockers(&self) -> Result<Vec<BoundlessAccountBlocker>> {
+    pub(crate) fn boundless_account_blockers(
+        &self,
+        runner_status: RunnerStatus,
+        now: u64,
+    ) -> Result<Vec<BoundlessAccountBlocker>> {
+        if runner_status == RunnerStatus::Completed {
+            return Ok(Vec::new());
+        }
         Ok(self
             .runtime
             .proposals
@@ -136,6 +143,7 @@ impl TaskMetadata {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
+            .filter(|blocker| now < blocker.lock_expires_at)
             .collect())
     }
 }
@@ -159,7 +167,7 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) provider_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_tx_hash: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) request_id_has_confirmed_submission: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) request_digest: Option<String>,
@@ -1225,6 +1233,25 @@ mod tests {
     }
 
     #[test]
+    fn unconfirmed_submission_marker_serializes_only_when_true() {
+        let mut runtime = TaskRuntimeMetadata::default();
+        let serialized = serde_json::to_value(&runtime).expect("serialize default runtime");
+        assert!(
+            serialized
+                .get("request_id_has_confirmed_submission")
+                .is_none(),
+            "the default false value must remain readable by the previous binary"
+        );
+
+        runtime.request_id_has_confirmed_submission = true;
+        let serialized = serde_json::to_value(&runtime).expect("serialize confirmed runtime");
+        assert_eq!(
+            serialized.get("request_id_has_confirmed_submission"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
     fn unresolved_onchain_boundless_runtime_restores_a_signer_blocker() {
         let mut runtime = complete_boundless_runtime();
         let blocker = runtime
@@ -1251,6 +1278,34 @@ mod tests {
                 .boundless_account_blocker()
                 .expect("off-chain checkpoint")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn completed_or_expired_boundless_runtime_does_not_restore_a_signer_blocker() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.runtime.aggregate = Some(complete_boundless_runtime());
+
+        assert_eq!(
+            metadata
+                .boundless_account_blockers(RunnerStatus::Failed, 1)
+                .expect("failed task blocker"),
+            vec![BoundlessAccountBlocker {
+                checkpoint_key: B256::repeat_byte(0x11),
+                lock_expires_at: 2,
+            }]
+        );
+        assert!(
+            metadata
+                .boundless_account_blockers(RunnerStatus::Completed, 1)
+                .expect("completed task")
+                .is_empty()
+        );
+        assert!(
+            metadata
+                .boundless_account_blockers(RunnerStatus::Failed, 2)
+                .expect("expired blocker")
+                .is_empty()
         );
     }
 

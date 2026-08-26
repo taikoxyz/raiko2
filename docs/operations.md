@@ -1388,8 +1388,9 @@ Operator notes:
   checkpoint so an already-paid request is never replaced solely because the indexer or storage
   backend is unavailable. Payload recovery is bounded by the remaining polling deadline. Exact
   checkpoints search `ProofDelivered` events from their persisted request-lifecycle lower block
-  instead of relying on the SDK's recent-block default. Same-ID rebids preserve the earliest lower
-  block across all rungs.
+  instead of relying on the SDK's recent-block default. Once an exact lower block exists, same-ID
+  rebids preserve it across later rungs. A migrated legacy checkpoint has no trustworthy lower block;
+  its first new rebid starts a fresh exact-event window at that rung's pre-broadcast head.
 - Same-nonce replacement hashes and fee rungs are process-local. Follow the non-overlapping drain
   procedure for planned deployments. After an unplanned restart, the server leaves failed work for
   client-driven retry. An on-chain retry may enter market polling only after the durable request-id
@@ -1404,11 +1405,18 @@ Operator notes:
   A rebid checkpoint with no exact event returns to polling
   the same request id only when its metadata explicitly records an earlier confirmed rung. Durable
   unconfirmed checkpoints restore signer blockers independently of the selected RPC's mempool view;
-  unknown pending signer nonces add a second guard.
+  unknown pending signer nonces add a second guard. Completed tasks and already-expired checkpoints
+  do not restore signer blockers.
 - Enabling on-chain Boundless transaction replacement is an atomic image/config cutover. The new
   image requires `[prover.risc0.boundless.transaction]` with `max_fee_per_gas_wei`, while an old image
   rejects that table as unknown. Drain the old process, then switch the ConfigMap and image together;
-  rollback must likewise restore both.
+  rollback must likewise restore both. Runtime metadata omits the default unconfirmed-predecessor
+  marker so ordinary checkpoints remain readable by the previous image. A checkpoint that records a
+  confirmed earlier same-ID rebid carries the new marker explicitly; do not roll back across such a
+  record without migrating it, and never delete a paid provider checkpoint to force rollback.
+- The mandatory pre-broadcast request checkpoint is bounded to ten seconds while the signer lane is
+  serialized. If the runtime store cannot persist it within that budget, the submission fails before
+  reserving a nonce or broadcasting a transaction.
 - `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

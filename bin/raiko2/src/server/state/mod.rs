@@ -258,6 +258,10 @@ async fn restored_boundless_account_blockers(
     runtime: &RuntimeManager,
 ) -> Result<Vec<BoundlessAccountBlocker>> {
     let mut blockers = HashMap::<_, u64>::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the UNIX epoch")?
+        .as_secs();
     for record in runtime.list_tasks().await? {
         let metadata = TaskMetadata::decode_for_record(&record).with_context(|| {
             format!(
@@ -265,7 +269,7 @@ async fn restored_boundless_account_blockers(
                 record.task_id
             )
         })?;
-        for blocker in metadata.boundless_account_blockers()? {
+        for blocker in metadata.boundless_account_blockers(record.runner_status, now)? {
             blockers
                 .entry(blocker.checkpoint_key)
                 .and_modify(|deadline| *deadline = (*deadline).max(blocker.lock_expires_at))

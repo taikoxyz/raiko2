@@ -1251,6 +1251,51 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   the proof task fails once it is exhausted. It must be no greater than `31`.
   `rpc.pairs[*].boundless` can override `poll_interval_ms`, `timeout_ms`, `rebid_timeout_ms`,
   `rebid_price_step_bps`, and `rebid_max_attempts` per `(network, l1_network)` pair.
+- `prover.risc0.boundless.transaction` is required when `offchain = false` and controls the
+  EIP-1559 transaction carrying each market submission. `receipt_timeout_ms` is the confirmation
+  budget for each transaction attempt (default and maximum `90000`); `fee_bump_bps` compounds both
+  `maxFeePerGas` and `maxPriorityFeePerGas` and must be at least `1000`; `max_replacements` counts
+  same-nonce replacements after the initial broadcast (default `4`; its effective maximum is
+  derived from the total-attempt budget and is `4` at the default `90000` ms receipt timeout); and
+  `max_fee_per_gas_wei` is a required decimal-string hard ceiling. The initial estimate is capped
+  at that value and fails only when the cap cannot cover the current base fee plus estimated tip.
+  Each replacement uses identical calldata, value, nonce, and gas limit. A replacement is skipped
+  when either fee field cannot meet the node's 10% replacement threshold below the cap. Any known
+  replacement hash may satisfy the receipt wait. A confirmed revert or exhausted replacement budget
+  fails the proof task, so market polling and market-level rebidding start only after the submission
+  transaction is confirmed. Configuration validation caps the worst-case sum of the 30-second send
+  and receipt windows across all attempts at ten minutes. The lock deadline stops every new
+  broadcast. A transaction already sent or ambiguously acknowledged still receives bounded
+  known-hash and exact-event recovery after that deadline when necessary, so a send accepted just
+  before expiry cannot be mistaken for an unbroadcast request. Exhaustion does not start a
+  background transaction retry; after final recovery, the proof task receives the error. Market
+  status RPC errors never authorize request-ID rotation: only a successful pinned status snapshot
+  proving the old request ID is no longer payable can do so. Once that snapshot reports fulfilled,
+  payload-read failure also retains the paid request checkpoint for a later client retry. The
+  payload read is bounded by the remaining polling deadline, and exact checkpoints use their
+  persisted request-lifecycle lower block for fulfillment-event search rather than the SDK's
+  default recent-block window. Same-ID market rebids retain the earliest lower block across all
+  rungs, so a predecessor fulfillment cannot fall outside the latest rung's search range.
+  `offchain = true` does not require this table because it sends no market transaction.
+  Transaction replacement state is process-local. A graceful deployment drains active work; after a
+  hard process restart, the durable request-id checkpoint is resumed only when the client retries the
+  proof request. Before market polling, on-chain recovery must find that request's
+  `RequestSubmitted` transaction and confirm its successful receipt to the same three-confirmation
+  threshold. It does not restart the old fee ladder or submit background transactions. A missing
+  request-id event with no confirmed predecessor fails closed until the request's lock deadline, then
+  clears the stale checkpoint for a fresh client retry. Legacy checkpoints without an exact digest
+  also fail closed until that deadline and never fabricate recovery identity. After the deadline,
+  they receive one final market-status lifecycle so an already-paid fulfillment can be recovered;
+  only a successful pinned status read proving an unfulfilled terminal result may replace the
+  checkpoint. RPC errors retain it for a later client retry. A missing rebid event may poll the same
+  request id only when the checkpoint explicitly records a confirmed prior rung. Unconfirmed on-chain
+  checkpoints also restore a process-local signer blocker before workers start, so a new send remains
+  blocked even if the selected RPC no longer exposes the old transaction in its mempool. The RPC
+  pending nonce guard provides a second check against queuing behind an unknown predecessor.
+- Transaction replacement and market rebidding are separate bounded loops. The transaction policy
+  handles one `submitRequest` transaction until it is confirmed; only then can
+  `rebid_timeout_ms`/`rebid_max_attempts` decide whether to submit a higher-priced market offer.
+  Every later market rebid uses the same transaction replacement policy.
 - `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` delegates price selection to the Boundless SDK price provider and optionally accepts a

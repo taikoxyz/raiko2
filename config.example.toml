@@ -151,6 +151,21 @@ rebid_price_step_bps = 5000
 # allows ~5x max price at the default step.
 rebid_max_attempts = 4
 
+# EIP-1559 policy for each on-chain submitRequest transaction. This is separate from the market
+# rebid ladder above: a market attempt may replace its own transaction at the same nonce when the
+# RPC accepted the send but no receipt reaches the required confirmations in time.
+[prover.risc0.boundless.transaction]
+receipt_timeout_ms = 90000
+# 5000 = +50% to both maxFeePerGas and maxPriorityFeePerGas for each same-nonce replacement.
+fee_bump_bps = 5000
+# Replacements after the initial broadcast. Total attempts are 1 + this value, and the configured
+# send-plus-receipt worst case must stay within ten minutes. With the default 90s receipt timeout,
+# the maximum valid value is 4.
+max_replacements = 4
+# Decimal wei string. The initial estimate is capped here. A replacement is sent only when both
+# EIP-1559 fee fields can still satisfy the node's 10% replacement threshold without crossing it.
+max_fee_per_gas_wei = "1000000000"
+
 # Optional request sampling policy for proof_type=zk_any.
 # When disabled or not drawn, the server returns data.status = "zk_any_not_drawn"
 # and does not register a task.

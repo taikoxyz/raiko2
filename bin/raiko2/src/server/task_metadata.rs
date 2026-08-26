@@ -1,4 +1,4 @@
-use alloy_primitives::{U256, hex, keccak256};
+use alloy_primitives::{B256, U256, hex, keccak256};
 use anyhow::{Context, Result};
 use raiko2_engine::{
     AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
@@ -8,7 +8,7 @@ use raiko2_primitives::{L2BlockRange, ProofType, ShastaCheckpoint, proof_type::l
 use raiko2_prover::{
     BoundlessSubmissionProgress, NetworkProverBackend, PendingProofCheckpointIdentity,
     Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
-    sp1_config::ExecutionMode,
+    boundless::BoundlessAccountBlocker, sp1_config::ExecutionMode,
 };
 use raiko2_runtime::{ProofArtifactDescriptor, RuntimeTaskRecord};
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,21 @@ impl RuntimeMetadata {
     }
 }
 
+impl TaskMetadata {
+    pub(crate) fn boundless_account_blockers(&self) -> Result<Vec<BoundlessAccountBlocker>> {
+        Ok(self
+            .runtime
+            .proposals
+            .values()
+            .chain(self.runtime.aggregate.iter())
+            .map(TaskRuntimeMetadata::boundless_account_blocker)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StageTimingMetadata {
@@ -144,6 +159,12 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) provider_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_tx_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) request_id_has_confirmed_submission: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) broadcast_from_block: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) image_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -654,6 +675,9 @@ impl TaskRuntimeMetadata {
     pub(crate) const fn has_remote_submission_progress(&self) -> bool {
         self.provider_request_id.is_some()
             || self.remote_tx_hash.is_some()
+            || self.request_id_has_confirmed_submission
+            || self.request_digest.is_some()
+            || self.broadcast_from_block.is_some()
             || self.image_ref.is_some()
             || self.deployment.is_some()
             || self.offchain.is_some()
@@ -705,6 +729,35 @@ impl TaskRuntimeMetadata {
         self.has_boundless_submission_resume() || self.has_sp1_network_submission_progress()
     }
 
+    pub(crate) fn boundless_account_blocker(&self) -> Result<Option<BoundlessAccountBlocker>> {
+        if !matches!(
+            self.validate_remote_submission()?,
+            Some(RemoteSubmissionKind::Boundless)
+        ) || self.offchain == Some(true)
+            || self.remote_tx_hash.is_some()
+        {
+            return Ok(None);
+        }
+        let checkpoint_key = if let Some(raw_digest) = self.request_digest.as_deref() {
+            raw_digest
+                .parse::<B256>()
+                .context("runtime unconfirmed Boundless checkpoint has invalid request_digest")?
+        } else {
+            let provider_request_id = self
+                .provider_request_id
+                .as_deref()
+                .context("runtime legacy Boundless checkpoint is missing provider_request_id")?;
+            keccak256(format!("legacy-boundless-checkpoint:{provider_request_id}"))
+        };
+        let lock_expires_at = self
+            .lock_expires_at
+            .context("runtime unconfirmed Boundless checkpoint is missing lock_expires_at")?;
+        Ok(Some(BoundlessAccountBlocker {
+            checkpoint_key,
+            lock_expires_at,
+        }))
+    }
+
     pub(crate) fn clear_remote_submission(
         &mut self,
         identity: &PendingProofCheckpointIdentity,
@@ -743,6 +796,9 @@ impl TaskRuntimeMetadata {
         }
 
         let has_boundless_fields = self.remote_tx_hash.is_some()
+            || self.request_id_has_confirmed_submission
+            || self.request_digest.is_some()
+            || self.broadcast_from_block.is_some()
             || self.image_ref.is_some()
             || self.deployment.is_some()
             || self.offchain.is_some()
@@ -818,6 +874,33 @@ impl TaskRuntimeMetadata {
             submitted_at < lock_expires_at && lock_expires_at <= expires_at,
             "runtime Boundless checkpoint has invalid lock deadlines"
         );
+        let offchain = self
+            .offchain
+            .context("runtime Boundless checkpoint is missing offchain")?;
+        if offchain {
+            anyhow::ensure!(
+                self.request_digest.is_none() && self.broadcast_from_block.is_none(),
+                "runtime off-chain Boundless checkpoint contains on-chain recovery identity"
+            );
+            anyhow::ensure!(
+                !self.request_id_has_confirmed_submission,
+                "runtime off-chain Boundless checkpoint claims an on-chain predecessor"
+            );
+        } else {
+            anyhow::ensure!(
+                self.request_digest.is_some() == self.broadcast_from_block.is_some(),
+                "runtime on-chain Boundless checkpoint has incomplete recovery identity"
+            );
+            if let Some(raw_digest) = self.request_digest.as_deref() {
+                let digest = raw_digest
+                    .parse::<B256>()
+                    .context("runtime Boundless checkpoint has invalid request_digest")?;
+                anyhow::ensure!(
+                    raw_digest == format!("{digest}"),
+                    "runtime Boundless checkpoint has non-canonical request_digest"
+                );
+            }
+        }
         anyhow::ensure!(
             matches!(self.max_price_multiplier, Some(multiplier) if multiplier > 0),
             "runtime Boundless checkpoint has an invalid max_price_multiplier"
@@ -866,6 +949,9 @@ impl TaskRuntimeMetadata {
             updated_at,
             provider_request_id: Some(progress.provider_request_id.clone()),
             remote_tx_hash: progress.remote_tx_hash.clone(),
+            request_id_has_confirmed_submission: progress.request_id_has_confirmed_submission,
+            request_digest: progress.request_digest.clone(),
+            broadcast_from_block: progress.broadcast_from_block,
             image_ref: Some(progress.image_ref.clone()),
             deployment: Some(progress.deployment.clone()),
             offchain: Some(progress.offchain),
@@ -1106,6 +1192,8 @@ mod tests {
     fn complete_boundless_runtime() -> TaskRuntimeMetadata {
         TaskRuntimeMetadata {
             provider_request_id: Some("0x1".to_string()),
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(1),
             image_ref: Some("0ximage".to_string()),
             deployment: Some("base".to_string()),
             offchain: Some(false),
@@ -1134,6 +1222,57 @@ mod tests {
             sp1_timeout_secs: Some(3_600),
             ..TaskRuntimeMetadata::default()
         }
+    }
+
+    #[test]
+    fn unresolved_onchain_boundless_runtime_restores_a_signer_blocker() {
+        let mut runtime = complete_boundless_runtime();
+        let blocker = runtime
+            .boundless_account_blocker()
+            .expect("valid runtime checkpoint")
+            .expect("unconfirmed on-chain submission blocks the signer");
+        assert_eq!(blocker.checkpoint_key, B256::repeat_byte(0x11));
+        assert_eq!(blocker.lock_expires_at, 2);
+
+        runtime.remote_tx_hash = Some("0xtx".to_string());
+        assert!(
+            runtime
+                .boundless_account_blocker()
+                .expect("confirmed checkpoint")
+                .is_none()
+        );
+
+        runtime.remote_tx_hash = None;
+        runtime.offchain = Some(true);
+        runtime.request_digest = None;
+        runtime.broadcast_from_block = None;
+        assert!(
+            runtime
+                .boundless_account_blocker()
+                .expect("off-chain checkpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_unconfirmed_boundless_runtime_fails_closed_without_fabricating_a_digest() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.request_digest = None;
+        runtime.broadcast_from_block = None;
+
+        runtime
+            .validate_remote_submission()
+            .expect("legacy checkpoint remains readable during rolling upgrade")
+            .expect("legacy checkpoint remains classified as Boundless");
+        let blocker = runtime
+            .boundless_account_blocker()
+            .expect("legacy checkpoint is valid")
+            .expect("legacy checkpoint blocks the shared signer");
+        assert_eq!(
+            blocker.checkpoint_key,
+            keccak256(b"legacy-boundless-checkpoint:0x1")
+        );
+        assert_eq!(blocker.lock_expires_at, 2);
     }
 
     fn boundless_checkpoint_identity(
@@ -1248,6 +1387,9 @@ mod tests {
         let mut progress = BoundlessSubmissionProgress {
             provider_request_id: "0x1".to_string(),
             remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
             expires_at: 200,
             lock_expires_at: 180,
             submitted_at: 100,
@@ -1265,6 +1407,7 @@ mod tests {
                 .merge_boundless_submission(&progress, 100)
                 .expect("initial checkpoint")
         );
+        assert!(runtime.request_id_has_confirmed_submission);
         progress.remote_tx_hash = Some("0xtx".to_string());
         assert!(
             !runtime
@@ -1282,6 +1425,7 @@ mod tests {
                 .is_some()
         );
         assert_eq!(runtime.remote_tx_hash.as_deref(), Some("0xtx"));
+        assert_eq!(runtime.submitted_at, Some(100));
 
         progress.remote_tx_hash = Some("0xother".to_string());
         let error = runtime
@@ -1289,6 +1433,28 @@ mod tests {
             .expect_err("one attempt cannot change transaction hash");
         assert!(error.downcast_ref::<RemoteSubmissionConflict>().is_some());
         assert_eq!(runtime.remote_tx_hash.as_deref(), Some("0xtx"));
+
+        progress.remote_tx_hash = Some("0xtx".to_string());
+        progress.request_digest = Some(format!("{}", B256::repeat_byte(0x22)));
+        let changed_digest = runtime
+            .merge_boundless_submission(&progress, 104)
+            .expect_err("one attempt cannot change its exact request digest");
+        assert!(
+            changed_digest
+                .downcast_ref::<RemoteSubmissionConflict>()
+                .is_some()
+        );
+
+        progress.request_digest = Some(format!("{}", B256::repeat_byte(0x11)));
+        progress.broadcast_from_block = Some(91);
+        let changed_lower_block = runtime
+            .merge_boundless_submission(&progress, 105)
+            .expect_err("one attempt cannot change its recovery lower block");
+        assert!(
+            changed_lower_block
+                .downcast_ref::<RemoteSubmissionConflict>()
+                .is_some()
+        );
     }
 
     #[test]

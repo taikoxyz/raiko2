@@ -2124,6 +2124,9 @@ fn build_pending_proof_checkpoint(
                     checkpoint_error("Boundless checkpoint is missing provider_request_id")
                 })?,
                 remote_tx_hash: runtime.remote_tx_hash.clone(),
+                request_id_has_confirmed_submission: runtime.request_id_has_confirmed_submission,
+                request_digest: runtime.request_digest.clone(),
+                broadcast_from_block: runtime.broadcast_from_block,
                 image_ref: runtime
                     .image_ref
                     .clone()
@@ -2433,6 +2436,9 @@ mod tests {
         let mut resume = BoundlessSubmissionResume {
             provider_request_id: "request-a".to_string(),
             remote_tx_hash: None,
+            request_id_has_confirmed_submission: false,
+            request_digest: Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
             image_ref: "image-a".to_string(),
             deployment: "base".to_string(),
             offchain: false,
@@ -2751,6 +2757,9 @@ mod tests {
         ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
             provider_request_id: provider_request_id.to_string(),
             remote_tx_hash: Some("0xabcd".to_string()),
+            request_id_has_confirmed_submission: false,
+            request_digest: None,
+            broadcast_from_block: None,
             expires_at,
             lock_expires_at: expires_at - 600,
             submitted_at: expires_at - 900,
@@ -2891,6 +2900,9 @@ mod tests {
             &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
                 provider_request_id: "0x1234".to_string(),
                 remote_tx_hash: Some("0xabcd".to_string()),
+                request_id_has_confirmed_submission: false,
+                request_digest: Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11))),
+                broadcast_from_block: Some(90),
                 expires_at: future_expires_at,
                 lock_expires_at: future_expires_at - 600,
                 submitted_at: future_expires_at - 900,
@@ -2922,6 +2934,11 @@ mod tests {
         );
         assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
         assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(
+            runtime_entry.request_digest.as_deref(),
+            Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11)).as_str())
+        );
+        assert_eq!(runtime_entry.broadcast_from_block, Some(90));
         assert_eq!(runtime_entry.expires_at, Some(future_expires_at));
         assert_eq!(runtime_entry.submitted_at, Some(future_expires_at - 900));
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
@@ -2954,6 +2971,11 @@ mod tests {
         .expect("boundless submission can resume");
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(
+            resumed.request_digest.as_deref(),
+            Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11)).as_str())
+        );
+        assert_eq!(resumed.broadcast_from_block, Some(90));
         assert_eq!(resumed.image_ref, "0ximage");
         assert_eq!(resumed.deployment, "base");
         assert!(!resumed.offchain);
@@ -3077,6 +3099,9 @@ mod tests {
             &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
                 provider_request_id: "0x1234".to_string(),
                 remote_tx_hash: Some("0xabcd".to_string()),
+                request_id_has_confirmed_submission: false,
+                request_digest: None,
+                broadcast_from_block: None,
                 expires_at,
                 lock_expires_at: expires_at - 600,
                 submitted_at: expires_at - 900,
@@ -3518,6 +3543,9 @@ mod tests {
             &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
                 provider_request_id: "0xaggregate".to_string(),
                 remote_tx_hash: Some("0xaggregate-tx".to_string()),
+                request_id_has_confirmed_submission: false,
+                request_digest: None,
+                broadcast_from_block: None,
                 expires_at,
                 lock_expires_at: expires_at - 600,
                 submitted_at: expires_at - 900,

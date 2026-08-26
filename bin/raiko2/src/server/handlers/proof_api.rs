@@ -3943,6 +3943,8 @@ mod tests {
     ) -> TaskRuntimeMetadata {
         TaskRuntimeMetadata {
             provider_request_id: Some(provider_request_id.to_string()),
+            request_digest: Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(1),
             image_ref: Some("0ximage".to_string()),
             deployment: Some("base".to_string()),
             offchain: Some(false),

@@ -518,6 +518,8 @@ pub struct BoundlessConfig {
     pub rpc_url: String,
     pub signer_key: String,
     #[serde(default)]
+    pub transaction: Option<raiko2_prover::boundless_config::BoundlessTransactionConfig>,
+    #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
     #[serde(default)]
     pub batch_quote: QuoteSizing,
@@ -542,6 +544,7 @@ impl Default for BoundlessConfig {
             offchain: raiko2_prover::boundless_config::BoundlessConfig::default().offchain,
             rpc_url: raiko2_prover::boundless_config::BoundlessConfig::default().rpc_url,
             signer_key: String::new(),
+            transaction: None,
             deployment: raiko2_prover::boundless_config::BoundlessConfig::default().deployment,
             batch_quote: raiko2_prover::boundless_config::BoundlessConfig::default().batch_quote,
             aggregation_quote: raiko2_prover::boundless_config::BoundlessConfig::default()
@@ -565,6 +568,20 @@ impl BoundlessConfig {
         self.aggregation_quote
             .validate("prover.risc0.boundless.aggregation_quote")
             .map_err(anyhow::Error::msg)?;
+        match &self.transaction {
+            Some(transaction) => {
+                transaction
+                    .validate()
+                    .map_err(anyhow::Error::msg)
+                    .context("prover.risc0.boundless.transaction")?;
+            }
+            None if !self.offchain => {
+                bail!(
+                    "prover.risc0.boundless.transaction is required when prover.risc0.boundless.offchain=false"
+                );
+            }
+            None => {}
+        }
         if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
             bail!("prover.risc0.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
         }
@@ -672,6 +689,14 @@ mod tests {
     fn boundless_network_config() -> ProverConfig {
         let mut config = config_with_routes("risc0/network");
         config.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.risc0.boundless.transaction = Some(
+            raiko2_prover::boundless_config::BoundlessTransactionConfig {
+                receipt_timeout_ms: 90_000,
+                fee_bump_bps: 5_000,
+                max_replacements: 4,
+                max_fee_per_gas_wei: "1000000000".to_string(),
+            },
+        );
         config
     }
 
@@ -771,6 +796,12 @@ rebid_timeout_ms = 310000
 rebid_price_step_bps = 4200
 rebid_max_attempts = 6
 
+[risc0.boundless.transaction]
+receipt_timeout_ms = 90000
+fee_bump_bps = 5000
+max_replacements = 4
+max_fee_per_gas_wei = "1000000000"
+
 [risc0.boundless.deployment]
 deployment_type = "taiko"
 
@@ -826,6 +857,11 @@ timeout_ms_per_mcycle = 6000
         assert_eq!(boundless.rebid_timeout_ms, 310_000);
         assert_eq!(boundless.rebid_price_step_bps, 4_200);
         assert_eq!(boundless.rebid_max_attempts, 6);
+        let transaction = boundless.transaction.as_ref().expect("transaction policy");
+        assert_eq!(transaction.receipt_timeout_ms, 90_000);
+        assert_eq!(transaction.fee_bump_bps, 5_000);
+        assert_eq!(transaction.max_replacements, 4);
+        assert_eq!(transaction.max_fee_per_gas_wei, "1000000000");
         let deployment = boundless.deployment.as_ref().expect("deployment");
         assert_eq!(
             deployment.deployment_type,
@@ -1124,6 +1160,26 @@ runner = "remote"
             err.to_string()
                 .contains("prover.risc0.boundless.signer_key")
         );
+    }
+
+    #[test]
+    fn risc0_network_requires_boundless_transaction_policy() {
+        let mut config = boundless_network_config();
+        config.risc0.boundless.transaction = None;
+
+        let err = config
+            .validate()
+            .expect_err("on-chain Boundless must require a transaction policy");
+        assert!(
+            err.to_string()
+                .contains("prover.risc0.boundless.transaction"),
+            "{err}"
+        );
+
+        config.risc0.boundless.offchain = true;
+        config
+            .validate()
+            .expect("off-chain Boundless does not submit transactions");
     }
 
     #[test]

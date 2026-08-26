@@ -21,7 +21,9 @@ use raiko2_pipeline::{
     forks::shasta::{ShastaSpec, preflight_cache::PreflightCoordinator},
 };
 use raiko2_primitives::ProofType;
-use raiko2_prover::{gaiko2::Gaiko2Prover, native::NativeProver};
+use raiko2_prover::{
+    boundless::BoundlessAccountBlocker, gaiko2::Gaiko2Prover, native::NativeProver,
+};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{RuntimeManager, StartupCleanupMask};
@@ -60,6 +62,7 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 use super::lifecycle::ProofLifecycle;
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
+use super::task_metadata::TaskMetadata;
 use super::telemetry::{
     PreflightCacheMetricsObserver, record_startup_cleanup_failure, record_startup_cleanup_report,
     record_startup_reconciliation, runtime_lifecycle_observer,
@@ -251,6 +254,35 @@ async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result
     Ok(())
 }
 
+async fn restored_boundless_account_blockers(
+    runtime: &RuntimeManager,
+) -> Result<Vec<BoundlessAccountBlocker>> {
+    let mut blockers = HashMap::<_, u64>::new();
+    for record in runtime.list_tasks().await? {
+        let metadata = TaskMetadata::decode_for_record(&record).with_context(|| {
+            format!(
+                "failed to restore Boundless signer checkpoint from runtime task {}",
+                record.task_id
+            )
+        })?;
+        for blocker in metadata.boundless_account_blockers()? {
+            blockers
+                .entry(blocker.checkpoint_key)
+                .and_modify(|deadline| *deadline = (*deadline).max(blocker.lock_expires_at))
+                .or_insert(blocker.lock_expires_at);
+        }
+    }
+    Ok(blockers
+        .into_iter()
+        .map(
+            |(checkpoint_key, lock_expires_at)| BoundlessAccountBlocker {
+                checkpoint_key,
+                lock_expires_at,
+            },
+        )
+        .collect())
+}
+
 struct PipelineResources {
     #[cfg(feature = "local-provers")]
     shasta_backends: Option<ShastaBackends>,
@@ -266,9 +298,13 @@ struct PipelineResources {
 
 #[cfg(any(feature = "host", feature = "local-provers"))]
 impl PipelineResources {
-    fn prepare(config: &Config, pipelines: &[PipelineRegistration]) -> Result<Self> {
+    fn prepare(
+        config: &Config,
+        pipelines: &[PipelineRegistration],
+        boundless_account_blockers: Vec<BoundlessAccountBlocker>,
+    ) -> Result<Self> {
         #[cfg(not(feature = "host"))]
-        let _ = config;
+        let _ = (config, boundless_account_blockers);
 
         #[cfg(feature = "local-provers")]
         let shasta_backends = if pipelines.iter().any(|registration| {
@@ -344,7 +380,8 @@ impl PipelineResources {
             BoundlessProver::validate_storage_configuration().map_err(anyhow::Error::msg)?;
         }
         #[cfg(feature = "host")]
-        let boundless_balance_gate = boundless_enabled.then(BoundlessBalanceGate::new);
+        let boundless_balance_gate = boundless_enabled
+            .then(|| BoundlessBalanceGate::with_durable_blockers(boundless_account_blockers));
 
         Ok(Self {
             #[cfg(feature = "local-provers")]
@@ -417,12 +454,34 @@ impl AppState {
         let pipeline_registrations = enabled_pipeline_registrations(&config)?;
         let runtime = Arc::new(build_runtime(&config).await?);
         runtime.set_lifecycle_observer(runtime_lifecycle_observer());
+        initialize_runtime(&config, &runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
         let resolved_pairs = config.rpc.resolved_pairs()?;
+        let boundless_enabled = pipeline_registrations
+            .iter()
+            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
+        let boundless_account_blockers = if boundless_enabled {
+            restored_boundless_account_blockers(&runtime).await?
+        } else {
+            Vec::new()
+        };
+        if !boundless_account_blockers.is_empty() {
+            tracing::info!(
+                blocker_count = boundless_account_blockers.len(),
+                "restored unresolved Boundless signer checkpoints before worker startup"
+            );
+        }
         #[cfg(any(feature = "host", feature = "local-provers"))]
-        let resources = PipelineResources::prepare(&config, &pipeline_registrations)?;
+        let resources = PipelineResources::prepare(
+            &config,
+            &pipeline_registrations,
+            boundless_account_blockers,
+        )?;
         #[cfg(not(any(feature = "host", feature = "local-provers")))]
-        let resources = PipelineResources {};
+        let resources = {
+            let _ = boundless_account_blockers;
+            PipelineResources {}
+        };
 
         let factory = build_pipeline_factory(
             &config,
@@ -432,7 +491,6 @@ impl AppState {
             &scheduler_config,
             &resources,
         )?;
-        initialize_runtime(&config, &runtime).await?;
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
         let state = Self::from_parts(config, pipelines, Arc::clone(&runtime));

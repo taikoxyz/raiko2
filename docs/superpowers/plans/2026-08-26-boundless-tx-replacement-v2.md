@@ -18,6 +18,7 @@
 - A replacement keeps request, signature, calldata, attached value, gas limit, and nonce unchanged.
 - Stop new broadcasts once the offer lock deadline has elapsed, while still reconciling known hashes and exact events.
 - Require three confirmations before market polling or market-level rebidding.
+- Never rotate a market request ID from status-RPC errors or from failure to fetch a payload after fulfillment was observed.
 - Keep off-chain Boundless behavior unchanged.
 - Do not expose RPC credentials in errors or logs.
 
@@ -66,11 +67,11 @@
 
 - [ ] **Step 2: Run focused tests and verify the current unbounded same-fee recovery fails them**
 
-  Run: `cargo test -p raiko2-prover boundless_tx_ --lib -- --nocapture`
+  Run: `cargo test -p raiko2-prover boundless_ --lib -- --nocapture`
 
 - [ ] **Step 3: Implement fixed gas/fee broadcast and bounded observation**
 
-  Record the funding reservation and uncertain nonce before the first send. Store every acknowledged transaction hash. Release a nonce only when no hash exists and every outcome is a definitive pre-broadcast rejection; otherwise preserve uncertainty and block later signer work.
+  Complete fee/gas preparation and durable checkpointing first, then record the funding reservation and uncertain nonce immediately before the first send. Store every acknowledged transaction hash. Release a nonce only when no hash exists and every outcome is a definitive pre-broadcast rejection; otherwise preserve uncertainty and block later signer work. Reject an RPC pending nonce ahead of the latest mined nonce so a restart cannot queue work behind an unknown predecessor.
 
 - [ ] **Step 4: Run focused tests and verify they pass**
 
@@ -99,11 +100,13 @@
 
 - [ ] **Step 3: Persist and validate the exact on-chain identity**
 
-  Store a canonical digest and the pre-broadcast lower block in runtime metadata. On restart without a confirmed hash, scan only that bounded block range, recompute each event request digest for the configured market and chain, and require an exact match before three-confirmation observation.
+  Store a canonical digest and the request id's earliest pre-broadcast lower block in runtime metadata. Preserve that lower block across same-id rebids. On restart without a confirmed hash, scan only that bounded block range, recompute each event request digest for the configured market and chain, and require an exact match before three-confirmation observation.
+
+  Persist an explicit `request_id_has_confirmed_submission` bit instead of inferring this state from the attempt number. A missing event remains fail-closed until its lock deadline unless that bit proves the same request id already has a confirmed rung. A legacy checkpoint without an exact digest waits until the deadline and then receives one final market-status lifecycle, recovering an already-paid fulfillment before replacing an unfulfilled checkpoint. Only a successful pinned status read may authorize that replacement; RPC errors retain the checkpoint. Restore every durable unconfirmed on-chain checkpoint as a process-local signer blocker before workers start, independently of the selected RPC's mempool view.
 
 - [ ] **Step 4: Enforce the deadline on every broadcast authorization**
 
-  An expired offer prevents another replacement send. Reconcile already acknowledged hashes and exact events before returning the terminal task error.
+  An expired offer prevents another replacement send. Continue bounded known-hash observation, exact-event scanning, and follow-up receipt checks for an already-started or ambiguous send even when recovery crosses the lock deadline. Release local uncertainty only after that final recovery cannot find a confirmed transaction, then return the terminal task error.
 
 - [ ] **Step 5: Run focused tests and verify they pass**
 
@@ -136,7 +139,7 @@
 
 - [ ] **Step 3: Run config and server tests**
 
-  Run: `cargo test -p raiko2 --lib` and `cargo test -p raiko2 --bin raiko2`.
+  Run: `cargo test -p raiko2 --bin raiko2`.
 
 ### Task 5: Full Verification And PR Update
 
@@ -148,7 +151,8 @@
 
 - [ ] **Step 1: Run formatting and targeted suites**
 
-  Run: `cargo fmt --all -- --check`, `cargo test -p raiko2-prover --lib`, and `cargo test -p raiko2`.
+  Run: `cargo fmt --all -- --check`, `cargo test -p raiko2-prover --lib`, and
+  `cargo test -p raiko2 --bin raiko2`.
 
 - [ ] **Step 2: Run workspace lint**
 

@@ -156,6 +156,7 @@ pub(crate) fn boundless_prover_config(
         offchain: boundless.offchain,
         rpc_url: boundless.rpc_url,
         signer_key: boundless.signer_key,
+        transaction: boundless.transaction,
         deployment: boundless.deployment,
         batch_quote: boundless.batch_quote,
         aggregation_quote: boundless.aggregation_quote,
@@ -300,6 +301,7 @@ mod tests {
     fn boundless_prover_inherits_risc0_execution_po2() {
         let mut config = Config::default();
         config.prover.risc0.execution_po2 = 24;
+        config.prover.risc0.boundless.offchain = true;
         let pair = config
             .rpc
             .resolved_pairs()

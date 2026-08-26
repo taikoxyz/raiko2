@@ -47,7 +47,8 @@ cargo run -r -p raiko2 -- --config config.toml
 per-proof-type tables enabled and fill every setting, credential, and endpoint they require. For
 example, SP1 network proving requires `prover.sp1.enabled = true`, `prover.sp1.prover = "network"`,
 and `NETWORK_PRIVATE_KEY`, while RISC0 network proving requires `prover.risc0.enabled = true`,
-`prover.risc0.runner = "network"`, and real nested Boundless credentials.
+`prover.risc0.runner = "network"`, real nested Boundless credentials, and an explicit
+`prover.risc0.boundless.transaction` fee/replacement policy for on-chain submission.
 
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
 override values from the file. The real server checks configured RPC endpoints and hosted prover

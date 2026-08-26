@@ -86,6 +86,17 @@ pub trait GuestInputCodec<I>: Send + Sync {
 pub struct BoundlessSubmissionProgress {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
+    /// Whether this request id already had a confirmed on-chain submission before the current
+    /// rebid transaction. A missing event may fall back to market polling only in this case.
+    #[serde(default)]
+    pub request_id_has_confirmed_submission: bool,
+    /// Exact EIP-712 signing digest of an on-chain Boundless request. This distinguishes market
+    /// rebid rungs that deliberately reuse one request id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_digest: Option<String>,
+    /// Earliest inclusive lower block for recovering any on-chain rung sharing this request id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_from_block: Option<u64>,
     pub expires_at: u64,
     /// Offer lock deadline (`rampUpStart + lockTimeout`), in seconds since the UNIX epoch. The
     /// client fee is zero for fulfillments past this time, so it bounds the payable window.
@@ -112,6 +123,16 @@ pub struct BoundlessSubmissionProgress {
 pub struct BoundlessSubmissionResume {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
+    /// Whether this request id already had a confirmed on-chain submission before the current
+    /// rebid transaction. Older checkpoints default to `false` and therefore fail closed.
+    #[serde(default)]
+    pub request_id_has_confirmed_submission: bool,
+    /// Exact EIP-712 signing digest of an on-chain Boundless request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_digest: Option<String>,
+    /// Earliest inclusive lower block for recovering any on-chain rung sharing this request id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_from_block: Option<u64>,
     /// Exact guest image used by the submitted request.
     pub image_ref: String,
     /// Boundless market deployment that owns the request identifier.

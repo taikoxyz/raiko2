@@ -1000,12 +1000,16 @@ error; `RUST_LOG` and `--verbose` cannot override this safety boundary. That pro
 output only: the credential still appears in the request line of any proxy or gateway in front of
 the endpoint, so rotate it on the same schedule as the signer key.
 
-Keep the signer wallet funded for the peak `attached_value` plus transaction gas. Monitor the
+Keep the signer wallet funded for the peak `attached_value` plus the configured transaction fee
+ceiling. Same-nonce replacements do not execute more than once, but the wallet must be able to pay
+the highest accepted replacement. Monitor the
 structured `Prepared Boundless funding decision` event (`reserved_count`, `market_balance`,
 `required_total`, and `attached_value`) and alert before the required top-up approaches available
-wallet funds. A restart intentionally does not reconstruct old reservations. An old request may
-therefore consume market balance before a rebuilt request locks; the existing no-lock timeout and
-rebid path recovers it at the accepted cost of retrying at most the active worker set.
+wallet funds. A restart does not reconstruct the exact funding amounts, but it restores a signer
+blocker for every durable unconfirmed on-chain checkpoint before workers start. New transactions
+remain blocked until exact-event recovery confirms the checkpoint, the checkpoint is explicitly
+cleared, or its lock deadline expires. The RPC pending/latest nonce check remains a second guard when
+the selected node still exposes the predecessor in its mempool.
 
 ## Release TEE Provider Metadata
 
@@ -1204,6 +1208,10 @@ rebid_timeout_ms = 300000
 rebid_price_step_bps = 5000
 rebid_max_attempts = 4
 
+[prover.risc0.boundless.transaction]
+# Optional bounded knobs default to 90 seconds, +50%, and four replacements.
+max_fee_per_gas_wei = "1000000000"
+
 [prover.risc0.boundless.deployment]
 deployment_type = "base"
 ```
@@ -1361,6 +1369,54 @@ Operator notes:
   no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
   maximum is `31`, and the default allows a final max price of about `5x` the base at the default
   step, unless `absolute_max_price_per_mcycle` clamps it sooner.
+- `prover.risc0.boundless.transaction` controls the EIP-1559 transaction for each market attempt.
+  `max_fee_per_gas_wei` is required for on-chain mode. `receipt_timeout_ms` defaults to and is capped
+  at `90000`; `fee_bump_bps` defaults to `5000` and must be at least the standard `1000` txpool
+  replacement threshold; `max_replacements` defaults to `4`, and its effective maximum is derived
+  from the total-attempt budget (`4` at the default `90000` ms receipt timeout). Validation caps
+  the combined worst-case send and receipt windows across all attempts at ten minutes. The lock
+  deadline prevents every new broadcast. An already-started or ambiguously acknowledged send still
+  receives bounded known-hash and exact-event recovery after the deadline when necessary; this can
+  briefly retain the serialized signer but prevents a canonical submission from being misclassified
+  as unbroadcast. Receipt polling checks the account nonce once per round and queries replacement
+  receipts only after the nonce is mined. The gas limit is estimated
+  once and fixed across replacements so the configured cap remains the transaction's per-gas ceiling
+  rather than an input to the SDK's dynamic fee filler.
+- Market status errors fail closed after the polling budget and retain the request checkpoint. Only
+  a successful pinned chain snapshot proving the old request ID is no longer payable may authorize
+  request-ID rotation. Once fulfillment is observed, a missing fulfillment payload also retains the
+  checkpoint so an already-paid request is never replaced solely because the indexer or storage
+  backend is unavailable. Payload recovery is bounded by the remaining polling deadline. Exact
+  checkpoints search `ProofDelivered` events from their persisted request-lifecycle lower block
+  instead of relying on the SDK's recent-block default. Once an exact lower block exists, same-ID
+  rebids preserve it across later rungs. A migrated legacy checkpoint has no trustworthy lower block;
+  its first new rebid starts a fresh exact-event window at that rung's pre-broadcast head.
+- Same-nonce replacement hashes and fee rungs are process-local. Follow the non-overlapping drain
+  procedure for planned deployments. After an unplanned restart, the server leaves failed work for
+  client-driven retry. An on-chain retry may enter market polling only after the durable request-id
+  checkpoint resolves to a successful `RequestSubmitted` transaction with three confirmations. It
+  does not restart the old transaction ladder in the background. A checkpoint with no exact event
+  and no confirmed predecessor fails closed until its lock deadline, then is cleared so the next
+  client retry can make a fresh request. Legacy no-hash checkpoints without an exact digest use a
+  deterministic local blocker key and never invent a digest. They fail closed until the lock
+  deadline, then run one final market-status lifecycle so an already-paid fulfillment is recovered
+  before an unfulfilled terminal checkpoint can be replaced. Only a successful pinned status read
+  permits that replacement; RPC errors leave the checkpoint intact for a later client retry.
+  A rebid checkpoint with no exact event returns to polling
+  the same request id only when its metadata explicitly records an earlier confirmed rung. Durable
+  unconfirmed checkpoints restore signer blockers independently of the selected RPC's mempool view;
+  unknown pending signer nonces add a second guard. Completed tasks and already-expired checkpoints
+  do not restore signer blockers.
+- Enabling on-chain Boundless transaction replacement is an atomic image/config cutover. The new
+  image requires `[prover.risc0.boundless.transaction]` with `max_fee_per_gas_wei`, while an old image
+  rejects that table as unknown. Drain the old process, then switch the ConfigMap and image together;
+  rollback must likewise restore both. Runtime metadata omits the default unconfirmed-predecessor
+  marker so ordinary checkpoints remain readable by the previous image. A checkpoint that records a
+  confirmed earlier same-ID rebid carries the new marker explicitly; do not roll back across such a
+  record without migrating it, and never delete a paid provider checkpoint to force rollback.
+- The mandatory pre-broadcast request checkpoint is bounded to ten seconds while the signer lane is
+  serialized. If the runtime store cannot persist it within that budget, the submission fails before
+  reserving a nonce or broadcasting a transaction.
 - `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

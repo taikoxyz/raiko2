@@ -17,7 +17,10 @@ use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
-use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
+use raiko2_prover::{
+    BoundlessSubmissionProgress, boundless_config::BoundlessTransactionConfig,
+    sp1::ProverMode as Sp1ProverMode,
+};
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -255,6 +258,15 @@ fn set_prover_routes(config: &mut Config, routes: &str) {
     config
         .prover
         .apply_routes_override(&routes.parse().expect("valid prover routes"));
+}
+
+fn set_test_boundless_transaction_policy(config: &mut Config) {
+    config.prover.risc0.boundless.transaction = Some(BoundlessTransactionConfig {
+        receipt_timeout_ms: 90_000,
+        fee_bump_bps: 5_000,
+        max_replacements: 4,
+        max_fee_per_gas_wei: "1000000000".to_string(),
+    });
 }
 
 fn sp1_fixture_app() -> (
@@ -1145,6 +1157,7 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     set_prover_routes(&mut config, "risc0/network");
     config.prover.risc0.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.risc0.boundless.signer_key = "not-a-private-key".to_string();
+    set_test_boundless_transaction_policy(&mut config);
     let state = AppState::from_parts(
         Arc::new(config),
         Arc::new(StaticPipelineFactory::default()),
@@ -1283,6 +1296,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     config.prover.risc0.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.risc0.boundless.signer_key =
         deterministic_test_private_key("raiko2:e2e-ready-boundless");
+    set_test_boundless_transaction_policy(&mut config);
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
     let state = AppState::from_parts(
@@ -3853,6 +3867,9 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             &BoundlessSubmissionProgress {
                 provider_request_id: "0x1234".to_string(),
                 remote_tx_hash: Some("0xabcd".to_string()),
+                request_id_has_confirmed_submission: false,
+                request_digest: None,
+                broadcast_from_block: None,
                 expires_at: 123_456,
                 lock_expires_at: 123_300,
                 submitted_at: 123_000,

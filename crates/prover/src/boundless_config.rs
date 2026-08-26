@@ -21,6 +21,79 @@ pub const DEFAULT_REBID_PRICE_STEP_BPS: u32 = 5000;
 pub const MIN_MEANINGFUL_REBID_PRICE_STEP_BPS: u32 = 100;
 pub const DEFAULT_REBID_MAX_ATTEMPTS: u32 = 4;
 pub const REBID_MAX_ATTEMPTS_LIMIT: u32 = 31;
+pub const BOUNDLESS_TX_MIN_FEE_BUMP_BPS: u32 = 1_000;
+pub const BOUNDLESS_TX_MAX_RECEIPT_TIMEOUT_MS: u64 = 90_000;
+pub const BOUNDLESS_TX_MAX_TOTAL_ATTEMPT_MS: u64 = 600_000;
+pub const BOUNDLESS_TX_SEND_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_BOUNDLESS_TX_RECEIPT_TIMEOUT_MS: u64 = 90_000;
+const DEFAULT_BOUNDLESS_TX_FEE_BUMP_BPS: u32 = 5_000;
+const DEFAULT_BOUNDLESS_TX_MAX_REPLACEMENTS: u32 = 4;
+
+const fn default_boundless_tx_receipt_timeout_ms() -> u64 {
+    DEFAULT_BOUNDLESS_TX_RECEIPT_TIMEOUT_MS
+}
+
+const fn default_boundless_tx_fee_bump_bps() -> u32 {
+    DEFAULT_BOUNDLESS_TX_FEE_BUMP_BPS
+}
+
+const fn default_boundless_tx_max_replacements() -> u32 {
+    DEFAULT_BOUNDLESS_TX_MAX_REPLACEMENTS
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BoundlessTransactionConfig {
+    #[serde(default = "default_boundless_tx_receipt_timeout_ms")]
+    pub receipt_timeout_ms: u64,
+    #[serde(default = "default_boundless_tx_fee_bump_bps")]
+    pub fee_bump_bps: u32,
+    #[serde(default = "default_boundless_tx_max_replacements")]
+    pub max_replacements: u32,
+    pub max_fee_per_gas_wei: String,
+}
+
+impl BoundlessTransactionConfig {
+    /// Parse and validate the configured EIP-1559 fee ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a transaction timing or fee bound is zero, excessive, or malformed.
+    /// `max_replacements = 0` is valid and selects one broadcast attempt without replacements.
+    pub fn validate(&self) -> Result<u128, String> {
+        if self.receipt_timeout_ms == 0 {
+            return Err("receipt_timeout_ms must be greater than zero".to_string());
+        }
+        if self.receipt_timeout_ms > BOUNDLESS_TX_MAX_RECEIPT_TIMEOUT_MS {
+            return Err(format!(
+                "receipt_timeout_ms must be <= {BOUNDLESS_TX_MAX_RECEIPT_TIMEOUT_MS}"
+            ));
+        }
+        if self.fee_bump_bps < BOUNDLESS_TX_MIN_FEE_BUMP_BPS {
+            return Err(format!(
+                "fee_bump_bps must be >= {BOUNDLESS_TX_MIN_FEE_BUMP_BPS}"
+            ));
+        }
+        let total_attempts = u64::from(self.max_replacements).saturating_add(1);
+        let total_attempt_ms = self
+            .receipt_timeout_ms
+            .saturating_add(BOUNDLESS_TX_SEND_TIMEOUT_MS)
+            .saturating_mul(total_attempts);
+        if total_attempt_ms > BOUNDLESS_TX_MAX_TOTAL_ATTEMPT_MS {
+            return Err(format!(
+                "(max_replacements + 1) * (receipt_timeout_ms + {BOUNDLESS_TX_SEND_TIMEOUT_MS}) must be <= {BOUNDLESS_TX_MAX_TOTAL_ATTEMPT_MS}"
+            ));
+        }
+        let max_fee_per_gas = self
+            .max_fee_per_gas_wei
+            .parse::<u128>()
+            .map_err(|_| "max_fee_per_gas_wei must be a decimal u128 string".to_string())?;
+        if max_fee_per_gas == 0 {
+            return Err("max_fee_per_gas_wei must be greater than zero".to_string());
+        }
+        Ok(max_fee_per_gas)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -153,6 +226,8 @@ pub struct BoundlessConfig {
     pub rpc_url: String,
     pub signer_key: String,
     #[serde(default)]
+    pub transaction: Option<BoundlessTransactionConfig>,
+    #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
     #[serde(default)]
     pub batch_quote: QuoteSizing,
@@ -178,6 +253,7 @@ impl Default for BoundlessConfig {
             offchain: false,
             rpc_url: "https://base-rpc.publicnode.com".to_string(),
             signer_key: String::new(),
+            transaction: None,
             deployment: Some(DeploymentConfig {
                 deployment_type: Some(DeploymentType::Base),
                 overrides: Some(serde_json::json!({
@@ -399,9 +475,9 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DEFAULT_REBID_MAX_ATTEMPTS,
-        DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType,
-        TimeoutPolicy, validate_offer_spec,
+        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, BoundlessTransactionConfig,
+        DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
+        DeploymentConfig, DeploymentType, TimeoutPolicy, validate_offer_spec,
     };
 
     #[test]
@@ -719,5 +795,63 @@ mod tests {
 
         let err = validate_offer_spec(&offer).expect_err("zero absolute ceiling");
         assert!(err.contains("absolute_max_price_per_mcycle must be positive"));
+    }
+
+    #[test]
+    fn transaction_config_validates_all_bounds() {
+        let valid = BoundlessTransactionConfig {
+            receipt_timeout_ms: 90_000,
+            fee_bump_bps: 5_000,
+            max_replacements: 4,
+            max_fee_per_gas_wei: "1000000000".to_string(),
+        };
+        assert_eq!(
+            valid.validate().expect("valid transaction config"),
+            1_000_000_000
+        );
+
+        let mut invalid = valid.clone();
+        invalid.receipt_timeout_ms = 0;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.fee_bump_bps = 0;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.fee_bump_bps = 999;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.receipt_timeout_ms = 90_001;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.max_replacements = 5;
+        assert!(
+            invalid
+                .validate()
+                .expect_err("default receipt timeout permits four replacements")
+                .contains("max_replacements + 1")
+        );
+
+        let mut invalid = valid;
+        invalid.max_fee_per_gas_wei = "not-a-number".to_string();
+        assert!(invalid.validate().is_err());
+
+        invalid.max_fee_per_gas_wei = "0".to_string();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn transaction_config_defaults_bounded_retry_knobs() {
+        let config: BoundlessTransactionConfig =
+            serde_json::from_str(r#"{"max_fee_per_gas_wei":"1000000000"}"#)
+                .expect("minimal transaction policy");
+
+        assert_eq!(config.receipt_timeout_ms, 90_000);
+        assert_eq!(config.fee_bump_bps, 5_000);
+        assert_eq!(config.max_replacements, 4);
+        assert!(config.validate().is_ok());
     }
 }

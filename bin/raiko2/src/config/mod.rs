@@ -312,6 +312,20 @@ mod tests {
             .apply_routes_override(&routes.parse().expect("valid prover routes"));
     }
 
+    fn enable_test_boundless_network(config: &mut Config) {
+        set_routes(config, "risc0/network");
+        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.prover.risc0.boundless.transaction = Some(
+            raiko2_prover::boundless_config::BoundlessTransactionConfig {
+                receipt_timeout_ms: 90_000,
+                fee_bump_bps: 5_000,
+                max_replacements: 4,
+                max_fee_per_gas_wei: "1000000000".to_string(),
+            },
+        );
+    }
+
     fn route_override_config() -> &'static str {
         r#"
 [server]
@@ -886,9 +900,7 @@ backend = "memory"
     #[test]
     fn config_validate_rejects_pair_boundless_when_network_route_enabled() {
         let mut config = Config::default();
-        set_routes(&mut config, "risc0/network");
-        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        enable_test_boundless_network(&mut config);
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
 
         let err = config
@@ -934,9 +946,7 @@ backend = "memory"
     #[test]
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
-        set_routes(&mut config, "risc0/network");
-        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        enable_test_boundless_network(&mut config);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless_config::BoundlessOfferParams {
                 timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {

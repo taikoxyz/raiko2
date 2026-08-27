@@ -526,6 +526,10 @@ Expected release outputs:
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
 - TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
+The `shasta` in these guest artifact filenames is a frozen identifier, not a fork selector. These
+are the current Unzen ELF and VK assets; renaming them would change the provenance fingerprint and
+force on-chain re-registration. See the `Frozen identifier` entry in [../CONTEXT.md](../CONTEXT.md).
+
 - Guest artifact assets:
   - `risc0_shasta_*.elf`
   - `sp1_shasta_*.elf`
@@ -938,8 +942,9 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shas
 > `config/chain_spec_list_default.json`, `taiko_hoodi` carries different SP1 and RISC0 verifier
 > addresses under `SHASTA` and `UNZEN`, so `--profile hoodi-shasta` registers against the Shasta
 > verifiers on a network that has run Unzen since 2026-06-18. Verify the resolved address against
-> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are identical under
-> both forks and are unaffected.
+> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are currently identical
+> under both forks, so mainnet is unaffected today — but the `SHASTA` path is hardcoded for every
+> profile, so re-check that before any `--apply` on mainnet.
 
 Current behavior:
 

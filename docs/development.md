@@ -298,8 +298,9 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shas
 > `config/chain_spec_list_default.json`, `taiko_hoodi` carries different SP1 and RISC0 verifier
 > addresses under `SHASTA` and `UNZEN`, so `--profile hoodi-shasta` registers against the Shasta
 > verifiers on a network that has run Unzen since 2026-06-18. Verify the resolved address against
-> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are identical under
-> both forks and are unaffected.
+> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are currently identical
+> under both forks, so mainnet is unaffected today — but the `SHASTA` path is hardcoded for every
+> profile, so re-check that before any `--apply` on mainnet.
 
 This `register-image` flow only covers zk guest digests (`risc0` image IDs and `sp1` verifier
 digests). SGX registration is separate: read `mr_enclave` from the baked
@@ -447,6 +448,10 @@ one launcher process via `--input-list` and `--jsonl-out`. This is important for
 because SP1 profiling startup is much more expensive than the tiny lab execute bodies.
 
 ## GuestInput Replay
+
+The `shasta` in fixture paths, script names, and `xtask` profile names below is a frozen identifier,
+not a fork selector. These are the current Unzen paths. See the `Frozen identifier` entry in
+[../CONTEXT.md](../CONTEXT.md).
 
 Checked-in GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.
 Use `preflight` to capture a native fixture after live RPC preflight succeeds. The checked-in

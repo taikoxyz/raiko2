@@ -297,10 +297,23 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shas
 > `/verifier_address_forks/SHASTA/<proof_type>` from the chain spec. In
 > `config/chain_spec_list_default.json`, `taiko_hoodi` carries different SP1 and RISC0 verifier
 > addresses under `SHASTA` and `UNZEN`, so `--profile hoodi-shasta` registers against the Shasta
-> verifiers on a network that has run Unzen since 2026-06-18. Verify the resolved address against
-> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are currently identical
-> under both forks, so mainnet is unaffected today — but the `SHASTA` path is hardcoded for every
-> profile, so re-check that before any `--apply` on mainnet.
+> verifiers on a network that has run Unzen since 2026-06-18.
+>
+> Checking the resolved address is not itself a remedy: `resolve_profile` falls back to
+> `load_shasta_verifiers_from_chain_spec` unless both verifiers are passed explicitly. To register
+> against the Unzen contracts, read the `UNZEN` addresses for `taiko_hoodi` out of the chain spec
+> and override:
+>
+> ```bash
+> PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all \
+>   --risc0-verifier <UNZEN RISC0 address> \
+>   --sp1-verifier <UNZEN SP1 address> \
+>   --apply
+> ```
+>
+> `taiko_mainnet` entries are currently identical under both forks, so mainnet is unaffected today —
+> but the `SHASTA` path is hardcoded for every profile, so re-check that before any `--apply` on
+> mainnet.
 
 This `register-image` flow only covers zk guest digests (`risc0` image IDs and `sp1` verifier
 digests). SGX registration is separate: read `mr_enclave` from the baked

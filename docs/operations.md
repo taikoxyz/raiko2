@@ -529,9 +529,9 @@ Expected release outputs:
 
 The `shasta` in these guest artifact filenames is a frozen identifier, not a fork selector. These
 are the current guest ELF and VK assets, and they carry the rules for every fork they support, not
-just one. On-chain registration keys on the RISC0 image ID or the SP1 VK hash, each computed from
-the built bytes, so a rename by itself does not require re-registration -- only a rebuild that
-changes those bytes does. See the `Frozen identifier` entry
+just one. On-chain registration is keyed on the RISC0 image ID or the SP1 VK hash, each computed
+from the built bytes. A rename by itself therefore does not require re-registration; only a rebuild
+that changes those bytes does. See the `Frozen identifier` entry
 in [../CONTEXT.md](../CONTEXT.md).
 
 - Guest artifact assets:
@@ -945,10 +945,23 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shas
 > `/verifier_address_forks/SHASTA/<proof_type>` from the chain spec. In
 > `config/chain_spec_list_default.json`, `taiko_hoodi` carries different SP1 and RISC0 verifier
 > addresses under `SHASTA` and `UNZEN`, so `--profile hoodi-shasta` registers against the Shasta
-> verifiers on a network that has run Unzen since 2026-06-18. Verify the resolved address against
-> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are currently identical
-> under both forks, so mainnet is unaffected today — but the `SHASTA` path is hardcoded for every
-> profile, so re-check that before any `--apply` on mainnet.
+> verifiers on a network that has run Unzen since 2026-06-18.
+>
+> Checking the resolved address is not itself a remedy: `resolve_profile` falls back to
+> `load_shasta_verifiers_from_chain_spec` unless both verifiers are passed explicitly. To register
+> against the Unzen contracts, read the `UNZEN` addresses for `taiko_hoodi` out of the chain spec
+> and override:
+>
+> ```bash
+> PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all \
+>   --risc0-verifier <UNZEN RISC0 address> \
+>   --sp1-verifier <UNZEN SP1 address> \
+>   --apply
+> ```
+>
+> `taiko_mainnet` entries are currently identical under both forks, so mainnet is unaffected today —
+> but the `SHASTA` path is hardcoded for every profile, so re-check that before any `--apply` on
+> mainnet.
 
 Current behavior:
 

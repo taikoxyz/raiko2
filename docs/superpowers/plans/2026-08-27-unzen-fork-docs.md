@@ -200,8 +200,8 @@ This machine has no system rasterizer, and PEP 668 blocks installing into system
 throwaway virtualenv in the scratchpad, not the repository.
 
 ```bash
-python3 -m venv /tmp/svgvenv
-/tmp/svgvenv/bin/pip install cairosvg
+python3 -m venv /private/tmp/claude-501/-Users-davidcai-taiko-raiko2/88459047-b4a2-4c0b-b6e7-6f27edce604d/scratchpad/svgvenv
+/private/tmp/claude-501/-Users-davidcai-taiko-raiko2/88459047-b4a2-4c0b-b6e7-6f27edce604d/scratchpad/svgvenv/bin/pip install cairosvg
 ```
 
 Expected: `Successfully installed cairosvg-...`. libcairo is already present via Homebrew.
@@ -209,7 +209,7 @@ Expected: `Successfully installed cairosvg-...`. libcairo is already present via
 - [ ] **Step 5: Render the PNG**
 
 ```bash
-DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib /tmp/svgvenv/bin/python -c \
+DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib /private/tmp/claude-501/-Users-davidcai-taiko-raiko2/88459047-b4a2-4c0b-b6e7-6f27edce604d/scratchpad/svgvenv/bin/python -c \
   "import cairosvg; cairosvg.svg2png(url='docs/assets/readme-banner.svg', \
    write_to='docs/assets/readme-banner.png', output_width=1800, output_height=600)"
 ```
@@ -1300,10 +1300,10 @@ The spec and plan are working artifacts for this change, not documentation the r
 Preserve them outside the repo first, then remove them from the branch.
 
 ```bash
-mkdir -p /tmp/unzen-docs-artifacts
+mkdir -p /private/tmp/claude-501/-Users-davidcai-taiko-raiko2/88459047-b4a2-4c0b-b6e7-6f27edce604d/scratchpad/unzen-docs-artifacts
 cp docs/superpowers/specs/2026-08-27-unzen-fork-docs-design.md \
    docs/superpowers/plans/2026-08-27-unzen-fork-docs.md \
-   /tmp/unzen-docs-artifacts/
+   /private/tmp/claude-501/-Users-davidcai-taiko-raiko2/88459047-b4a2-4c0b-b6e7-6f27edce604d/scratchpad/unzen-docs-artifacts/
 git rm -q docs/superpowers/specs/2026-08-27-unzen-fork-docs-design.md \
           docs/superpowers/plans/2026-08-27-unzen-fork-docs.md
 git commit -m "docs: drop working spec and plan from the branch"

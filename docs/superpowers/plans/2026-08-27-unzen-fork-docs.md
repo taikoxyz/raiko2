@@ -242,15 +242,17 @@ Expected: no output, exit code 0.
 ```bash
 file docs/assets/readme-banner.png
 ```
-Expected: `PNG image data, 1800 x 600, 8-bit/color RGBA, non-interlaced`
+Expected: `PNG image data, 1800 x 600, 8-bit/color RGB, non-interlaced` (the pre-change
+PNG was also RGB; cairo emits opaque RGB because the SVG paints a full-bleed background rect)
 
 Then open `docs/assets/readme-banner.png` and confirm visually:
 - "Raiko2" wordmark and the subtitle "Taiko proof orchestration" are present.
 - No badge pills anywhere.
 - No fork name anywhere.
 - No clipped or overlapping text.
-- The gap between the subtitle and the divider does not read as loose. If it does, lower the lift
-  from 62px to about 50px (divider `y=404`, rule `y=438`) and re-render.
+- The gap between the subtitle and the divider does not read as loose. If it does, INCREASE the
+  lift (e.g. divider `y=380`, rule `y=414`) and re-render. A smaller lift moves the divider back
+  down and widens the gap, which is the wrong direction.
 
 The SVG requests Adwaita Sans, which is absent here, so glyph metrics drift slightly from the
 original render. This is expected and affects only kerning.

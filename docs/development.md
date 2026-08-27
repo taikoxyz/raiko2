@@ -450,7 +450,7 @@ because SP1 profiling startup is much more expensive than the tiny lab execute b
 ## GuestInput Replay
 
 The `shasta` in fixture paths, script names, and `xtask` profile names below is a frozen identifier,
-not a fork selector. These are the current Unzen paths. See the `Frozen identifier` entry in
+not a fork selector. See the `Frozen identifier` entry in
 [../CONTEXT.md](../CONTEXT.md).
 
 Checked-in GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.

@@ -526,9 +526,12 @@ Expected release outputs:
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
 - TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
+
 The `shasta` in these guest artifact filenames is a frozen identifier, not a fork selector. These
-are the current Unzen ELF and VK assets; renaming them would change the provenance fingerprint and
-force on-chain re-registration. See the `Frozen identifier` entry in [../CONTEXT.md](../CONTEXT.md).
+are the current Unzen ELF and VK assets. On-chain registration keys on the RISC0 image ID or the
+SP1 VK hash, each computed from the built bytes, so a rename by itself does not require
+re-registration -- only a rebuild that changes those bytes does. See the `Frozen identifier` entry
+in [../CONTEXT.md](../CONTEXT.md).
 
 - Guest artifact assets:
   - `risc0_shasta_*.elf`

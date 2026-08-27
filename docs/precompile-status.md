@@ -67,10 +67,10 @@ Every address below is active under Unzen. The `Crypto` trait exposes 17 overrid
 
 | Address | Precompile | Introduced | RISC0 hook | SP1 hook |
 | --- | --- | --- | --- | --- |
-| `0x01` | `ECRECOVER` | Homestead | Yes | Yes |
-| `0x02` | `SHA256` | Homestead | Yes | Yes |
-| `0x03` | `RIPEMD160` | Homestead | No | No |
-| `0x04` | `IDENTITY` | Homestead | No hook exists | No hook exists |
+| `0x01` | `ECRECOVER` | Frontier | Yes | Yes |
+| `0x02` | `SHA256` | Frontier | Yes | Yes |
+| `0x03` | `RIPEMD160` | Frontier | No | No |
+| `0x04` | `IDENTITY` | Frontier | No hook exists | No hook exists |
 | `0x05` | `MODEXP` | Byzantium, repriced by Berlin and Osaka | Yes | No |
 | `0x06` | `BN254_ADD` | Byzantium, repriced by Istanbul | Yes | Yes |
 | `0x07` | `BN254_MUL` | Byzantium, repriced by Istanbul | Yes | Yes |
@@ -113,10 +113,16 @@ Consequences:
 - BLS12-381 (`0x0B` through `0x11`) falls back to the pure-Rust `ark-bls12-381` implementation.
 - KZG (`0x0A`) falls back to the pure-Rust arkworks implementation rather than `c-kzg`.
 
-The SP1 hooks are not syscall shims in the way the RISC0 hooks are. `Sp1GuestCrypto::sha256`
-delegates to `sha2::Digest`, `secp256k1_ecrecover` to `k256`, and the BN254 operations to hand
-written `BigUint` arithmetic. These depend on SP1's patched crate graph for acceleration rather than
-on direct precompile calls.
+The SP1 hooks are not syscall shims in the way the RISC0 hooks are, and they do not all benefit
+from SP1's patched crate graph. `Sp1GuestCrypto::sha256` delegates to `sha2` and
+`secp256k1_ecrecover` to `k256`; `guests/sp1/Cargo.toml` patches both to SP1 forks, so those two are
+accelerated.
+
+The BN254 hooks at `0x06` and `0x07` are not. They are hand-written `BigUint` arithmetic over
+`num-bigint 0.4.6` (`guests/sp1/Cargo.toml`), which is absent from that `[patch.crates-io]` block.
+The result is an inversion worth measuring: the two BN254 operations SP1 hooks run on unpatched
+arithmetic, while `0x08` `BN254_PAIRING`, which SP1 does NOT hook, falls through to the `bn`
+backend (`substrate-bn`) that the patch block DOES cover.
 
 ## KZG Clarification
 

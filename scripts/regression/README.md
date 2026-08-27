@@ -1,8 +1,9 @@
 # Proposal Regression Tool
 
 The `shasta` in the script, config, and directory names below is a frozen identifier, not a fork
-selector. These are the current tools; run against a live network they exercise Unzen. See the
-`Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
+selector. These are the current tools. The selected proposal determines which fork is exercised:
+current proposals run under Unzen, while historical proposals replay under their original fork
+rules. See the `Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
 
 ## Setup
 

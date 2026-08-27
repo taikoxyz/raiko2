@@ -24,5 +24,6 @@ rules.
   routes such as `/prove/shasta`, request schemas such as `raiko2-shasta-request-v1`, `PipelineKey`
   variants such as `ShastaSp1`, proof-URI pipeline-key segments such as `shasta-sp1-local`, guest
   ELF and VK filenames, `xtask` profile names, and checked-in fixture and regression paths. The
-  spelling records when the identifier was introduced; it does not select a fork. These names carry
-  current Unzen work.
+  spelling records when the identifier was introduced; it does not select a fork — a proposal's
+  timestamp does. These are the current, live surfaces, but a proposal from before a fork's
+  activation still replays under that fork's rules.

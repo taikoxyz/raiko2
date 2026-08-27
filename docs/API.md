@@ -423,7 +423,7 @@ Response fields:
 `proof_uri` such as `shasta-sp1-local`, are frozen identifiers rather than fork selectors. The
 variant name is stored in authoritative runtime state and the URI segment is part of published
 proof object names, so neither can be renamed without breaking live consumers. Both keep their
-original spelling while carrying current Unzen work. See the `Frozen identifier` entry in
+original spelling on the current proving path. See the `Frozen identifier` entry in
 [../CONTEXT.md](../CONTEXT.md).
 
 SP1 proposal artifacts and final aggregate artifacts have different payload contracts:

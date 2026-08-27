@@ -232,7 +232,7 @@ impl<T> BoundlessDispatchResult<T> {
     }
 }
 
-fn expired_uncertain_dispatch_result<T>(
+const fn expired_uncertain_dispatch_result<T>(
     uncertain: &BoundlessUncertainSubmission,
     error: RaikoError,
 ) -> BoundlessDispatchResult<T> {
@@ -8392,6 +8392,12 @@ mod tests {
             (Vec::new(), false, false, "provably unbroadcast"),
             (Vec::new(), true, true, "ambiguous broadcast"),
             (vec![test_digest(22)], false, true, "known transaction hash"),
+            (
+                vec![test_digest(22)],
+                true,
+                true,
+                "known transaction hash and ambiguous broadcast",
+            ),
         ];
 
         for (transaction_hashes, broadcast_may_have_succeeded, expected_retain, case) in cases {

@@ -1,9 +1,9 @@
 # Hoodi Tx-List Witness Rollout
 
-This runbook covers the Hoodi rollout path for Shasta proposal proving with the
+This runbook covers the Hoodi rollout path for proposal proving with the
 `debug_executionWitnessForTxList` witness API.
 
-The goal is to make `raiko2` prove the derived Shasta transaction list instead of depending on
+The goal is to make `raiko2` prove the derived transaction list instead of depending on
 canonical block witnesses when the derived tx list contains recoverable invalid or non-canonical
 suffix transactions.
 
@@ -11,7 +11,7 @@ suffix transactions.
 
 - `alethia-reth` L2 node with `debug_executionWitnessForTxList`.
 - Proof-history storage enabled and covering the target proposal block range.
-- `raiko2` image built from #70 or a later commit that requests tx-list witnesses for Shasta source
+- `raiko2` image built from #70 or a later commit that requests tx-list witnesses for proposal source
   manifests.
 - Remote SGX providers:
   - `raiko2-sgx` for `proof_type = "sgx"`.
@@ -46,7 +46,7 @@ Each lane is enabled independently. Its endpoint and timeout live in the same ta
 one lane never selects or configures the other.
 
 Do not route `l2_witness_rpc` to a node that only supports canonical `debug_executionWitness`.
-The Shasta source-manifest path must use `debug_executionWitnessForTxList`.
+The proposal source-manifest path must use `debug_executionWitnessForTxList`.
 
 ## Alethia-Reth Readiness
 
@@ -91,7 +91,7 @@ Submit one recent Hoodi proposal with each proof type:
 
 The `raiko2` logs should include:
 
-- `shasta tx-list witnesses ready`
+- `proposal tx-list witnesses ready`
 - `fetched witnesses via debug_executionWitnessForTxList`
 
 The witness count must match the derived manifest block count.

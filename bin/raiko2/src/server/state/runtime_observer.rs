@@ -201,7 +201,7 @@ impl RuntimeObserver {
                 proof_ref = %publication.root_ref,
                 proof_uri = %publication.proof_uri,
                 content_hash = %publication.descriptor.content_hash,
-                "completed shasta proof task"
+                "completed proposal proof task"
             );
         }
     }
@@ -2249,7 +2249,7 @@ mod tests {
     #[test]
     fn proof_task_log_context_uses_public_proposal_shape() {
         let proposal = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaSgx,
+            pipeline: PipelineKey::SgxRemote,
             request: proposal_request_with_id(42),
         });
         let proposal_context = proof_task_log_context(&proposal);
@@ -2257,7 +2257,7 @@ mod tests {
         assert_eq!(proposal_context.proposal_ids, vec![42]);
 
         let aggregate = EngineTaskId::new(EngineTaskKey::Aggregate {
-            pipeline: PipelineKey::ShastaSgx,
+            pipeline: PipelineKey::SgxRemote,
             request: AggregationTaskRequest {
                 request_id: "sample-request".to_string(),
                 proposal_ids: vec![42, 43, 44],
@@ -2794,7 +2794,7 @@ mod tests {
         runner_status: RunnerStatus,
     ) -> Result<()> {
         let task_ref = proposal_task_ref(pipeline, request);
-        let route = if pipeline == PipelineKey::ShastaSp1 {
+        let route = if pipeline == PipelineKey::Sp1Local {
             "sp1/network"
                 .parse::<PipelineRoute>()
                 .expect("parse SP1 network route")
@@ -2843,14 +2843,14 @@ mod tests {
             "runtime-observer",
         ))?);
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request: proposal_request(),
         });
-        let task_ref = proposal_task_ref(PipelineKey::ShastaRisc0Network, &proposal_request());
+        let task_ref = proposal_task_ref(PipelineKey::Risc0Network, &proposal_request());
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public".to_string(),
-                pipeline_key: PipelineKey::ShastaRisc0Network,
+                pipeline_key: PipelineKey::Risc0Network,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -2887,7 +2887,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network.route(),
         );
         let future_expires_at = now_secs().saturating_add(3_600);
         drive_engine_progress(
@@ -3072,7 +3072,7 @@ mod tests {
             &runtime,
             "task_public",
             "taiko_dev/ethereum",
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             &request,
             RunnerStatus::Allocated,
         )
@@ -3080,10 +3080,10 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network.route(),
         );
         let id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request: request.clone(),
         });
         let task = EngineTask::ProveProposal {
@@ -3195,7 +3195,7 @@ mod tests {
             &runtime,
             "task_active",
             "taiko_dev/ethereum",
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             &request,
             RunnerStatus::Allocated,
         )
@@ -3204,7 +3204,7 @@ mod tests {
             &runtime,
             "task_invalid",
             "taiko_dev/ethereum",
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             &request,
             RunnerStatus::Allocated,
         )
@@ -3212,10 +3212,10 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network.route(),
         );
         let id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request: request.clone(),
         });
         let task = EngineTask::ProveProposal {
@@ -3288,7 +3288,7 @@ mod tests {
             &runtime,
             "task_active",
             "taiko_dev/ethereum",
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             &request,
             RunnerStatus::Allocated,
         )
@@ -3297,7 +3297,7 @@ mod tests {
             &runtime,
             "task_terminal",
             "taiko_dev/ethereum",
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             &request,
             RunnerStatus::Failed,
         )
@@ -3305,10 +3305,10 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network.route(),
         );
         let id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request: request.clone(),
         });
         let task = EngineTask::ProveProposal {
@@ -3381,7 +3381,7 @@ mod tests {
                 &runtime,
                 task_id,
                 "taiko_dev/ethereum",
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 &request,
                 RunnerStatus::Allocated,
             )
@@ -3390,10 +3390,10 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network.route(),
         );
         let id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request: request.clone(),
         });
         let task = EngineTask::ProveProposal {
@@ -3423,7 +3423,7 @@ mod tests {
             &runtime,
             "task_reincarnated",
             "taiko_dev/ethereum",
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             &request,
             RunnerStatus::Allocated,
         )
@@ -3477,7 +3477,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-clear-boundless-aggregate",
         ))?);
-        let pipeline = PipelineKey::ShastaRisc0Network;
+        let pipeline = PipelineKey::Risc0Network;
         let aggregate_request = AggregationTaskRequest {
             request_id: "agg-42".to_string(),
             proposal_ids: vec![42],
@@ -3594,7 +3594,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-aggregate-pending",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = "sp1/network"
             .parse::<PipelineRoute>()
             .expect("parse SP1 network route");
@@ -3629,7 +3629,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_aggregate_pending".to_string(),
-                pipeline_key: PipelineKey::ShastaSp1,
+                pipeline_key: PipelineKey::Sp1Local,
                 route,
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
@@ -3720,7 +3720,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-late-standalone-owner",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = "sp1/network"
             .parse::<PipelineRoute>()
             .expect("parse SP1 network route");
@@ -3860,7 +3860,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-compressed-sp1-root",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -3919,7 +3919,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-invalidated-read-fence",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4004,7 +4004,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-incomplete-sp1-root",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -4057,7 +4057,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-detached-publication",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4103,7 +4103,7 @@ mod tests {
             "runtime-observer-proposal-cleanup-pending",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4160,7 +4160,7 @@ mod tests {
             "runtime-observer-aggregate-cleanup-pending",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = AggregationTaskRequest {
             request_id: "cleanup-pending-aggregate".to_string(),
@@ -4248,7 +4248,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-publication-outbox",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4295,7 +4295,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-completed-publication-retry",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4373,7 +4373,7 @@ mod tests {
             allow_put: tokio::sync::Notify::new(),
         });
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4461,7 +4461,7 @@ mod tests {
             allow_put: tokio::sync::Notify::new(),
         });
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4547,8 +4547,8 @@ mod tests {
             publishing_runtime
                 .publish_proof_artifact_bytes(
                     "taiko_dev/ethereum",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "proposal-1",
                     br#"{"proof":"0x01"}"#,
                 )
@@ -4578,7 +4578,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-network-pair",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -4610,7 +4610,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal.route(),
         );
         drive_engine_start(&observer, &proposal_task_id, &task, "worker-a")
             .await
@@ -4640,7 +4640,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-retry-start",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -4669,7 +4669,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal.route(),
         );
         let error = drive_engine_start(&observer, &proposal_task_id, &task, "worker-a")
             .await
@@ -4694,7 +4694,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-multi-proposal",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let first_request = proposal_request_with_id(42);
         let second_request = proposal_request_with_id(43);
         let first_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -4710,7 +4710,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_multi_proposal".to_string(),
-                pipeline_key: PipelineKey::ShastaSp1,
+                pipeline_key: PipelineKey::Sp1Local,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
@@ -4740,7 +4740,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaSp1.route(),
+            PipelineKey::Sp1Local.route(),
         );
         checkpoint_proof_fixture(
             &observer,
@@ -4843,14 +4843,14 @@ mod tests {
             "runtime-observer-sp1",
         ))?);
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaSp1,
+            pipeline: PipelineKey::Sp1Local,
             request: proposal_request(),
         });
-        let task_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request());
+        let task_ref = proposal_task_ref(PipelineKey::Sp1Local, &proposal_request());
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1".to_string(),
-                pipeline_key: PipelineKey::ShastaSp1,
+                pipeline_key: PipelineKey::Sp1Local,
                 route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
@@ -4963,7 +4963,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-submission-metrics",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request_with_id(9_901);
         let id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5029,7 +5029,7 @@ mod tests {
             "progress-conflict".into(),
         )?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5051,8 +5051,8 @@ mod tests {
         competing_runtime
             .register_task(TaskRegistration {
                 task_id: "other-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: Vec::new(),
@@ -5102,7 +5102,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-late-provider-owner",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5196,7 +5196,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-provider-identity-drift",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5274,7 +5274,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-post-checkpoint-owner",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5377,7 +5377,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-cancelled-progress",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5456,7 +5456,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-progress-draining",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5519,20 +5519,20 @@ mod tests {
             "runtime-observer-sp1-load-proposal",
         ))?);
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaSp1,
+            pipeline: PipelineKey::Sp1Local,
             request: proposal_request(),
         });
         let other_request = proposal_request_with_id(43);
         let other_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaSp1,
+            pipeline: PipelineKey::Sp1Local,
             request: other_request.clone(),
         });
-        let task_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request());
-        let other_task_ref = proposal_task_ref(PipelineKey::ShastaSp1, &other_request);
+        let task_ref = proposal_task_ref(PipelineKey::Sp1Local, &proposal_request());
+        let other_task_ref = proposal_task_ref(PipelineKey::Sp1Local, &other_request);
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_load".to_string(),
-                pipeline_key: PipelineKey::ShastaSp1,
+                pipeline_key: PipelineKey::Sp1Local,
                 route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
@@ -5648,14 +5648,14 @@ mod tests {
             prover_config: ProverTaskConfig::default(),
         };
         let aggregate_task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
-            pipeline: PipelineKey::ShastaSp1,
+            pipeline: PipelineKey::Sp1Local,
             request: aggregate_request.clone(),
         });
-        let task_ref = aggregate_task_ref(PipelineKey::ShastaSp1, &aggregate_request);
+        let task_ref = aggregate_task_ref(PipelineKey::Sp1Local, &aggregate_request);
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_aggregate".to_string(),
-                pipeline_key: PipelineKey::ShastaSp1,
+                pipeline_key: PipelineKey::Sp1Local,
                 route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: "taiko_dev/ethereum".into(),
@@ -5759,10 +5759,10 @@ mod tests {
             "runtime-observer-no-negative-gauge",
         ))?);
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaNative,
+            pipeline: PipelineKey::NativeLocal,
             request: proposal_request(),
         });
-        let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &proposal_request());
+        let proposal_ref = proposal_task_ref(PipelineKey::NativeLocal, &proposal_request());
         let preflight_ref = stage_task_ref(&proposal_task_id);
         let mut metadata = TaskMetadata {
             network_pair: "telemetry_restart/ethereum".to_string(),
@@ -5791,7 +5791,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_restart".to_string(),
-                pipeline_key: PipelineKey::ShastaNative,
+                pipeline_key: PipelineKey::NativeLocal,
                 route: "native/local"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -5806,7 +5806,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "telemetry_restart/ethereum".to_string(),
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal.route(),
         );
         let projection = drive_engine_failure(
             &observer,
@@ -5836,7 +5836,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-terminal-metrics",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5898,7 +5898,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-cancelled-metrics",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5957,7 +5957,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-failure-kind",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -5977,7 +5977,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "metrics_failure_kind/ethereum".to_string(),
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal.route(),
         );
         let projection = drive_engine_failure(
             &observer,
@@ -6008,7 +6008,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-terminal-failure-projection",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -6074,7 +6074,7 @@ mod tests {
     async fn runtime_observer_fails_closed_when_outbox_checkpoint_cannot_persist() -> Result<()> {
         let store = Arc::new(FailingArtifactStore::default());
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -6095,7 +6095,7 @@ mod tests {
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             network_pair.to_string(),
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal.route(),
         );
         let error = drive_engine_success(
             &observer,

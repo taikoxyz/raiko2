@@ -245,11 +245,11 @@ git commit -m "refactor(runtime): add exact proof manifest deletion"
 ### Task 3: Version Canonical Preflight Compatibility And Remove Its Tombstones
 
 **Files:**
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache/types.rs:16-45`
-- Modify: `crates/pipeline/src/forks/shasta/spec.rs:241-325`
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs:20-100`
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs:295-525`
-- Test: `crates/pipeline/src/forks/shasta/preflight_cache.rs:600-980`
+- Modify: `crates/pipeline/src/proposal/preflight_cache/types.rs:16-45`
+- Modify: `crates/pipeline/src/proposal/spec.rs:241-325`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs:20-100`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs:295-525`
+- Test: `crates/pipeline/src/proposal/preflight_cache.rs:600-980`
 - Modify: `crates/runtime/src/artifact_store.rs:430-475`
 - Modify: `crates/runtime/src/artifact_store/gcs.rs:340-382`
 - Modify: `crates/runtime/src/artifact_store/gcs.rs:640-715`
@@ -359,7 +359,7 @@ Expected: all focused tests pass, including failed-build recomputation.
 **Step 6: Commit**
 
 ```bash
-git add crates/pipeline/src/forks/shasta/preflight_cache.rs crates/pipeline/src/forks/shasta/preflight_cache crates/pipeline/src/forks/shasta/spec.rs crates/runtime/src/artifact_store.rs crates/runtime/src/artifact_store/gcs.rs crates/runtime/src/artifact_store/gcs_tests.rs crates/runtime/src/lib.rs
+git add crates/pipeline/src/proposal/preflight_cache.rs crates/pipeline/src/proposal/preflight_cache crates/pipeline/src/proposal/spec.rs crates/runtime/src/artifact_store.rs crates/runtime/src/artifact_store/gcs.rs crates/runtime/src/artifact_store/gcs_tests.rs crates/runtime/src/lib.rs
 git commit -m "refactor(preflight): version and rebuild canonical cache entries"
 ```
 

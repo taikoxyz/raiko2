@@ -30,14 +30,26 @@ where
     }
 }
 
+/// Proposal proving route.
+///
+/// Frozen wire identity: the external gaiko2 prover posts to this exact path. The retired Shasta
+/// spelling is deliberate here. See the frozen identifier list in `CONCEPTS.md`.
+pub(crate) const PROVE_SHASTA_ROUTE: &str = "/prove/shasta";
+
+/// Aggregate proving route. Frozen for the same reason as [`PROVE_SHASTA_ROUTE`].
+pub(crate) const PROVE_SHASTA_AGGREGATE_ROUTE: &str = "/prove/shasta-aggregate";
+
 pub(crate) fn router<P>(state: SgxProver<P>) -> Router
 where
     P: TeeProvider + Clone + Send + Sync + 'static,
 {
     Router::new()
         .route("/health", get(health))
-        .route("/prove/shasta", post(prove_shasta::<P>))
-        .route("/prove/shasta-aggregate", post(prove_shasta_aggregate::<P>))
+        .route(PROVE_SHASTA_ROUTE, post(prove_shasta::<P>))
+        .route(
+            PROVE_SHASTA_AGGREGATE_ROUTE,
+            post(prove_shasta_aggregate::<P>),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -74,7 +86,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 const fn proposal_id_from_request(
-    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ProposalRequest,
 ) -> u64 {
     request
         .payload
@@ -85,19 +97,19 @@ const fn proposal_id_from_request(
 }
 
 const fn shasta_request_block_count(
-    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ProposalRequest,
 ) -> usize {
     request.payload.guest_input.witnesses.len()
 }
 
 const fn shasta_request_chain_id(
-    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ProposalRequest,
 ) -> u64 {
     request.payload.guest_input.proof_carry_data.chain_id
 }
 
 fn aggregate_proposal_id_summary(
-    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest,
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ProposalAggregateRequest,
 ) -> String {
     if request.payload.proofs.is_empty() {
         return "none".to_string();
@@ -121,7 +133,7 @@ fn aggregate_proposal_id_summary(
 async fn prove_shasta<P>(
     State(state): State<SgxProver<P>>,
     request: Result<
-        Json<raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest>,
+        Json<raiko2_prover::remote_prover::protocol::Raiko2ProposalRequest>,
         JsonRejection,
     >,
 ) -> (
@@ -179,7 +191,7 @@ where
 async fn prove_shasta_aggregate<P>(
     State(state): State<SgxProver<P>>,
     request: Result<
-        Json<raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest>,
+        Json<raiko2_prover::remote_prover::protocol::Raiko2ProposalAggregateRequest>,
         JsonRejection,
     >,
 ) -> (
@@ -237,9 +249,9 @@ mod tests {
     };
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_prover::remote_prover::protocol::{
-        RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock,
-        Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaGuestInput,
-        Raiko2ShastaPayload, Raiko2ShastaRequest,
+        RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
+        Raiko2ProposalAggregatePayload, Raiko2ProposalAggregateRequest, Raiko2ProposalGuestInput,
+        Raiko2ProposalPayload, Raiko2ProposalRequest, Raiko2ReplayBlock,
     };
     use secp256k1::SecretKey;
     use tower::util::ServiceExt;
@@ -268,17 +280,17 @@ mod tests {
         }
     }
 
-    fn request_fixture() -> Raiko2ShastaRequest {
+    fn request_fixture() -> Raiko2ProposalRequest {
         let mut carry = ProofCarryData {
             chain_id: 167_013,
             ..ProofCarryData::default()
         };
         carry.transition_input.proposal_id = 42;
 
-        Raiko2ShastaRequest {
+        Raiko2ProposalRequest {
             schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaPayload {
-                guest_input: Raiko2ShastaGuestInput {
+            payload: Raiko2ProposalPayload {
+                guest_input: Raiko2ProposalGuestInput {
                     proof_carry_data: carry,
                     ..Default::default()
                 },
@@ -379,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prove_shasta_aggregate_rejects_empty_request() {
+    async fn prove_proposal_aggregate_rejects_empty_request() {
         let app = router(SgxProver {
             provider: FakeProvider,
             service_config: ServiceConfig {
@@ -388,9 +400,9 @@ mod tests {
                 instance_id: 99,
             },
         });
-        let body = serde_json::to_vec(&Raiko2ShastaAggregateRequest {
+        let body = serde_json::to_vec(&Raiko2ProposalAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaAggregatePayload { proofs: vec![] },
+            payload: Raiko2ProposalAggregatePayload { proofs: vec![] },
         })
         .expect("request body");
 
@@ -426,9 +438,9 @@ mod tests {
     fn aggregate_log_summary_summarizes_proposal_ids() {
         let mut first = request_fixture().payload.guest_input.proof_carry_data;
         first.transition_input.proposal_id = 2_222;
-        let aggregate = Raiko2ShastaAggregateRequest {
+        let aggregate = Raiko2ProposalAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaAggregatePayload {
+            payload: Raiko2ProposalAggregatePayload {
                 proofs: vec![
                     raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
                         input: "0x1".to_string(),
@@ -444,9 +456,9 @@ mod tests {
 
     #[test]
     fn aggregate_log_summary_reports_none_for_empty_proofs() {
-        let aggregate = Raiko2ShastaAggregateRequest {
+        let aggregate = Raiko2ProposalAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaAggregatePayload { proofs: vec![] },
+            payload: Raiko2ProposalAggregatePayload { proofs: vec![] },
         };
 
         assert_eq!(aggregate_proposal_id_summary(&aggregate), "none");
@@ -460,9 +472,9 @@ mod tests {
         let mut last = request_fixture().payload.guest_input.proof_carry_data;
         last.transition_input.proposal_id = 2_333;
 
-        let aggregate = Raiko2ShastaAggregateRequest {
+        let aggregate = Raiko2ProposalAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaAggregatePayload {
+            payload: Raiko2ProposalAggregatePayload {
                 proofs: vec![
                     raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
                         input: "0x1".to_string(),
@@ -479,5 +491,23 @@ mod tests {
         };
 
         assert_eq!(aggregate_proposal_id_summary(&aggregate), "2222..2333");
+    }
+}
+
+#[cfg(test)]
+mod frozen_identity_tests {
+    use super::{PROVE_SHASTA_AGGREGATE_ROUTE, PROVE_SHASTA_ROUTE};
+    use crate::config::DEFAULT_FORK;
+
+    /// Pins the routes the external gaiko2 prover posts to, and the fork key it is configured with.
+    ///
+    /// `DEFAULT_FORK` is not cosmetic: it is the lookup key into the SGX bootstrap
+    /// `registered.json` instance-id map and the value of the deployed `RAIKO2_SGX_FORK` and
+    /// `GAIKO2_FORK` environment variables. Changing it loses the registered SGX instance id.
+    #[test]
+    fn remote_prover_surface_is_frozen_wire_identity() {
+        assert_eq!(PROVE_SHASTA_ROUTE, "/prove/shasta");
+        assert_eq!(PROVE_SHASTA_AGGREGATE_ROUTE, "/prove/shasta-aggregate");
+        assert_eq!(DEFAULT_FORK, "shasta");
     }
 }

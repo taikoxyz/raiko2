@@ -1156,8 +1156,8 @@ mod tests {
         RuntimeTaskRecord {
             task_id: "root".to_string(),
             incarnation_id: uuid::Uuid::new_v4(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             task_kind: "proposal".to_string(),
             network_pair: metadata.network_pair.clone(),
             artifact_refs,
@@ -1188,7 +1188,7 @@ mod tests {
             execution_mode: None,
             aggregate_requested: true,
             proposals: Vec::new(),
-            aggregate_task_id: Some(aggregate_task_ref(PipelineKey::ShastaSp1, &request)),
+            aggregate_task_id: Some(aggregate_task_ref(PipelineKey::Sp1Local, &request)),
             aggregate_request: Some(request),
             aggregate_input_artifacts: vec![AggregateInputProofArtifact {
                 proof_ref: "external-input".to_string(),
@@ -1540,7 +1540,7 @@ mod tests {
         let metadata = external_aggregate_metadata();
 
         assert_eq!(
-            publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1),
+            publication_proof_artifact_refs(&metadata, PipelineKey::Sp1Local),
             vec![
                 metadata.aggregate_task_id.clone().expect("aggregate ref"),
                 "external-input".to_string(),
@@ -1551,7 +1551,7 @@ mod tests {
     #[test]
     fn decode_for_record_rejects_identity_drift() {
         let metadata = external_aggregate_metadata();
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Sp1Local);
         let valid = runtime_record(&metadata, artifact_refs);
         assert!(TaskMetadata::decode_for_record(&valid).is_ok());
 
@@ -1560,7 +1560,7 @@ mod tests {
         assert!(TaskMetadata::decode_for_record(&wrong_network).is_err());
 
         let mut wrong_pipeline = valid.clone();
-        wrong_pipeline.pipeline_key = PipelineKey::ShastaRisc0;
+        wrong_pipeline.pipeline_key = PipelineKey::Risc0Local;
         wrong_pipeline.route = wrong_pipeline.pipeline_key.route();
         assert!(TaskMetadata::decode_for_record(&wrong_pipeline).is_err());
 
@@ -1574,15 +1574,15 @@ mod tests {
         let mut metadata = external_aggregate_metadata();
         metadata.proof_type = ProofType::SgxGeth;
         metadata.aggregate_task_id = Some(aggregate_task_ref(
-            PipelineKey::ShastaSgxGeth,
+            PipelineKey::SgxGethRemote,
             metadata
                 .aggregate_request
                 .as_ref()
                 .expect("aggregate request"),
         ));
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSgxGeth);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::SgxGethRemote);
         let mut legacy = runtime_record(&metadata, artifact_refs);
-        legacy.pipeline_key = PipelineKey::ShastaSgxGeth;
+        legacy.pipeline_key = PipelineKey::SgxGethRemote;
         legacy.route = "sgx/remote".parse().expect("legacy SGXGETH route");
 
         assert!(TaskMetadata::decode_for_record(&legacy).is_ok());
@@ -1595,7 +1595,7 @@ mod tests {
     #[test]
     fn decode_for_record_rejects_noncanonical_metadata_shape() {
         let metadata = external_aggregate_metadata();
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Sp1Local);
         let valid = runtime_record(&metadata, artifact_refs);
 
         let mut missing_request = valid.clone();
@@ -1613,14 +1613,14 @@ mod tests {
             .expect("aggregate request");
         request.proposal_ids.push(2);
         mismatched_inputs.aggregate_task_id = Some(aggregate_task_ref(
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             mismatched_inputs
                 .aggregate_request
                 .as_ref()
                 .expect("aggregate request"),
         ));
         let mismatch_refs =
-            publication_proof_artifact_refs(&mismatched_inputs, PipelineKey::ShastaSp1);
+            publication_proof_artifact_refs(&mismatched_inputs, PipelineKey::Sp1Local);
         let mismatched_inputs = runtime_record(&mismatched_inputs, mismatch_refs);
         assert!(TaskMetadata::decode_for_record(&mismatched_inputs).is_err());
 
@@ -1639,7 +1639,7 @@ mod tests {
             rebid_attempt: Some(1),
             ..TaskRuntimeMetadata::default()
         });
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Sp1Local);
         let record = runtime_record(&metadata, artifact_refs);
 
         let error = TaskMetadata::decode_for_record(&record)
@@ -1651,13 +1651,13 @@ mod tests {
     fn decode_for_record_accepts_sp1_checkpoint_only_on_the_network_route() {
         let mut metadata = external_aggregate_metadata();
         metadata.runtime.aggregate = Some(complete_sp1_runtime());
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Sp1Local);
         let mut network = runtime_record(&metadata, artifact_refs);
         network.route = "sp1/network".parse().expect("parse SP1 network route");
         assert!(TaskMetadata::decode_for_record(&network).is_ok());
 
         let mut local = network;
-        local.route = PipelineKey::ShastaSp1.route();
+        local.route = PipelineKey::Sp1Local.route();
         let error = TaskMetadata::decode_for_record(&local)
             .expect_err("SP1 provider checkpoint must not load on a local route");
         assert!(error.to_string().contains("canonical proving route"));
@@ -1671,23 +1671,19 @@ mod tests {
             .aggregate_request
             .clone()
             .expect("aggregate request");
-        metadata.aggregate_task_id = Some(aggregate_task_ref(
-            PipelineKey::ShastaRisc0Network,
-            &request,
-        ));
+        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::Risc0Network, &request));
         metadata.runtime.aggregate = Some(complete_boundless_runtime());
-        let artifact_refs =
-            publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0Network);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Risc0Network);
         let mut network = runtime_record(&metadata, artifact_refs);
-        network.pipeline_key = PipelineKey::ShastaRisc0Network;
-        network.route = PipelineKey::ShastaRisc0Network.route();
+        network.pipeline_key = PipelineKey::Risc0Network;
+        network.route = PipelineKey::Risc0Network.route();
         assert!(TaskMetadata::decode_for_record(&network).is_ok());
 
-        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::ShastaRisc0, &request));
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::Risc0Local, &request));
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Risc0Local);
         let mut local = runtime_record(&metadata, artifact_refs);
-        local.pipeline_key = PipelineKey::ShastaRisc0;
-        local.route = PipelineKey::ShastaRisc0.route();
+        local.pipeline_key = PipelineKey::Risc0Local;
+        local.route = PipelineKey::Risc0Local.route();
         let error = TaskMetadata::decode_for_record(&local)
             .expect_err("Boundless provider checkpoint must not load on a local pipeline");
         assert!(error.to_string().contains("canonical proving route"));
@@ -1699,7 +1695,7 @@ mod tests {
         let mut runtime = complete_sp1_runtime();
         runtime.remote_tx_hash = Some("0xdeadbeef".to_string());
         metadata.runtime.aggregate = Some(runtime);
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Sp1Local);
         let mut record = runtime_record(&metadata, artifact_refs);
         record.route = "sp1/network".parse().expect("parse SP1 network route");
 

@@ -4,7 +4,7 @@ use prometheus::{
     Encoder, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, histogram_opts,
     register_histogram_vec, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
-use raiko2_pipeline::forks::shasta::preflight_cache::{
+use raiko2_pipeline::proposal::preflight_cache::{
     PreflightCacheRecoveryEvent, PreflightCacheResult, PreflightCacheStage, PreflightObserver,
     PreflightSingleFlightEvent, PreflightSingleFlightPhase,
 };

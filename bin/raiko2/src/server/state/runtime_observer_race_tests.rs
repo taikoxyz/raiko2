@@ -3,7 +3,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-stale-cancellation",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         register_observer_task(
             runtime.as_ref(),
@@ -51,7 +51,7 @@
             "runtime-observer-zero-active-publication",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let proof_ref = proposal_task_ref(pipeline, &request);
@@ -145,7 +145,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-stale-execution-permit",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -241,7 +241,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-late-shared-root",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -319,7 +319,7 @@
             "runtime-observer-post-checkpoint-shared-root",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proof_ref = proposal_task_ref(pipeline, &request);
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -405,7 +405,7 @@
             "runtime-observer-post-checkpoint-replacement",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -502,7 +502,7 @@
             "runtime-observer-external-consumer",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proof_ref = proposal_task_ref(pipeline, &request);
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -628,7 +628,7 @@
             "runtime-observer-late-terminal-root",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,

@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_shasta_proposal_id_from_extra_data() {
+    fn decodes_proposal_id_from_extra_data() {
         let proposal_id = 2_670_u64;
         let decoded = decode_proposal_id_from_extra_data(shasta_extra_data(proposal_id).as_ref());
         assert_eq!(decoded, Some(proposal_id));

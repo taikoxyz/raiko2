@@ -194,7 +194,7 @@ mod tests {
         let observer = Arc::new(TestLifecycleObserver::default());
         runtime.set_lifecycle_observer(observer.clone());
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-cleanup-pending";
         runtime
@@ -247,7 +247,7 @@ mod tests {
         ));
         let runtime = RuntimeManager::new(root)?;
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-invalid-canonical";
         let valid_proof = br#"{"proof":"0xnew"}"#;
@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_candidate_cannot_claim_canonical_manifest() -> Result<()> {
         let runtime = RuntimeManager::new("invalid-candidate")?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
 
         runtime
@@ -327,7 +327,7 @@ mod tests {
         )?);
         let first = RuntimeManager::with_store(store.clone());
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-recover-manifest";
         let proof = br#"{"proof":"0x01"}"#;
@@ -402,7 +402,7 @@ mod tests {
         ));
         let runtime = RuntimeManager::new(root)?;
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-cancelled-after-commit";
         let proof = br#"{"proof":"0x01"}"#;

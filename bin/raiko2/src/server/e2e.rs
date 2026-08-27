@@ -1366,7 +1366,7 @@ async fn e2e_proposal_proof_risc0_completes_from_fixture() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_disabled_route_wins_over_registered_fixture_pipeline() {
+async fn e2e_proposal_disabled_route_wins_over_registered_fixture_pipeline() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
@@ -1383,11 +1383,11 @@ async fn e2e_shasta_disabled_route_wins_over_registered_fixture_pipeline() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_proposal_and_external_aggregate_use_same_enabled_route() {
+async fn e2e_proposal_and_external_aggregate_use_same_enabled_route() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sgx/remote");
-    let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let engine = native_fixture_engine_for_pipeline(PipelineKey::SgxRemote, None);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::SgxRemote, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, proposal) = post_json(
@@ -1442,7 +1442,7 @@ async fn e2e_shasta_proposal_and_external_aggregate_use_same_enabled_route() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_rejects_boundless_public_proof_type() {
+async fn e2e_proposal_rejects_boundless_public_proof_type() {
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(base_config(), engine);
 
@@ -1471,7 +1471,7 @@ async fn e2e_shasta_rejects_boundless_public_proof_type() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
+async fn e2e_proposal_request_is_compatible_with_taiko_client_shape() {
     let config = base_config();
     let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
@@ -1506,7 +1506,7 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_request_rejects_partial_network_pair() {
+async fn e2e_proposal_request_rejects_partial_network_pair() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
@@ -1538,7 +1538,7 @@ async fn e2e_shasta_request_rejects_partial_network_pair() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_request_rejects_unknown_fields() {
+async fn e2e_proposal_request_rejects_unknown_fields() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
@@ -1575,7 +1575,7 @@ async fn e2e_shasta_request_rejects_unknown_fields() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_reports_unregistered_sgxgeth_pipeline() {
+async fn e2e_proposal_reports_unregistered_sgxgeth_pipeline() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sgxgeth/remote");
     let engine = risc0_fixture_engine(json!({}));
@@ -1606,7 +1606,7 @@ async fn e2e_shasta_reports_unregistered_sgxgeth_pipeline() {
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
+async fn e2e_duplicate_proposal_post_reuses_same_root_task() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
@@ -1666,13 +1666,13 @@ async fn e2e_batch_public_task_id_is_scoped_to_runtime_namespace() {
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_progress() {
+async fn e2e_duplicate_proposal_post_returns_work_in_progress_when_runtime_has_progress() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -1721,7 +1721,7 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart() {
+async fn e2e_duplicate_proposal_post_recovers_stale_runtime_progress_after_restart() {
     let config = base_config();
     let (state, _engine) = state_with_observed_risc0_fixture_engine(config);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -1764,13 +1764,13 @@ async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart
         json!({}),
         Some(engine_observer(
             Arc::clone(&state.runtime),
-            PipelineKey::ShastaRisc0.route(),
+            PipelineKey::Risc0Local.route(),
         )),
     );
     let mut factory = StaticPipelineFactory::default();
     factory.insert(
         "taiko_dev/ethereum".to_string(),
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         Arc::new(restarted_engine.clone()),
     );
     let restarted_state = AppState::from_parts(
@@ -1793,7 +1793,7 @@ async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
+async fn e2e_duplicate_proposal_post_returns_completed_legacy_proof() {
     let config = base_config();
     let (app, engine) = app_with_observed_risc0_fixture_engine(config);
     let payload = json!({
@@ -1824,7 +1824,7 @@ async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_children() {
+async fn e2e_duplicate_proposal_post_recovers_registered_task_without_engine_children() {
     let config = base_config();
     let (state, engine) = state_with_observed_risc0_fixture_engine(config);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -1852,7 +1852,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         graffiti: None,
         prover_config: ProverTaskConfig::default(),
     };
-    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request);
+    let proposal_ref = proposal_task_ref(PipelineKey::Risc0Local, &proposal_request);
     let metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -1893,12 +1893,12 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         false,
         &canonical_proposals,
     );
-    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Risc0Local);
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_orphan_registered".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0,
+            pipeline_key: PipelineKey::Risc0Local,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             network_pair: "taiko_dev/ethereum".into(),
@@ -1922,7 +1922,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_keeps_completed_without_root_proof_as_success() {
+async fn e2e_duplicate_proposal_post_keeps_completed_without_root_proof_as_success() {
     let (app, engine) = sp1_fixture_app();
     let payload = json!({
         "proposals": [
@@ -1961,13 +1961,13 @@ async fn e2e_duplicate_shasta_post_keeps_completed_without_root_proof_as_success
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission() {
+async fn e2e_duplicate_proposal_post_recovers_failed_task_before_remote_submission() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -2013,13 +2013,13 @@ async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission
 }
 
 #[tokio::test]
-async fn e2e_duplicate_aggregate_shasta_post_recovers_failed_root_before_remote_submission() {
+async fn e2e_duplicate_aggregate_proposal_post_recovers_failed_root_before_remote_submission() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
     let payload = json!({
         "proposals": [
@@ -2071,7 +2071,7 @@ async fn e2e_duplicate_aggregate_shasta_post_recovers_failed_root_before_remote_
 }
 
 #[tokio::test]
-async fn e2e_duplicate_aggregate_shasta_post_returns_aggregate_proof() {
+async fn e2e_duplicate_aggregate_proposal_post_returns_aggregate_proof() {
     let (app, engine) = sp1_fixture_app();
     let payload = json!({
         "proposals": [
@@ -2164,7 +2164,7 @@ async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state);
@@ -2203,7 +2203,7 @@ async fn e2e_zk_any_still_validates_request_when_not_drawn() {
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state);
@@ -2695,15 +2695,15 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
         graffiti: None,
         prover_config: ProverTaskConfig::default(),
     };
-    let proof_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request);
+    let proof_ref = proposal_task_ref(PipelineKey::Sp1Local, &proposal_request);
     let proof: Proof = serde_json::from_value(sp1_external_proof("0xcached-sp1-proof".to_string()))
         .expect("cached proof");
     let proof_uri = write_e2e_proof_artifact(
         &state,
         "taiko_dev/ethereum",
         &proof_ref,
-        PipelineKey::ShastaSp1,
-        PipelineKey::ShastaSp1.route(),
+        PipelineKey::Sp1Local,
+        PipelineKey::Sp1Local.route(),
         &proof,
     )
     .await;
@@ -2805,7 +2805,7 @@ async fn e2e_batch_aggregate_zk_any_rejection_does_not_consume_ballot() {
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -2964,7 +2964,7 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
     config.rpc.pairs[0].sp1_verifier_address =
         Some("0x0000000000000000000000000000000000000001".to_string());
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
     let payload = json!({
         "aggregation_ids": [10, 11],
@@ -3177,7 +3177,7 @@ async fn e2e_aggregate_reports_unregistered_sgxgeth_pipeline() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sgxgeth/remote");
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -3443,7 +3443,7 @@ async fn e2e_sp1_hosted_api_rejects_unverified_prove_requests() {
     config.prover.sp1.verify = false;
 
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -3481,7 +3481,7 @@ async fn e2e_sp1_hosted_api_rejects_network_verify_when_pair_not_enabled() {
     config.prover.sp1.verify = true;
 
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -3522,7 +3522,7 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
         Some("0x0000000000000000000000000000000000000001".to_string());
 
     let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::Sp1Local, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -3559,8 +3559,8 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
 async fn e2e_sgx_batch_accepts_aggregate_requests() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sgx/remote");
-    let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let engine = native_fixture_engine_for_pipeline(PipelineKey::SgxRemote, None);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::SgxRemote, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -3597,8 +3597,8 @@ async fn e2e_sgx_batch_accepts_aggregate_requests() {
 async fn e2e_sgx_accepts_aggregate_proof_requests() {
     let mut config = base_config();
     set_prover_routes(&mut config, "sgx/remote");
-    let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
-    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let engine = native_fixture_engine_for_pipeline(PipelineKey::SgxRemote, None);
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::SgxRemote, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state);
 
     let (status, res) = post_json(
@@ -3813,7 +3813,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0Network,
+        PipelineKey::Risc0Network,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -3829,7 +3829,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         graffiti: None,
         prover_config: Default::default(),
     };
-    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0Network, &proposal_request);
+    let proposal_ref = proposal_task_ref(PipelineKey::Risc0Network, &proposal_request);
     let mut metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -3885,13 +3885,13 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             updated_at,
         )
         .expect("persist canonical Boundless progress");
-    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0Network);
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Risc0Network);
 
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
+            pipeline_key: PipelineKey::Risc0Network,
             route: "risc0/network"
                 .parse::<PipelineRoute>()
                 .expect("parse route"),
@@ -3985,7 +3985,7 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         engine,
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
@@ -4001,7 +4001,7 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
         graffiti: None,
         prover_config: Default::default(),
     };
-    let proof_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &proposal_request);
+    let proof_ref = proposal_task_ref(PipelineKey::Risc0Local, &proposal_request);
     let metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
@@ -4028,13 +4028,13 @@ async fn e2e_completed_task_recovers_root_proof_from_artifact_store() {
             ..Default::default()
         },
     };
-    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Risc0Local);
 
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_persisted_proof".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0,
+            pipeline_key: PipelineKey::Risc0Local,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             network_pair: "taiko_dev/ethereum".into(),
@@ -4089,7 +4089,7 @@ async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
     set_prover_routes(&mut config, "risc0/local");
 
     let engine = risc0_fixture_engine(json!({
-        "shasta_data_sources": [{
+        "proposal_data_sources": [{
             "tx_data_from_calldata": [],
             "tx_data_from_blob": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
             "blob_commitments": [],
@@ -4100,7 +4100,7 @@ async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
+        PipelineKey::Risc0Local,
         engine.clone(),
     );
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());

@@ -231,8 +231,8 @@ mod tests {
     fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             proof_ref: proof_ref.to_string(),
         }
     }
@@ -240,19 +240,19 @@ mod tests {
     #[test]
     fn proposal_ready_sort_orders_by_proposal_id_only() {
         let p2 = EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaNative,
+            pipeline: PipelineKey::NativeLocal,
             request: proposal_request(2),
         };
         let p1_native = EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaNative,
+            pipeline: PipelineKey::NativeLocal,
             request: proposal_request(1),
         };
         let p1_sp1 = EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaSp1,
+            pipeline: PipelineKey::Sp1Local,
             request: proposal_request(1),
         };
         let p1_risc0 = EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0,
+            pipeline: PipelineKey::Risc0Local,
             request: proposal_request(1),
         };
 
@@ -272,7 +272,7 @@ mod tests {
             keys[0],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 1, .. },
-                pipeline: PipelineKey::ShastaNative
+                pipeline: PipelineKey::NativeLocal
             }
         ));
         assert!(matches!(
@@ -293,7 +293,7 @@ mod tests {
             keys[3],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 2, .. },
-                pipeline: PipelineKey::ShastaNative
+                pipeline: PipelineKey::NativeLocal
             }
         ));
     }
@@ -301,15 +301,15 @@ mod tests {
     #[test]
     fn aggregate_ready_sort_stays_with_its_proposal_range() {
         let p2 = EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaNative,
+            pipeline: PipelineKey::NativeLocal,
             request: proposal_request(2),
         };
         let p1 = EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaNative,
+            pipeline: PipelineKey::NativeLocal,
             request: proposal_request(1),
         };
         let aggregate = EngineTaskKey::Aggregate {
-            pipeline: PipelineKey::ShastaNative,
+            pipeline: PipelineKey::NativeLocal,
             request: AggregationTaskRequest {
                 request_id: "1-192".to_string(),
                 proposal_ids: vec![1, 192],
@@ -344,7 +344,7 @@ mod tests {
 
         let a1 = sched
             .submit(
-                proposal_task_id(PipelineKey::ShastaNative, proposal_request(1)),
+                proposal_task_id(PipelineKey::NativeLocal, proposal_request(1)),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::Proposal {
@@ -356,7 +356,7 @@ mod tests {
             .await?;
         let a2 = sched
             .submit(
-                proposal_task_id(PipelineKey::ShastaNative, proposal_request(2)),
+                proposal_task_id(PipelineKey::NativeLocal, proposal_request(2)),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::Proposal {
@@ -369,7 +369,7 @@ mod tests {
         let b = sched
             .submit(
                 TaskId::new(EngineTaskKey::Aggregate {
-                    pipeline: PipelineKey::ShastaNative,
+                    pipeline: PipelineKey::NativeLocal,
                     request: AggregationTaskRequest {
                         request_id: "agg-1".to_string(),
                         proposal_ids: vec![1, 2],
@@ -433,7 +433,7 @@ mod tests {
 
         let proposal = sched
             .submit(
-                proposal_task_id(PipelineKey::ShastaNative, proposal_request(1)),
+                proposal_task_id(PipelineKey::NativeLocal, proposal_request(1)),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::Proposal {
@@ -446,7 +446,7 @@ mod tests {
         let aggregate = sched
             .submit(
                 TaskId::new(EngineTaskKey::Aggregate {
-                    pipeline: PipelineKey::ShastaNative,
+                    pipeline: PipelineKey::NativeLocal,
                     request: AggregationTaskRequest {
                         request_id: "agg-2".to_string(),
                         proposal_ids: vec![2],

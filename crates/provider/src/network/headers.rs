@@ -33,7 +33,7 @@ impl NetworkProvider {
             .await
     }
 
-    pub(crate) async fn fetch_shasta_proposal_event(
+    pub(crate) async fn fetch_proposal_event(
         &self,
         l1_contract: Address,
         l1_inclusion_block_number: u64,

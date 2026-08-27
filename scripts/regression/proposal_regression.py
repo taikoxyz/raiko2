@@ -263,7 +263,7 @@ def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Optional[
         response.raise_for_status()
         return response.json()
     except Exception as err:
-        logger = logging.getLogger("shasta_regression")
+        logger = logging.getLogger("proposal_regression")
         logger.debug(
             "RPC call failed: url=%s method=%s params=%s timeout=%s error=%s",
             rpc_url,
@@ -314,7 +314,7 @@ def discover_proposal_spans_from_l2_range(
 
 
 def run_command(cmd: List[str]) -> subprocess.CompletedProcess:
-    logger = logging.getLogger("shasta_regression")
+    logger = logging.getLogger("proposal_regression")
     logger.info(f"Start running CMD: {' '.join(cmd)}")
     return subprocess.run(cmd, check=False, text=True, capture_output=True)
 
@@ -621,7 +621,7 @@ def derive_block_range_for_proposal(
     2) Binary search downward to find the lower boundary.
     3) Binary search upward to find the upper boundary.
     """
-    logger = logging.getLogger("shasta_regression")
+    logger = logging.getLogger("proposal_regression")
     latest = get_latest_l2_block_number(rpc_url, timeout)
 
     logger.info(f"latest proposal is {latest}")
@@ -689,7 +689,7 @@ def derive_block_range_for_proposal(
 
 
 def setup_logger(log_path: Path) -> logging.Logger:
-    logger = logging.getLogger("shasta_regression")
+    logger = logging.getLogger("proposal_regression")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -732,12 +732,12 @@ def main() -> int:
         "--proposal-metadata",
         type=Path,
         default=None,
-        help="Path to proposal metadata JSON produced by stress_shasta_proposal.py --proposal-out",
+        help="Path to proposal metadata JSON produced by stress_proposal.py --proposal-out",
     )
     parser.add_argument(
         "--aggregate", type=int, default=0, help="Aggregation group size (0=off)"
     )
-    parser.add_argument("--out-dir", default="test/regression/shasta")
+    parser.add_argument("--out-dir", default="test/regression/proposal")
     parser.add_argument(
         "--proof-type",
         default=None,
@@ -913,7 +913,7 @@ def main() -> int:
         )
         logger.error(
             "Selected proposal spans do not include current preflight metadata: %s. "
-            "Run scripts/regression/stress_shasta_proposal.py --discover-only --proposal-out "
+            "Run scripts/regression/stress_proposal.py --discover-only --proposal-out "
             "and pass the JSON with --proposal-metadata.",
             formatted,
         )

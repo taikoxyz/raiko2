@@ -222,7 +222,7 @@ mod tests {
         ));
         let task = TaskView {
             id: EngineTaskId::new(EngineTaskKey::Proposal {
-                pipeline: PipelineKey::ShastaRisc0,
+                pipeline: PipelineKey::Risc0Local,
                 request: ProposalTaskRequest {
                     proposal_id: 1,
                     l2_block_range: None,

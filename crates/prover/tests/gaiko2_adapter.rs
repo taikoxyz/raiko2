@@ -5,7 +5,7 @@ use alloy_primitives::B256;
 use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::remote_prover::{
-    adapter::build_shasta_packet,
+    adapter::build_proposal_packet,
     protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock},
 };
 
@@ -37,7 +37,7 @@ fn fixture_guest_input() -> GuestInput {
 #[test]
 fn adapter_projects_guest_input_into_execution_packet() {
     let input = fixture_guest_input();
-    let packet = build_shasta_packet(&input).expect("build packet");
+    let packet = build_proposal_packet(&input).expect("build packet");
 
     assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(
@@ -96,7 +96,7 @@ fn adapter_keeps_replay_ancestors_full() {
     next_witness.chain_spec.chain_id = 167_013;
     input.witnesses.push(next_witness);
 
-    let packet = build_shasta_packet(&input).expect("build packet");
+    let packet = build_proposal_packet(&input).expect("build packet");
     let first_headers = &packet.payload.guest_input.witnesses[0].witness.headers;
     let second_headers = &packet.payload.guest_input.witnesses[1].witness.headers;
 
@@ -123,7 +123,7 @@ fn adapter_rejects_compact_replay_ancestor_headers() {
         }),
     );
 
-    let err = build_shasta_packet(&input).expect_err("reject compact replay ancestor");
+    let err = build_proposal_packet(&input).expect_err("reject compact replay ancestor");
     assert!(
         err.to_string()
             .contains("remote prover replay witness requires full ancestor headers")
@@ -132,7 +132,7 @@ fn adapter_rejects_compact_replay_ancestor_headers() {
 
 #[test]
 fn adapter_rejects_guest_input_without_witnesses() {
-    let err = build_shasta_packet(&GuestInput::default()).expect_err("reject empty witness list");
+    let err = build_proposal_packet(&GuestInput::default()).expect_err("reject empty witness list");
     assert!(
         err.to_string()
             .contains("cannot build remote prover shasta packet without witnesses")
@@ -144,7 +144,7 @@ fn adapter_rejects_unset_proof_carry_chain_id() {
     let mut input = fixture_guest_input();
     input.proof_carry_data.chain_id = 0;
 
-    let err = build_shasta_packet(&input).expect_err("reject unset carry chain id");
+    let err = build_proposal_packet(&input).expect_err("reject unset carry chain id");
     assert!(err.to_string().contains("proof_carry_data.chain_id"));
 }
 

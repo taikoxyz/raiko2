@@ -71,21 +71,19 @@ pub(super) fn route_for_proof_type(
     }
 
     let (guest_system, pipeline_key) = match (proof_type, runner) {
-        (BatchProofType::Risc0, RunnerKind::Local) => {
-            (GuestSystem::Risc0, PipelineKey::ShastaRisc0)
-        }
+        (BatchProofType::Risc0, RunnerKind::Local) => (GuestSystem::Risc0, PipelineKey::Risc0Local),
         (BatchProofType::Risc0, RunnerKind::Network) => {
-            (GuestSystem::Risc0, PipelineKey::ShastaRisc0Network)
+            (GuestSystem::Risc0, PipelineKey::Risc0Network)
         }
         (BatchProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => {
-            (GuestSystem::Sp1, PipelineKey::ShastaSp1)
+            (GuestSystem::Sp1, PipelineKey::Sp1Local)
         }
         (BatchProofType::Native, RunnerKind::Local) => {
-            (GuestSystem::Native, PipelineKey::ShastaNative)
+            (GuestSystem::Native, PipelineKey::NativeLocal)
         }
-        (BatchProofType::Sgx, RunnerKind::Remote) => (GuestSystem::Sgx, PipelineKey::ShastaSgx),
+        (BatchProofType::Sgx, RunnerKind::Remote) => (GuestSystem::Sgx, PipelineKey::SgxRemote),
         (BatchProofType::SgxGeth, RunnerKind::Remote) => {
-            (GuestSystem::SgxGeth, PipelineKey::ShastaSgxGeth)
+            (GuestSystem::SgxGeth, PipelineKey::SgxGethRemote)
         }
         _ => {
             return Err(ApiError::internal(format!(
@@ -233,8 +231,8 @@ mod tests {
             Sp1RequestContext::ProposalBatch { aggregate: false },
         )
         .expect("configured RISC0 route");
-        assert_eq!(risc0.route, PipelineKey::ShastaRisc0.route());
-        assert_eq!(risc0.pipeline_key(), PipelineKey::ShastaRisc0);
+        assert_eq!(risc0.route, PipelineKey::Risc0Local.route());
+        assert_eq!(risc0.pipeline_key(), PipelineKey::Risc0Local);
 
         let error = route_for_proof_type(
             &state,
@@ -261,8 +259,8 @@ mod tests {
             Sp1RequestContext::ProposalBatch { aggregate: false },
         )
         .expect("configured SP1 route");
-        assert_eq!(sp1.route, PipelineKey::ShastaSp1.route());
-        assert_eq!(sp1.pipeline_key(), PipelineKey::ShastaSp1);
+        assert_eq!(sp1.route, PipelineKey::Sp1Local.route());
+        assert_eq!(sp1.pipeline_key(), PipelineKey::Sp1Local);
 
         let error = route_for_proof_type(
             &state,
@@ -295,7 +293,7 @@ mod tests {
                 .parse::<PipelineRoute>()
                 .expect("parse sgx route")
         );
-        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaSgxGeth);
+        assert_eq!(selection.pipeline_key(), PipelineKey::SgxGethRemote);
     }
 
     #[test]
@@ -309,27 +307,27 @@ mod tests {
             (
                 BatchProofType::Risc0,
                 PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
             ),
             (
                 BatchProofType::Sp1,
                 PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network),
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
             ),
             (
                 BatchProofType::Native,
                 PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-                PipelineKey::ShastaNative,
+                PipelineKey::NativeLocal,
             ),
             (
                 BatchProofType::Sgx,
                 PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
-                PipelineKey::ShastaSgx,
+                PipelineKey::SgxRemote,
             ),
             (
                 BatchProofType::SgxGeth,
                 PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
-                PipelineKey::ShastaSgxGeth,
+                PipelineKey::SgxGethRemote,
             ),
         ] {
             let selection = route_for_proof_type(
@@ -399,8 +397,8 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("failed to route {requested:?}: {error:?}"));
 
-            assert_eq!(selection.route, PipelineKey::ShastaSp1.route());
-            assert_eq!(selection.pipeline_key(), PipelineKey::ShastaSp1);
+            assert_eq!(selection.route, PipelineKey::Sp1Local.route());
+            assert_eq!(selection.pipeline_key(), PipelineKey::Sp1Local);
         }
     }
 }

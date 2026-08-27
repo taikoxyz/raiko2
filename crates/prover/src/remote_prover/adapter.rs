@@ -3,15 +3,15 @@ use raiko2_primitives_shasta::{GuestInput, roll_proposal_ancestor_headers_in_pla
 
 use crate::remote_prover::protocol::{
     RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2AggregateProof,
-    Raiko2ReplayBlock, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
-    Raiko2ShastaGuestInput, Raiko2ShastaPayload, Raiko2ShastaRequest,
+    Raiko2ProposalAggregatePayload, Raiko2ProposalAggregateRequest, Raiko2ProposalGuestInput,
+    Raiko2ProposalPayload, Raiko2ProposalRequest, Raiko2ReplayBlock,
 };
 
 /// # Errors
 ///
 /// Returns an error when the guest input has no witnesses or the replay packet cannot be
 /// assembled from the witness state.
-pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaRequest> {
+pub fn build_proposal_packet(input: &GuestInput) -> RaikoResult<Raiko2ProposalRequest> {
     shasta_packet_chain_id(input)?;
 
     let shared_state_nodes = input.proposal_state_nodes();
@@ -33,10 +33,10 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaReques
         );
     }
 
-    Ok(Raiko2ShastaRequest {
+    Ok(Raiko2ProposalRequest {
         schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-        payload: Raiko2ShastaPayload {
-            guest_input: Raiko2ShastaGuestInput {
+        payload: Raiko2ProposalPayload {
+            guest_input: Raiko2ProposalGuestInput {
                 witnesses,
                 taiko: input.taiko.clone(),
                 proposal_ancestor_headers,
@@ -67,9 +67,9 @@ fn shasta_packet_chain_id(input: &GuestInput) -> RaikoResult<u64> {
 ///
 /// Returns an error when the proof list is empty or a proof cannot be converted into the
 /// remote aggregate proof envelope.
-pub fn build_shasta_aggregate_request(
+pub fn build_proposal_aggregate_request(
     proofs: &[Proof],
-) -> RaikoResult<Raiko2ShastaAggregateRequest> {
+) -> RaikoResult<Raiko2ProposalAggregateRequest> {
     if proofs.is_empty() {
         return Err(RaikoError::InvalidRequestConfig(
             "cannot build remote prover shasta aggregate request without proofs".to_string(),
@@ -81,9 +81,9 @@ pub fn build_shasta_aggregate_request(
         .map(Raiko2AggregateProof::from_proof)
         .collect::<RaikoResult<Vec<_>>>()?;
 
-    Ok(Raiko2ShastaAggregateRequest {
+    Ok(Raiko2ProposalAggregateRequest {
         schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-        payload: Raiko2ShastaAggregatePayload { proofs },
+        payload: Raiko2ProposalAggregatePayload { proofs },
     })
 }
 

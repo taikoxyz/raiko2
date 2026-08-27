@@ -50,9 +50,9 @@ use tracing::info;
 use url::Url;
 
 use crate::{
-    GuestInputCodec, ProverProgress, ProverProgressObserver, build_shasta_aggregation_input,
-    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    GuestInputCodec, ProverProgress, ProverProgressObserver, build_proposal_aggregation_input,
+    ensure_proposal_input_matches_carry, parse_proposal_aggregation_input_hash,
+    parse_proposal_input_hash, with_proposal_extra_data,
 };
 
 const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
@@ -773,7 +773,7 @@ where
             input.proofs.len()
         );
 
-        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        let aggregation_input = build_proposal_aggregation_input(&input.proofs)?;
 
         // Get the proposal prover's verifying key for proof verification.
         // The proposal proofs were generated with the proposal ELF.
@@ -833,7 +833,7 @@ where
             input.proofs.len()
         );
 
-        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        let aggregation_input = build_proposal_aggregation_input(&input.proofs)?;
         let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
         let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
@@ -980,7 +980,7 @@ async fn verify_network_proposal_proof(
         );
         return Ok(());
     };
-    let input_hash = parse_shasta_proposal_input_hash(proof.public_values.as_slice())?;
+    let input_hash = parse_proposal_input_hash(proof.public_values.as_slice())?;
     verify_sp1_remote_contract(
         config,
         vk,
@@ -1172,12 +1172,8 @@ async fn execute_proposal_with_local_client(
             RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
         })?;
         let public_values_raw = public_values.raw();
-        let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice())?;
-        ensure_shasta_proposal_input_matches_carry(
-            input_hash,
-            &guest_input.proof_carry_data,
-            "sp1",
-        )?;
+        let input_hash = parse_proposal_input_hash(public_values.as_slice())?;
+        ensure_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
         let metadata = serde_json::to_value(Sp1ExecutionMetadata::from_execution_report(
             public_values_raw,
             &execution_report,
@@ -1192,7 +1188,7 @@ async fn execute_proposal_with_local_client(
             input: input_hash,
             sp1_proof: None,
             vkey: None,
-            extra_data: with_shasta_extra_data(
+            extra_data: with_proposal_extra_data(
                 &guest_input.proof_carry_data,
                 "sp1",
                 Some(metadata),
@@ -1255,8 +1251,8 @@ fn prove_proposal_with_client(
     }
 
     let public_values = proof.public_values.as_slice();
-    let input_hash = parse_shasta_proposal_input_hash(public_values)?;
-    ensure_shasta_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
+    let input_hash = parse_proposal_input_hash(public_values)?;
+    ensure_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
 
     Ok(Sp1Response {
         proof: encode_sp1_proposal_proof_payload(&proof, &setup.vk),
@@ -1264,7 +1260,7 @@ fn prove_proposal_with_client(
         input: input_hash,
         sp1_proof: Some(proof),
         vkey: Some(setup.vk.clone()),
-        extra_data: with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?,
+        extra_data: with_proposal_extra_data(&guest_input.proof_carry_data, "sp1", None)?,
     }
     .into())
 }
@@ -1299,9 +1295,9 @@ async fn prove_proposal_with_network_client(
     }
 
     let public_values = request.proof.public_values.as_slice();
-    let input_hash = parse_shasta_proposal_input_hash(public_values)?;
-    ensure_shasta_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
-    let base_extra_data = with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?;
+    let input_hash = parse_proposal_input_hash(public_values)?;
+    ensure_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
+    let base_extra_data = with_proposal_extra_data(&guest_input.proof_carry_data, "sp1", None)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;
@@ -1390,7 +1386,7 @@ fn aggregate_with_client(
     }
 
     let public_values = proof.public_values.as_slice();
-    let agg_input_hash = parse_shasta_aggregation_input_hash(public_values)?;
+    let agg_input_hash = parse_proposal_aggregation_input_hash(public_values)?;
 
     Ok(Sp1Response {
         proof: encode_sp1_aggregation_proof_payload(
@@ -1479,7 +1475,7 @@ async fn aggregate_with_network_client(
     }
 
     let public_values = request.proof.public_values.as_slice();
-    let agg_input_hash = parse_shasta_aggregation_input_hash(public_values)?;
+    let agg_input_hash = parse_proposal_aggregation_input_hash(public_values)?;
     ensure_sp1_network_aggregation_input_hash_matches(expected_input_hash, agg_input_hash)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))
@@ -2002,9 +1998,9 @@ mod tests {
         Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress, sp1_config::Sp1Config,
     };
     use alloy_primitives::B256;
-    use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
+    use raiko2_guests::{Sp1GuestElves, load_sp1_guest_elves};
     use raiko2_pipeline::ProofStage;
-    use raiko2_pipeline::forks::shasta::sp1_shasta_backend_from_elves;
+    use raiko2_pipeline::proposal::sp1_proposal_backend_from_elves;
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmissionId};
@@ -2071,8 +2067,8 @@ mod tests {
         }
     }
 
-    fn sp1_test_elves() -> Sp1ShastaGuestElves {
-        load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
+    fn sp1_test_elves() -> Sp1GuestElves {
+        load_sp1_guest_elves().expect("load SP1 Shasta guest ELFs")
     }
 
     #[test]
@@ -2244,7 +2240,7 @@ mod tests {
 
     #[test]
     fn sp1_new_with_backend_preloads_setup_cache() {
-        let backend = sp1_shasta_backend_from_elves(sp1_test_elves());
+        let backend = sp1_proposal_backend_from_elves(sp1_test_elves());
         let prover = super::Sp1Prover::new_with_backend(super::Sp1Config::default(), &backend)
             .expect("preload SP1 setup");
 

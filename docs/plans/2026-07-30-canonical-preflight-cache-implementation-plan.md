@@ -34,10 +34,10 @@ ELF provenance.
 
 **Files:**
 
-- Create: `crates/pipeline/src/forks/shasta/preflight_cache/types.rs`
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Create: `crates/pipeline/src/proposal/preflight_cache/types.rs`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs`
 - Modify: `crates/pipeline/Cargo.toml`
-- Test: `crates/pipeline/src/forks/shasta/preflight_cache/types.rs`
+- Test: `crates/pipeline/src/proposal/preflight_cache/types.rs`
 
 ### Step 1: Write failing key-boundary tests
 
@@ -139,12 +139,12 @@ git commit -m "feat(preflight): define canonical cache identity"
 
 **Files:**
 
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
-- Modify: `crates/pipeline/src/forks/shasta/mod.rs`
-- Modify: `crates/pipeline/src/forks/shasta/spec.rs`
-- Modify: `crates/pipeline/src/forks/shasta/manifest.rs`
-- Test: `crates/pipeline/src/forks/shasta/spec.rs`
-- Test: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs`
+- Modify: `crates/pipeline/src/proposal/mod.rs`
+- Modify: `crates/pipeline/src/proposal/spec.rs`
+- Modify: `crates/pipeline/src/proposal/manifest.rs`
+- Test: `crates/pipeline/src/proposal/spec.rs`
+- Test: `crates/pipeline/src/proposal/preflight_cache.rs`
 
 ### Step 1: Write failing equivalence and trust-boundary tests
 
@@ -260,7 +260,7 @@ git commit -m "refactor(preflight): split canonical core materialization"
 
 **Files:**
 
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs`
 - Modify: `crates/runtime/src/artifact_store.rs`
 - Modify: `crates/runtime/src/lib.rs`
 - Test: `crates/runtime/src/artifact_store.rs`
@@ -519,9 +519,9 @@ git commit -m "feat(runtime): add scoped startup cleanup"
 
 **Files:**
 
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
-- Modify: `crates/pipeline/src/forks/shasta/spec.rs`
-- Test: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs`
+- Modify: `crates/pipeline/src/proposal/spec.rs`
+- Test: `crates/pipeline/src/proposal/preflight_cache.rs`
 
 ### Step 1: Write failing concurrency tests
 
@@ -599,9 +599,9 @@ git commit -m "feat(preflight): coalesce canonical Shasta builds"
 
 - Modify: `bin/raiko2/src/server/state/mod.rs`
 - Modify: `bin/preflight/src/main.rs`
-- Modify: `crates/pipeline/src/forks/shasta/spec.rs`
+- Modify: `crates/pipeline/src/proposal/spec.rs`
 - Test: `bin/raiko2/src/server/state/mod.rs`
-- Test: `crates/pipeline/src/forks/shasta/spec.rs`
+- Test: `crates/pipeline/src/proposal/spec.rs`
 
 ### Step 1: Write failing server wiring tests
 
@@ -669,7 +669,7 @@ git commit -m "feat(server): share preflight cache across lanes"
 
 **Files:**
 
-- Modify: `crates/pipeline/src/forks/shasta/preflight_cache.rs`
+- Modify: `crates/pipeline/src/proposal/preflight_cache.rs`
 - Modify: `bin/raiko2/src/server/telemetry.rs`
 - Modify: `bin/raiko2/src/server/state/mod.rs`
 - Test: `bin/raiko2/src/server/telemetry.rs`

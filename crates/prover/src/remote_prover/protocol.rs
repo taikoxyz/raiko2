@@ -17,18 +17,18 @@ pub const RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA: &str = "raiko2-shasta-aggregat
 pub const RAIKO2_PROOF_RESPONSE_SCHEMA: &str = "raiko2-proof-v1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaRequest {
+pub struct Raiko2ProposalRequest {
     pub schema: String,
-    pub payload: Raiko2ShastaPayload,
+    pub payload: Raiko2ProposalPayload,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaPayload {
-    pub guest_input: Raiko2ShastaGuestInput,
+pub struct Raiko2ProposalPayload {
+    pub guest_input: Raiko2ProposalGuestInput,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaGuestInput {
+pub struct Raiko2ProposalGuestInput {
     pub witnesses: Vec<Raiko2ReplayBlock>,
     pub taiko: TaikoManifest,
     pub proposal_ancestor_headers: Vec<WitnessHeader>,
@@ -37,13 +37,13 @@ pub struct Raiko2ShastaGuestInput {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaAggregateRequest {
+pub struct Raiko2ProposalAggregateRequest {
     pub schema: String,
-    pub payload: Raiko2ShastaAggregatePayload,
+    pub payload: Raiko2ProposalAggregatePayload,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaAggregatePayload {
+pub struct Raiko2ProposalAggregatePayload {
     pub proofs: Vec<Raiko2AggregateProof>,
 }
 
@@ -79,8 +79,8 @@ impl From<Raiko2ReplayBlock> for StatelessInput {
     }
 }
 
-impl From<Raiko2ShastaGuestInput> for GuestInput {
-    fn from(value: Raiko2ShastaGuestInput) -> Self {
+impl From<Raiko2ProposalGuestInput> for GuestInput {
+    fn from(value: Raiko2ProposalGuestInput) -> Self {
         Self {
             witnesses: value.witnesses.into_iter().map(Into::into).collect(),
             taiko: value.taiko,
@@ -204,4 +204,23 @@ pub struct Raiko2ProofResult {
 pub struct Raiko2ProofError {
     pub code: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod frozen_identity_tests {
+    use super::{RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA};
+
+    /// Pins the remote-prover schema tags, which are a contract with the external gaiko2 service.
+    ///
+    /// The `shasta` spelling is retired everywhere it is only a local name, but these two values
+    /// are validated byte-for-byte by the remote prover, so they outlive the rename. Changing one
+    /// requires shipping both sides together.
+    #[test]
+    fn remote_prover_schema_tags_are_frozen_wire_identity() {
+        assert_eq!(RAIKO2_SHASTA_REQUEST_SCHEMA, "raiko2-shasta-request-v1");
+        assert_eq!(
+            RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
+            "raiko2-shasta-aggregate-request-v1"
+        );
+    }
 }

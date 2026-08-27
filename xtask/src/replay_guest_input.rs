@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
-use raiko2_pipeline::forks::shasta::validate_shasta_guest_input;
+use raiko2_pipeline::proposal::validate_proposal_guest_input;
 use raiko2_primitives::ProofType;
 use raiko2_primitives_shasta::{
     DEFAULT_GUEST_INPUT_ROOT, GuestInput, build_proof_carry_data_from_witness_spec,
@@ -235,7 +235,7 @@ fn replay_proposal(path: &Path, proposal_id: u64) -> ProposalReplayResult {
         result.input_hash = Some(format!("{expected_hash:#x}"));
 
         let validation_started_at = Instant::now();
-        validate_shasta_guest_input(&input).map_err(|err| anyhow::anyhow!("{err}"))?;
+        validate_proposal_guest_input(&input).map_err(|err| anyhow::anyhow!("{err}"))?;
         result.validation_ms = Some(elapsed_ms(validation_started_at));
 
         Ok(())

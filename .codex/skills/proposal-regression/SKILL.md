@@ -1,5 +1,5 @@
 ---
-name: shasta-proposal-regression
+name: proposal-regression
 description: Use when validating a Shasta proposal locally from a Taiko L2 block height; discovers the proposal tuple, runs preflight, and verifies the generated GuestInput with the native guest launcher.
 ---
 
@@ -30,7 +30,7 @@ mkdir -p "$WORK_DIR"
 2. Discover the proposal tuple from the L2 block:
 
 ```bash
-python scripts/regression/stress_shasta_proposal.py \
+python scripts/regression/stress_proposal.py \
   --network "$NETWORK" \
   --l1-network "$L1_NETWORK" \
   --l2-block-range "${L2_BLOCK},$((L2_BLOCK + 1))" \
@@ -91,5 +91,5 @@ cargo run -r -p guest-launcher -- \
   results; that is a build-environment issue, not a discovery/preflight failure.
 - Chain specs provide default RPC URLs and the Shasta inbox contract. Override with stress
   `--l1-rpc`, `--l2-rpc`, or `--event-contract` only for non-standard environments.
-- Fork-specific ABI files live under `scripts/regression/shasta/`.
+- Fork-specific ABI files live under `scripts/regression/abi/`.
 - Report the discovered proposal tuple and exact commands run in handoff notes.

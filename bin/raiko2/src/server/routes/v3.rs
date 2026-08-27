@@ -11,7 +11,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/v3/proof/batch/shasta",
-            post(handlers::v3::request_batch_shasta_proof),
+            post(handlers::v3::request_batch_proposal_proof),
         )
         .route(
             "/v3/proof/aggregate",
@@ -24,7 +24,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v3/prover/clear", post(handlers::v3::clear_prover))
         .route(
             "/proof/batch/shasta",
-            post(handlers::v3::request_batch_shasta_proof),
+            post(handlers::v3::request_batch_proposal_proof),
         )
         .route(
             "/proof/aggregate",

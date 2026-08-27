@@ -1,8 +1,8 @@
 mod types;
 
 pub use types::{
-    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalShastaManifestV1,
-    CanonicalShastaPreflightV1, CanonicalStatelessInputV1, chain_rules_fingerprint,
+    CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalProposalManifestV1,
+    CanonicalProposalPreflightV1, CanonicalStatelessInputV1, chain_rules_fingerprint,
     proposal_event_digest,
 };
 
@@ -192,7 +192,7 @@ pub enum PreflightSingleFlightEvent {
 }
 
 enum CanonicalLoad {
-    Hit(Box<CanonicalShastaPreflightV1>),
+    Hit(Box<CanonicalProposalPreflightV1>),
     Miss { publish: bool },
 }
 
@@ -241,7 +241,7 @@ pub struct PreflightCoordinator {
     store: Option<Arc<dyn CanonicalPreflightStore>>,
     observer: Arc<dyn PreflightObserver>,
     locator_flights: SingleFlight<CanonicalPreflightLocatorKeyV1, CanonicalPreflightLocatorV1>,
-    canonical_flights: SingleFlight<CanonicalFlightKey, CanonicalShastaPreflightV1>,
+    canonical_flights: SingleFlight<CanonicalFlightKey, CanonicalProposalPreflightV1>,
 }
 
 impl PreflightCoordinator {
@@ -315,11 +315,11 @@ impl PreflightCoordinator {
         key: CanonicalPreflightKeyV1,
         build: Build,
         validate: Validate,
-    ) -> RaikoResult<Arc<CanonicalShastaPreflightV1>>
+    ) -> RaikoResult<Arc<CanonicalProposalPreflightV1>>
     where
         Build: Fn() -> BuildFuture + Send + Sync,
-        BuildFuture: Future<Output = RaikoResult<CanonicalShastaPreflightV1>> + Send,
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()> + Send + Sync,
+        BuildFuture: Future<Output = RaikoResult<CanonicalProposalPreflightV1>> + Send,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()> + Send + Sync,
     {
         let flight_key = CanonicalFlightKey::new(key.clone())?;
         self.canonical_flights
@@ -340,11 +340,11 @@ impl PreflightCoordinator {
         key: &CanonicalPreflightKeyV1,
         build: &Build,
         validate: &Validate,
-    ) -> RaikoResult<CanonicalShastaPreflightV1>
+    ) -> RaikoResult<CanonicalProposalPreflightV1>
     where
         Build: Fn() -> BuildFuture + Send + Sync,
-        BuildFuture: Future<Output = RaikoResult<CanonicalShastaPreflightV1>> + Send,
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()> + Send + Sync,
+        BuildFuture: Future<Output = RaikoResult<CanonicalProposalPreflightV1>> + Send,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()> + Send + Sync,
     {
         let publish = match self.try_load_canonical(key, validate).await {
             CanonicalLoad::Hit(core) => return Ok(*core),
@@ -397,7 +397,7 @@ impl PreflightCoordinator {
         validate: &Validate,
     ) -> CanonicalLoad
     where
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()>,
     {
         let Some(store) = self.store.as_ref() else {
             self.observer
@@ -451,12 +451,12 @@ impl PreflightCoordinator {
         &self,
         store: &Arc<dyn CanonicalPreflightStore>,
         key: &CanonicalPreflightKeyV1,
-        core: CanonicalShastaPreflightV1,
+        core: CanonicalProposalPreflightV1,
         bytes: &[u8],
         validate: &Validate,
-    ) -> CanonicalShastaPreflightV1
+    ) -> CanonicalProposalPreflightV1
     where
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()>,
     {
         match store.put_canonical_preflight_if_absent(key, bytes).await {
             Ok(CanonicalPreflightPutResult::Created(_)) => core,
@@ -495,12 +495,12 @@ impl PreflightCoordinator {
         &self,
         store: &Arc<dyn CanonicalPreflightStore>,
         key: &CanonicalPreflightKeyV1,
-        core: CanonicalShastaPreflightV1,
+        core: CanonicalProposalPreflightV1,
         descriptor: &CanonicalPreflightDescriptor,
         validate: &Validate,
-    ) -> CanonicalShastaPreflightV1
+    ) -> CanonicalProposalPreflightV1
     where
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()>,
     {
         match store.get_canonical_preflight(key).await {
             Ok(Some(winner)) => match self.decode_and_validate(key, &winner, validate) {
@@ -543,9 +543,9 @@ impl PreflightCoordinator {
         key: &CanonicalPreflightKeyV1,
         object: &CanonicalPreflightObject,
         validate: &Validate,
-    ) -> RaikoResult<CanonicalShastaPreflightV1>
+    ) -> RaikoResult<CanonicalProposalPreflightV1>
     where
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()>,
     {
         let expected_digest = key
             .digest()
@@ -555,7 +555,7 @@ impl PreflightCoordinator {
                 "canonical preflight object key digest mismatch".to_string(),
             ));
         }
-        let core: CanonicalShastaPreflightV1 = bincode::deserialize(&object.bytes)
+        let core: CanonicalProposalPreflightV1 = bincode::deserialize(&object.bytes)
             .map_err(|error| RaikoError::Serialization(error.to_string()))?;
         let validation_started_at = Instant::now();
         let result = validate(&core);
@@ -575,7 +575,7 @@ impl PreflightCoordinator {
         validate: &Validate,
     ) -> CanonicalLoad
     where
-        Validate: Fn(&CanonicalShastaPreflightV1) -> RaikoResult<()>,
+        Validate: Fn(&CanonicalProposalPreflightV1) -> RaikoResult<()>,
     {
         match store
             .delete_canonical_preflight_exact(key, &object.descriptor())
@@ -951,7 +951,7 @@ mod tests {
         CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult,
         CanonicalPreflightDescriptor, CanonicalPreflightKeyV1, CanonicalPreflightLocatorKeyV1,
         CanonicalPreflightLocatorV1, CanonicalPreflightObject, CanonicalPreflightPutResult,
-        CanonicalPreflightStore, CanonicalShastaPreflightV1, PreflightCacheRecoveryEvent,
+        CanonicalPreflightStore, CanonicalProposalPreflightV1, PreflightCacheRecoveryEvent,
         PreflightCacheResult, PreflightCoordinator, PreflightObserver, SingleFlight,
     };
     use alloy_primitives::B256;
@@ -1338,7 +1338,7 @@ mod tests {
                     key.clone(),
                     || async {
                         builds.fetch_add(1, Ordering::SeqCst);
-                        let mut core = CanonicalShastaPreflightV1::default();
+                        let mut core = CanonicalProposalPreflightV1::default();
                         core.manifest.proposal_id = 42;
                         Ok(core)
                     },
@@ -1365,7 +1365,7 @@ mod tests {
     async fn same_version_restart_reuses_validated_publication() -> Result<()> {
         let store = Arc::new(TestCanonicalPreflightStore::default());
         let key = canonical_key();
-        let mut published = CanonicalShastaPreflightV1::default();
+        let mut published = CanonicalProposalPreflightV1::default();
         published.manifest.proposal_id = key.proposal_id;
 
         PreflightCoordinator::new(store.clone())
@@ -1379,7 +1379,7 @@ mod tests {
                 key.clone(),
                 || async {
                     builds.fetch_add(1, Ordering::SeqCst);
-                    Ok(CanonicalShastaPreflightV1::default())
+                    Ok(CanonicalProposalPreflightV1::default())
                 },
                 |core| {
                     if core.manifest.proposal_id == key.proposal_id {
@@ -1417,7 +1417,7 @@ mod tests {
                 canonical_key(),
                 || async {
                     builds.fetch_add(1, Ordering::SeqCst);
-                    let mut core = CanonicalShastaPreflightV1::default();
+                    let mut core = CanonicalProposalPreflightV1::default();
                     core.manifest.proposal_id = 42;
                     Ok(core)
                 },
@@ -1439,7 +1439,7 @@ mod tests {
         let error = coordinator
             .canonical(
                 canonical_key(),
-                || async { Ok(CanonicalShastaPreflightV1::default()) },
+                || async { Ok(CanonicalProposalPreflightV1::default()) },
                 |_| {
                     Err(RaikoError::Preflight(
                         "injected canonical validation failure".to_string(),
@@ -1482,7 +1482,7 @@ mod tests {
                 canonical_key(),
                 || async {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    let mut core = CanonicalShastaPreflightV1::default();
+                    let mut core = CanonicalProposalPreflightV1::default();
                     core.manifest.proposal_id = 42;
                     Ok(core)
                 },
@@ -1516,7 +1516,7 @@ mod tests {
             .canonical(
                 key,
                 || async {
-                    let mut core = CanonicalShastaPreflightV1::default();
+                    let mut core = CanonicalProposalPreflightV1::default();
                     core.manifest.proposal_id = 42;
                     Ok(core)
                 },
@@ -1548,7 +1548,7 @@ mod tests {
             generation: Some(7),
             bytes: b"not-bincode".to_vec(),
         };
-        let mut winner_core = CanonicalShastaPreflightV1::default();
+        let mut winner_core = CanonicalProposalPreflightV1::default();
         winner_core.manifest.proposal_id = 42;
         let winner = CanonicalPreflightObject {
             key_digest: key.digest()?,
@@ -1569,7 +1569,7 @@ mod tests {
                 key,
                 || async {
                     builds.fetch_add(1, Ordering::SeqCst);
-                    Ok(CanonicalShastaPreflightV1::default())
+                    Ok(CanonicalProposalPreflightV1::default())
                 },
                 |core| {
                     if core.manifest.proposal_id == 42 {
@@ -1590,7 +1590,7 @@ mod tests {
     #[tokio::test]
     async fn coordinator_invalidates_semantically_invalid_core_before_rebuild() -> Result<()> {
         let key = canonical_key();
-        let mut stale = CanonicalShastaPreflightV1::default();
+        let mut stale = CanonicalProposalPreflightV1::default();
         stale.manifest.proposal_id = 7;
         let store = Arc::new(TestCanonicalPreflightStore {
             object: Mutex::new(Some(CanonicalPreflightObject {
@@ -1609,7 +1609,7 @@ mod tests {
                 key,
                 || async {
                     builds.fetch_add(1, Ordering::SeqCst);
-                    let mut core = CanonicalShastaPreflightV1::default();
+                    let mut core = CanonicalProposalPreflightV1::default();
                     core.manifest.proposal_id = 42;
                     Ok(core)
                 },

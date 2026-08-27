@@ -482,7 +482,7 @@ fn validate_hosted_sp1_posture(
 }
 
 fn canonicalize_proposal(proposal: &ShastaProposal) -> Result<CanonicalProposal, ApiError> {
-    validate_shasta_proposal_id("proposal.proposal_id", proposal.proposal_id)?;
+    validate_proposal_id("proposal.proposal_id", proposal.proposal_id)?;
     Ok(CanonicalProposal {
         proposal_id: proposal.proposal_id,
         checkpoint: proposal.checkpoint,
@@ -511,12 +511,12 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
         ));
     }
     for proposal_id in &req.aggregation_ids {
-        validate_shasta_proposal_id("aggregation_ids[]", *proposal_id)?;
+        validate_proposal_id("aggregation_ids[]", *proposal_id)?;
     }
     Ok(())
 }
 
-fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiError> {
+fn validate_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiError> {
     if proposal_id > SHASTA_PROPOSAL_ID_MAX {
         return Err(ApiError::bad_request(format!(
             "{field} does not fit in uint48: {proposal_id}"
@@ -1357,7 +1357,7 @@ fn registered_batch_response(submission: &CanonicalBatchSubmission) -> Response 
         requested_proof_type = log_context.requested_proof_type.as_str(),
         prover_type = submission.prover_type.map_or("none", ProverType::as_str),
         network_pair = %submission.pair.key,
-        "registered shasta proof task"
+        "registered proposal proof task"
     );
 
     registered_response(
@@ -3654,21 +3654,21 @@ mod tests {
     fn native_local_route() -> CanonicalProofRoute {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-            PipelineKey::ShastaNative,
+            PipelineKey::NativeLocal,
         )
     }
 
     fn sgx_remote_route() -> CanonicalProofRoute {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
-            PipelineKey::ShastaSgx,
+            PipelineKey::SgxRemote,
         )
     }
 
     fn sgxgeth_remote_route() -> CanonicalProofRoute {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
-            PipelineKey::ShastaSgxGeth,
+            PipelineKey::SgxGethRemote,
         )
     }
 
@@ -3676,7 +3676,7 @@ mod tests {
     fn registered_task_log_context_distinguishes_selected_lane_from_request() {
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
         );
         let mut submission = canonical_submission(route, false);
         submission.requested_proof_type = BatchProofType::ZkAny;
@@ -3694,7 +3694,7 @@ mod tests {
         let mut historical_submission = submission.clone();
         historical_submission.route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
-            PipelineKey::ShastaSgxGeth,
+            PipelineKey::SgxGethRemote,
         );
         historical_submission.requested_proof_type = BatchProofType::SgxGeth;
         let request_fingerprint = batch_request_fingerprint_for_test(&historical_submission)?;
@@ -3719,8 +3719,8 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaSgxGeth,
-            PipelineKey::ShastaSgxGeth.route(),
+            PipelineKey::SgxGethRemote,
+            PipelineKey::SgxGethRemote.route(),
         );
         record.route = "sgx/remote".parse().expect("legacy SGXGETH route");
         record.request_fingerprint = request_fingerprint;
@@ -3745,8 +3745,8 @@ mod tests {
         write_test_proof_artifact_for_route(
             runtime,
             network_pair,
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
             proof_ref,
             proof,
         )
@@ -3790,7 +3790,7 @@ mod tests {
     fn test_state(runtime: Arc<RuntimeManager>, engine: Arc<dyn EngineHandle>) -> AppState {
         let config = Config::default();
         let mut factory = StaticPipelineFactory::default();
-        factory.insert("taiko_dev/ethereum", PipelineKey::ShastaNative, engine);
+        factory.insert("taiko_dev/ethereum", PipelineKey::NativeLocal, engine);
         AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
@@ -3810,7 +3810,7 @@ mod tests {
         runner_status: RuntimeRunnerStatus,
         metadata: &TaskMetadata,
     ) -> RuntimeTaskRecord {
-        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let pipeline_key = PipelineKey::Risc0Network;
         let mut metadata = metadata.clone();
         canonicalize_test_metadata(&mut metadata, pipeline_key);
         let artifact_refs = publication_proof_artifact_refs(&metadata, pipeline_key);
@@ -3894,7 +3894,7 @@ mod tests {
                 l1_inclusion_block_number: 1,
                 l2_block_numbers: vec![42],
                 last_anchor_block_number: 41,
-                task_id: proposal_task_ref(PipelineKey::ShastaRisc0, &request),
+                task_id: proposal_task_ref(PipelineKey::Risc0Local, &request),
                 request,
             }],
             aggregate_task_id: None,
@@ -3990,10 +3990,7 @@ mod tests {
             prover_config: ProverTaskConfig::default(),
         };
         metadata.aggregate_requested = true;
-        metadata.aggregate_task_id = Some(aggregate_task_ref(
-            PipelineKey::ShastaRisc0Network,
-            &request,
-        ));
+        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::Risc0Network, &request));
         metadata.aggregate_request = Some(request);
     }
 
@@ -4081,7 +4078,7 @@ mod tests {
             "missing-pipeline",
             RuntimeRunnerStatus::Running,
             &missing_pipeline_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
@@ -4119,14 +4116,14 @@ mod tests {
             "expired-boundless",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4152,14 +4149,14 @@ mod tests {
             "orphaned-root",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4183,7 +4180,7 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request,
         });
         upsert_test_record(
@@ -4191,7 +4188,7 @@ mod tests {
             "root",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
@@ -4202,7 +4199,7 @@ mod tests {
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4229,7 +4226,7 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::Risc0Network,
             request,
         });
         upsert_test_record(
@@ -4237,7 +4234,7 @@ mod tests {
             "root-a",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
         upsert_test_record(
@@ -4245,7 +4242,7 @@ mod tests {
             "root-b",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
@@ -4262,7 +4259,7 @@ mod tests {
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4293,7 +4290,7 @@ mod tests {
             "missing-pipeline",
             RuntimeRunnerStatus::Running,
             &missing_pipeline_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
         upsert_test_record(
@@ -4301,7 +4298,7 @@ mod tests {
             "clearable",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
         let mut remote_metadata = metadata.clone();
@@ -4320,14 +4317,14 @@ mod tests {
             "remote-progress",
             RuntimeRunnerStatus::Running,
             &remote_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4380,14 +4377,14 @@ mod tests {
             "clearable",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
         )
         .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 Arc::new(CancelFailEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4436,10 +4433,10 @@ mod tests {
         let metadata = task_metadata_with_stage(Some("preflight"));
 
         for pipeline_key in [
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaRisc0,
-            PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::NativeLocal,
+            PipelineKey::Risc0Local,
+            PipelineKey::Sp1Local,
+            PipelineKey::Risc0Network,
         ] {
             let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
             record.pipeline_key = pipeline_key;
@@ -4519,7 +4516,7 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             "sp1/network".parse().expect("SP1 network route"),
         );
         let metadata = TaskMetadata::decode_for_record(&record).expect("canonical SP1 root");
@@ -4534,7 +4531,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.proof_type = ProofType::Sp1;
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.pipeline_key = PipelineKey::Sp1Local;
 
         assert!(should_reenqueue_existing_submission_without_engine(
             &record, &metadata
@@ -4545,7 +4542,7 @@ mod tests {
     fn running_submission_with_stale_runtime_progress_is_reenqueueable() {
         let metadata = task_metadata_with_stage(Some("prove"));
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
-        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.pipeline_key = PipelineKey::Sp1Local;
 
         assert!(should_reenqueue_existing_submission(&record, &metadata));
     }
@@ -4563,7 +4560,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(&mut metadata, test_sp1_runtime("0xsp1", 1, 7_200));
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
-        record.pipeline_key = PipelineKey::ShastaSp1;
+        record.pipeline_key = PipelineKey::Sp1Local;
 
         assert!(should_reenqueue_existing_submission(&record, &metadata));
     }
@@ -4572,7 +4569,7 @@ mod tests {
     async fn remote_progress_duplicate_recovers_inactive_execution() -> Result<()> {
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
         );
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "remote-progress-duplicate",
@@ -4592,7 +4589,7 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
         );
         record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
@@ -4603,7 +4600,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
                 engine.clone() as Arc<dyn EngineHandle>,
             )],
         );
@@ -4626,7 +4623,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_progress_recovery_failure_preserves_checkpointed_root() -> Result<()> {
-        let pipeline = PipelineKey::ShastaRisc0Network;
+        let pipeline = PipelineKey::Risc0Network;
         let route = CanonicalProofRoute::new(pipeline.route(), pipeline);
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "remote-progress-recovery-failure",
@@ -4710,14 +4707,14 @@ mod tests {
             submission.graffiti.clone(),
             submission.prover_config.clone(),
         );
-        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        let proof_ref = proposal_task_ref(PipelineKey::NativeLocal, &request);
         metadata.proposals[0].request = request;
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
         );
         record.error = Some("stale running".to_string());
         runtime.upsert_task(&record).await?;
@@ -4760,8 +4757,8 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
         );
         record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         runtime.upsert_task(&record).await?;
@@ -4805,8 +4802,8 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
         );
         record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         runtime.upsert_task(&record).await?;
@@ -4858,7 +4855,7 @@ mod tests {
         ))?);
         let metadata = task_metadata_with_stage(Some("preflight"));
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        record.pipeline_key = PipelineKey::ShastaNative;
+        record.pipeline_key = PipelineKey::NativeLocal;
         record.route = "native/local".parse().expect("parse route");
         runtime.upsert_task(&record).await?;
 
@@ -4896,7 +4893,7 @@ mod tests {
         ))?);
         let metadata = task_metadata_with_stage(Some("preflight"));
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        record.pipeline_key = PipelineKey::ShastaNative;
+        record.pipeline_key = PipelineKey::NativeLocal;
         record.route = "native/local".parse().expect("parse route");
         record.error = Some("old failure".to_string());
         runtime.upsert_task(&record).await?;
@@ -4927,18 +4924,18 @@ mod tests {
             Arc::clone(&runtime),
             [
                 (
-                    PipelineKey::ShastaSgx,
+                    PipelineKey::SgxRemote,
                     Arc::clone(&sgx_engine) as Arc<dyn EngineHandle>,
                 ),
                 (
-                    PipelineKey::ShastaSgxGeth,
+                    PipelineKey::SgxGethRemote,
                     Arc::clone(&sgxgeth_engine) as Arc<dyn EngineHandle>,
                 ),
             ],
         );
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::SgxGeth, RunnerKind::Remote),
-            PipelineKey::ShastaSgxGeth,
+            PipelineKey::SgxGethRemote,
         );
         let submission = canonical_submission(route, false);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
@@ -4960,9 +4957,9 @@ mod tests {
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
-        record.pipeline_key = PipelineKey::ShastaSgx;
+        record.pipeline_key = PipelineKey::SgxRemote;
         record.route = PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote);
-        record.artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSgx);
+        record.artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::SgxRemote);
         record.request_fingerprint = request_fingerprint;
         runtime.upsert_task(&record).await?;
 
@@ -5002,7 +4999,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaSgxGeth,
+                PipelineKey::SgxGethRemote,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -5040,7 +5037,7 @@ mod tests {
             let state = test_state_with_engines(
                 Arc::clone(&runtime),
                 [(
-                    PipelineKey::ShastaSgxGeth,
+                    PipelineKey::SgxGethRemote,
                     recorder.clone() as Arc<dyn EngineHandle>,
                 )],
             );
@@ -5088,7 +5085,7 @@ mod tests {
             let state = test_state_with_engines(
                 Arc::clone(&runtime),
                 [(
-                    PipelineKey::ShastaSgxGeth,
+                    PipelineKey::SgxGethRemote,
                     recorder.clone() as Arc<dyn EngineHandle>,
                 )],
             );
@@ -5170,7 +5167,7 @@ mod tests {
         let canonical = sgxgeth_remote_route();
         let legacy = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
-            PipelineKey::ShastaSgxGeth,
+            PipelineKey::SgxGethRemote,
         );
         let prover_config = ProverTaskConfig::default();
 
@@ -5211,13 +5208,13 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
                 recorder.clone() as Arc<dyn EngineHandle>,
             )],
         );
         let requested_route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
         );
         let mut submission = canonical_submission(requested_route, false);
         submission.requested_proof_type = BatchProofType::Sp1;
@@ -5247,7 +5244,7 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
         );
         record.request_fingerprint = request_fingerprint;
@@ -5262,7 +5259,7 @@ mod tests {
             .get_task(&submission.public_task_id)
             .await?
             .expect("replacement runtime task");
-        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSp1);
+        assert_eq!(stored.pipeline_key, PipelineKey::Sp1Local);
         assert_eq!(stored.route, submission.route.route);
         assert_eq!(recorder.proposals.lock().expect("submissions").len(), 1);
         Ok(())
@@ -5275,7 +5272,7 @@ mod tests {
         ))?);
         let requested_route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
         );
         let mut submission = canonical_submission(requested_route, false);
         submission.requested_proof_type = BatchProofType::Sp1;
@@ -5287,7 +5284,7 @@ mod tests {
         align_runtime_record_identity(
             &mut record,
             &mut metadata,
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
         );
         runtime.upsert_task(&record).await?;
@@ -5304,7 +5301,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
                 recorder.clone() as Arc<dyn EngineHandle>,
             )],
         );
@@ -5332,7 +5329,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(None);
         metadata.proof_type = ProofType::Sp1;
         let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
-        align_runtime_record_identity(&mut record, &mut metadata, PipelineKey::ShastaSp1, route);
+        align_runtime_record_identity(&mut record, &mut metadata, PipelineKey::Sp1Local, route);
         runtime.upsert_task(&record).await?;
         let proof_ref = metadata.proposals[0].task_id.clone();
         let proof = Proof {
@@ -5345,7 +5342,7 @@ mod tests {
         write_test_proof_artifact_for_route(
             &runtime,
             &metadata.network_pair,
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             route,
             &proof_ref,
             &proof,
@@ -5367,7 +5364,7 @@ mod tests {
             load_proof_artifact_material(
                 &runtime,
                 &metadata.network_pair,
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
                 route,
                 &proof_ref,
                 ProofArtifactPayload::Final,
@@ -5380,7 +5377,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::new(runtime),
             [(
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -5399,7 +5396,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn clearing_aggregate_outboxes_preserves_shared_proposal_until_last_root() -> Result<()> {
         let runtime = RuntimeManager::new(unique_test_runtime_root("shared-proposal-outbox"))?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let mut aggregate_metadata = task_metadata_with_stage(Some("aggregate"));
         aggregate_metadata.proof_type = ProofType::Native;
@@ -5540,7 +5537,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "replacement-preserves-shared-proposal",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = test_proposal_request(42);
         let shared_task_ref = proposal_task_ref(pipeline, &request);
         let mut first_metadata = task_metadata_with_stage(Some("prove"));
@@ -5644,7 +5641,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "concurrent-root-replacement",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = test_proposal_request(42);
         let proof_ref = proposal_task_ref(pipeline, &request);
         let mut metadata = task_metadata_with_stage(Some("prove"));
@@ -5906,7 +5903,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "stale-retirement-after-recovery",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let metadata = task_metadata_with_stage(Some("prove"));
         let mut stale = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         stale.task_id = "recovered-root".to_string();
@@ -5974,7 +5971,7 @@ mod tests {
             },
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        record.pipeline_key = PipelineKey::ShastaNative;
+        record.pipeline_key = PipelineKey::NativeLocal;
 
         assert!(!should_reenqueue_existing_submission_without_engine(
             &record, &metadata
@@ -6173,7 +6170,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::Risc0Network,
                 recorder.clone() as Arc<dyn EngineHandle>,
             )],
         );
@@ -6480,7 +6477,7 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let cached_ref = proposal_task_ref(PipelineKey::ShastaNative, &first_request);
+        let cached_ref = proposal_task_ref(PipelineKey::NativeLocal, &first_request);
         let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         let uncached_plan = build_submission_plan(&submission, &request_fingerprint)
             .expect("uncached submission plan");
@@ -6524,8 +6521,8 @@ mod tests {
             AggregateProofInput::PendingProofArtifact {
                 artifact: proof_artifact_ref(
                     &submission.pair.key,
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     &cached_ref
                 ),
                 dependency: Box::new(plan.proposals[0].task_id.clone()),
@@ -6536,8 +6533,8 @@ mod tests {
             AggregateProofInput::PendingProofArtifact {
                 artifact: proof_artifact_ref(
                     &submission.pair.key,
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     &plan.proposals[1].task_ref
                 ),
                 dependency: Box::new(plan.proposals[1].task_id.clone()),
@@ -6562,7 +6559,7 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &first_request);
+        let proof_ref = proposal_task_ref(PipelineKey::NativeLocal, &first_request);
         write_test_proof_artifact(
             &runtime,
             &submission.pair.key,
@@ -6576,8 +6573,8 @@ mod tests {
         let cached = runtime
             .get_proof_artifact(
                 &submission.pair.key,
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 &proof_ref,
             )
             .await?
@@ -6755,12 +6752,12 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        let proof_ref = proposal_task_ref(PipelineKey::NativeLocal, &request);
         let publication = runtime
             .publish_proof_artifact_bytes(
                 &submission.pair.key,
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 &proof_ref,
                 b"{bad-json",
             )
@@ -6773,7 +6770,7 @@ mod tests {
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: submission.pair.key.clone(),
                 proof_ref,
-                pipeline_key: PipelineKey::ShastaNative,
+                pipeline_key: PipelineKey::NativeLocal,
                 route: "native/local".parse().expect("route"),
                 proof_uri: artifact.proof_uri.clone(),
                 content_hash: artifact.content_hash.clone(),
@@ -6789,8 +6786,8 @@ mod tests {
         let error = match load_proof_artifact_material(
             &runtime,
             &submission.pair.key,
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
             &plan.proposals[0].task_ref,
             ProofArtifactPayload::Proposal,
         )
@@ -6918,8 +6915,8 @@ mod tests {
             inputs,
             aggregate_inputs_from_artifacts(
                 "taiko_dev/ethereum",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 &artifacts,
             )
         );
@@ -6927,8 +6924,8 @@ mod tests {
         let stored = load_proof_artifact_material(
             &runtime,
             "taiko_dev/ethereum",
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
             &artifacts[0].proof_ref,
             ProofArtifactPayload::AggregateInput,
         )
@@ -7001,8 +6998,8 @@ mod tests {
         runtime
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 "proposal-recovery",
                 &serde_json::to_vec(&proof)?,
             )
@@ -7011,8 +7008,8 @@ mod tests {
             runtime
                 .get_proof_artifact(
                     "taiko_dev/ethereum",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "proposal-recovery",
                 )
                 .await?
@@ -7022,8 +7019,8 @@ mod tests {
         let recovered = load_proof_artifact_material(
             &runtime,
             "taiko_dev/ethereum",
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
             "proposal-recovery",
             ProofArtifactPayload::Proposal,
         )
@@ -7038,7 +7035,7 @@ mod tests {
         let runtime = RuntimeManager::new(unique_test_runtime_root("sp1-network-artifact-route"))?;
         let route = CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Network),
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
         );
         let proof = Proof {
             proof: Some("0xproof".to_string()),
@@ -7050,7 +7047,7 @@ mod tests {
         runtime
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
-                PipelineKey::ShastaSp1,
+                PipelineKey::Sp1Local,
                 route.route,
                 "sp1-network-proposal",
                 &serde_json::to_vec(&proof)?,
@@ -7234,7 +7231,7 @@ mod tests {
         let pair = resolved_pair();
         let mut factory = StaticPipelineFactory::default();
         let risc0_engine: Arc<dyn EngineHandle> = Arc::new(NoopEngine);
-        factory.insert(pair.key.clone(), PipelineKey::ShastaRisc0, risc0_engine);
+        factory.insert(pair.key.clone(), PipelineKey::Risc0Local, risc0_engine);
 
         let mut config = Config::default();
         config.runtime.namespace = "resolve-engine-network-config".to_string();
@@ -7247,7 +7244,7 @@ mod tests {
             ),
         );
 
-        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Network) else {
+        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::Risc0Network) else {
             panic!("network pipeline should be unavailable");
         };
 

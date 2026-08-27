@@ -12,8 +12,8 @@ use alloy::sol;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use raiko2_guests::{
-    DEFAULT_GUEST_ELF_DIR, Risc0ShastaGuestElves, Sp1ShastaGuestElves,
-    load_risc0_shasta_guest_elves_from_dir, load_sp1_shasta_guest_elves_from_dir,
+    DEFAULT_GUEST_ELF_DIR, Risc0GuestElves, Sp1GuestElves, load_risc0_guest_elves_from_dir,
+    load_sp1_guest_elves_from_dir,
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
@@ -448,23 +448,22 @@ fn build_plan(
 
     match backend {
         Backend::Risc0 => {
-            let elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+            let elves = load_risc0_guest_elves_from_dir(&elf_dir).with_context(|| {
                 format!("failed to load RISC0 guest ELFs from {}", elf_dir.display())
             })?;
             plan.extend(build_risc0_calls(config, &elves)?);
         }
         Backend::Sp1 => {
-            let elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+            let elves = load_sp1_guest_elves_from_dir(&elf_dir).with_context(|| {
                 format!("failed to load SP1 guest ELFs from {}", elf_dir.display())
             })?;
             plan.extend(build_sp1_calls(config, &elves)?);
         }
         Backend::All => {
-            let risc0_elves =
-                load_risc0_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
-                    format!("failed to load RISC0 guest ELFs from {}", elf_dir.display())
-                })?;
-            let sp1_elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+            let risc0_elves = load_risc0_guest_elves_from_dir(&elf_dir).with_context(|| {
+                format!("failed to load RISC0 guest ELFs from {}", elf_dir.display())
+            })?;
+            let sp1_elves = load_sp1_guest_elves_from_dir(&elf_dir).with_context(|| {
                 format!("failed to load SP1 guest ELFs from {}", elf_dir.display())
             })?;
             plan.extend(build_risc0_calls(config, &risc0_elves)?);
@@ -481,7 +480,7 @@ fn build_plan(
 
 fn build_risc0_calls(
     config: &ResolvedProfile,
-    elves: &Risc0ShastaGuestElves,
+    elves: &Risc0GuestElves,
 ) -> Result<Vec<RegistrationCall>> {
     Ok(vec![
         risc0_call(
@@ -501,7 +500,7 @@ fn build_risc0_calls(
 
 fn build_sp1_calls(
     config: &ResolvedProfile,
-    elves: &Sp1ShastaGuestElves,
+    elves: &Sp1GuestElves,
 ) -> Result<Vec<RegistrationCall>> {
     let proposal_vk = verified_sp1_vk(
         Arc::clone(&elves.proposal),
@@ -822,9 +821,7 @@ mod tests {
     };
     use alloy::primitives::{Address, B256, address};
     use clap::ValueEnum;
-    use raiko2_guests::{
-        Sp1ShastaGuestElves, load_risc0_shasta_guest_elves, load_sp1_shasta_guest_elves,
-    };
+    use raiko2_guests::{Sp1GuestElves, load_risc0_guest_elves, load_sp1_guest_elves};
     use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
     use xtask_build_guest::Backend;
 
@@ -992,7 +989,7 @@ mod tests {
         };
 
         let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
-        let elves = load_risc0_shasta_guest_elves().expect("load RISC0 Shasta guest ELFs");
+        let elves = load_risc0_guest_elves().expect("load RISC0 Shasta guest ELFs");
         let calls = build_risc0_calls(&resolved, &elves).expect("build risc0 calls");
         let keys = calls
             .iter()
@@ -1086,8 +1083,8 @@ mod tests {
             apply: false,
         };
         let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
-        let elves = load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs");
-        let swapped = Sp1ShastaGuestElves {
+        let elves = load_sp1_guest_elves().expect("load SP1 Shasta guest ELFs");
+        let swapped = Sp1GuestElves {
             proposal: Arc::clone(&elves.proposal),
             aggregation: Arc::clone(&elves.aggregation),
             proposal_vk: Arc::clone(&elves.aggregation_vk),

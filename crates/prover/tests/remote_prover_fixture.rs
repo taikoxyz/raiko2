@@ -8,7 +8,7 @@ use raiko2_primitives_shasta::GuestInput;
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::remote_prover::{
-    adapter::{build_shasta_aggregate_request, build_shasta_packet},
+    adapter::{build_proposal_aggregate_request, build_proposal_packet},
     protocol::RAIKO2_SHASTA_REQUEST_SCHEMA,
 };
 
@@ -17,7 +17,7 @@ fn proposal_request_adapter_outputs_v1_guest_input_packet() {
     let raw =
         fs::read_to_string(shared_guest_input_path()).expect("read shared shasta guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared fixture");
-    let packet = build_shasta_packet(&guest_input).expect("build remote prover packet");
+    let packet = build_proposal_packet(&guest_input).expect("build remote prover packet");
 
     assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(packet.payload.guest_input.witnesses.len(), 192);
@@ -35,7 +35,7 @@ fn proposal_request_adapter_outputs_v1_guest_input_packet() {
 #[test]
 fn vendored_aggregate_request_fixture_matches_adapter_output() {
     let actual = serde_json::to_string_pretty(
-        &build_shasta_aggregate_request(&[fixture_aggregate_proof()])
+        &build_proposal_aggregate_request(&[fixture_aggregate_proof()])
             .expect("build aggregate packet"),
     )
     .expect("serialize aggregate request");

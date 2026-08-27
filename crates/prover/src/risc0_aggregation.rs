@@ -9,7 +9,7 @@ use risc0_zkvm::{
 use serde_json::Value;
 
 use crate::{
-    RISC0_SEAL_PAYLOAD_KIND, build_shasta_aggregation_input, decode_hex_payload,
+    RISC0_SEAL_PAYLOAD_KIND, build_proposal_aggregation_input, decode_hex_payload,
     shasta_image_id_words_from_uuid,
 };
 
@@ -28,7 +28,7 @@ pub fn build_risc0_aggregation_input(agg: &AggregationInput) -> RaikoResult<Vec<
         .iter()
         .map(|proof| proof_from_envelope(proof, expected_image_id))
         .collect::<RaikoResult<Vec<_>>>()?;
-    let canonical_input = build_shasta_aggregation_input(&proofs)?;
+    let canonical_input = build_proposal_aggregation_input(&proofs)?;
 
     let expected_words = shasta_image_id_words_from_uuid(expected_image_id).map_err(|err| {
         RaikoError::InvalidRequestConfig(format!("Invalid expected_image_id/image id: {err}"))

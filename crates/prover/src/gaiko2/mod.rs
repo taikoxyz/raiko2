@@ -15,16 +15,16 @@ use raiko2_primitives_shasta::GuestInput;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 
 use crate::{
-    GuestInputCodec, Prover, ensure_shasta_aggregate_input_matches_carries,
-    ensure_shasta_proposal_input_matches_carry, with_shasta_extra_data,
+    GuestInputCodec, Prover, ensure_proposal_aggregate_input_matches_carries,
+    ensure_proposal_input_matches_carry, with_proposal_extra_data,
 };
 
 use crate::remote_prover::{
-    adapter::{build_shasta_aggregate_request, build_shasta_packet},
+    adapter::{build_proposal_aggregate_request, build_proposal_packet},
     protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
         RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ProofStatus,
-        Raiko2ShastaRequest,
+        Raiko2ProposalRequest,
     },
 };
 
@@ -115,7 +115,7 @@ impl Gaiko2Prover {
 
 impl GuestInputCodec<GuestInput> for Gaiko2Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let payload = serde_json::to_vec(&build_shasta_packet(input)?).map_err(|err| {
+        let payload = serde_json::to_vec(&build_proposal_packet(input)?).map_err(|err| {
             RaikoError::Guest(format!("failed to encode {} packet: {err}", self.label))
         })?;
         Ok(Bytes::from(payload))
@@ -150,9 +150,9 @@ where
                 self.label, result.input
             ))
         })?;
-        ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, self.label)?;
+        ensure_proposal_input_matches_carry(input_hash, &proof_carry_data, self.label)?;
 
-        let extra_data = with_shasta_extra_data(
+        let extra_data = with_proposal_extra_data(
             &proof_carry_data,
             self.label,
             Some(gaiko2_metadata(&envelope.schema, &result)),
@@ -173,7 +173,7 @@ where
         _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let packet = build_shasta_aggregate_request(&input.proofs)?;
+        let packet = build_proposal_aggregate_request(&input.proofs)?;
         if packet.schema != RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA {
             return Err(RaikoError::Guest(format!(
                 "unsupported remote prover request schema: {}",
@@ -203,7 +203,7 @@ where
             .iter()
             .map(|proof| proof.proof_carry_data.clone())
             .collect::<Vec<_>>();
-        ensure_shasta_aggregate_input_matches_carries(
+        ensure_proposal_aggregate_input_matches_carries(
             input_hash,
             &carries,
             instance_address,
@@ -225,7 +225,7 @@ where
 
 impl Gaiko2Prover {
     fn proposal_carry_data_from_encoded(&self, input: &Bytes) -> RaikoResult<ProofCarryData> {
-        let packet: Raiko2ShastaRequest =
+        let packet: Raiko2ProposalRequest =
             serde_json::from_slice(input.as_ref()).map_err(|err| {
                 RaikoError::Guest(format!("failed to decode {} packet: {err}", self.label))
             })?;

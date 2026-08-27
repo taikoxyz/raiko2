@@ -15,7 +15,7 @@ use raiko2_prover::{
     Prover,
     gaiko2::{Gaiko2Config, Gaiko2Prover},
     remote_prover::{
-        adapter::build_shasta_aggregate_request,
+        adapter::build_proposal_aggregate_request,
         protocol::{RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA},
     },
 };
@@ -78,13 +78,13 @@ fn shasta_aggregate_request_rejects_child_input_mismatch() {
     let mut proof = fixture_aggregate_proof();
     proof.input = Some(B256::from([0x99; 32]));
 
-    let err = build_shasta_aggregate_request(&[proof]).expect_err("child input mismatch");
+    let err = build_proposal_aggregate_request(&[proof]).expect_err("child input mismatch");
 
     assert!(err.to_string().contains("input hash"));
 }
 
 #[tokio::test]
-async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response() {
+async fn gaiko2_prover_posts_proposal_aggregate_packet_and_maps_success_response() {
     let server = MockServer::start();
     let proofs = vec![fixture_aggregate_proof()];
     let instance_address =

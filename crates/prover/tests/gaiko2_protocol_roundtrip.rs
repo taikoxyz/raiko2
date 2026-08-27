@@ -3,9 +3,9 @@
 use alloy_primitives::{Address, B256};
 use raiko2_prover::remote_prover::protocol::{
     RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
-    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ReplayBlock,
-    Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaGuestInput,
-    Raiko2ShastaPayload, Raiko2ShastaRequest,
+    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult,
+    Raiko2ProposalAggregatePayload, Raiko2ProposalAggregateRequest, Raiko2ProposalGuestInput,
+    Raiko2ProposalPayload, Raiko2ProposalRequest, Raiko2ReplayBlock,
 };
 
 #[test]
@@ -21,10 +21,10 @@ fn shasta_packet_roundtrip_preserves_guest_input_payload() {
     };
     proof_carry_data.transition_input.proposal_id = 7;
 
-    let packet = Raiko2ShastaRequest {
+    let packet = Raiko2ProposalRequest {
         schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-        payload: Raiko2ShastaPayload {
-            guest_input: Raiko2ShastaGuestInput {
+        payload: Raiko2ProposalPayload {
+            guest_input: Raiko2ProposalGuestInput {
                 witnesses: vec![replay_block],
                 proof_carry_data,
                 ..Default::default()
@@ -33,7 +33,7 @@ fn shasta_packet_roundtrip_preserves_guest_input_payload() {
     };
 
     let json = serde_json::to_string(&packet).expect("serialize request");
-    let decoded: Raiko2ShastaRequest = serde_json::from_str(&json).expect("deserialize request");
+    let decoded: Raiko2ProposalRequest = serde_json::from_str(&json).expect("deserialize request");
 
     assert_eq!(decoded.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(decoded.payload.guest_input.witnesses.len(), 1);
@@ -82,9 +82,9 @@ fn shasta_aggregate_packet_roundtrip_preserves_schema_and_payload() {
     };
     proof_carry_data.transition_input.proposal_id = 7;
 
-    let packet = Raiko2ShastaAggregateRequest {
+    let packet = Raiko2ProposalAggregateRequest {
         schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-        payload: Raiko2ShastaAggregatePayload {
+        payload: Raiko2ProposalAggregatePayload {
             proofs: vec![
                 raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
                     input: format!("0x{}", hex::encode([0x11; 32])),
@@ -96,7 +96,7 @@ fn shasta_aggregate_packet_roundtrip_preserves_schema_and_payload() {
     };
 
     let json = serde_json::to_string(&packet).expect("serialize aggregate request");
-    let decoded: Raiko2ShastaAggregateRequest =
+    let decoded: Raiko2ProposalAggregateRequest =
         serde_json::from_str(&json).expect("deserialize aggregate request");
 
     assert_eq!(decoded.schema, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA);

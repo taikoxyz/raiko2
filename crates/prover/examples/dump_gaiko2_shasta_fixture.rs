@@ -3,7 +3,7 @@
 use std::{env, fs, path::PathBuf};
 
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_prover::remote_prover::adapter::build_shasta_packet;
+use raiko2_prover::remote_prover::adapter::build_proposal_packet;
 
 fn main() {
     let positional = env::args().skip(1).collect::<Vec<_>>();
@@ -18,7 +18,7 @@ fn main() {
     let output_path = PathBuf::from(output);
     let raw = fs::read_to_string(&input_path).expect("read guest input fixture");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse GuestInput fixture");
-    let packet = build_shasta_packet(&guest_input).expect("adapt guest input shasta packet");
+    let packet = build_proposal_packet(&guest_input).expect("adapt guest input shasta packet");
     let serialized = serde_json::to_vec(&packet).expect("serialize shasta packet");
 
     if let Some(parent) = output_path.parent() {

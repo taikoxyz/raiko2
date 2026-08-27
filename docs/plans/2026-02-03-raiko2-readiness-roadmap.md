@@ -31,9 +31,9 @@ plus an on-chain verifier for **all** proof backends.
 ### Known gaps / mismatches
 - **Proposal derivation is not implemented.**
   - Shasta preflight currently treats `proposal_id` as a *block number*:
-    `crates/pipeline/src/forks/shasta/spec.rs:66`.
+    `crates/pipeline/src/proposal/spec.rs:66`.
   - Manifest building still depended on request config injection:
-    `crates/pipeline/src/forks/shasta/manifest.rs:234`.
+    `crates/pipeline/src/proposal/manifest.rs:234`.
 - **Blob verification is not wired into the pipeline validation.**
   - Helper exists (`crates/primitives-shasta/src/blob.rs:28`), but must be invoked as part of the
     validation stage to match readiness expectations.
@@ -85,9 +85,9 @@ injection as a production path.
 
 **Implementation Notes / Touchpoints**
 - Replace `block_numbers = vec![ctx.request.proposal_id]` with derived block numbers:
-  `crates/pipeline/src/forks/shasta/spec.rs:66`.
+  `crates/pipeline/src/proposal/spec.rs:66`.
 - Replace config-injected proposal event/payloads as the default production path:
-  `crates/pipeline/src/forks/shasta/manifest.rs:56` and `crates/pipeline/src/forks/shasta/manifest.rs:234`.
+  `crates/pipeline/src/proposal/manifest.rs:56` and `crates/pipeline/src/proposal/manifest.rs:234`.
 - Ensure the derived `InputDataSource` matches Shasta `DerivationSource` semantics and blob slicing.
 
 **Tests**

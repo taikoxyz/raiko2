@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use raiko2_pipeline::forks::shasta::{ShastaSpec, preflight_cache::PreflightCoordinator};
+use raiko2_pipeline::proposal::{ProposalSpec, preflight_cache::PreflightCoordinator};
 use raiko2_pipeline::{NativeBackend, Pipeline, PipelineKey};
 use raiko2_primitives::{
     ChainSpec, PreflightRpcClientConfig, PreflightRpcRetryConfig, ProofContext, ProofRequest,
@@ -208,7 +208,7 @@ async fn main() -> Result<()> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider)
+    let spec = ProposalSpec::new(PipelineKey::NativeLocal, (), NativeBackend, provider)
         .with_preflight_coordinator(Arc::new(PreflightCoordinator::disabled()));
     let pipeline = Pipeline::new(&spec);
 

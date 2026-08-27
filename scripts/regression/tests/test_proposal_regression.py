@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from shasta_regression import load_config, output_paths
+from proposal_regression import load_config, output_paths
 
 
 class TestConfigAndPaths(unittest.TestCase):
@@ -37,7 +37,7 @@ class TestConfigAndPaths(unittest.TestCase):
 
 class TestBinaries(unittest.TestCase):
     def test_missing_binaries(self):
-        from shasta_regression import check_binaries
+        from proposal_regression import check_binaries
 
         missing = check_binaries("/nope/preflight", "/nope/guest-launcher")
         self.assertTrue(missing)
@@ -45,14 +45,14 @@ class TestBinaries(unittest.TestCase):
 
 class TestSelection(unittest.TestCase):
     def test_range_overrides_count(self):
-        from shasta_regression import select_proposals
+        from proposal_regression import select_proposals
 
         proposals = list(range(1, 11))
         picked = select_proposals(proposals, range_tuple=(3, 6), count=2)
         self.assertEqual(picked, [3, 4, 5, 6])
 
     def test_count_selects_latest(self):
-        from shasta_regression import select_proposals
+        from proposal_regression import select_proposals
 
         proposals = [1, 2, 3, 4, 5]
         picked = select_proposals(proposals, range_tuple=None, count=2)
@@ -61,7 +61,7 @@ class TestSelection(unittest.TestCase):
 
 class TestSelectionAll(unittest.TestCase):
     def test_select_all_proposals_returns_all(self):
-        from shasta_regression import select_all_proposals
+        from proposal_regression import select_all_proposals
 
         proposals = [3, 4, 7]
         self.assertEqual(select_all_proposals(proposals), proposals)
@@ -69,7 +69,7 @@ class TestSelectionAll(unittest.TestCase):
 
 class TestAggregationGrouping(unittest.TestCase):
     def test_grouping(self):
-        from shasta_regression import group_for_aggregation
+        from proposal_regression import group_for_aggregation
 
         proofs = ["a", "b", "c", "d", "e"]
         groups = group_for_aggregation(proofs, size=2)
@@ -78,7 +78,7 @@ class TestAggregationGrouping(unittest.TestCase):
 
 class TestAggregationGroupingPaths(unittest.TestCase):
     def test_grouping_paths(self):
-        from shasta_regression import group_for_aggregation
+        from proposal_regression import group_for_aggregation
 
         proofs = [Path("/tmp/a"), Path("/tmp/b"), Path("/tmp/c")]
         groups = group_for_aggregation(proofs, size=2)
@@ -87,7 +87,7 @@ class TestAggregationGroupingPaths(unittest.TestCase):
 
 class TestSummary(unittest.TestCase):
     def test_write_summary(self):
-        from shasta_regression import write_summary
+        from proposal_regression import write_summary
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run_summary.json"
@@ -98,7 +98,7 @@ class TestSummary(unittest.TestCase):
 
 class TestExtradataParsing(unittest.TestCase):
     def test_extract_proposal_id_from_extradata(self):
-        from shasta_regression import extract_proposal_id_from_extradata
+        from proposal_regression import extract_proposal_id_from_extradata
 
         # 0x + 1 byte config + 6 bytes proposal id (uint48, big-endian)
         extradata = "0x4b000000000005"
@@ -107,7 +107,7 @@ class TestExtradataParsing(unittest.TestCase):
 
 class TestDiscovery(unittest.TestCase):
     def test_discover_proposals_from_blocks(self):
-        from shasta_regression import discover_proposals_from_blocks
+        from proposal_regression import discover_proposals_from_blocks
 
         blocks = [
             {"number": 1, "extraData": "0x4b000000000001"},
@@ -119,7 +119,7 @@ class TestDiscovery(unittest.TestCase):
 
 class TestProposalSpanDiscovery(unittest.TestCase):
     def test_discover_proposal_spans_from_blocks(self):
-        from shasta_regression import discover_proposal_spans_from_blocks
+        from proposal_regression import discover_proposal_spans_from_blocks
 
         blocks = [
             {"number": "0x1", "extraData": "0x4b000000000001"},
@@ -141,7 +141,7 @@ class TestProposalSpanDiscovery(unittest.TestCase):
 
 class TestProposalMetadata(unittest.TestCase):
     def test_load_proposal_metadata_from_stress_payload(self):
-        from shasta_regression import load_proposal_metadata
+        from proposal_regression import load_proposal_metadata
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "proposals.json"
@@ -181,7 +181,7 @@ class TestProposalMetadata(unittest.TestCase):
 
 class TestChainSpecLookup(unittest.TestCase):
     def test_resolve_rpc_from_chain_spec(self):
-        from shasta_regression import resolve_rpc_from_chain_spec
+        from proposal_regression import resolve_rpc_from_chain_spec
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -198,7 +198,7 @@ class TestChainSpecLookup(unittest.TestCase):
 
 class TestChainSpecContracts(unittest.TestCase):
     def test_resolve_event_address_from_chain_spec(self):
-        from shasta_regression import resolve_event_address_from_chain_spec
+        from proposal_regression import resolve_event_address_from_chain_spec
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -218,7 +218,7 @@ class TestChainSpecContracts(unittest.TestCase):
             )
 
     def test_resolve_event_address_uses_single_configured_contract_if_fork_key_is_absent(self):
-        from shasta_regression import resolve_event_address_from_chain_spec
+        from proposal_regression import resolve_event_address_from_chain_spec
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -242,7 +242,7 @@ class TestChainSpecContracts(unittest.TestCase):
 
 class TestConfigEventAddress(unittest.TestCase):
     def test_resolve_event_address_from_config(self):
-        from shasta_regression import resolve_event_address_from_config
+        from proposal_regression import resolve_event_address_from_config
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -264,7 +264,7 @@ class TestConfigEventAddress(unittest.TestCase):
 
 class TestConfigValidation(unittest.TestCase):
     def test_resolve_event_address_missing_chain_spec(self):
-        from shasta_regression import resolve_event_address_from_config
+        from proposal_regression import resolve_event_address_from_config
 
         config = {"l1_chain": "taiko_dev_l1"}
         self.assertIsNone(resolve_event_address_from_config(config))
@@ -272,7 +272,7 @@ class TestConfigValidation(unittest.TestCase):
 
 class TestEventAddressFallback(unittest.TestCase):
     def test_event_address_fallback_to_l2_chain(self):
-        from shasta_regression import resolve_event_address_from_config
+        from proposal_regression import resolve_event_address_from_config
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -295,7 +295,7 @@ class TestEventAddressFallback(unittest.TestCase):
 
 class TestEventAddressOverride(unittest.TestCase):
     def test_event_address_from_chain_spec_used(self):
-        from shasta_regression import resolve_event_address_from_config
+        from proposal_regression import resolve_event_address_from_config
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -316,7 +316,7 @@ class TestEventAddressOverride(unittest.TestCase):
 
 class TestPreflightCommand(unittest.TestCase):
     def test_build_preflight_command(self):
-        from shasta_regression import build_preflight_cmd
+        from proposal_regression import build_preflight_cmd
 
         cmd = build_preflight_cmd(
             preflight_bin="/bin/preflight",
@@ -348,7 +348,7 @@ class TestPreflightCommand(unittest.TestCase):
 
 class TestPreflightRpc(unittest.TestCase):
     def test_preflight_rpc_uses_l2(self):
-        from shasta_regression import preflight_rpc_from_config
+        from proposal_regression import preflight_rpc_from_config
 
         cfg = {"l1_rpc": "http://l1", "l2_rpc": "http://l2"}
         self.assertEqual(preflight_rpc_from_config(cfg), "http://l2")
@@ -356,7 +356,7 @@ class TestPreflightRpc(unittest.TestCase):
 
 class TestGuestLauncherCommand(unittest.TestCase):
     def test_build_guest_launcher_command(self):
-        from shasta_regression import build_guest_launcher_cmd
+        from proposal_regression import build_guest_launcher_cmd
 
         cmd = build_guest_launcher_cmd(
             guest_bin="/bin/guest-launcher",
@@ -378,7 +378,7 @@ class TestGuestLauncherCommand(unittest.TestCase):
 
 class TestProgressLogging(unittest.TestCase):
     def test_format_progress(self):
-        from shasta_regression import format_progress
+        from proposal_regression import format_progress
 
         msg = format_progress(2, 10, "preflight", proposal_id=42)
         self.assertIn("2/10", msg)
@@ -388,7 +388,7 @@ class TestProgressLogging(unittest.TestCase):
 
 class TestChainSpecCache(unittest.TestCase):
     def test_resolve_rpc_from_specs(self):
-        from shasta_regression import resolve_rpc_from_specs
+        from proposal_regression import resolve_rpc_from_specs
 
         specs = [
             {"name": "l1", "rpc": "http://l1"},
@@ -399,16 +399,16 @@ class TestChainSpecCache(unittest.TestCase):
 
 class TestRpcCall(unittest.TestCase):
     def test_rpc_call_handles_request_error(self):
-        from shasta_regression import rpc_call
+        from proposal_regression import rpc_call
 
-        with mock.patch("shasta_regression.requests.post") as post:
+        with mock.patch("proposal_regression.requests.post") as post:
             post.side_effect = Exception("boom")
             self.assertIsNone(rpc_call("http://rpc", "eth_blockNumber", [], 1))
 
 
 class TestCountValidation(unittest.TestCase):
     def test_count_is_capped(self):
-        from shasta_regression import validate_count_option
+        from proposal_regression import validate_count_option
 
         ok, message = validate_count_option(count=6)
         self.assertFalse(ok)
@@ -417,7 +417,7 @@ class TestCountValidation(unittest.TestCase):
 
 class TestRangeParsing(unittest.TestCase):
     def test_parse_range_invalid_returns_none(self):
-        from shasta_regression import parse_range
+        from proposal_regression import parse_range
 
         self.assertIsNone(parse_range("1"))
         self.assertIsNone(parse_range("1:"))
@@ -427,13 +427,13 @@ class TestRangeParsing(unittest.TestCase):
 
 class TestConfigErrors(unittest.TestCase):
     def test_load_config_missing_file_raises(self):
-        from shasta_regression import load_config
+        from proposal_regression import load_config
 
         with self.assertRaises(ValueError):
             load_config(Path("/nope/config.json"))
 
     def test_load_config_invalid_json_raises(self):
-        from shasta_regression import load_config
+        from proposal_regression import load_config
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "config.json"
@@ -444,7 +444,7 @@ class TestConfigErrors(unittest.TestCase):
 
 class TestChainSpecErrors(unittest.TestCase):
     def test_load_chain_specs_invalid_json_raises(self):
-        from shasta_regression import load_chain_specs
+        from proposal_regression import load_chain_specs
 
         with tempfile.TemporaryDirectory() as tmp:
             spec_path = Path(tmp) / "chain_spec.json"
@@ -455,7 +455,7 @@ class TestChainSpecErrors(unittest.TestCase):
 
 class TestRangeExpansion(unittest.TestCase):
     def test_expand_range_to_proposal_boundaries(self):
-        from shasta_regression import expand_range_to_proposal_boundaries
+        from proposal_regression import expand_range_to_proposal_boundaries
 
         def extradata(pid: int) -> str:
             return f"0x4b{pid:012x}"
@@ -473,9 +473,9 @@ class TestRangeExpansion(unittest.TestCase):
         def fake_get_block(_rpc, num, _timeout):
             return block_map.get(num)
 
-        with mock.patch("shasta_regression.get_l2_block", side_effect=fake_get_block):
+        with mock.patch("proposal_regression.get_l2_block", side_effect=fake_get_block):
             with mock.patch(
-                "shasta_regression.get_latest_l2_block_number", return_value=22
+                "proposal_regression.get_latest_l2_block_number", return_value=22
             ):
                 start, end, start_pid, end_pid = expand_range_to_proposal_boundaries(
                     "http://rpc", 11, 17, timeout=1
@@ -486,7 +486,7 @@ class TestRangeExpansion(unittest.TestCase):
 
 class TestCompletedProposalDiscovery(unittest.TestCase):
     def test_discover_latest_completed_proposals_skips_current(self):
-        from shasta_regression import discover_latest_completed_proposals_from_l2
+        from proposal_regression import discover_latest_completed_proposals_from_l2
 
         def extradata(pid: int) -> str:
             return f"0x4b{pid:012x}"
@@ -502,9 +502,9 @@ class TestCompletedProposalDiscovery(unittest.TestCase):
         def fake_get_block(_rpc, num, _timeout):
             return block_map.get(num)
 
-        with mock.patch("shasta_regression.get_l2_block", side_effect=fake_get_block):
+        with mock.patch("proposal_regression.get_l2_block", side_effect=fake_get_block):
             with mock.patch(
-                "shasta_regression.get_latest_l2_block_number", return_value=9
+                "proposal_regression.get_latest_l2_block_number", return_value=9
             ):
                 proposals = discover_latest_completed_proposals_from_l2(
                     "http://rpc", count=2, timeout=1, max_scan=20
@@ -514,14 +514,14 @@ class TestCompletedProposalDiscovery(unittest.TestCase):
 
 class TestCompletedProposalSpanDiscovery(unittest.TestCase):
     def test_discover_latest_completed_proposal_spans(self):
-        from shasta_regression import discover_latest_completed_proposal_spans_from_l2
+        from proposal_regression import discover_latest_completed_proposal_spans_from_l2
 
         with mock.patch(
-            "shasta_regression.discover_latest_completed_proposals_from_l2",
+            "proposal_regression.discover_latest_completed_proposals_from_l2",
             return_value=[1, 2],
         ):
             with mock.patch(
-                "shasta_regression.derive_block_range_for_proposal",
+                "proposal_regression.derive_block_range_for_proposal",
                 side_effect=[(0, 3), (4, 6)],
             ):
                 spans = discover_latest_completed_proposal_spans_from_l2(

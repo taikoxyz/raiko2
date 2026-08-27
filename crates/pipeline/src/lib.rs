@@ -11,8 +11,8 @@ use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr, sync::Arc};
 
-pub mod forks;
 mod pipeline;
+pub mod proposal;
 
 pub use pipeline::Pipeline;
 
@@ -34,58 +34,69 @@ pub enum PipelineStage {
 }
 
 /// Pipeline identifier for routing requests to the right engine.
+///
+/// The `serde` names and [`PipelineKey::as_str`] values are frozen wire identity, not cosmetics.
+/// The `serde` names appear in persisted `ProofArtifactRecord` JSON, and the `as_str` values are
+/// path components of live GCS proof URIs. Renaming either orphans every stored artifact and
+/// re-pays for proofs already produced. See the frozen identifier list in `CONCEPTS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PipelineKey {
-    ShastaRisc0,
-    ShastaSp1,
-    ShastaNative,
-    ShastaRisc0Network,
-    ShastaSgx,
-    ShastaSgxGeth,
+    #[serde(rename = "ShastaRisc0")]
+    Risc0Local,
+    #[serde(rename = "ShastaSp1")]
+    Sp1Local,
+    #[serde(rename = "ShastaNative")]
+    NativeLocal,
+    #[serde(rename = "ShastaRisc0Network")]
+    Risc0Network,
+    #[serde(rename = "ShastaSgx")]
+    SgxRemote,
+    #[serde(rename = "ShastaSgxGeth")]
+    SgxGethRemote,
 }
 
 impl PipelineKey {
     pub const ALL: [Self; 6] = [
-        Self::ShastaRisc0,
-        Self::ShastaSp1,
-        Self::ShastaNative,
-        Self::ShastaRisc0Network,
-        Self::ShastaSgx,
-        Self::ShastaSgxGeth,
+        Self::Risc0Local,
+        Self::Sp1Local,
+        Self::NativeLocal,
+        Self::Risc0Network,
+        Self::SgxRemote,
+        Self::SgxGethRemote,
     ];
 
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
-            PipelineKey::ShastaRisc0 => "shasta-risc0-local",
-            PipelineKey::ShastaSp1 => "shasta-sp1-local",
-            PipelineKey::ShastaNative => "shasta-native-local",
-            PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
-            PipelineKey::ShastaSgx => "shasta-sgx-remote",
-            PipelineKey::ShastaSgxGeth => "shasta-sgxgeth-remote",
+            PipelineKey::Risc0Local => "shasta-risc0-local",
+            PipelineKey::Sp1Local => "shasta-sp1-local",
+            PipelineKey::NativeLocal => "shasta-native-local",
+            PipelineKey::Risc0Network => "shasta-risc0-network",
+            PipelineKey::SgxRemote => "shasta-sgx-remote",
+            PipelineKey::SgxGethRemote => "shasta-sgxgeth-remote",
         }
     }
 
     #[must_use]
     pub const fn route(self) -> PipelineRoute {
         match self {
-            Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
-            Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
-            Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-            Self::ShastaSgx => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
-            Self::ShastaSgxGeth => PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
-            Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
+            Self::Risc0Local => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
+            Self::Sp1Local => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+            Self::NativeLocal => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            Self::SgxRemote => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
+            Self::SgxGethRemote => PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
+            Self::Risc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }
 
     #[must_use]
     pub const fn proof_type(self) -> ProofType {
         match self {
-            Self::ShastaRisc0 | Self::ShastaRisc0Network => ProofType::Risc0,
-            Self::ShastaSp1 => ProofType::Sp1,
-            Self::ShastaNative => ProofType::Native,
-            Self::ShastaSgx => ProofType::Sgx,
-            Self::ShastaSgxGeth => ProofType::SgxGeth,
+            Self::Risc0Local | Self::Risc0Network => ProofType::Risc0,
+            Self::Sp1Local => ProofType::Sp1,
+            Self::NativeLocal => ProofType::Native,
+            Self::SgxRemote => ProofType::Sgx,
+            Self::SgxGethRemote => ProofType::SgxGeth,
         }
     }
 
@@ -94,37 +105,37 @@ impl PipelineKey {
         matches!(
             (self, route),
             (
-                Self::ShastaRisc0,
+                Self::Risc0Local,
                 PipelineRoute {
                     guest_system: GuestSystem::Risc0,
                     runner: RunnerKind::Local,
                 }
             ) | (
-                Self::ShastaRisc0Network,
+                Self::Risc0Network,
                 PipelineRoute {
                     guest_system: GuestSystem::Risc0,
                     runner: RunnerKind::Network,
                 }
             ) | (
-                Self::ShastaSp1,
+                Self::Sp1Local,
                 PipelineRoute {
                     guest_system: GuestSystem::Sp1,
                     runner: RunnerKind::Local | RunnerKind::Network,
                 }
             ) | (
-                Self::ShastaNative,
+                Self::NativeLocal,
                 PipelineRoute {
                     guest_system: GuestSystem::Native,
                     runner: RunnerKind::Local,
                 }
             ) | (
-                Self::ShastaSgx,
+                Self::SgxRemote,
                 PipelineRoute {
                     guest_system: GuestSystem::Sgx,
                     runner: RunnerKind::Remote,
                 }
             ) | (
-                Self::ShastaSgxGeth,
+                Self::SgxGethRemote,
                 PipelineRoute {
                     guest_system: GuestSystem::SgxGeth,
                     runner: RunnerKind::Remote,
@@ -141,7 +152,7 @@ impl PipelineKey {
         }
         match (self, route) {
             (
-                Self::ShastaSgxGeth,
+                Self::SgxGethRemote,
                 PipelineRoute {
                     guest_system: GuestSystem::Sgx,
                     runner: RunnerKind::Remote,
@@ -163,12 +174,12 @@ impl FromStr for PipelineKey {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "shasta-risc0-local" => Ok(Self::ShastaRisc0),
-            "shasta-sp1-local" => Ok(Self::ShastaSp1),
-            "shasta-native-local" => Ok(Self::ShastaNative),
-            "shasta-sgx-remote" => Ok(Self::ShastaSgx),
-            "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
-            "shasta-risc0-network" => Ok(Self::ShastaRisc0Network),
+            "shasta-risc0-local" => Ok(Self::Risc0Local),
+            "shasta-sp1-local" => Ok(Self::Sp1Local),
+            "shasta-native-local" => Ok(Self::NativeLocal),
+            "shasta-sgx-remote" => Ok(Self::SgxRemote),
+            "shasta-sgxgeth-remote" => Ok(Self::SgxGethRemote),
+            "shasta-risc0-network" => Ok(Self::Risc0Network),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -295,13 +306,67 @@ impl FromStr for PipelineRoute {
 }
 
 #[cfg(test)]
+mod frozen_identity_tests {
+    use super::PipelineKey;
+
+    /// Pins the `as_str` values, which are path components of live GCS proof URIs.
+    ///
+    /// Changing any of these orphans every stored artifact under the old path and makes the
+    /// service re-prove and re-pay for work it already completed. If this test fails because a
+    /// value was deliberately changed, the change needs a storage migration, not a new expectation.
+    #[test]
+    fn pipeline_key_as_str_values_are_frozen_gcs_path_components() {
+        assert_eq!(PipelineKey::Risc0Local.as_str(), "shasta-risc0-local");
+        assert_eq!(PipelineKey::Sp1Local.as_str(), "shasta-sp1-local");
+        assert_eq!(PipelineKey::NativeLocal.as_str(), "shasta-native-local");
+        assert_eq!(PipelineKey::Risc0Network.as_str(), "shasta-risc0-network");
+        assert_eq!(PipelineKey::SgxRemote.as_str(), "shasta-sgx-remote");
+        assert_eq!(PipelineKey::SgxGethRemote.as_str(), "shasta-sgxgeth-remote");
+    }
+
+    /// Pins the `serde` names, which appear in persisted `ProofArtifactRecord` JSON.
+    ///
+    /// These are deliberately decoupled from the Rust variant names: the variants were renamed
+    /// away from the retired Shasta-era spelling, while the stored representation must keep
+    /// deserializing records written by earlier releases.
+    #[test]
+    fn pipeline_key_serde_names_are_frozen_persisted_identity() {
+        for (key, expected) in [
+            (PipelineKey::Risc0Local, "\"ShastaRisc0\""),
+            (PipelineKey::Sp1Local, "\"ShastaSp1\""),
+            (PipelineKey::NativeLocal, "\"ShastaNative\""),
+            (PipelineKey::Risc0Network, "\"ShastaRisc0Network\""),
+            (PipelineKey::SgxRemote, "\"ShastaSgx\""),
+            (PipelineKey::SgxGethRemote, "\"ShastaSgxGeth\""),
+        ] {
+            let encoded = serde_json::to_string(&key).expect("serialize pipeline key");
+            assert_eq!(encoded, expected, "serde name drifted for {key:?}");
+            let decoded: PipelineKey =
+                serde_json::from_str(&encoded).expect("deserialize pipeline key");
+            assert_eq!(decoded, key);
+        }
+    }
+
+    /// `as_str` and `FromStr` must stay mutually inverse, or persisted routes stop resolving.
+    #[test]
+    fn pipeline_key_string_round_trip_is_total() {
+        for key in PipelineKey::ALL {
+            assert_eq!(
+                key.as_str().parse::<PipelineKey>().expect("round trip"),
+                key
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod route_tests {
     use super::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
     use raiko2_primitives::ProofType;
 
     #[test]
     fn pipeline_key_is_the_canonical_route_owner() {
-        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let pipeline_key = PipelineKey::Risc0Network;
         let route = pipeline_key.route();
 
         assert!(pipeline_key.supports_route(route));
@@ -333,19 +398,19 @@ mod route_tests {
     #[test]
     fn sp1_network_route_uses_sp1_pipeline() {
         let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
-        assert!(PipelineKey::ShastaSp1.supports_route(route));
+        assert!(PipelineKey::Sp1Local.supports_route(route));
     }
 
     #[test]
     fn sgx_remote_route_uses_only_sgx_pipeline() {
         let route = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
-        assert!(PipelineKey::ShastaSgx.supports_route(route));
-        assert!(!PipelineKey::ShastaSgxGeth.supports_route(route));
+        assert!(PipelineKey::SgxRemote.supports_route(route));
+        assert!(!PipelineKey::SgxGethRemote.supports_route(route));
         assert_eq!(
             "shasta-sgx-remote"
                 .parse::<PipelineKey>()
                 .expect("parse sgx pipeline key"),
-            PipelineKey::ShastaSgx
+            PipelineKey::SgxRemote
         );
         assert_eq!(
             "sgx/remote"
@@ -366,64 +431,64 @@ mod route_tests {
 
         assert_ne!(sgxgeth, sgx);
         assert_eq!(sgxgeth.to_string(), "sgxgeth/remote");
-        assert_eq!(PipelineKey::ShastaSgxGeth.route(), sgxgeth);
+        assert_eq!(PipelineKey::SgxGethRemote.route(), sgxgeth);
     }
 
     #[test]
     fn pipeline_key_parses_sgx_variants() {
         assert_eq!(
             "shasta-sgx-remote".parse::<PipelineKey>().expect("sgx key"),
-            PipelineKey::ShastaSgx
+            PipelineKey::SgxRemote
         );
         assert_eq!(
             "shasta-sgxgeth-remote"
                 .parse::<PipelineKey>()
                 .expect("sgxgeth key"),
-            PipelineKey::ShastaSgxGeth
+            PipelineKey::SgxGethRemote
         );
     }
 
     #[test]
     fn pipeline_key_owns_proof_type_and_route_identity() {
         let sp1_network = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
-        assert!(PipelineKey::ShastaSp1.supports_route(sp1_network));
-        assert_eq!(PipelineKey::ShastaSp1.proof_type(), ProofType::Sp1);
+        assert!(PipelineKey::Sp1Local.supports_route(sp1_network));
+        assert_eq!(PipelineKey::Sp1Local.proof_type(), ProofType::Sp1);
 
         let sgx_remote = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
-        assert!(PipelineKey::ShastaSgx.supports_route(sgx_remote));
-        assert!(!PipelineKey::ShastaSgxGeth.supports_route(sgx_remote));
+        assert!(PipelineKey::SgxRemote.supports_route(sgx_remote));
+        assert!(!PipelineKey::SgxGethRemote.supports_route(sgx_remote));
         let sgxgeth_remote = PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote);
-        assert!(PipelineKey::ShastaSgxGeth.supports_route(sgxgeth_remote));
-        assert!(!PipelineKey::ShastaSgx.supports_route(sgxgeth_remote));
-        assert_eq!(PipelineKey::ShastaSgx.proof_type(), ProofType::Sgx);
-        assert_eq!(PipelineKey::ShastaSgxGeth.proof_type(), ProofType::SgxGeth);
-        assert!(!PipelineKey::ShastaNative.supports_route(sp1_network));
+        assert!(PipelineKey::SgxGethRemote.supports_route(sgxgeth_remote));
+        assert!(!PipelineKey::SgxRemote.supports_route(sgxgeth_remote));
+        assert_eq!(PipelineKey::SgxRemote.proof_type(), ProofType::Sgx);
+        assert_eq!(PipelineKey::SgxGethRemote.proof_type(), ProofType::SgxGeth);
+        assert!(!PipelineKey::NativeLocal.supports_route(sp1_network));
     }
 
     #[test]
     fn persisted_route_compatibility_is_limited_to_legacy_sgxgeth() {
         let legacy_sgxgeth = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
-        let canonical_sgxgeth = PipelineKey::ShastaSgxGeth.route();
+        let canonical_sgxgeth = PipelineKey::SgxGethRemote.route();
         let sp1_network = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
 
         assert_eq!(
-            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(canonical_sgxgeth),
+            PipelineKey::SgxGethRemote.canonicalize_persisted_route(canonical_sgxgeth),
             Some(canonical_sgxgeth)
         );
         assert_eq!(
-            PipelineKey::ShastaSp1.canonicalize_persisted_route(sp1_network),
+            PipelineKey::Sp1Local.canonicalize_persisted_route(sp1_network),
             Some(sp1_network)
         );
         assert_eq!(
-            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(legacy_sgxgeth),
+            PipelineKey::SgxGethRemote.canonicalize_persisted_route(legacy_sgxgeth),
             Some(canonical_sgxgeth)
         );
         assert_eq!(
-            PipelineKey::ShastaSgx.canonicalize_persisted_route(canonical_sgxgeth),
+            PipelineKey::SgxRemote.canonicalize_persisted_route(canonical_sgxgeth),
             None
         );
         assert_eq!(
-            PipelineKey::ShastaSgxGeth.canonicalize_persisted_route(PipelineRoute::new(
+            PipelineKey::SgxGethRemote.canonicalize_persisted_route(PipelineRoute::new(
                 GuestSystem::Risc0,
                 RunnerKind::Local,
             )),
@@ -588,11 +653,11 @@ impl ProverBackend for ShastaElfBackend {
 
 /// RISC0 backend for Shasta guest programs.
 #[derive(Debug, Clone)]
-pub struct Risc0ShastaBackend {
+pub struct Risc0ProposalBackend {
     elf_backend: ShastaElfBackend,
 }
 
-impl Risc0ShastaBackend {
+impl Risc0ProposalBackend {
     #[must_use]
     pub const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
@@ -605,7 +670,7 @@ impl Risc0ShastaBackend {
     }
 }
 
-impl ProverBackend for Risc0ShastaBackend {
+impl ProverBackend for Risc0ProposalBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
     }
@@ -613,13 +678,13 @@ impl ProverBackend for Risc0ShastaBackend {
 
 /// SP1 backend for Shasta guest programs.
 #[derive(Debug, Clone)]
-pub struct Sp1ShastaBackend {
+pub struct Sp1ProposalBackend {
     elf_backend: ShastaElfBackend,
     proposal_vk: Arc<[u8]>,
     aggregation_vk: Arc<[u8]>,
 }
 
-impl Sp1ShastaBackend {
+impl Sp1ProposalBackend {
     #[must_use]
     pub const fn new(
         proposal_elf: Arc<[u8]>,
@@ -635,7 +700,7 @@ impl Sp1ShastaBackend {
     }
 }
 
-impl ProverBackend for Sp1ShastaBackend {
+impl ProverBackend for Sp1ProposalBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
     }

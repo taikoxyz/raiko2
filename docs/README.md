@@ -21,8 +21,8 @@ This directory contains the contributor- and operator-facing documentation for `
 - Read [architecture.md](architecture.md) for component boundaries, runtime lifecycle fencing, proof
   publication, cancellation, recovery, and readiness flows.
 - Read [API.md](API.md) for request, response, and task lifecycle semantics.
-- Read [precompile-status.md](precompile-status.md) when you need the current Shasta precompile
-  activation and guest hook coverage.
+- Read [precompile-status.md](precompile-status.md) when you need Shasta precompile activation and
+  guest hook coverage. It documents Shasta only; Unzen maps to a later EVM spec and is not covered.
 - Read [development.md](development.md) for local workflows, fixture testing, guest builds, and benchmarking.
 - Read [operations.md](operations.md) for runtime configuration, Docker, and image publishing.
 - Read [gaiko2-remote-prover-integration.md](gaiko2-remote-prover-integration.md) when updating

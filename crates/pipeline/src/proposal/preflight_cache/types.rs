@@ -56,7 +56,7 @@ pub struct CanonicalStatelessInputV1 {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct CanonicalShastaManifestV1 {
+pub struct CanonicalProposalManifestV1 {
     pub proposal_id: u64,
     #[serde(with = "header_bincode_compat")]
     pub l1_header: Header,
@@ -68,8 +68,8 @@ pub struct CanonicalShastaManifestV1 {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct CanonicalShastaPreflightV1 {
-    pub manifest: CanonicalShastaManifestV1,
+pub struct CanonicalProposalPreflightV1 {
+    pub manifest: CanonicalProposalManifestV1,
     pub witnesses: Vec<CanonicalStatelessInputV1>,
     pub proposal_ancestor_headers: Vec<WitnessHeader>,
     pub proposal_state_nodes: Vec<WitnessStateNode>,
@@ -204,7 +204,7 @@ mod header_vec_bincode_compat {
 #[cfg(test)]
 mod tests {
     use super::{
-        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalShastaPreflightV1,
+        CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightKeyV1, CanonicalProposalPreflightV1,
         chain_rules_fingerprint,
     };
     use alloy_primitives::{Address, B256};
@@ -358,9 +358,9 @@ mod tests {
 
     #[test]
     fn canonical_core_has_stable_binary_roundtrip() {
-        let core = CanonicalShastaPreflightV1::default();
+        let core = CanonicalProposalPreflightV1::default();
         let bytes = bincode::serialize(&core).expect("encode");
-        let decoded: CanonicalShastaPreflightV1 = bincode::deserialize(&bytes).expect("decode");
+        let decoded: CanonicalProposalPreflightV1 = bincode::deserialize(&bytes).expect("decode");
         assert_eq!(bytes, bincode::serialize(&decoded).expect("re-encode"));
     }
 }

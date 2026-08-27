@@ -9,10 +9,10 @@ use raiko2_primitives_shasta::instance::{
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_prover::remote_prover::{
-    adapter::build_shasta_packet,
+    adapter::build_proposal_packet,
     protocol::{
-        RAIKO2_PROOF_RESPONSE_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
-        Raiko2ShastaRequest,
+        RAIKO2_PROOF_RESPONSE_SCHEMA, Raiko2ProofResponse, Raiko2ProposalAggregateRequest,
+        Raiko2ProposalRequest,
     },
 };
 use reqwest::{Client, Url};
@@ -161,27 +161,27 @@ fn shared_guest_input_path() -> PathBuf {
     )
 }
 
-fn proposal_request() -> (Raiko2ShastaRequest, String) {
+fn proposal_request() -> (Raiko2ProposalRequest, String) {
     let raw = fs::read_to_string(shared_guest_input_path()).expect("read shared guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared guest input");
-    let request = build_shasta_packet(&guest_input).expect("build proposal request");
+    let request = build_proposal_packet(&guest_input).expect("build proposal request");
     let body = serde_json::to_string(&request).expect("serialize proposal request");
     (request, body)
 }
 
 fn build_live_aggregate_request(
-    proposal_request: &Raiko2ShastaRequest,
+    proposal_request: &Raiko2ProposalRequest,
     proposal_response: &Raiko2ProofResponse,
-) -> Raiko2ShastaAggregateRequest {
+) -> Raiko2ProposalAggregateRequest {
     let result = proposal_response
         .result
         .as_ref()
         .expect("proposal response result");
     let proof = result.proof.as_ref().expect("proposal response proof");
 
-    Raiko2ShastaAggregateRequest {
+    Raiko2ProposalAggregateRequest {
         schema: "raiko2-shasta-aggregate-request-v1".to_string(),
-        payload: raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregatePayload {
+        payload: raiko2_prover::remote_prover::protocol::Raiko2ProposalAggregatePayload {
             proofs: vec![
                 raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
                     input: result.input.clone(),

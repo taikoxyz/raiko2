@@ -40,13 +40,13 @@ use artifact_store::{
 use artifact_store::{ProofObjectStore, RuntimeStateStore, RuntimeStoreScope};
 use futures::{StreamExt, stream};
 #[cfg(test)]
-use raiko2_pipeline::forks::shasta::preflight_cache::CANONICAL_PREFLIGHT_SCHEMA_V1;
-use raiko2_pipeline::forks::shasta::preflight_cache::{
+use raiko2_pipeline::proposal::preflight_cache::CANONICAL_PREFLIGHT_SCHEMA_V1;
+use raiko2_pipeline::proposal::preflight_cache::{
     CanonicalPreflightDeleteResult, CanonicalPreflightDescriptor, CanonicalPreflightKeyV1,
     CanonicalPreflightObject, CanonicalPreflightPutResult,
 };
 use raiko2_pipeline::{
-    PipelineKey, PipelineRoute, forks::shasta::preflight_cache::CanonicalPreflightStore,
+    PipelineKey, PipelineRoute, proposal::preflight_cache::CanonicalPreflightStore,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -4476,8 +4476,8 @@ mod tests {
     fn task_retention_state_is_process_local_and_accepts_older_removing_snapshots() -> Result<()> {
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: Vec::new(),
@@ -4562,7 +4562,7 @@ mod tests {
 
     #[test]
     fn artifact_state_keys_are_unambiguous() {
-        let pipeline = PipelineKey::ShastaRisc0;
+        let pipeline = PipelineKey::Risc0Local;
         let route = pipeline.route();
         let middle = format!("{}|{route}", pipeline.as_str());
 
@@ -4578,8 +4578,8 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "exact-root-commands".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: Vec::new(),
@@ -4615,8 +4615,8 @@ mod tests {
         let stale = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -4674,8 +4674,8 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "exact-recovery-snapshot".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: Vec::new(),
@@ -4717,8 +4717,8 @@ mod tests {
         let root = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -4780,8 +4780,8 @@ mod tests {
         let stale = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -4816,7 +4816,7 @@ mod tests {
     async fn legacy_sgxgeth_state_loads_without_rekeying_artifacts() -> Result<()> {
         let network_pair = "taiko_dev/taiko_dev_l1";
         let proof_ref = "legacy-sgxgeth-proof";
-        let pipeline_key = PipelineKey::ShastaSgxGeth;
+        let pipeline_key = PipelineKey::SgxGethRemote;
         let legacy_route = "sgx/remote"
             .parse::<PipelineRoute>()
             .expect("parse legacy SGXGETH route");
@@ -4942,7 +4942,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_sgxgeth_registrations_reject_legacy_route() -> Result<()> {
-        let pipeline_key = PipelineKey::ShastaSgxGeth;
+        let pipeline_key = PipelineKey::SgxGethRemote;
         let legacy_route = "sgx/remote"
             .parse::<PipelineRoute>()
             .expect("parse legacy SGXGETH route");
@@ -4985,8 +4985,8 @@ mod tests {
     fn persisted_route_compatibility_rejects_other_mismatches() -> Result<()> {
         let mut task = build_task_record(&TaskRegistration {
             task_id: "mismatched-sgxgeth-root".into(),
-            pipeline_key: PipelineKey::ShastaSgxGeth,
-            route: PipelineKey::ShastaSgxGeth.route(),
+            pipeline_key: PipelineKey::SgxGethRemote,
+            route: PipelineKey::SgxGethRemote.route(),
             task_kind: "proposal".into(),
             network_pair: "taiko_dev/taiko_dev_l1".into(),
             artifact_refs: Vec::new(),
@@ -5011,8 +5011,8 @@ mod tests {
     async fn superseded_runtime_state_schema_fails_closed() -> Result<()> {
         let record = build_task_record(&TaskRegistration {
             task_id: "legacy-root".into(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            route: PipelineKey::ShastaRisc0Network.route(),
+            pipeline_key: PipelineKey::Risc0Network,
+            route: PipelineKey::Risc0Network.route(),
             task_kind: "aggregate".into(),
             network_pair: "taiko_dev/taiko_dev_l1".into(),
             artifact_refs: vec!["legacy-proof".into()],
@@ -5023,8 +5023,8 @@ mod tests {
             environment: "test".into(),
             network_pair: "taiko_dev/taiko_dev_l1".into(),
             proof_ref: "legacy-proof".into(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            route: PipelineKey::ShastaRisc0Network.route(),
+            pipeline_key: PipelineKey::Risc0Network,
+            route: PipelineKey::Risc0Network.route(),
             proof_uri: "memory://legacy-proof".into(),
             content_hash: "legacy-hash".into(),
             generation: None,
@@ -5034,8 +5034,8 @@ mod tests {
         })?;
         let legacy_artifact_key = artifact_record_key(
             "taiko_dev/taiko_dev_l1",
-            PipelineKey::ShastaRisc0Network,
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network,
+            PipelineKey::Risc0Network.route(),
             "legacy-proof",
         );
         let current_state = serde_json::json!({
@@ -5334,8 +5334,8 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "one".into())?;
         let registration = TaskRegistration {
             task_id: "task-a".into(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: Vec::new(),
@@ -5377,8 +5377,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
-                pipeline_key: PipelineKey::ShastaSp1,
-                route: PipelineKey::ShastaSp1.route(),
+                pipeline_key: PipelineKey::Sp1Local,
+                route: PipelineKey::Sp1Local.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -5451,8 +5451,8 @@ mod tests {
                 runtime
                     .publish_proof_artifact_bytes(
                         "l1-l2",
-                        PipelineKey::ShastaSp1,
-                        PipelineKey::ShastaSp1.route(),
+                        PipelineKey::Sp1Local,
+                        PipelineKey::Sp1Local.route(),
                         "proof",
                         b"proof",
                     )
@@ -5483,7 +5483,7 @@ mod tests {
         let store = Arc::new(RuntimeStateProbeStore::new("artifact-lock-scope")?);
         store.block_next_artifact_put.store(true, Ordering::SeqCst);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let blocked_ref = "blocked-proof";
         let independent_ref = "independent-proof";
@@ -5522,8 +5522,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
-                pipeline_key: PipelineKey::ShastaSp1,
-                route: PipelineKey::ShastaSp1.route(),
+                pipeline_key: PipelineKey::Sp1Local,
+                route: PipelineKey::Sp1Local.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -5591,8 +5591,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "checkpoint-root".into(),
-                pipeline_key: PipelineKey::ShastaSp1,
-                route: PipelineKey::ShastaSp1.route(),
+                pipeline_key: PipelineKey::Sp1Local,
+                route: PipelineKey::Sp1Local.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -5648,8 +5648,8 @@ mod tests {
         let registration = |proof_ref: &str, generation: i64| ProofArtifactRegistration {
             network_pair: "l1-l2".into(),
             proof_ref: proof_ref.into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             proof_uri: format!("memory://{proof_ref}"),
             content_hash: format!("hash-{proof_ref}"),
             generation: Some(generation),
@@ -5657,8 +5657,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaSp1,
-                route: PipelineKey::ShastaSp1.route(),
+                pipeline_key: PipelineKey::Sp1Local,
+                route: PipelineKey::Sp1Local.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: vec!["pending".into()],
@@ -5680,8 +5680,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "pending",
                     &[owner],
                     b"pending-proof",
@@ -5705,8 +5705,8 @@ mod tests {
         let before_raw = runtime
             .get_pending_proof_publication(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "pending",
             )
             .await?;
@@ -5750,8 +5750,8 @@ mod tests {
                 .update_tasks_and_invalidate_artifact(
                     "pending",
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     |_| Ok(((), true)),
                 )
                 .await
@@ -5761,8 +5761,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "pending",
                     &[owner],
                     b"pending-proof",
@@ -5774,8 +5774,8 @@ mod tests {
             runtime
                 .release_pending_proof_publication_owner(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "pending",
                     owner,
                 )
@@ -5791,8 +5791,8 @@ mod tests {
             runtime
                 .get_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "pending",
                 )
                 .await?,
@@ -5823,8 +5823,8 @@ mod tests {
                 .update_tasks_and_invalidate_artifact(
                     "pending",
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     |_| Ok(((), true)),
                 )
                 .await
@@ -5845,8 +5845,8 @@ mod tests {
         runtime
             .upsert_pending_proof_publication(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "proposal-1",
                 b"proof",
             )
@@ -5865,8 +5865,8 @@ mod tests {
         let error = runtime
             .register_task(TaskRegistration {
                 task_id: "conflicting-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -5893,8 +5893,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "committed-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -5918,8 +5918,8 @@ mod tests {
         let runtime = RuntimeManager::with_store(store.clone());
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: Vec::new(),
@@ -5965,8 +5965,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "committed-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -5992,8 +5992,8 @@ mod tests {
         let error = runtime
             .register_task(TaskRegistration {
                 task_id: "must-not-commit".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -6019,8 +6019,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "retryable-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -6046,8 +6046,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -6146,8 +6146,8 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -6167,8 +6167,8 @@ mod tests {
         let record = runtime
             .register_task(TaskRegistration {
                 task_id: task_id.into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: artifact_refs.iter().map(|value| (*value).into()).collect(),
@@ -6193,7 +6193,7 @@ mod tests {
         runtime: &RuntimeManager,
         proof_ref: &str,
     ) -> Result<ProofArtifactRecord> {
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let object = runtime
             .publish_proof_artifact_bytes(
@@ -6250,8 +6250,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "terminal-proof",
                 )
                 .await?
@@ -6310,8 +6310,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "failed-proof",
                     &[owner.incarnation_id],
                     b"failed-proof-bytes",
@@ -6354,8 +6354,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "referenced-proof",
                     &[owner.incarnation_id],
                     b"referenced-proof-bytes",
@@ -6425,14 +6425,14 @@ mod tests {
                 state.pending_publications.insert(
                     artifact_record_key(
                         "l1-l2",
-                        PipelineKey::ShastaNative,
-                        PipelineKey::ShastaNative.route(),
+                        PipelineKey::NativeLocal,
+                        PipelineKey::NativeLocal.route(),
                         "shared-proof",
                     ),
                     PendingProofPublicationRecord {
                         network_pair: "l1-l2".into(),
-                        pipeline_key: PipelineKey::ShastaNative,
-                        route: PipelineKey::ShastaNative.route(),
+                        pipeline_key: PipelineKey::NativeLocal,
+                        route: PipelineKey::NativeLocal.route(),
                         proof_ref: "shared-proof".into(),
                         content_hash: "shared-pending".into(),
                         owner_incarnations: vec![expired.incarnation_id, active.incarnation_id],
@@ -6473,8 +6473,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "orphan-proof",
                 )
                 .await?
@@ -6486,8 +6486,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "shared-proof",
                 )
                 .await?
@@ -6565,8 +6565,8 @@ mod tests {
         register_retention_artifact(&runtime, "second-proof").await?;
         let pending_key = artifact_record_key(
             "l1-l2",
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
             "second-proof",
         );
         runtime
@@ -6575,8 +6575,8 @@ mod tests {
                     pending_key.clone(),
                     PendingProofPublicationRecord {
                         network_pair: "l1-l2".into(),
-                        pipeline_key: PipelineKey::ShastaNative,
-                        route: PipelineKey::ShastaNative.route(),
+                        pipeline_key: PipelineKey::NativeLocal,
+                        route: PipelineKey::NativeLocal.route(),
                         proof_ref: "second-proof".into(),
                         content_hash: "pending-content".into(),
                         owner_incarnations: vec![second.incarnation_id],
@@ -6648,8 +6648,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                     &[running.incarnation_id],
                     b"pending-proof-bytes",
@@ -6694,8 +6694,8 @@ mod tests {
             runtime
                 .get_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                 )
                 .await?
@@ -6710,7 +6710,7 @@ mod tests {
     {
         let store = Arc::new(RuntimeStateProbeStore::new("pending-delete-adoption")?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "pending-proof";
         let old_owner = register_retention_task(
@@ -6850,8 +6850,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "legacy-proof",
                 )
                 .await?
@@ -6877,8 +6877,8 @@ mod tests {
         let invalidated = runtime
             .get_proof_artifact_including_invalidated(
                 "l1-l2",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 "orphan-proof",
             )
             .await?
@@ -7035,8 +7035,8 @@ mod tests {
         runtime
             .publish_proof_artifact_bytes(
                 "l1-l2",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 "pending-proof",
                 b"pending-proof-bytes",
             )
@@ -7047,8 +7047,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                     &[owner.incarnation_id],
                     b"pending-proof-bytes",
@@ -7081,8 +7081,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                 )
                 .await?
@@ -7092,8 +7092,8 @@ mod tests {
             runtime
                 .get_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                 )
                 .await?
@@ -7127,8 +7127,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                     &[owner.incarnation_id],
                     b"pending-proof",
@@ -7157,8 +7157,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                 )
                 .await?
@@ -7186,8 +7186,8 @@ mod tests {
         runtime
             .publish_proof_artifact_bytes(
                 "l1-l2",
-                PipelineKey::ShastaNative,
-                PipelineKey::ShastaNative.route(),
+                PipelineKey::NativeLocal,
+                PipelineKey::NativeLocal.route(),
                 "pending-proof",
                 b"changed-canonical-proof",
             )
@@ -7198,8 +7198,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                     &[owner.incarnation_id],
                     b"stale-pending-proof",
@@ -7242,8 +7242,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "live-proof",
                     &[owner.incarnation_id],
                     b"live-proof-bytes",
@@ -7276,8 +7276,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "shared-proof",
                     &[old_owner.incarnation_id],
                     b"old-proof-bytes",
@@ -7310,8 +7310,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "shared-proof",
                     &[new_owner.incarnation_id],
                     b"new-proof-bytes",
@@ -7331,8 +7331,8 @@ mod tests {
             runtime
                 .get_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "shared-proof",
                 )
                 .await?
@@ -7360,8 +7360,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaNative,
-                    PipelineKey::ShastaNative.route(),
+                    PipelineKey::NativeLocal,
+                    PipelineKey::NativeLocal.route(),
                     "pending-proof",
                     &[owner.incarnation_id],
                     b"old-pending-proof",
@@ -7421,8 +7421,8 @@ mod tests {
         register_retention_artifact(&runtime, "stats-proof").await?;
         let pending_key = artifact_record_key(
             "l1-l2",
-            PipelineKey::ShastaNative,
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal,
+            PipelineKey::NativeLocal.route(),
             "stats-proof",
         );
         runtime
@@ -7431,8 +7431,8 @@ mod tests {
                     pending_key.clone(),
                     PendingProofPublicationRecord {
                         network_pair: "l1-l2".into(),
-                        pipeline_key: PipelineKey::ShastaNative,
-                        route: PipelineKey::ShastaNative.route(),
+                        pipeline_key: PipelineKey::NativeLocal,
+                        route: PipelineKey::NativeLocal.route(),
                         proof_ref: "stats-proof".into(),
                         content_hash: "stats-pending".into(),
                         owner_incarnations: vec![task.incarnation_id],
@@ -7457,7 +7457,7 @@ mod tests {
         runtime: &RuntimeManager,
         proof_ref: &str,
     ) -> Result<ProofArtifactPrecondition> {
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let object = runtime
             .publish_proof_artifact_bytes(
@@ -7501,8 +7501,8 @@ mod tests {
         first
             .register_task(TaskRegistration {
                 task_id: "task-a".into(),
-                pipeline_key: PipelineKey::ShastaSp1,
-                route: PipelineKey::ShastaSp1.route(),
+                pipeline_key: PipelineKey::Sp1Local,
+                route: PipelineKey::Sp1Local.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -7515,8 +7515,8 @@ mod tests {
         first
             .upsert_pending_proof_publication(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "proposal-1",
                 proof,
             )
@@ -7539,8 +7539,8 @@ mod tests {
             recovered
                 .get_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                 )
                 .await?,
@@ -7558,8 +7558,8 @@ mod tests {
         let current = ProofArtifactRegistration {
             network_pair: "l1-l2".into(),
             proof_ref: "proposal-1".into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             proof_uri: "memory://generation-2".into(),
             content_hash: "hash-2".into(),
             generation: Some(2),
@@ -7604,8 +7604,8 @@ mod tests {
         let publication = first
             .publish_proof_artifact_bytes(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "proposal-1",
                 b"proof",
             )
@@ -7616,8 +7616,8 @@ mod tests {
         let registration = ProofArtifactRegistration {
             network_pair: "l1-l2".into(),
             proof_ref: "proposal-1".into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             proof_uri: object.proof_uri.clone(),
             content_hash: object.content_hash.clone(),
             generation: object.generation,
@@ -7694,7 +7694,7 @@ mod tests {
             "concurrent-artifact-reconciliation",
         )?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         for proof_ref in ["proof-a", "proof-b"] {
             let object = runtime
@@ -7758,7 +7758,7 @@ mod tests {
             1,
         )
         .await?;
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let proof = b"identical-proof";
         let old = first
@@ -7888,7 +7888,7 @@ mod tests {
             "restart-retention-refresh".into(),
         )?);
         let first = RuntimeManager::with_store(store.clone());
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let proof_ref = "orphan-proof";
         let old = first
@@ -7988,8 +7988,8 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "outbox-incarnation".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: vec!["proposal-1".into()],
@@ -8006,8 +8006,8 @@ mod tests {
         runtime
             .upsert_pending_proof_publication(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "proposal-1",
                 b"orphaned-proof-from-crashed-owner",
             )
@@ -8016,8 +8016,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                     &[first.incarnation_id],
                     b"proof",
@@ -8035,8 +8035,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                     &[second.incarnation_id],
                     b"proof",
@@ -8048,8 +8048,8 @@ mod tests {
             !runtime
                 .remove_pending_proof_publication_if_unowned(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                 )
                 .await?
@@ -8058,8 +8058,8 @@ mod tests {
             !runtime
                 .invalidate_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                 )
                 .await?
@@ -8067,8 +8067,8 @@ mod tests {
         let pending = runtime
             .get_recoverable_pending_proof_publication(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "proposal-1",
             )
             .await?
@@ -8081,7 +8081,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_root_does_not_own_the_previous_incarnations_publication() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "replacement-outbox".into())?;
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let registration = TaskRegistration {
@@ -8148,7 +8148,7 @@ mod tests {
     #[tokio::test]
     async fn pending_owner_is_bound_to_the_full_artifact_identity() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "pending-owner-identity".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "shared-ref";
         let root = runtime
@@ -8180,8 +8180,8 @@ mod tests {
             !runtime
                 .checkpoint_pending_proof_publication(
                     "network-a",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     proof_ref,
                     &[root.incarnation_id],
                     b"proof",
@@ -8193,7 +8193,7 @@ mod tests {
                 .checkpoint_pending_proof_publication(
                     "network-a",
                     pipeline,
-                    PipelineKey::ShastaRisc0.route(),
+                    PipelineKey::Risc0Local.route(),
                     proof_ref,
                     &[root.incarnation_id],
                     b"proof",
@@ -8218,7 +8218,7 @@ mod tests {
     #[tokio::test]
     async fn active_artifact_publication_requires_a_durable_task_owner() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "active-owner".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "external-input-0";
 
@@ -8248,7 +8248,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_task_cannot_publish_active_input_artifacts() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "terminal-input-owner".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
 
         let failed = match runtime
@@ -8325,7 +8325,7 @@ mod tests {
     #[tokio::test]
     async fn activation_rechecks_pending_owner_liveness() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "activation-owner-fence".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let root = runtime
@@ -8416,7 +8416,7 @@ mod tests {
     #[tokio::test]
     async fn activation_accepts_a_distinct_owner_added_after_checkpoint() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "activation-owner-refresh".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let first = runtime
@@ -8503,7 +8503,7 @@ mod tests {
             "cancel-during-active-publication",
         )?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "external-input-0";
         let owner = runtime
@@ -8587,7 +8587,7 @@ mod tests {
             "canonical-publication-invalidation",
         )?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-publication";
         let proof = br#"{"proof":"0x01"}"#;
@@ -8667,7 +8667,7 @@ mod tests {
             "retention-finalization-republication",
         )?);
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-republication";
         let proof = br#"{"proof":"0x01"}"#;
@@ -8792,7 +8792,7 @@ mod tests {
     #[tokio::test]
     async fn active_artifact_publication_rejects_different_bytes() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "active-conflict".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "external-input-0";
         let owner = match runtime
@@ -8867,7 +8867,7 @@ mod tests {
     #[tokio::test]
     async fn active_canonical_artifact_satisfies_a_conflicting_checkpoint() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "active-conflict-reuse".into())?;
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "proposal-conflict";
         let root = runtime
@@ -8969,7 +8969,7 @@ mod tests {
     #[tokio::test]
     async fn task_ref_lookup_includes_external_aggregate_inputs() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "aggregate-input-lookup".into())?;
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let proof_ref = "external-input-0";
         runtime
             .register_task(TaskRegistration {
@@ -9000,7 +9000,7 @@ mod tests {
             "pending-hash-mismatch".into(),
         )?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let proof_ref = "external-input-0";
         let owner = runtime
@@ -9049,7 +9049,7 @@ mod tests {
     #[tokio::test]
     async fn invalidation_owner_scope_uses_full_artifact_identity() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "artifact-owner-scope".into())?;
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "shared-proof-ref";
         let object = runtime
@@ -9134,8 +9134,8 @@ mod tests {
         )?);
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: vec!["proposal-1".into()],
@@ -9151,8 +9151,8 @@ mod tests {
             first
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                     &[first_owner],
                     b"first-proof",
@@ -9176,8 +9176,8 @@ mod tests {
             replacement
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                     &[replacement_owner],
                     b"different-replacement-proof",
@@ -9187,8 +9187,8 @@ mod tests {
         let pending = replacement
             .get_recoverable_pending_proof_publication(
                 "l1-l2",
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSp1.route(),
+                PipelineKey::Sp1Local,
+                PipelineKey::Sp1Local.route(),
                 "proposal-1",
             )
             .await?
@@ -9203,8 +9203,8 @@ mod tests {
         let runtime = RuntimeManager::new_memory("test".into(), "remove-incarnation".into())?;
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: Vec::new(),
@@ -9237,7 +9237,7 @@ mod tests {
     async fn pending_outbox_state_failure_does_not_create_an_untracked_object() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("pending-state-failure")?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let owner = runtime
@@ -9291,7 +9291,7 @@ mod tests {
     async fn pending_outbox_object_failure_keeps_its_durable_intent() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("pending-object-failure")?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let owner = runtime
@@ -9355,7 +9355,7 @@ mod tests {
     #[tokio::test]
     async fn materialized_live_outbox_is_first_write_wins() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "pending-first-write".into())?;
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let owner = runtime
@@ -9408,7 +9408,7 @@ mod tests {
     #[tokio::test]
     async fn same_content_checkpoints_merge_live_owners() -> Result<()> {
         let runtime = RuntimeManager::new_memory("test".into(), "pending-owner-merge".into())?;
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let mut owners = Vec::new();
@@ -9460,7 +9460,7 @@ mod tests {
     async fn unmaterialized_live_intent_is_first_write_wins() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("pending-intent-first-write")?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let owner = runtime
@@ -9525,7 +9525,7 @@ mod tests {
     async fn pending_outbox_delete_failure_remains_recoverable_after_restart() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("pending-delete-recovery")?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let proof_ref = "proposal-1";
         let owner = runtime
@@ -9597,7 +9597,7 @@ mod tests {
     async fn restart_deletes_a_cancelled_unregistered_canonical_publication() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("cancelled-canonical-recovery")?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let network_pair = "l1-l2";
         let proof_ref = "proposal-1";
@@ -9663,7 +9663,7 @@ mod tests {
             "dangling-publication-recovery",
         )?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let network_pair = "l1-l2";
         let proof_ref = "proposal-dangling";
@@ -9730,7 +9730,7 @@ mod tests {
     async fn activated_outbox_is_retained_until_object_cleanup_succeeds() -> Result<()> {
         let store = Arc::new(RuntimeStateProbeStore::new("activated-pending-delete")?);
         let runtime = RuntimeManager::with_store(store.clone());
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
         let network_pair = "l1-l2";
         let proof_ref = "proposal-1";
@@ -9827,8 +9827,8 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let registration = TaskRegistration {
             task_id: "root".into(),
-            pipeline_key: PipelineKey::ShastaSp1,
-            route: PipelineKey::ShastaSp1.route(),
+            pipeline_key: PipelineKey::Sp1Local,
+            route: PipelineKey::Sp1Local.route(),
             task_kind: "proposal".into(),
             network_pair: "l1-l2".into(),
             artifact_refs: vec!["proposal-1".into()],
@@ -9848,8 +9848,8 @@ mod tests {
                 runtime
                     .checkpoint_pending_proof_publication(
                         "l1-l2",
-                        PipelineKey::ShastaSp1,
-                        PipelineKey::ShastaSp1.route(),
+                        PipelineKey::Sp1Local,
+                        PipelineKey::Sp1Local.route(),
                         "proposal-1",
                         &[owner],
                         b"late-proof",
@@ -9865,8 +9865,8 @@ mod tests {
                 runtime
                     .remove_pending_proof_publication_if_unowned(
                         "l1-l2",
-                        PipelineKey::ShastaSp1,
-                        PipelineKey::ShastaSp1.route(),
+                        PipelineKey::Sp1Local,
+                        PipelineKey::Sp1Local.route(),
                         "proposal-1",
                     )
                     .await
@@ -9881,8 +9881,8 @@ mod tests {
             runtime
                 .get_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                 )
                 .await?
@@ -9900,8 +9900,8 @@ mod tests {
             runtime
                 .checkpoint_pending_proof_publication(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "proposal-1",
                     &[replacement],
                     b"replacement-proof",

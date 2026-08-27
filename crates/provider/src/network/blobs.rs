@@ -121,7 +121,7 @@ impl NetworkProvider {
         Ok(payload.data)
     }
 
-    pub(crate) async fn fetch_shasta_data_sources(
+    pub(crate) async fn fetch_proposal_data_sources(
         &self,
         l1_chain_spec: &ChainSpec,
         proposal_event: &ShastaEventData,

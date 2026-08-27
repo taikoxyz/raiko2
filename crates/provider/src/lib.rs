@@ -75,7 +75,7 @@ pub trait Provider: Send + Sync {
 
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;
 
-    async fn shasta_proposal_event(
+    async fn proposal_event(
         &self,
         _l1_contract: Address,
         _l1_inclusion_block_number: u64,
@@ -86,7 +86,7 @@ pub trait Provider: Send + Sync {
         ))
     }
 
-    async fn shasta_data_sources(
+    async fn proposal_data_sources(
         &self,
         _l1_chain_spec: &ChainSpec,
         _proposal_event: &ShastaEventData,

@@ -67,7 +67,7 @@ blob sidecars and stores raw blob bytes plus commitments/proofs into the manifes
 
 Relevant code:
 
-- `crates/pipeline/src/forks/shasta/spec.rs:147`
+- `crates/pipeline/src/proposal/spec.rs:147`
 - `crates/provider/src/network/blobs.rs:125`
 
 For `sp1` and `risc0`, the manifest resolves `blob_proof_type` to
@@ -75,7 +75,7 @@ For `sp1` and `risc0`, the manifest resolves `blob_proof_type` to
 
 Relevant code:
 
-- `crates/pipeline/src/forks/shasta/manifest.rs:105`
+- `crates/pipeline/src/proposal/manifest.rs:105`
 
 ### Guest Executes The Full Blob -> Txlist Derivation
 

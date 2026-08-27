@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, PipelineRoute,
-    forks::shasta::{ShastaSpec, preflight_cache::PreflightCoordinator},
+    proposal::{ProposalSpec, preflight_cache::PreflightCoordinator},
 };
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
@@ -35,13 +35,11 @@ use tracing::warn;
 const SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "local-provers")]
-use raiko2_pipeline::forks::shasta::{ShastaBackends, load_shasta_backends};
+use raiko2_pipeline::proposal::{ProposalBackends, load_proposal_backends};
 #[cfg(all(feature = "host", not(feature = "local-provers")))]
-use raiko2_pipeline::forks::shasta::{
-    load_risc0_boundless_shasta_backend, load_sp1_shasta_backend,
-};
+use raiko2_pipeline::proposal::{load_risc0_boundless_proposal_backend, load_sp1_proposal_backend};
 #[cfg(feature = "host")]
-use raiko2_pipeline::{Risc0ShastaBackend, Sp1ShastaBackend};
+use raiko2_pipeline::{Risc0ProposalBackend, Sp1ProposalBackend};
 #[cfg(feature = "local-provers")]
 use raiko2_prover::risc0::Risc0Prover;
 #[cfg(feature = "host")]
@@ -51,13 +49,13 @@ use raiko2_prover::{
 };
 
 #[cfg(feature = "local-provers")]
-type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
+type Risc0Spec = ProposalSpec<Risc0Prover, Risc0ProposalBackend, NetworkProvider>;
 #[cfg(feature = "host")]
-type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
-type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
-type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
+type Sp1Spec = ProposalSpec<Sp1Prover, Sp1ProposalBackend, NetworkProvider>;
+type NativeSpec = ProposalSpec<NativeProver, NativeBackend, NetworkProvider>;
+type Gaiko2Spec = ProposalSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
 #[cfg(feature = "host")]
-type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
+type BoundlessSpec = ProposalSpec<BoundlessProver, Risc0ProposalBackend, NetworkProvider>;
 
 use super::lifecycle::ProofLifecycle;
 use super::sampling::ZkAnySampler;
@@ -145,12 +143,12 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
         .iter_routes()
         .map(|(proof_type, runner)| {
             let pipeline_key = match (proof_type, runner) {
-                (ProofType::Risc0, RunnerKind::Local) => PipelineKey::ShastaRisc0,
-                (ProofType::Risc0, RunnerKind::Network) => PipelineKey::ShastaRisc0Network,
-                (ProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => PipelineKey::ShastaSp1,
-                (ProofType::Native, RunnerKind::Local) => PipelineKey::ShastaNative,
-                (ProofType::Sgx, RunnerKind::Remote) => PipelineKey::ShastaSgx,
-                (ProofType::SgxGeth, RunnerKind::Remote) => PipelineKey::ShastaSgxGeth,
+                (ProofType::Risc0, RunnerKind::Local) => PipelineKey::Risc0Local,
+                (ProofType::Risc0, RunnerKind::Network) => PipelineKey::Risc0Network,
+                (ProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => PipelineKey::Sp1Local,
+                (ProofType::Native, RunnerKind::Local) => PipelineKey::NativeLocal,
+                (ProofType::Sgx, RunnerKind::Remote) => PipelineKey::SgxRemote,
+                (ProofType::SgxGeth, RunnerKind::Remote) => PipelineKey::SgxGethRemote,
                 _ => unreachable!("prover routes are validated before pipeline registration"),
             };
             let remote_url = match proof_type {
@@ -289,11 +287,11 @@ async fn restored_boundless_account_blockers(
 
 struct PipelineResources {
     #[cfg(feature = "local-provers")]
-    shasta_backends: Option<ShastaBackends>,
+    shasta_backends: Option<ProposalBackends>,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    boundless_backend: Option<Risc0ShastaBackend>,
+    boundless_backend: Option<Risc0ProposalBackend>,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    sp1_backend: Option<Sp1ShastaBackend>,
+    sp1_backend: Option<Sp1ProposalBackend>,
     #[cfg(feature = "host")]
     sp1_prover: Option<Sp1Prover>,
     #[cfg(feature = "host")]
@@ -314,35 +312,35 @@ impl PipelineResources {
         let shasta_backends = if pipelines.iter().any(|registration| {
             matches!(
                 registration.pipeline_key,
-                PipelineKey::ShastaRisc0 | PipelineKey::ShastaRisc0Network | PipelineKey::ShastaSp1
+                PipelineKey::Risc0Local | PipelineKey::Risc0Network | PipelineKey::Sp1Local
             )
         }) {
-            Some(load_shasta_backends().map_err(anyhow::Error::msg)?)
+            Some(load_proposal_backends().map_err(anyhow::Error::msg)?)
         } else {
             None
         };
         #[cfg(all(feature = "host", not(feature = "local-provers")))]
         let boundless_backend = if pipelines
             .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network)
+            .any(|registration| registration.pipeline_key == PipelineKey::Risc0Network)
         {
-            Some(load_risc0_boundless_shasta_backend().map_err(anyhow::Error::msg)?)
+            Some(load_risc0_boundless_proposal_backend().map_err(anyhow::Error::msg)?)
         } else {
             None
         };
         #[cfg(all(feature = "host", not(feature = "local-provers")))]
         let sp1_backend = if pipelines
             .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaSp1)
+            .any(|registration| registration.pipeline_key == PipelineKey::Sp1Local)
         {
-            Some(load_sp1_shasta_backend().map_err(anyhow::Error::msg)?)
+            Some(load_sp1_proposal_backend().map_err(anyhow::Error::msg)?)
         } else {
             None
         };
         #[cfg(feature = "host")]
         let sp1_prover = if pipelines
             .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaSp1)
+            .any(|registration| registration.pipeline_key == PipelineKey::Sp1Local)
         {
             let sp1_config = setup::sp1_prover_config(config);
             #[cfg(feature = "local-provers")]
@@ -378,7 +376,7 @@ impl PipelineResources {
         #[cfg(feature = "host")]
         let boundless_enabled = pipelines
             .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
+            .any(|registration| registration.pipeline_key == PipelineKey::Risc0Network);
         #[cfg(feature = "host")]
         if boundless_enabled {
             BoundlessProver::validate_storage_configuration().map_err(anyhow::Error::msg)?;
@@ -463,7 +461,7 @@ impl AppState {
         let resolved_pairs = config.rpc.resolved_pairs()?;
         let boundless_enabled = pipeline_registrations
             .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
+            .any(|registration| registration.pipeline_key == PipelineKey::Risc0Network);
         let boundless_account_blockers = if boundless_enabled {
             restored_boundless_account_blockers(&runtime).await?
         } else {
@@ -595,11 +593,11 @@ struct PairPipelineRegistration<'a> {
     #[cfg(feature = "host")]
     boundless_balance_gate: Option<BoundlessBalanceGate>,
     #[cfg(feature = "local-provers")]
-    shasta_backends: Option<&'a ShastaBackends>,
+    shasta_backends: Option<&'a ProposalBackends>,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    boundless_backend: Option<&'a Risc0ShastaBackend>,
+    boundless_backend: Option<&'a Risc0ProposalBackend>,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    sp1_backend: Option<&'a Sp1ShastaBackend>,
+    sp1_backend: Option<&'a Sp1ProposalBackend>,
     #[cfg(feature = "host")]
     sp1_prover: Option<Sp1Prover>,
     scheduler_config: SchedulerConfig,
@@ -757,7 +755,7 @@ fn register_pair_pipelines(
 fn build_risc0_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
-    backend: Risc0ShastaBackend,
+    backend: Risc0ProposalBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     preflight_coordinator: Option<Arc<PreflightCoordinator>>,
@@ -766,8 +764,8 @@ fn build_risc0_engine(
 
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Risc0)?;
-    let spec = ShastaSpec::new(
-        PipelineKey::ShastaRisc0,
+    let spec = ProposalSpec::new(
+        PipelineKey::Risc0Local,
         Risc0Prover::new(risc0_config),
         backend,
         provider,
@@ -789,14 +787,14 @@ fn build_sp1_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
     prover: Sp1Prover,
-    backend: Sp1ShastaBackend,
+    backend: Sp1ProposalBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     preflight_coordinator: Option<Arc<PreflightCoordinator>>,
 ) -> Result<Engine<Sp1Spec>> {
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Sp1)?;
-    let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider)
+    let spec = ProposalSpec::new(PipelineKey::Sp1Local, prover, backend, provider)
         .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
@@ -818,8 +816,8 @@ fn build_native_engine(
 ) -> Result<Engine<NativeSpec>> {
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Native)?;
-    let spec = ShastaSpec::new(
-        PipelineKey::ShastaNative,
+    let spec = ProposalSpec::new(
+        PipelineKey::NativeLocal,
         NativeProver,
         NativeBackend,
         provider,
@@ -840,7 +838,7 @@ fn build_native_engine(
 fn build_boundless_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
-    backend: Risc0ShastaBackend,
+    backend: Risc0ProposalBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     balance_gate: BoundlessBalanceGate,
@@ -850,8 +848,8 @@ fn build_boundless_engine(
 
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, ProofType::Risc0)?;
-    let spec = ShastaSpec::new(
-        PipelineKey::ShastaRisc0Network,
+    let spec = ProposalSpec::new(
+        PipelineKey::Risc0Network,
         BoundlessProver::with_balance_gate(agent_config, balance_gate),
         backend,
         provider,
@@ -894,7 +892,7 @@ fn build_remote_sgx_engine(
 
     let provider = setup::build_provider(config, pair)?;
     let context = setup::build_context(config, pair, lane.proof_type)?;
-    let spec = ShastaSpec::new(lane.pipeline_key, gaiko2_prover, NativeBackend, provider)
+    let spec = ProposalSpec::new(lane.pipeline_key, gaiko2_prover, NativeBackend, provider)
         .with_optional_preflight_coordinator(preflight_coordinator);
     let engine = Engine::with_store_scheduler_config_and_observer(
         spec,
@@ -974,12 +972,12 @@ mod tests {
         let first_observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaSp1.route(),
+            PipelineKey::Sp1Local.route(),
         );
         let second_observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::Risc0Network.route(),
         );
         let first_permit = first_observer
             .acquire_submission_checkpoint_permit()
@@ -1045,8 +1043,8 @@ mod tests {
         previous_runtime
             .register_task(TaskRegistration {
                 task_id: "stale-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -1077,8 +1075,8 @@ mod tests {
         previous_runtime
             .register_task(TaskRegistration {
                 task_id: "preserved-task".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "l1-l2".into(),
                 artifact_refs: Vec::new(),
@@ -1106,7 +1104,7 @@ mod tests {
         )?);
         let previous = RuntimeManager::with_store(Arc::clone(&store));
         previous.initialize().await?;
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let proof_ref = "startup-invalidated-proof";
         let object = previous
@@ -1166,7 +1164,7 @@ mod tests {
         let runtime_store: Arc<dyn RuntimeStore> = store.clone();
         let previous = RuntimeManager::with_store(runtime_store);
         previous.initialize().await?;
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let proof_ref = "stale-proof";
         let first = previous
@@ -1277,7 +1275,7 @@ mod tests {
 
         assert_eq!(
             selected_pipeline_keys(&config)?,
-            vec![PipelineKey::ShastaRisc0Network]
+            vec![PipelineKey::Risc0Network]
         );
         Ok(())
     }
@@ -1289,7 +1287,7 @@ mod tests {
 
         assert_eq!(
             selected_pipeline_keys(&config)?,
-            vec![PipelineKey::ShastaSp1]
+            vec![PipelineKey::Sp1Local]
         );
         Ok(())
     }
@@ -1302,10 +1300,10 @@ mod tests {
         assert_eq!(
             selected_pipeline_keys(&config)?,
             vec![
-                PipelineKey::ShastaRisc0Network,
-                PipelineKey::ShastaSp1,
-                PipelineKey::ShastaSgx,
-                PipelineKey::ShastaSgxGeth,
+                PipelineKey::Risc0Network,
+                PipelineKey::Sp1Local,
+                PipelineKey::SgxRemote,
+                PipelineKey::SgxGethRemote,
             ]
         );
         Ok(())
@@ -1320,7 +1318,7 @@ mod tests {
         let registrations = enabled_pipeline_registrations(&config)?;
 
         assert_eq!(registrations.len(), 1);
-        assert_eq!(registrations[0].pipeline_key, PipelineKey::ShastaSgx);
+        assert_eq!(registrations[0].pipeline_key, PipelineKey::SgxRemote);
         assert_eq!(
             registrations[0].route(),
             "sgx/remote".parse().expect("parse SGX route")
@@ -1341,7 +1339,7 @@ mod tests {
         let registrations = enabled_pipeline_registrations(&config)?;
 
         assert_eq!(registrations.len(), 1);
-        assert_eq!(registrations[0].pipeline_key, PipelineKey::ShastaSgxGeth);
+        assert_eq!(registrations[0].pipeline_key, PipelineKey::SgxGethRemote);
         assert_eq!(
             registrations[0].route(),
             "sgxgeth/remote".parse().expect("parse SGXGETH route")
@@ -1390,7 +1388,7 @@ mod tests {
         let registrations = enabled_pipeline_registrations(&config)?;
 
         assert_eq!(registrations.len(), 1);
-        assert_eq!(registrations[0].pipeline_key, PipelineKey::ShastaNative);
+        assert_eq!(registrations[0].pipeline_key, PipelineKey::NativeLocal);
         assert_eq!(registrations[0].runner, RunnerKind::Local);
         Ok(())
     }
@@ -1402,7 +1400,7 @@ mod tests {
 
         assert_eq!(
             selected_pipeline_keys(&config)?,
-            vec![PipelineKey::ShastaSp1, PipelineKey::ShastaNative]
+            vec![PipelineKey::Sp1Local, PipelineKey::NativeLocal]
         );
         assert_eq!(
             enabled_pipeline_registrations(&config)?[0].runner,

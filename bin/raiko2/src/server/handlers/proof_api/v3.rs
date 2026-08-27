@@ -23,17 +23,17 @@ use super::{
     zk_any_not_drawn_response,
 };
 
-pub(crate) async fn request_batch_shasta_proof(
+pub(crate) async fn request_batch_proposal_proof(
     state: State<AppState>,
     req: Result<Json<BatchShastaRequest>, JsonRejection>,
 ) -> Response {
-    match request_batch_shasta_proof_inner(state, req).await {
+    match request_batch_proposal_proof_inner(state, req).await {
         Ok(response) => response,
         Err(err) => legacy_api_error_response(err),
     }
 }
 
-async fn request_batch_shasta_proof_inner(
+async fn request_batch_proposal_proof_inner(
     State(state): State<AppState>,
     req: Result<Json<BatchShastaRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {

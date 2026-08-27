@@ -1,11 +1,18 @@
 # Precompile Status for Shasta
 
-This document describes the precompile surface that is relevant to the current `raiko2`
-Shasta proving path.
+> **Scope: Shasta only. This document has not been extended to Unzen.**
+>
+> Every table below describes the Shasta fork, which maps to Ethereum `SpecId::SHANGHAI`. Unzen
+> maps to `SpecId::OSAKA` (see `ForkId::as_spec_id` in `crates/primitives/src/chain_spec.rs`), so
+> its active precompile set is a **superset** of the one documented here. Because Unzen is the fork
+> active on every live network, treat this file as a historical Shasta reference until the Unzen
+> address set is verified against `revm-precompile` and added.
+
+This document describes the precompile surface relevant to the `raiko2` Shasta proving path.
 
 It answers three separate questions:
 
-1. Which precompiles are active under the current Shasta fork mapping?
+1. Which precompiles are active under the Shasta fork mapping?
 2. Which active precompiles are routed through guest-specific crypto hooks?
 3. Which code paths exist in `revm-precompile` but are not active for Shasta?
 

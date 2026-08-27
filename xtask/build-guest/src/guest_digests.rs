@@ -7,8 +7,8 @@ use alloy_primitives::{B256, hex};
 use anyhow::{Context, Result};
 use clap::Args;
 use raiko2_guests::{
-    DEFAULT_GUEST_ELF_DIR, Risc0ShastaGuestElves, Sp1ShastaGuestElves,
-    load_risc0_shasta_guest_elves_from_dir, load_sp1_shasta_guest_elves_from_dir,
+    DEFAULT_GUEST_ELF_DIR, Risc0GuestElves, Sp1GuestElves, load_risc0_guest_elves_from_dir,
+    load_sp1_guest_elves_from_dir,
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
@@ -88,9 +88,9 @@ pub fn collect_guest_digests_with_dir(
     let elf_dir = guest_elf_dir
         .map(|path| resolve_input_path(root, path))
         .unwrap_or_else(|| root.join(DEFAULT_GUEST_ELF_DIR));
-    let risc0_elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir)
+    let risc0_elves = load_risc0_guest_elves_from_dir(&elf_dir)
         .with_context(|| format!("failed to load RISC0 guest ELFs from {}", elf_dir.display()))?;
-    let sp1_elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir)
+    let sp1_elves = load_sp1_guest_elves_from_dir(&elf_dir)
         .with_context(|| format!("failed to load SP1 guest ELFs from {}", elf_dir.display()))?;
 
     let mut digests = Vec::new();
@@ -129,7 +129,7 @@ fn resolve_output_path(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> 
         .join("summary.json"))
 }
 
-fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
+fn risc0_digest_entries(elves: &Risc0GuestElves) -> Result<Vec<GuestDigestEntry>> {
     Ok(vec![
         risc0_digest_entry(
             "risc0_shasta_proposal",
@@ -144,7 +144,7 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
     ])
 }
 
-fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
+fn sp1_digest_entries(elves: &Sp1GuestElves) -> Result<Vec<GuestDigestEntry>> {
     let proposal_vk = verified_sp1_vk(
         Arc::clone(&elves.proposal),
         Some(elves.proposal_vk.as_ref()),

@@ -16,7 +16,11 @@ pub const PRIV_KEY_FILENAME: &str = "priv.key";
 
 const DEFAULT_RAIKO2_SGX_CONFIG_SUBDIR: &str = ".config/raiko2/sgx/config";
 const DEFAULT_RAIKO2_SGX_SECRET_SUBDIR: &str = ".config/raiko2/sgx/secrets";
-const DEFAULT_FORK: &str = "shasta";
+/// Fork key used to select the registered SGX instance id.
+///
+/// Frozen wire identity: this is the `registered.json` map key and the deployed `RAIKO2_SGX_FORK`
+/// / `GAIKO2_FORK` value. See the frozen identifier list in `CONCEPTS.md`.
+pub(crate) const DEFAULT_FORK: &str = "shasta";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 /// Native-mode fallback instance id used when no explicit id is provided.
 pub const DEFAULT_NATIVE_INSTANCE_ID: u32 = 0xDEAD_C0DE;

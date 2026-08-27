@@ -19,9 +19,9 @@ use tracing::info;
 
 use crate::{
     GuestInputCodec, encode_risc0_aggregation_proof_payload, encode_risc0_proposal_proof_payload,
-    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, risc0_aggregation::build_risc0_aggregation_input_from_proofs,
-    with_shasta_extra_data,
+    ensure_proposal_input_matches_carry, parse_proposal_aggregation_input_hash,
+    parse_proposal_input_hash, risc0_aggregation::build_risc0_aggregation_input_from_proofs,
+    with_proposal_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -235,13 +235,13 @@ where
                 &opts,
                 image_id,
                 "proposal",
-                parse_shasta_proposal_input_hash,
+                parse_proposal_input_hash,
             )?;
             prover.finalize_stage("proposal", &receipt, image_id)?;
 
             let journal_bytes = &receipt.journal.bytes;
-            let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
-            ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "risc0")?;
+            let input_hash = parse_proposal_input_hash(journal_bytes)?;
+            ensure_proposal_input_matches_carry(input_hash, &proof_carry_data, "risc0")?;
 
             info!(
                 "Generated proposal receipt journal: {:?}",
@@ -259,7 +259,7 @@ where
                     receipt: receipt_json,
                     image_id: Self::image_id_hex(image_id),
                     input: input_hash,
-                    extra_data: with_shasta_extra_data(&proof_carry_data, "risc0", extra_data)?,
+                    extra_data: with_proposal_extra_data(&proof_carry_data, "risc0", extra_data)?,
                 }
                 .into(),
             )
@@ -298,12 +298,12 @@ where
                 &opts,
                 image_id,
                 "aggregation",
-                parse_shasta_aggregation_input_hash,
+                parse_proposal_aggregation_input_hash,
             )?;
             prover.finalize_stage("aggregation", &receipt, image_id)?;
 
             let journal_bytes = &receipt.journal.bytes;
-            let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes)?;
+            let agg_input_hash = parse_proposal_aggregation_input_hash(journal_bytes)?;
 
             let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
 
@@ -335,7 +335,7 @@ mod tests {
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, B256, Signature, TxKind, U256};
     use alloy_sol_types::{SolCall, sol};
-    use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
+    use raiko2_pipeline::proposal::load_risc0_proposal_backend;
     use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_protocol_shasta::TaikoManifest;
@@ -443,7 +443,7 @@ mod tests {
             verify: true,
         });
         let guest_input = fixture_guest_input();
-        let backend = load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs");
+        let backend = load_risc0_proposal_backend().expect("load RISC0 Shasta guest ELFs");
 
         let err = prover
             .prove(guest_input, &ProverConfig::default(), &backend)

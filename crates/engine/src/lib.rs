@@ -2424,7 +2424,7 @@ mod tests {
                 prover,
                 backend: TestBackend,
                 provider: MockProvider,
-                pipeline_key: PipelineKey::ShastaNative,
+                pipeline_key: PipelineKey::NativeLocal,
             }
         }
 
@@ -2558,8 +2558,8 @@ mod tests {
     fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
         ProofArtifactRef {
             network_pair: "taiko_dev/ethereum".to_string(),
-            pipeline_key: PipelineKey::ShastaNative,
-            route: PipelineKey::ShastaNative.route(),
+            pipeline_key: PipelineKey::NativeLocal,
+            route: PipelineKey::NativeLocal.route(),
             proof_ref: proof_ref.to_string(),
         }
     }
@@ -2612,7 +2612,7 @@ mod tests {
 
     fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
-            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::Risc0Network),
             test_context(),
             raiko2_queue::MemoryStore::new(),
             scheduler_config,
@@ -2743,7 +2743,7 @@ mod tests {
         assert_eq!(
             aggregate_id,
             EngineTaskId::new(EngineTaskKey::Aggregate {
-                pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
                 request,
             })
         );
@@ -2787,7 +2787,7 @@ mod tests {
         assert_eq!(
             aggregate_id,
             EngineTaskId::new(EngineTaskKey::Aggregate {
-                pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
                 request,
             })
         );
@@ -2834,7 +2834,7 @@ mod tests {
         );
 
         let other_pipeline_task = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: raiko2_pipeline::PipelineKey::ShastaSp1,
+            pipeline: raiko2_pipeline::PipelineKey::Sp1Local,
             request: proposal_request(1),
         });
         let err = engine
@@ -3465,7 +3465,7 @@ mod tests {
         let proposal_id = 1;
         let request = proposal_request(proposal_id);
         let preflight_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+            pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
             request: request.clone(),
         });
 
@@ -3508,7 +3508,7 @@ mod tests {
         let result = engine
             .execute(
                 &EngineTaskId::new(EngineTaskKey::Proposal {
-                    pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                    pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
                     request: request.clone(),
                 }),
                 EngineTask::Validate {
@@ -3544,7 +3544,7 @@ mod tests {
         let proposal_id = 1;
         let request = proposal_request(proposal_id);
         let validation_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+            pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
             request: request.clone(),
         });
 
@@ -3559,7 +3559,7 @@ mod tests {
                     payload: EngineTask::Validate {
                         request: request.clone(),
                         preflight_task: EngineTaskId::new(EngineTaskKey::Proposal {
-                            pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                            pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
                             request: request.clone(),
                         }),
                     },
@@ -3591,7 +3591,7 @@ mod tests {
         let result = engine
             .execute(
                 &EngineTaskId::new(EngineTaskKey::Proposal {
-                    pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                    pipeline: raiko2_pipeline::PipelineKey::NativeLocal,
                     request: request.clone(),
                 }),
                 EngineTask::Encode {

@@ -10,7 +10,7 @@ use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 use crate::{bootstrap::public_key_to_address, tee::TeeProvider};
 
-const SHASTA_SGX_PROOF_LEN: usize = 89;
+const SGX_PROOF_LEN: usize = 89;
 
 /// Structured request failure mapped to the remote prover response envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub(crate) fn proof_result_from_input_hash<P: TeeProvider>(
         .load_quote(instance_address)
         .context("load SGX quote")?;
     let signature = sign_hash(&secret_key, input_hash)?;
-    let proof = build_shasta_proof_bytes(instance_id, instance_address, signature);
+    let proof = build_proposal_proof_bytes(instance_id, instance_address, signature);
 
     Ok(Raiko2ProofResult {
         proof: Some(prefixed_hex(&proof)),
@@ -115,12 +115,12 @@ fn sign_hash(secret_key: &SecretKey, hash: B256) -> Result<[u8; 65]> {
     Ok(sig_bytes)
 }
 
-fn build_shasta_proof_bytes(
+fn build_proposal_proof_bytes(
     instance_id: u32,
     instance_address: Address,
     signature: [u8; 65],
 ) -> Vec<u8> {
-    let mut proof = Vec::with_capacity(SHASTA_SGX_PROOF_LEN);
+    let mut proof = Vec::with_capacity(SGX_PROOF_LEN);
     proof.extend(instance_id.to_be_bytes());
     proof.extend(instance_address);
     proof.extend(signature);

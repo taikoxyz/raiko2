@@ -8,7 +8,7 @@ description: Use when validating an already running or isolated raiko2 v4 servic
 ## Scope
 
 Exercise the real v4 host-to-remote-provider path without replacing, restarting, pruning, or
-reconfiguring a live service. Use `shasta-proposal-regression` instead for local native GuestInput
+reconfiguring a live service. Use `proposal-regression` instead for local native GuestInput
 replay.
 
 Do not build images, register enclaves, change verifier state, or verify proofs on-chain unless the
@@ -48,7 +48,7 @@ WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/raiko2-service-regression.XXXXXX")
 2. Discover the canonical proposal tuples once:
 
 ```bash
-"$PYTHON" "$REPO_ROOT/scripts/regression/stress_shasta_proposal.py" \
+"$PYTHON" "$REPO_ROOT/scripts/regression/stress_proposal.py" \
   --network "$NETWORK" --l1-network "$L1_NETWORK" \
   --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" \
   --raiko-rpc "$RAIKO_RPC" --proposal-ids "$PROPOSAL_IDS" \
@@ -60,7 +60,7 @@ WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/raiko2-service-regression.XXXXXX")
 
 ```bash
 for PROOF_TYPE in $PROOF_TYPES; do
-  "$PYTHON" "$REPO_ROOT/scripts/regression/stress_shasta_proposal.py" \
+  "$PYTHON" "$REPO_ROOT/scripts/regression/stress_proposal.py" \
     --network "$NETWORK" --l1-network "$L1_NETWORK" \
     --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" \
     --raiko-rpc "$RAIKO_RPC" --proposal-ids "$PROPOSAL_IDS" \

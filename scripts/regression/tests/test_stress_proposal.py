@@ -15,7 +15,7 @@ import web3.middleware as web3_middleware
 if not hasattr(web3_middleware, "ExtraDataToPOAMiddleware"):
     web3_middleware.ExtraDataToPOAMiddleware = object()
 
-from stress_shasta_proposal import (
+from stress_proposal import (
     BatchMonitor,
     DEFAULT_CHAIN_SPEC_LIST,
     DEFAULT_PROVER,
@@ -64,7 +64,7 @@ class _FakeEvents:
 class TestBatchMonitorL1SearchWindow(unittest.IsolatedAsyncioTestCase):
     def make_monitor(self, logs=None, latest_l1=0):
         monitor = BatchMonitor.__new__(BatchMonitor)
-        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.logger = logging.getLogger("test_stress_proposal")
         monitor.proposal_block_cache = {}
         monitor.evt_contract = SimpleNamespace(events=_FakeEvents(logs or []))
         monitor._extract_proposal_id_from_proposed_log = (
@@ -206,7 +206,7 @@ class TestBatchMonitorPayload(unittest.TestCase):
 class TestBatchMonitorProposalIdSearch(unittest.IsolatedAsyncioTestCase):
     async def test_find_l2_block_for_proposal_id_skips_pre_shasta_blocks(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
-        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.logger = logging.getLogger("test_stress_proposal")
         monitor.get_latest_l2_block_number = lambda: 8
         proposal_ids_by_block = {
             0: None,
@@ -307,7 +307,7 @@ class TestStressChainSpecResolution(unittest.TestCase):
 class TestBatchMonitorAnchorInfoCache(unittest.IsolatedAsyncioTestCase):
     async def test_get_anchor_info_caches_negative_parse_results_after_fetch(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
-        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.logger = logging.getLogger("test_stress_proposal")
         monitor.anchor_info_cache = {}
 
         calls = 0
@@ -327,7 +327,7 @@ class TestBatchMonitorAnchorInfoCache(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_anchor_info_does_not_cache_missing_blocks(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
-        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.logger = logging.getLogger("test_stress_proposal")
         monitor.anchor_info_cache = {}
 
         calls = 0
@@ -348,7 +348,7 @@ class TestBatchMonitorAnchorInfoCache(unittest.IsolatedAsyncioTestCase):
 class TestBatchMonitorRangeIteration(unittest.IsolatedAsyncioTestCase):
     async def test_get_next_batches_starts_from_range_start_when_state_is_uninitialized(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
-        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.logger = logging.getLogger("test_stress_proposal")
         monitor.l2_block_range = (10, 12)
         monitor.ts_offset = None
         monitor.running_count = 1
@@ -454,7 +454,7 @@ class TestBatchMonitorProposalResults(unittest.IsolatedAsyncioTestCase):
     def make_monitor(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.watch_mode = False
-        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.logger = logging.getLogger("test_stress_proposal")
         monitor.log_file = None
         monitor.running_count = 1
         monitor.timeout = 1

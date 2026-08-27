@@ -18,11 +18,11 @@ scripts/regression/prepare_regression.sh
 
 ```bash
 # Resolve the latest completed proposal spans without running preflight or guest binaries.
-python scripts/regression/shasta_regression.py --config scripts/regression/config/shasta_regression_devnet.json --count 3 --discover-only
+python scripts/regression/proposal_regression.py --config scripts/regression/config/proposal_regression_devnet.json --count 3 --discover-only
 
 # Run preflight and guest-launcher from full proposal metadata produced by the stress helper.
-python scripts/regression/shasta_regression.py \
-  --config scripts/regression/config/shasta_regression_devnet.json \
+python scripts/regression/proposal_regression.py \
+  --config scripts/regression/config/proposal_regression_devnet.json \
   --proposal-metadata /tmp/proposal-730.discovery.json \
   --proof-type sp1
 ```
@@ -38,16 +38,16 @@ python scripts/regression/shasta_regression.py \
 
 ## Which Tool
 
-Use `stress_shasta_proposal.py` for live regression against a running `raiko2` host. It resolves
+Use `stress_proposal.py` for live regression against a running `raiko2` host. It resolves
 full Shasta proposal metadata from L1/L2, submits HTTP proof requests to `--raiko-rpc`, and is the
 right path for SGX, SGXGETH, remote-prover, queue, and API status checks.
 
-Use `shasta_regression.py` for file-based local replay. It runs `preflight` to materialize
+Use `proposal_regression.py` for file-based local replay. It runs `preflight` to materialize
 `GuestInput` and then runs `guest-launcher` without a `raiko2` server. For current Shasta preflight,
-feed it metadata from `stress_shasta_proposal.py --discover-only --proposal-out`; `--range` and
+feed it metadata from `stress_proposal.py --discover-only --proposal-out`; `--range` and
 `--count` are only lightweight L2 span discovery helpers.
 
-For SP1 prover-gas research, use `stress_shasta_proposal.py` only to discover the proposal tuple,
+For SP1 prover-gas research, use `stress_proposal.py` only to discover the proposal tuple,
 then run `preflight` once and reuse the generated `GuestInput` with `xtask bench-guest sp1
 --skip-build-guest`. That keeps the optimization loop off live RPC and avoids SP1 network proving
 costs.
@@ -58,7 +58,7 @@ For a single L2 block, use the stress discovery helper to resolve the containing
 tuple without submitting work to `raiko2`:
 
 ```bash
-python scripts/regression/stress_shasta_proposal.py \
+python scripts/regression/stress_proposal.py \
   --network taiko_hoodi \
   --l1-network hoodi \
   --l2-block-range 7225500,7225501 \
@@ -70,7 +70,7 @@ The stress helper derives the default L1 RPC, L2 RPC, and Shasta inbox contract 
 `config/chain_spec_list_default.json`. For devnet, pass the internal RPC overrides explicitly:
 
 ```bash
-python scripts/regression/stress_shasta_proposal.py \
+python scripts/regression/stress_proposal.py \
   --network taiko_dev \
   --l1-network taiko_dev_l1 \
   --l1-rpc https://l1rpc.internal.taiko.xyz \
@@ -89,7 +89,7 @@ For real v4 proposal plus aggregate service validation, use the repository-local
 ```bash
 ids=$(seq -s, 203 302)
 
-python3 scripts/regression/stress_shasta_proposal.py \
+python3 scripts/regression/stress_proposal.py \
   --network taiko_dev \
   --l1-network taiko_dev_l1 \
   --l1-rpc https://l1rpc.internal.taiko.xyz \
@@ -102,7 +102,7 @@ python3 scripts/regression/stress_shasta_proposal.py \
   --polling-interval 5 \
   --log-file /tmp/devnet-discover-203-302.log
 
-python3 scripts/regression/stress_shasta_proposal.py \
+python3 scripts/regression/stress_proposal.py \
   --network taiko_dev \
   --l1-network taiko_dev_l1 \
   --l1-rpc https://l1rpc.internal.taiko.xyz \
@@ -115,7 +115,7 @@ python3 scripts/regression/stress_shasta_proposal.py \
   --polling-interval 5 \
   --log-file /tmp/devnet-sgx-203-302.log
 
-python3 scripts/regression/stress_shasta_proposal.py \
+python3 scripts/regression/stress_proposal.py \
   --network taiko_dev \
   --l1-network taiko_dev_l1 \
   --l1-rpc https://l1rpc.internal.taiko.xyz \
@@ -131,7 +131,7 @@ python3 scripts/regression/stress_shasta_proposal.py \
 
 Use `--l1-rpc`, `--l2-rpc`, `--event-contract`, `--abi-file`, and `--anchor-abi-file` only as
 overrides for non-standard environments. Fork-specific ABI files live under
-`scripts/regression/shasta/`.
+`scripts/regression/abi/`.
 
 Then run `preflight` directly against one discovered proposal. The proposal tuple stays explicit,
 while RPC URLs and chain IDs come from the chain specs selected by `--l1-network` and `--network`:
@@ -191,7 +191,7 @@ serving as pre-fork controls.
 
 ## Outputs
 
-Artifacts are written under `test/regression/shasta/`.
+Artifacts are written under `test/regression/proposal/`.
 
 ## SGX Regression Stack
 

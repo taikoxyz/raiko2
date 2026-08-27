@@ -140,7 +140,7 @@ class ProvedEventPayload:
     transition_record: TransitionRecord
     metadata: TransitionMetadata
 
-class ShastaEventDecoder:
+class ProposalEventDecoder:
     """Decoder for Shasta event data"""
     
     def __init__(self):
@@ -383,7 +383,7 @@ def test_decoder():
         # Convert hex string to bytes
         test_data = bytes.fromhex(test_data_hex.replace("0x", ""))
         
-        decoder = ShastaEventDecoder()
+        decoder = ProposalEventDecoder()
         event_data = decoder.decode_event_data(test_data)
         
         print("✅ Successfully decoded event data!")

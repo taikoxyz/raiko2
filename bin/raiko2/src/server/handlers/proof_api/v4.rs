@@ -760,7 +760,7 @@ mod tests {
             submission.requested_proof_type,
             BatchProofType::Native
         ));
-        assert_eq!(submission.route.pipeline_key(), PipelineKey::ShastaNative);
+        assert_eq!(submission.route.pipeline_key(), PipelineKey::NativeLocal);
         assert_eq!(submission.route.route.to_string(), "native/local");
         assert!(submission.aggregate_requested);
     }
@@ -1204,7 +1204,7 @@ mod tests {
         let mut factory = StaticPipelineFactory::default();
         factory.insert(
             "taiko_hoodi/hoodi",
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             Arc::new(ActiveEngine),
         );
         let state = AppState::from_parts(Arc::new(config), Arc::new(factory), Arc::clone(&runtime));

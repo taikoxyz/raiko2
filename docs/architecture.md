@@ -1,6 +1,6 @@
 # Architecture
 
-Raiko2 is a Shasta proof orchestration service. It turns a normalized v4 proof request into a
+Raiko2 is a proposal proof orchestration service. It turns a normalized v4 proof request into a
 durable proposal or aggregation proof while keeping request identity, execution state, remote
 provider checkpoints, and published proof artifacts recoverable across process restarts.
 
@@ -65,7 +65,7 @@ flowchart TB
   Publication --> ObjectRepo
 
   Projection --> Engine["Engine and scheduler<br/>leases, dependencies, retries"]
-  Engine --> Pipeline["Shasta pipeline"]
+  Engine --> Pipeline["Proposal pipeline"]
   Pipeline --> RPC["L1, L2, beacon, and witness RPC"]
   Pipeline --> Prover["Local, Boundless, SP1, or remote SGX prover"]
   Engine --> Observer["RuntimeObserver<br/>event adapter"]
@@ -178,7 +178,7 @@ proposal node or change an aggregate input from dependent to independent. Initia
 client-triggered recovery therefore reconstruct the same task set, payloads, and dependency edges.
 
 Artifact payload policy follows the canonical engine task kind, not the current root-owner set. A
-proposal task accepts a normal proof payload; `ShastaSp1` proposal tasks additionally accept a
+proposal task accepts a normal proof payload; `Sp1Local` proposal tasks additionally accept a
 complete Compressed payload containing `quote`, `input`, `uuid`, and `extra_data`. Aggregate tasks
 always require a non-null final `proof`. The same proposal artifact is therefore valid whether it is
 owned by a standalone root, an aggregate root, or both, including when an owner joins after proving
@@ -190,7 +190,7 @@ flowchart LR
   Task["Canonical engine task identity"] --> Kind{Task kind}
   Kind -->|Proposal| Proposal["Proposal payload policy"]
   Proposal --> Full["Non-null proof"]
-  Proposal -->|ShastaSp1 only| Compressed["quote + input + uuid + extra_data"]
+  Proposal -->|Sp1Local only| Compressed["quote + input + uuid + extra_data"]
   Kind -->|Aggregate| Aggregate["Final payload policy"]
   Aggregate --> Final["Non-null proof"]
   Owners["Current RootOwner set"] --> Activation["Eligible root synchronization"]

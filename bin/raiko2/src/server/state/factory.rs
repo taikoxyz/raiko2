@@ -155,8 +155,8 @@ mod tests {
     #[test]
     fn factory_is_queue_ready_when_every_engine_has_a_fresh_tick() {
         let mut factory = StaticPipelineFactory::default();
-        factory.insert("pair-a", PipelineKey::ShastaNative, engine(true));
-        factory.insert("pair-a", PipelineKey::ShastaSp1, engine(true));
+        factory.insert("pair-a", PipelineKey::NativeLocal, engine(true));
+        factory.insert("pair-a", PipelineKey::Sp1Local, engine(true));
 
         assert!(factory.queue_maintenance_ready(std::time::Duration::from_secs(1)));
     }
@@ -165,8 +165,8 @@ mod tests {
     fn factory_is_not_queue_ready_when_any_engine_has_no_fresh_tick() {
         for (first_ready, second_ready) in [(false, true), (true, false), (false, false)] {
             let mut factory = StaticPipelineFactory::default();
-            factory.insert("pair-a", PipelineKey::ShastaNative, engine(first_ready));
-            factory.insert("pair-a", PipelineKey::ShastaSp1, engine(second_ready));
+            factory.insert("pair-a", PipelineKey::NativeLocal, engine(first_ready));
+            factory.insert("pair-a", PipelineKey::Sp1Local, engine(second_ready));
 
             assert!(
                 !factory.queue_maintenance_ready(std::time::Duration::from_secs(1)),

@@ -42,7 +42,7 @@ fn fixture_guest_input() -> GuestInput {
 }
 
 #[tokio::test]
-async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
+async fn gaiko2_prover_posts_proposal_packet_and_maps_success_response() {
     let server = MockServer::start();
     let guest_input = fixture_guest_input();
     let expected_input_hash = hash_shasta_subproof_input(&guest_input.proof_carry_data);

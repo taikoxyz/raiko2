@@ -3,7 +3,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-invalidated-completion-rollback",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -82,7 +82,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-exact-completion-rollback",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -154,7 +154,7 @@
             "runtime-observer-cancel-shared-completed",
         ))?);
         let network_pair = "taiko_dev/ethereum";
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         for (root_id, status) in [
@@ -245,7 +245,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-publication-reconciled-root",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
@@ -348,7 +348,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-retryable-publication-matrix",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -426,7 +426,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-terminal-root",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
@@ -455,7 +455,7 @@
         let observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaNative.route(),
+            PipelineKey::NativeLocal.route(),
         );
         let proof_task = EngineTask::ProveProposal {
             request: request.clone(),
@@ -521,7 +521,7 @@
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-stale-completion-failure",
         ))?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let request = proposal_request();
         let proof_ref = proposal_task_ref(pipeline, &request);
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {

@@ -10,14 +10,14 @@ use raiko2_primitives_shasta::{
 };
 
 use crate::{
-    GuestInputCodec, build_shasta_aggregation_input, ensure_shasta_proposal_input_matches_carry,
+    GuestInputCodec, build_proposal_aggregation_input, ensure_proposal_input_matches_carry,
 };
 
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeProver;
 
-const SHASTA_SGX_PROOF_LEN: usize = 89;
+const SGX_PROOF_LEN: usize = 89;
 const SHASTA_NATIVE_MOCK_INSTANCE_ID: u32 = 0xDEAD_C0DE;
 // Native proofs are explicit host-local mocks. Keep the instance stable so downstream
 // fixture/tests can identify the mock path without embedding key material in the repo.
@@ -63,11 +63,11 @@ where
         let input_hash = prove_shasta_proposal(&input).map_err(|e| {
             RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
         })?;
-        ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "native")?;
+        ensure_proposal_input_matches_carry(input_hash, &proof_carry_data, "native")?;
         let signature = mock_signature(input_hash);
         let sgx_instance = signer_address();
         let proof =
-            build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
+            build_proposal_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
         Ok(Proof {
             proof: Some(format!("0x{}", hex::encode(proof))),
@@ -83,7 +83,7 @@ where
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        let aggregation_input = build_proposal_aggregation_input(&input.proofs)?;
 
         let endianness = config
             .get("native_image_id_endianness")
@@ -117,7 +117,7 @@ where
         let sgx_instance = signer_address();
         let signature = mock_signature(aggregation_hash);
         let proof =
-            build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
+            build_proposal_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
         Ok(Proof {
             proof: Some(format!("0x{}", hex::encode(proof))),
@@ -195,19 +195,19 @@ fn verify_native_proof_envelope(proof: &Proof, expected_input: B256) -> RaikoRes
     Ok(())
 }
 
-fn decode_native_proof_bytes(proof_hex: &str) -> RaikoResult<[u8; SHASTA_SGX_PROOF_LEN]> {
+fn decode_native_proof_bytes(proof_hex: &str) -> RaikoResult<[u8; SGX_PROOF_LEN]> {
     let bytes = hex::decode(proof_hex.trim_start_matches("0x"))
         .map_err(|e| RaikoError::InvalidRequestConfig(format!("invalid native proof hex: {e}")))?;
     let len = bytes.len();
     bytes.try_into().map_err(|_| {
         RaikoError::InvalidRequestConfig(format!(
-            "native proof has invalid length: expected {SHASTA_SGX_PROOF_LEN} bytes, got {len}"
+            "native proof has invalid length: expected {SGX_PROOF_LEN} bytes, got {len}"
         ))
     })
 }
 
-fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) -> Vec<u8> {
-    let mut proof = Vec::with_capacity(SHASTA_SGX_PROOF_LEN);
+fn build_proposal_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) -> Vec<u8> {
+    let mut proof = Vec::with_capacity(SGX_PROOF_LEN);
     proof.extend(instance_id.to_be_bytes());
     proof.extend(instance);
     proof.extend(sig);
@@ -277,7 +277,7 @@ mod tests {
         Proof {
             proof: Some(format!(
                 "0x{}",
-                hex::encode(super::build_shasta_proof_bytes(
+                hex::encode(super::build_proposal_proof_bytes(
                     EXPECTED_INSTANCE_ID,
                     Address::from_str(EXPECTED_ADDR).expect("expected addr"),
                     super::mock_signature(input_hash),
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_proposal_proof_matches_shasta_format() {
+    async fn native_proposal_proof_matches_expected_format() {
         let prover = NativeProver;
         let config = ProverConfig::default();
         let input = fixture_guest_input();
@@ -415,7 +415,7 @@ mod tests {
         let proofs = vec![Proof {
             proof: Some(format!(
                 "0x{}",
-                hex::encode(super::build_shasta_proof_bytes(
+                hex::encode(super::build_proposal_proof_bytes(
                     EXPECTED_INSTANCE_ID,
                     Address::from_str(EXPECTED_ADDR).unwrap(),
                     super::mock_signature(child_input),
@@ -437,7 +437,7 @@ mod tests {
             .await
             .expect("aggregate");
         let aggregation_input =
-            crate::build_shasta_aggregation_input(&proofs).expect("aggregation input");
+            crate::build_proposal_aggregation_input(&proofs).expect("aggregation input");
         let image_id_b256 = B256::from(words_to_bytes_be(&aggregation_input.image_id));
         let expected_hash = aggregate_shasta_zk_with_verifier(
             &aggregation_input,

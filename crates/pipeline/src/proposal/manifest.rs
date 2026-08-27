@@ -17,9 +17,9 @@ use tracing::info;
 
 /// Shasta manifest builder.
 #[derive(Debug, Clone, Default)]
-pub struct ShastaManifestBuilder;
+pub struct ProposalManifestBuilder;
 
-impl ShastaManifestBuilder {
+impl ProposalManifestBuilder {
     /// Create a new Shasta manifest builder.
     #[must_use]
     pub const fn new() -> Self {
@@ -86,7 +86,7 @@ impl ShastaManifestBuilder {
     }
 
     fn parse_proposal_event(ctx: &ProofContext) -> RaikoResult<ShastaEventData> {
-        if let Some(event) = Self::parse_config(&ctx.config, "shasta_proposal_event")? {
+        if let Some(event) = Self::parse_config(&ctx.config, "proposal_event")? {
             return Ok(event);
         }
         if let Some(proposed) =
@@ -272,7 +272,7 @@ impl ShastaManifestBuilder {
 }
 
 #[async_trait::async_trait]
-impl ManifestBuilder for ShastaManifestBuilder {
+impl ManifestBuilder for ProposalManifestBuilder {
     type Manifest = TaikoManifest;
 
     async fn taiko_manifest(
@@ -284,7 +284,7 @@ impl ManifestBuilder for ShastaManifestBuilder {
     }
 }
 
-impl ShastaManifestBuilder {
+impl ProposalManifestBuilder {
     /// Build a Shasta manifest using an already-resolved proposal event.
     ///
     /// # Errors
@@ -322,7 +322,7 @@ impl ShastaManifestBuilder {
         let proposal_event =
             proposal_event_override.map_or_else(|| Self::parse_proposal_event(ctx), Ok)?;
         let mut data_sources =
-            Self::parse_config::<Vec<InputDataSource>>(&ctx.config, "shasta_data_sources")?
+            Self::parse_config::<Vec<InputDataSource>>(&ctx.config, "proposal_data_sources")?
                 .unwrap_or_default();
         let manifest_offset =
             Self::parse_config::<usize>(&ctx.config, "shasta_manifest_offset")?.unwrap_or(0);
@@ -398,7 +398,7 @@ mod tests {
         ctx.preflight.resolved_l2_chain_spec = Some(spec);
 
         let manifest =
-            ShastaManifestBuilder::build_taiko_manifest(&ctx, &[], None).expect("manifest");
+            ProposalManifestBuilder::build_taiko_manifest(&ctx, &[], None).expect("manifest");
 
         assert_eq!(manifest.chain_spec.name, "taiko_dev_override");
         assert_eq!(manifest.chain_spec.chain_id, 167_001);
@@ -413,7 +413,7 @@ mod tests {
         });
 
         let manifest =
-            ShastaManifestBuilder::build_taiko_manifest(&ctx, &[], None).expect("manifest");
+            ProposalManifestBuilder::build_taiko_manifest(&ctx, &[], None).expect("manifest");
 
         assert_eq!(manifest.chain_spec.name, UNKNOWN_L2_CHAIN_SPEC_NAME);
         assert_eq!(manifest.chain_spec.chain_id, 999_999);
@@ -428,7 +428,7 @@ mod tests {
             ..Default::default()
         });
 
-        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+        let err = ProposalManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
 
         assert!(err.to_string().contains("invalid prover address"));
     }
@@ -441,7 +441,7 @@ mod tests {
             ..Default::default()
         });
 
-        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+        let err = ProposalManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
 
         assert!(err.to_string().contains("invalid graffiti"));
     }
@@ -462,7 +462,7 @@ mod tests {
             ..Default::default()
         });
 
-        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+        let err = ProposalManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
 
         assert!(err.to_string().contains("does not fit in uint48"));
     }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use raiko2_pipeline::{
     PipelineKey, PipelineRoute,
-    forks::shasta::preflight_cache::{
+    proposal::preflight_cache::{
         CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult,
         CanonicalPreflightDescriptor, CanonicalPreflightKeyV1, CanonicalPreflightObject,
         CanonicalPreflightPutResult, CanonicalPreflightStore,
@@ -705,7 +705,7 @@ mod tests {
     use super::*;
     use raiko2_pipeline::{
         PipelineKey,
-        forks::shasta::preflight_cache::{
+        proposal::preflight_cache::{
             CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightKeyV1,
             CanonicalPreflightPutResult, CanonicalPreflightStore,
         },
@@ -713,7 +713,7 @@ mod tests {
     use raiko2_primitives::{L2BlockRange, ShastaCheckpoint};
 
     fn key() -> ProofArtifactKey {
-        let pipeline_key = PipelineKey::ShastaSp1;
+        let pipeline_key = PipelineKey::Sp1Local;
         ProofArtifactKey {
             network_pair: "taiko_dev/ethereum".to_string(),
             pipeline_key,

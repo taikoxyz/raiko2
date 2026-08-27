@@ -1,7 +1,7 @@
 use super::*;
 use alloy_primitives::B256;
 use raiko2_pipeline::PipelineKey;
-use raiko2_pipeline::forks::shasta::preflight_cache::{
+use raiko2_pipeline::proposal::preflight_cache::{
     CANONICAL_PREFLIGHT_SCHEMA_V1, CanonicalPreflightDeleteResult, CanonicalPreflightKeyV1,
     CanonicalPreflightPutResult, CanonicalPreflightStore,
 };
@@ -301,8 +301,8 @@ impl GcsTransport for FakeGcsTransport {
 fn key() -> ProofArtifactKey {
     ProofArtifactKey {
         network_pair: "taiko_dev/ethereum".to_string(),
-        pipeline_key: PipelineKey::ShastaSp1,
-        route: PipelineKey::ShastaSp1.route(),
+        pipeline_key: PipelineKey::Sp1Local,
+        route: PipelineKey::Sp1Local.route(),
         proof_ref: "proposal-1".to_string(),
     }
 }

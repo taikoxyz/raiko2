@@ -18,7 +18,7 @@ except ImportError:
     ExtraDataToPOAMiddleware = None
 import sys
 import os
-from shasta_event_decoder import ShastaEventDecoder
+from proposal_event_decoder import ProposalEventDecoder
 
 # UNZEN-era proposal spans can grow far beyond the old 192-block SHASTA limit.
 # Keep the regression harness aligned with the widest supported proposal window.
@@ -233,7 +233,7 @@ class BatchMonitor:
         self.api_version = api_version
         self.discovered_proposals: list[Dict[str, Any]] = []
         # Initialize Shasta event decoder
-        self.shasta_decoder = ShastaEventDecoder()
+        self.shasta_decoder = ProposalEventDecoder()
         # Cache for proposal block numbers: proposal_id -> l1_block_number
         # Used for both normal proposals and bond proposals
         self.proposal_block_cache: Dict[int, Optional[int]] = {}
@@ -2368,8 +2368,8 @@ async def main():
 
 
 # Example usage:
-# python stress_shasta_proposal.py -t native -g 1000,2000 -p 10 -o stress_dev.log -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1-rpc.example.com -l https://l2-rpc.example.com -i IInbox.json -b Anchor.json -x 100 -w
-# python stress_shasta_proposal.py -t native -g 1000,2000 -A 5 -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1-rpc.example.com -l https://l2-rpc.example.com -i IInbox.json -b Anchor.json
+# python stress_proposal.py -t native -g 1000,2000 -p 10 -o stress_dev.log -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1-rpc.example.com -l https://l2-rpc.example.com -i IInbox.json -b Anchor.json -x 100 -w
+# python stress_proposal.py -t native -g 1000,2000 -A 5 -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1-rpc.example.com -l https://l2-rpc.example.com -i IInbox.json -b Anchor.json
 # Note: 
 #   -a (--raiko-rpc): Raiko RPC endpoint (default: http://localhost:8080)
 #   -g now specifies L2 block range instead of L1 block range

@@ -491,23 +491,23 @@ impl Provider for NetworkProvider {
         self.fetch_l1_headers(block_numbers).await
     }
 
-    async fn shasta_proposal_event(
+    async fn proposal_event(
         &self,
         l1_contract: Address,
         l1_inclusion_block_number: u64,
         proposal_id: u64,
     ) -> RaikoResult<ShastaEventData> {
-        self.fetch_shasta_proposal_event(l1_contract, l1_inclusion_block_number, proposal_id)
+        self.fetch_proposal_event(l1_contract, l1_inclusion_block_number, proposal_id)
             .await
     }
 
-    async fn shasta_data_sources(
+    async fn proposal_data_sources(
         &self,
         l1_chain_spec: &raiko2_primitives::ChainSpec,
         proposal_event: &ShastaEventData,
         blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
-        self.fetch_shasta_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
+        self.fetch_proposal_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
             .await
     }
 }

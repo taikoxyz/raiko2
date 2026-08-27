@@ -9,7 +9,7 @@ use raiko2_protocol_shasta::{
     shasta::{Commitment, ProofCarryData},
 };
 use raiko2_prover::remote_prover::protocol::{
-    RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
+    RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProposalAggregateRequest,
 };
 use secp256k1::{
     Message, Secp256k1,
@@ -22,7 +22,7 @@ use crate::{
     tee::TeeProvider,
 };
 
-const SHASTA_SGX_PROOF_LEN: usize = 89;
+const SGX_PROOF_LEN: usize = 89;
 
 struct ValidatedAggregateRequest {
     carries: Vec<ProofCarryData>,
@@ -32,7 +32,7 @@ struct ValidatedAggregateRequest {
 pub(crate) fn aggregate_request<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
-    request: &Raiko2ShastaAggregateRequest,
+    request: &Raiko2ProposalAggregateRequest,
 ) -> Result<Raiko2ProofResponse, RequestFailure> {
     let identity = load_signer_identity(provider)
         .map_err(|err| RequestFailure::prover_error(err.to_string()))?;
@@ -52,7 +52,7 @@ pub(crate) fn aggregate_request<P: TeeProvider>(
 }
 
 fn validate_request(
-    request: &Raiko2ShastaAggregateRequest,
+    request: &Raiko2ProposalAggregateRequest,
     expected_instance_id: u32,
     expected_instance_address: Address,
 ) -> Result<ValidatedAggregateRequest, RequestFailure> {
@@ -94,9 +94,9 @@ fn validate_request(
         let proof_bytes = hex::decode(item.proof.trim_start_matches("0x")).map_err(|err| {
             RequestFailure::invalid_request(format!("decode aggregate proof {index}: {err}"))
         })?;
-        if proof_bytes.len() != SHASTA_SGX_PROOF_LEN {
+        if proof_bytes.len() != SGX_PROOF_LEN {
             return Err(RequestFailure::invalid_request(format!(
-                "aggregate proof {index} length mismatch: got {} expected {SHASTA_SGX_PROOF_LEN}",
+                "aggregate proof {index} length mismatch: got {} expected {SGX_PROOF_LEN}",
                 proof_bytes.len()
             )));
         }
@@ -132,16 +132,16 @@ fn validate_sgx_child_proof(
     expected_instance_id: u32,
     expected_instance_address: Address,
 ) -> Result<(), RequestFailure> {
-    if proof_bytes.len() != SHASTA_SGX_PROOF_LEN {
+    if proof_bytes.len() != SGX_PROOF_LEN {
         return Err(RequestFailure::invalid_request(format!(
-            "aggregate proof {index} length mismatch: got {} expected {SHASTA_SGX_PROOF_LEN}",
+            "aggregate proof {index} length mismatch: got {} expected {SGX_PROOF_LEN}",
             proof_bytes.len()
         )));
     }
 
     let instance_id = u32::from_be_bytes(proof_bytes[0..4].try_into().map_err(|_| {
         RequestFailure::invalid_request(format!(
-            "aggregate proof {index} length mismatch: got {} expected {SHASTA_SGX_PROOF_LEN}",
+            "aggregate proof {index} length mismatch: got {} expected {SGX_PROOF_LEN}",
             proof_bytes.len()
         ))
     })?);
@@ -209,12 +209,12 @@ mod tests {
     use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
     use raiko2_prover::remote_prover::protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2AggregateProof,
-        Raiko2ProofStatus, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
+        Raiko2ProofStatus, Raiko2ProposalAggregatePayload, Raiko2ProposalAggregateRequest,
     };
     use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
     use std::str::FromStr;
 
-    use super::{SHASTA_SGX_PROOF_LEN, aggregate_request, validate_sgx_child_proof};
+    use super::{SGX_PROOF_LEN, aggregate_request, validate_sgx_child_proof};
     use crate::bootstrap::public_key_to_address;
     use crate::tee::TeeProvider;
 
@@ -272,7 +272,7 @@ mod tests {
         }
     }
 
-    fn aggregate_request_fixture() -> Raiko2ShastaAggregateRequest {
+    fn aggregate_request_fixture() -> Raiko2ProposalAggregateRequest {
         let first = carry_fixture(7, B256::from([0xAA; 32]), B256::from([0xBB; 32]));
         let mut second = carry_fixture(
             8,
@@ -302,9 +302,9 @@ mod tests {
             })
             .collect();
 
-        Raiko2ShastaAggregateRequest {
+        Raiko2ProposalAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaAggregatePayload { proofs },
+            payload: Raiko2ProposalAggregatePayload { proofs },
         }
     }
 
@@ -372,9 +372,9 @@ mod tests {
             secret_key: SecretKey::from_slice(&[11u8; 32]).expect("secret key"),
             quote: vec![],
         };
-        let request = Raiko2ShastaAggregateRequest {
+        let request = Raiko2ProposalAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaAggregatePayload { proofs: vec![] },
+            payload: Raiko2ProposalAggregatePayload { proofs: vec![] },
         };
 
         let err = aggregate_request(&provider, 19, &request).expect_err("empty proofs");
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn aggregate_child_proof_accepts_extended_recovery_id_format() {
         for recovery_id in [29, 30] {
-            let mut proof = vec![0u8; SHASTA_SGX_PROOF_LEN];
+            let mut proof = vec![0u8; SGX_PROOF_LEN];
             proof[88] = recovery_id;
 
             let err = validate_sgx_child_proof(0, &proof, B256::from([0u8; 32]), 0, Address::ZERO)

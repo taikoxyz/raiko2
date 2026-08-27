@@ -1054,8 +1054,7 @@ mod tests {
     async fn runtime_cleanup_cancels_orphaned_roots_without_remote_progress() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned"))?);
         let orphaned_task_id = encoded_proposal_task_id(10)?;
-        let remote_task_id =
-            encoded_proposal_task_id_for_pipeline(11, PipelineKey::ShastaRisc0Network)?;
+        let remote_task_id = encoded_proposal_task_id_for_pipeline(11, PipelineKey::Risc0Network)?;
         let queued_task_id = encoded_proposal_task_id(13)?;
         let now = now_ts();
         let stale = now.saturating_sub(7_201);
@@ -1108,7 +1107,7 @@ mod tests {
             runtime.as_ref(),
             "remote-root",
             &remote_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::Risc0Network,
             RunnerStatus::Running,
             stale,
         )
@@ -1310,7 +1309,7 @@ mod tests {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "artifact-lock-sweep",
         ))?);
-        let pipeline = PipelineKey::ShastaSp1;
+        let pipeline = PipelineKey::Sp1Local;
         let route = pipeline.route();
 
         runtime
@@ -1375,8 +1374,8 @@ mod tests {
             runtime
                 .publish_proof_artifact_bytes(
                     "l1-l2",
-                    PipelineKey::ShastaSp1,
-                    PipelineKey::ShastaSp1.route(),
+                    PipelineKey::Sp1Local,
+                    PipelineKey::Sp1Local.route(),
                     "failed-pass-lock",
                     b"proof",
                 )
@@ -1857,12 +1856,12 @@ mod tests {
         )
         .await?;
         let metadata = metadata_for_task(&encoded_proposal_ref);
-        let proof_ref = proposal_task_ref(PipelineKey::ShastaRisc0, &metadata.proposals[0].request);
+        let proof_ref = proposal_task_ref(PipelineKey::Risc0Local, &metadata.proposals[0].request);
         let artifact = runtime
             .publish_proof_artifact_bytes(
                 "taiko_dev/ethereum",
-                PipelineKey::ShastaRisc0,
-                PipelineKey::ShastaRisc0.route(),
+                PipelineKey::Risc0Local,
+                PipelineKey::Risc0Local.route(),
                 &proof_ref,
                 br#"{"proof":"0xcomplete"}"#,
             )
@@ -1874,8 +1873,8 @@ mod tests {
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: "taiko_dev/ethereum".to_string(),
                 proof_ref: proof_ref.clone(),
-                pipeline_key: PipelineKey::ShastaRisc0,
-                route: PipelineKey::ShastaRisc0.route(),
+                pipeline_key: PipelineKey::Risc0Local,
+                route: PipelineKey::Risc0Local.route(),
                 proof_uri: artifact.proof_uri,
                 content_hash: artifact.content_hash,
                 generation: artifact.generation,
@@ -1906,19 +1905,19 @@ mod tests {
     #[tokio::test]
     async fn restart_reconciliation_completes_compressed_sp1_proposal_root() -> Result<()> {
         let runtime = RuntimeManager::new(unique_runtime_root("sp1-artifact-reconcile"))?;
-        let encoded_task = encoded_proposal_task_id_for_pipeline(16, PipelineKey::ShastaSp1)?;
+        let encoded_task = encoded_proposal_task_id_for_pipeline(16, PipelineKey::Sp1Local)?;
         let metadata = metadata_for_task(&encoded_task);
         register_runtime_task_with_metadata(
             &runtime,
             "sp1-root",
             &metadata,
-            PipelineKey::ShastaSp1,
+            PipelineKey::Sp1Local,
             RunnerStatus::Running,
             1,
         )
         .await?;
         let record = runtime.get_task("sp1-root").await?.expect("SP1 root");
-        let proof_ref = proposal_task_ref(PipelineKey::ShastaSp1, &metadata.proposals[0].request);
+        let proof_ref = proposal_task_ref(PipelineKey::Sp1Local, &metadata.proposals[0].request);
         let proof = raiko2_primitives::Proof {
             input: Some(alloy_primitives::B256::ZERO),
             quote: Some(r#"{"Compressed":{}}"#.to_string()),
@@ -2814,8 +2813,8 @@ mod tests {
                 runtime
                     .get_proof_artifact_including_invalidated(
                         "taiko_dev/ethereum",
-                        PipelineKey::ShastaRisc0,
-                        PipelineKey::ShastaRisc0.route(),
+                        PipelineKey::Risc0Local,
+                        PipelineKey::Risc0Local.route(),
                         &proof_ref,
                     )
                     .await?
@@ -2831,8 +2830,8 @@ mod tests {
             runtime
                 .get_proof_artifact_including_invalidated(
                     "taiko_dev/ethereum",
-                    PipelineKey::ShastaRisc0,
-                    PipelineKey::ShastaRisc0.route(),
+                    PipelineKey::Risc0Local,
+                    PipelineKey::Risc0Local.route(),
                     "a-retry-artifact",
                 )
                 .await?
@@ -2892,7 +2891,7 @@ mod tests {
 
     fn build_factory(engine: Arc<dyn EngineHandle>) -> StaticPipelineFactory {
         let mut factory = StaticPipelineFactory::default();
-        factory.insert("taiko_dev/ethereum", PipelineKey::ShastaRisc0, engine);
+        factory.insert("taiko_dev/ethereum", PipelineKey::Risc0Local, engine);
         factory
     }
 
@@ -2923,11 +2922,11 @@ mod tests {
         network_pair: &str,
     ) -> Result<()> {
         let metadata = metadata_for_task_with_pair(proposal_task_id, network_pair);
-        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::Risc0Local);
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
-                pipeline_key: PipelineKey::ShastaRisc0,
+                pipeline_key: PipelineKey::Risc0Local,
                 route: "risc0/local".parse().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: network_pair.to_string(),
@@ -3005,7 +3004,7 @@ mod tests {
         runtime: &RuntimeManager,
         proof_ref: &str,
     ) -> Result<ProofArtifactRegistration> {
-        let pipeline_key = PipelineKey::ShastaRisc0;
+        let pipeline_key = PipelineKey::Risc0Local;
         let route = pipeline_key.route();
         let object = runtime
             .publish_proof_artifact_bytes(
@@ -3078,7 +3077,7 @@ mod tests {
     }
 
     fn encoded_proposal_task_id(proposal_id: u64) -> Result<String> {
-        encoded_proposal_task_id_for_pipeline(proposal_id, PipelineKey::ShastaRisc0)
+        encoded_proposal_task_id_for_pipeline(proposal_id, PipelineKey::Risc0Local)
     }
 
     fn encoded_proposal_task_id_for_pipeline(

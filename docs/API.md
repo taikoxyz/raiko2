@@ -2,7 +2,7 @@
 
 ## Overview
 
-Raiko2 exposes a Shasta-first `/v4` API for explicit proof-type proposal proving,
+Raiko2 exposes a proposal-oriented `/v4` API for explicit proof-type proposal proving,
 aggregation, task lookup, status, and clear operations.
 
 Proof submission is asynchronous. Legacy `/v3/*` and `/proof/*` compatibility routes are kept in
@@ -321,7 +321,7 @@ Validation:
 - `proposals` may contain at most 1,024 items.
 - `aggregate=false` requires exactly one proposal.
 - `aggregate=true` accepts one or more contiguous proposals.
-- `proposals[].proposal_id` must fit Shasta's `uint48` protocol field.
+- `proposals[].proposal_id` must fit the protocol's `uint48` field.
 - `proposals[].proposal_id` values must be strictly increasing and contiguous.
 - `proposals[].l2_block_number_end` must be greater than or equal to
   `proposals[].l2_block_number_start`.
@@ -422,7 +422,7 @@ Response fields:
 SP1 proposal artifacts and final aggregate artifacts have different payload contracts:
 
 - A proposal artifact is readable when it contains a non-null `proof`, or, only for
-  `PipelineKey::ShastaSp1`, when it contains the complete Compressed payload fields `quote`,
+  `PipelineKey::Sp1Local`, when it contains the complete Compressed payload fields `quote`,
   `input`, `uuid`, and `extra_data`.
 - An aggregate artifact is readable only when it contains a non-null final `proof`.
 - Artifact validation is derived from the proposal or aggregate task identity. Whether the task is
@@ -650,10 +650,10 @@ and `[prover.sgxgeth]`; each table owns its `enabled`, `base_url`, and `timeout_
 - `proposal.l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
 - `proposal.checkpoint` is optional and is validated against the canonical final witness
   checkpoint when the proof is built.
-- `proposal.l1_inclusion_block_number` is required. The server derives canonical Shasta proposal
+- `proposal.l1_inclusion_block_number` is required. The server derives canonical proposal
   data from RPC; request-time internal manifest overrides are not accepted.
-- `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
-- `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
+- `proposal.proposal_id` must fit the protocol's `uint48` field.
+- `proposal.last_anchor_block_number` participates in anchor monotonicity validation.
 - `proof_type` mapping:
   - `native -> native/local` when `prover.native.enabled = true`; otherwise rejected
   - `sp1 -> sp1/local | sp1/network` from `prover.sp1.enabled` and `prover.sp1.prover`
@@ -693,7 +693,7 @@ and `[prover.sgxgeth]`; each table owns its `enabled`, `base_url`, and `timeout_
 - `sp1.prover=network` with `sp1.verify=true` requires the selected `(network, l1_network)` pair
   to declare `sp1_verifier_rpc_url` and `sp1_verifier_address` in server config.
   `sp1_verifier_address` is the Succinct SP1 verifier gateway used for `ISP1Verifier.verifyProof`,
-  not the Taiko Shasta verifier registered in the chain spec.
+  not the Taiko proposal verifier registered in the chain spec.
 - `sp1` network-only settings require `sp1.prover=network`.
 - `sp1.network_mode=mainnet` requires `sp1.fulfillment_strategy=auction`.
 - `sp1.network_mode=reserved` requires `sp1.fulfillment_strategy=reserved` or `hosted`.
@@ -1177,10 +1177,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   distributed owner lease, owner epoch, or ownership heartbeat. Deployment must guarantee that old
   and replacement processes never overlap for one namespace. Configure prefixes so one deployment
   scope cannot be nested below another deployment's `(prefix, environment, namespace)` scope.
-- Canonical Shasta preflight cores are keyed by chain/range/proposal/L1 inclusion and effective rule
+- Canonical proposal preflight cores are keyed by chain/range/proposal/L1 inclusion and effective rule
   identity, then shared across all proof lanes in one process. Proof type, verifier addresses,
   request presentation fields, and RPC endpoints are not part of that cache identity. Cache hits are
-  revalidated with guest-equivalent Shasta semantics before lane-specific `GuestInput` materialization.
+  revalidated with guest-equivalent proposal semantics before lane-specific `GuestInput` materialization.
 - The namespace fence is global to the process but short-lived: draining closes mutation admission
   and readiness immediately, then waits only for repository commits already admitted and provider
   request-ID checkpoints covered by existing permits. It is not held across a full task,
@@ -1203,10 +1203,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - A proof task reports `completed` only after its normalized `Proof` artifact is durably published,
   registered, readable, and satisfies its task-identity payload contract. Proposal tasks accept a
   non-null `proof`, plus the complete Compressed SP1 tuple (`quote`, `input`, `uuid`, `extra_data`)
-  on `ShastaSp1`; aggregate tasks require a non-null final `proof`. Publication is create-only: an
+  on `Sp1Local`; aggregate tasks require a non-null final `proof`. Publication is create-only: an
   identical existing object is idempotent, while a different late object is discarded.
 - Proof artifact identity includes the concrete execution route. In particular, `sp1/local` and
-  `sp1/network` use different objects even though they share `PipelineKey::ShastaSp1`.
+  `sp1/network` use different objects even though they share `PipelineKey::Sp1Local`.
 - Before the first canonical publication attempt, a completed proof payload is checkpointed under
   the queue lease. Authoritative runtime state first records a publication intent containing the
   typed artifact identity, content hash, and exact `TaskLifetime` owners; only then is the immutable
@@ -1220,7 +1220,7 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   rejected until exact deletion and state finalization converge. Immutable proof content is retained,
   and a later lifecycle may publish identical or different content under a new manifest generation.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
-- `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob sidecar fetches use that L1
+- `rpc.pairs[*].beacon_rpc` is optional. When set, blob sidecar fetches use that L1
   beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.
 - `rpc.pairs[*].l2_rpc` is the canonical read/state RPC used for blocks and account/state proofs.
 - `rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`;
@@ -1342,7 +1342,7 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   preflight. Omit a network from the map to skip that verification for the pair. The verification
   RPC uses the same `rpc.client` timeout, concurrency, and retry settings as the main preflight
   provider RPCs.
-- Shasta preflight splits proposals into chunks of `8` blocks by default and runs at most `6`
+- Proposal preflight splits proposals into chunks of `8` blocks by default and runs at most `6`
   chunks concurrently. Operators may override those values with `PREFLIGHT_CHUNK_SIZE`
   (`PREFETCH_CHUNK_SIZE` is accepted for old-raiko compatibility) and
   `PREFLIGHT_CHUNK_CONCURRENCY`.
@@ -1350,13 +1350,13 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   witnesses at a time per preflight chunk, to keep regular geth RPC endpoints from being flooded.
 - `queue.workers` defaults to `6`, aligned with the old raiko hosted proving concurrency. Each
   worker runs one queue task at a time; preflight chunk concurrency is controlled separately.
-- Shasta preflight retries retryable provider/RPC/IO failures inside the preflight stage with
+- Proposal preflight retries retryable provider/RPC/IO failures inside the preflight stage with
   exponential backoff, while invalid request/configuration and deterministic validation failures
   still fail fast. Queue tasks no longer have a global wall-clock deadline.
 - `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional
   pair-level settings that enable hosted `sp1.prover=network` verification through a remote
   Succinct verifier contract. Leaving them unset keeps that pair closed for hosted SP1 network
-  proving. This verifier is separate from the Taiko Shasta verifier address in the chain spec.
+  proving. This verifier is separate from the Taiko proposal verifier address in the chain spec.
 - Queue tasks use a renewable lease for worker ownership but no global wall-clock timeout. RISC0
   network routes own retry/rebid behavior in the Boundless prover. SP1 network routes retry failed
   root tasks up to twenty times with a fixed five-minute delay.

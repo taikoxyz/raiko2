@@ -176,3 +176,49 @@ RISC0 binds proof acceptance to block and aggregation image IDs through `isImage
 instances under the current enclave policy. Stale or deprecated image IDs, program keys, instances,
 or enclave policies must be revoked promptly, because their proofs remain acceptable while that
 authorization stays active (audit assumption A1 and the L-7 image-lifecycle note).
+
+## Fork Vocabulary
+
+### Proposal Fork
+A Taiko hardfork that defines proposal rules. `Shasta` and `Unzen` are distinct, ordered variants of
+`TaikoFork`, and both are live concepts: Unzen is active on every network, while Shasta still
+resolves for pre-Unzen proposals and supplies inherited contract addresses where a network defines
+no Unzen override. A fork name in code or docs is correct only when it names one of these actual
+forks.
+
+### Proposal Pipeline
+The proving machinery that spans forks: preflight, validation, proving, and aggregation. It is
+named `proposal`, never after a fork, because a single implementation serves Shasta and Unzen
+together and will serve their successors. Earlier releases called this "Shasta", which is why the
+frozen identifiers below still carry that spelling.
+
+### Frozen Identifiers
+Strings and files that carry identity or a cross-service contract. Each keeps the retired `shasta`
+spelling because renaming it breaks something outside this repository. Do not "finish" the rename.
+
+- `TaikoFork::Shasta` and the `"SHASTA"` keys in `config/chain_spec_list_default.json` name the real
+  Shasta fork. Not a rename candidate at all.
+- Crate names `raiko2-primitives-shasta` and `raiko2-protocol-shasta`, the guest bin targets, and the
+  artifact filenames `risc0_shasta_*.elf`, `sp1_shasta_*.elf`, `sp1_shasta_*.vk.bin`. All are inside
+  the guest ELF closure and are recorded in `crates/guests/elf/*.provenance.json`. Renaming forces a
+  guest rebuild, which yields new image ids and verifying keys and requires on-chain verifier
+  re-registration on every network.
+- `PipelineKey::as_str` values (`shasta-sp1-local` and siblings) are path components of live GCS
+  proof URIs. `PipelineKey`'s `serde` names (`ShastaSp1` and siblings, pinned with
+  `#[serde(rename)]`) appear in persisted `ProofArtifactRecord` JSON. Changing either orphans stored
+  artifacts and re-pays for completed proofs.
+- `POST /v3/proof/batch/shasta` is a published legacy route.
+- `POST /prove/shasta` and `POST /prove/shasta-aggregate` are served by `raiko2-sgx-runtime` and
+  called by the external gaiko2 prover.
+- `raiko2-shasta-request-v1` and `raiko2-shasta-aggregate-request-v1` are the remote-prover schema
+  tags, validated byte-for-byte by gaiko2.
+- `RAIKO2_SGX_FORK` and `GAIKO2_FORK` default to `shasta`. This is both a deployed environment
+  variable and the lookup key into the SGX bootstrap `registered.json` instance-id map, so changing
+  it loses the registered SGX instance id.
+- The `shasta` field on `ProofRequest` is a serialized request field in a guest-closure crate.
+
+Each of these is covered by a `frozen_identity_tests` module in the crate that owns it. A failure
+there means a frozen boundary was crossed, not that the expectation is stale.
+
+The naming rule for everything else: an identifier whose job is to name a frozen string or file
+keeps the frozen spelling; every other identifier drops the fork name.

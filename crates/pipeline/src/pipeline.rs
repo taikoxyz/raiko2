@@ -113,7 +113,7 @@ mod tests {
         type Provider = EmptyProvider;
 
         fn pipeline_key(&self) -> PipelineKey {
-            PipelineKey::ShastaNative
+            PipelineKey::NativeLocal
         }
 
         fn prover(&self) -> &Self::Prover {

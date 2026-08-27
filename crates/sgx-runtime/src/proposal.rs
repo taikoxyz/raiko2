@@ -3,7 +3,7 @@
 use raiko2_guest_common::prove_shasta_proposal;
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_prover::remote_prover::protocol::{
-    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaRequest,
+    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProposalRequest,
 };
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 pub(crate) fn prove_request<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
-    request: &Raiko2ShastaRequest,
+    request: &Raiko2ProposalRequest,
 ) -> Result<Raiko2ProofResponse, RequestFailure> {
     validate_schema(request)?;
     let guest_input: raiko2_primitives_shasta::GuestInput =
@@ -34,7 +34,7 @@ pub(crate) fn prove_request<P: TeeProvider>(
     Ok(Raiko2ProofResponse::success(result))
 }
 
-fn validate_schema(request: &Raiko2ShastaRequest) -> Result<(), RequestFailure> {
+fn validate_schema(request: &Raiko2ProposalRequest) -> Result<(), RequestFailure> {
     if request.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
         return Err(RequestFailure::invalid_request(format!(
             "unsupported schema {:?}",
@@ -66,8 +66,8 @@ mod tests {
     use alloy_primitives::Address;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_prover::remote_prover::protocol::{
-        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock, Raiko2ShastaGuestInput,
-        Raiko2ShastaPayload, Raiko2ShastaRequest,
+        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProposalGuestInput, Raiko2ProposalPayload,
+        Raiko2ProposalRequest, Raiko2ReplayBlock,
     };
     use secp256k1::SecretKey;
 
@@ -94,17 +94,17 @@ mod tests {
         }
     }
 
-    fn request_fixture() -> Raiko2ShastaRequest {
+    fn request_fixture() -> Raiko2ProposalRequest {
         let mut carry = ProofCarryData {
             chain_id: 167_013,
             ..ProofCarryData::default()
         };
         carry.transition_input.proposal_id = 42;
 
-        Raiko2ShastaRequest {
+        Raiko2ProposalRequest {
             schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Raiko2ShastaPayload {
-                guest_input: Raiko2ShastaGuestInput {
+            payload: Raiko2ProposalPayload {
+                guest_input: Raiko2ProposalGuestInput {
                     proof_carry_data: carry,
                     ..Default::default()
                 },

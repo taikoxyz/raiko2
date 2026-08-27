@@ -57,8 +57,8 @@ use crate::redact::redact_urls;
 use crate::{
     BoundlessSubmissionProgress, BoundlessSubmissionResume, PendingProofCheckpointIdentity,
     ProverProgress, ProverProgressObserver, encode_risc0_aggregation_seal_payload,
-    encode_risc0_proposal_seal_payload, ensure_shasta_proposal_input_matches_carry,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    encode_risc0_proposal_seal_payload, ensure_proposal_input_matches_carry,
+    parse_proposal_aggregation_input_hash, parse_proposal_input_hash, with_proposal_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -4522,11 +4522,11 @@ impl BoundlessProver {
             None
         };
         let input_hash = match context.proof_type {
-            "proposal" => parse_shasta_proposal_input_hash(journal)?,
-            _ => parse_shasta_aggregation_input_hash(journal)?,
+            "proposal" => parse_proposal_input_hash(journal)?,
+            _ => parse_proposal_aggregation_input_hash(journal)?,
         };
         if let ("proposal", Some(carry)) = (context.proof_type, context.proposal_carry_data) {
-            ensure_shasta_proposal_input_matches_carry(input_hash, carry, "boundless")?;
+            ensure_proposal_input_matches_carry(input_hash, carry, "boundless")?;
         }
         if input_hash != context.expected_input_hash {
             return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
@@ -4536,7 +4536,7 @@ impl BoundlessProver {
         let stage_metadata = self.boundless_stage_metadata(submission, context);
         let extra_data = match (context.proof_type, context.proposal_carry_data) {
             ("proposal", Some(carry)) => {
-                with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?
+                with_proposal_extra_data(carry, "risc0", Some(stage_metadata))?
             }
             _ => Some(stage_metadata),
         };
@@ -4602,9 +4602,9 @@ impl BoundlessProver {
         let (evaluated_mcycles_count, journal) =
             Self::evaluate_guest(input.to_vec(), self.config.execution_po2, elf.to_vec()).await?;
         let expected_input_hash = if elf_type.is_proposal() {
-            parse_shasta_proposal_input_hash(&journal)?
+            parse_proposal_input_hash(&journal)?
         } else {
-            parse_shasta_aggregation_input_hash(&journal)?
+            parse_proposal_aggregation_input_hash(&journal)?
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
         // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.

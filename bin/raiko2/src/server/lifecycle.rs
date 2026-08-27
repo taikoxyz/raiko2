@@ -746,7 +746,7 @@ mod tests {
             "test".into(),
             format!("missing-finalization-{}", uuid::Uuid::new_v4()),
         )?);
-        let pipeline = PipelineKey::ShastaNative;
+        let pipeline = PipelineKey::NativeLocal;
         let route = pipeline.route();
         let object = runtime
             .publish_proof_artifact_bytes(
@@ -973,8 +973,8 @@ mod tests {
         let record = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: Vec::new(),
@@ -1042,8 +1042,8 @@ mod tests {
         let record = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: Vec::new(),
@@ -1114,8 +1114,8 @@ mod tests {
         let record = runtime
             .register_task(TaskRegistration {
                 task_id: "root".into(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: PipelineKey::ShastaNative.route(),
+                pipeline_key: PipelineKey::NativeLocal,
+                route: PipelineKey::NativeLocal.route(),
                 task_kind: "proposal".into(),
                 network_pair: "taiko_dev/ethereum".into(),
                 artifact_refs: Vec::new(),

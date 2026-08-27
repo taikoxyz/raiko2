@@ -62,7 +62,7 @@ mod tests {
     use std::sync::Arc;
 
     fn artifact_key(proof_ref: &str) -> ProofArtifactKey {
-        let pipeline_key = PipelineKey::ShastaSp1;
+        let pipeline_key = PipelineKey::Sp1Local;
         ProofArtifactKey {
             network_pair: "l1-l2".to_string(),
             pipeline_key,

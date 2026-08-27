@@ -20,7 +20,7 @@ impl ProofArtifactPayload {
         match self {
             Self::Proposal => {
                 proof.proof.is_some()
-                    || (matches!(pipeline_key, PipelineKey::ShastaSp1)
+                    || (matches!(pipeline_key, PipelineKey::Sp1Local)
                         && proof.quote.is_some()
                         && proof.input.is_some()
                         && proof.uuid.is_some()
@@ -121,14 +121,14 @@ mod tests {
             ..Proof::default()
         };
 
-        assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaSp1, &compressed_sp1));
+        assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::Sp1Local, &compressed_sp1));
         assert!(
-            ProofArtifactPayload::AggregateInput.accepts(PipelineKey::ShastaSp1, &compressed_sp1)
+            ProofArtifactPayload::AggregateInput.accepts(PipelineKey::Sp1Local, &compressed_sp1)
         );
-        assert!(!ProofArtifactPayload::Final.accepts(PipelineKey::ShastaSp1, &compressed_sp1));
-        assert!(!ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaRisc0, &compressed_sp1));
-        assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::ShastaSp1, &final_proof));
-        assert!(ProofArtifactPayload::Final.accepts(PipelineKey::ShastaSp1, &final_proof));
+        assert!(!ProofArtifactPayload::Final.accepts(PipelineKey::Sp1Local, &compressed_sp1));
+        assert!(!ProofArtifactPayload::Proposal.accepts(PipelineKey::Risc0Local, &compressed_sp1));
+        assert!(ProofArtifactPayload::Proposal.accepts(PipelineKey::Sp1Local, &final_proof));
+        assert!(ProofArtifactPayload::Final.accepts(PipelineKey::Sp1Local, &final_proof));
     }
 
     #[tokio::test]
@@ -136,7 +136,7 @@ mod tests {
         let runtime =
             RuntimeManager::new_memory("test".to_string(), "invalidated-reader-fence".to_string())?;
         let network_pair = "taiko_dev/ethereum";
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let proof_ref = "proof-ref";
         let proof_bytes = serde_json::to_vec(&Proof {
@@ -282,7 +282,7 @@ mod tests {
         });
         let runtime = Arc::new(RuntimeManager::with_store(store.clone()));
         let network_pair = "taiko_dev/ethereum";
-        let pipeline_key = PipelineKey::ShastaNative;
+        let pipeline_key = PipelineKey::NativeLocal;
         let route = pipeline_key.route();
         let proof_ref = "proof-ref";
         let old_bytes = serde_json::to_vec(&Proof {

@@ -7,15 +7,16 @@ mod spec;
 use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};
 
 pub use backends::{
-    ShastaBackends, load_risc0_boundless_shasta_backend, load_risc0_shasta_backend,
-    load_shasta_backends, load_sp1_shasta_backend, risc0_boundless_shasta_backend_from_elves,
-    risc0_shasta_backend_from_elves, shasta_backends_from_elves, sp1_shasta_backend_from_elves,
+    ProposalBackends, load_proposal_backends, load_risc0_boundless_proposal_backend,
+    load_risc0_proposal_backend, load_sp1_proposal_backend, proposal_backends_from_elves,
+    risc0_boundless_proposal_backend_from_elves, risc0_proposal_backend_from_elves,
+    sp1_proposal_backend_from_elves,
 };
 pub use checkpoint_verify::{
     compare_guest_input_checkpoint_against_l2_blocks, verify_guest_input_checkpoint_against_l2_rpc,
 };
-pub use manifest::ShastaManifestBuilder;
-pub use spec::{ShastaSpec, validate_shasta_guest_input};
+pub use manifest::ProposalManifestBuilder;
+pub use spec::{ProposalSpec, validate_proposal_guest_input};
 
 // ELF selection is handled by the backend instance.
 
@@ -52,17 +53,17 @@ fn host_l2_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec>
 mod tests {
     use super::*;
     use crate::{ProofStage, ProverBackend};
-    use raiko2_guests::load_shasta_guest_elves;
+    use raiko2_guests::load_guest_elves;
     use raiko2_primitives::{ProofRequest, ProverConfig};
 
     #[test]
     fn shasta_backends_return_expected_elves() -> Result<(), Box<dyn std::error::Error>> {
-        let elves = load_shasta_guest_elves()?;
+        let elves = load_guest_elves()?;
         let expected_risc0_proposal = elves.risc0.proposal.clone();
         let expected_risc0_agg = elves.risc0.aggregation.clone();
         let expected_sp1_proposal = elves.sp1.proposal.clone();
         let expected_sp1_agg = elves.sp1.aggregation.clone();
-        let backends = shasta_backends_from_elves(elves);
+        let backends = proposal_backends_from_elves(elves);
 
         let risc0_proposal = backends.risc0.elf(ProofStage::Proposal)?;
         let risc0_agg = backends.risc0.elf(ProofStage::Aggregation)?;

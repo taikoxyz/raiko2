@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
-use raiko2_pipeline::{ProofStage, ProverBackend, forks::shasta::load_risc0_shasta_backend};
+use raiko2_pipeline::{ProofStage, ProverBackend, proposal::load_risc0_proposal_backend};
 use raiko2_primitives_shasta::GuestInput;
 use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ProgramBinary::new(&bytes, V1COMPAT_ELF).encode()
         }
     } else {
-        load_risc0_shasta_backend()
+        load_risc0_proposal_backend()
             .map_err(|err| format!("load RISC0 Shasta guest ELFs: {err}"))?
             .elf(ProofStage::Proposal)
             .map_err(|err| format!("load risc0 proposal elf: {err}"))?

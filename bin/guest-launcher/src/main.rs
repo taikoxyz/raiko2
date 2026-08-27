@@ -6,7 +6,7 @@ use std::time::Instant;
 use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
+use raiko2_pipeline::proposal::{load_risc0_proposal_backend, load_sp1_proposal_backend};
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::{
     AggregationGuestInput, OpcodeLabInput, PrecompileLabInput, Proof, ProofType as RaikoProofType,
@@ -832,7 +832,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
     }
 
     let sp1_config = args.sp1_config()?;
-    let backend = load_sp1_shasta_backend()
+    let backend = load_sp1_proposal_backend()
         .map_err(anyhow::Error::msg)
         .context("load SP1 Shasta guest ELFs")?;
     let prover = Sp1Prover::new(sp1_config);
@@ -1091,7 +1091,7 @@ async fn run_sp1_proposal(
     mut report: BenchReport,
 ) -> Result<()> {
     let sp1_config = args.sp1_config()?;
-    let backend = load_sp1_shasta_backend()
+    let backend = load_sp1_proposal_backend()
         .map_err(anyhow::Error::msg)
         .context("load SP1 Shasta guest ELFs")?;
     let prover = Sp1Prover::new(sp1_config);
@@ -1158,7 +1158,7 @@ async fn run_risc0_proposal(
     let elf = if let Some(path) = &args.elf {
         fs::read(path).with_context(|| format!("read {}", path.display()))?
     } else {
-        let backend = load_risc0_shasta_backend()
+        let backend = load_risc0_proposal_backend()
             .map_err(anyhow::Error::msg)
             .context("load RISC0 Shasta guest ELFs")?;
         backend

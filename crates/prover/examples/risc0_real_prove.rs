@@ -3,7 +3,7 @@
 use std::{env, fs, time::Instant};
 
 use raiko2_pipeline::{
-    ProofStage, ProverBackend, Risc0ShastaBackend, forks::shasta::load_risc0_shasta_backend,
+    ProofStage, ProverBackend, Risc0ProposalBackend, proposal::load_risc0_proposal_backend,
 };
 use raiko2_primitives::ProverConfig;
 use raiko2_primitives_shasta::GuestInput;
@@ -18,7 +18,7 @@ const QUOTED_MCYCLES_LIMIT: u32 = 6_000;
 
 fn evaluated_mcycles(
     input: &GuestInput,
-    backend: &Risc0ShastaBackend,
+    backend: &Risc0ProposalBackend,
 ) -> Result<u32, Box<dyn std::error::Error>> {
     let elf = backend
         .elf(ProofStage::Proposal)
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| format!("read guest input from {input_path}: {err}"))?;
     let guest_input: GuestInput = serde_json::from_str(&input_bytes)
         .map_err(|err| format!("parse guest input json: {err}"))?;
-    let backend = load_risc0_shasta_backend()
+    let backend = load_risc0_proposal_backend()
         .map_err(|err| format!("load RISC0 Shasta guest ELFs: {err}"))?;
 
     let evaluated_start = Instant::now();

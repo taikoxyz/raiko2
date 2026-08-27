@@ -962,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_command_uses_current_shasta_tuple_args() {
+    fn preflight_command_uses_current_proposal_tuple_args() {
         let root = Path::new("/repo");
         let output = Path::new("/tmp/input.json");
         let args = BenchGuestArgs {

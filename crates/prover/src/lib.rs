@@ -374,7 +374,7 @@ const B256_BYTES: usize = 32;
 pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
 
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
+pub(crate) fn parse_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() == B256_BYTES {
         Ok(B256::from_slice(public_values))
     } else {
@@ -385,7 +385,7 @@ pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoRes
     }
 }
 
-pub(crate) fn ensure_shasta_proposal_input_matches_carry(
+pub(crate) fn ensure_proposal_input_matches_carry(
     input_hash: B256,
     carry: &ProofCarryData,
     source: &str,
@@ -399,7 +399,7 @@ pub(crate) fn ensure_shasta_proposal_input_matches_carry(
     Ok(())
 }
 
-pub(crate) fn expected_shasta_aggregate_input(
+pub(crate) fn expected_proposal_aggregate_input(
     carries: &[ProofCarryData],
     prover_address: Address,
 ) -> RaikoResult<B256> {
@@ -421,13 +421,13 @@ pub(crate) fn expected_shasta_aggregate_input(
     ))
 }
 
-pub(crate) fn ensure_shasta_aggregate_input_matches_carries(
+pub(crate) fn ensure_proposal_aggregate_input_matches_carries(
     input_hash: B256,
     carries: &[ProofCarryData],
     prover_address: Address,
     source: &str,
 ) -> RaikoResult<()> {
-    let expected_input = expected_shasta_aggregate_input(carries, prover_address)?;
+    let expected_input = expected_proposal_aggregate_input(carries, prover_address)?;
     if input_hash != expected_input {
         return Err(RaikoError::Guest(format!(
             "{source} aggregate input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
@@ -437,7 +437,7 @@ pub(crate) fn ensure_shasta_aggregate_input_matches_carries(
 }
 
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
+pub(crate) fn parse_proposal_aggregation_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() >= B256_BYTES {
         Ok(B256::from_slice(&public_values[..B256_BYTES]))
     } else {
@@ -502,7 +502,7 @@ pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-pub(crate) fn build_shasta_aggregation_input(
+pub(crate) fn build_proposal_aggregation_input(
     proofs: &[Proof],
 ) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
     let image_id = shasta_aggregation_image_id_words(proofs)?;
@@ -546,7 +546,7 @@ pub(crate) fn build_shasta_aggregation_input(
     })
 }
 
-pub(crate) fn with_shasta_extra_data(
+pub(crate) fn with_proposal_extra_data(
     carry: &ProofCarryData,
     namespace: &str,
     metadata: Option<serde_json::Value>,
@@ -620,22 +620,22 @@ pub fn validate_external_aggregate_proofs(
 ) -> Result<(), RaikoError> {
     for (index, proof) in proofs.iter().enumerate() {
         match pipeline_key {
-            raiko2_pipeline::PipelineKey::ShastaNative => {
+            raiko2_pipeline::PipelineKey::NativeLocal => {
                 if proof.input.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing native aggregation metadata"
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaSgx
-            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
+            raiko2_pipeline::PipelineKey::SgxRemote
+            | raiko2_pipeline::PipelineKey::SgxGethRemote => {
                 if proof.input.is_none() || proof.extra_data.is_none() || proof.proof.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing SGX aggregation metadata"
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaSp1 => {
+            raiko2_pipeline::PipelineKey::Sp1Local => {
                 if proof.input.is_none()
                     || proof.extra_data.is_none()
                     || proof.uuid.is_none()
@@ -646,7 +646,7 @@ pub fn validate_external_aggregate_proofs(
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaRisc0 => {
+            raiko2_pipeline::PipelineKey::Risc0Local => {
                 if proof.input.is_none()
                     || proof.extra_data.is_none()
                     || proof.uuid.is_none()
@@ -657,7 +657,7 @@ pub fn validate_external_aggregate_proofs(
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaRisc0Network => {
+            raiko2_pipeline::PipelineKey::Risc0Network => {
                 if proof.quote.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing Boundless aggregation metadata"
@@ -748,10 +748,10 @@ mod tests {
     use super::{
         CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, NetworkProverBackend,
         PendingProofCheckpointIdentity, ProgressPersistenceError, ProverProgress,
-        ProverProgressObserver, SubmissionCheckpointPermit, build_shasta_aggregation_input,
+        ProverProgressObserver, SubmissionCheckpointPermit, build_proposal_aggregation_input,
         clear_pending_proof_checkpoint, encode_proof_carry_data,
-        ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
-        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
+        ensure_proposal_input_matches_carry, parse_proposal_aggregation_input_hash,
+        parse_proposal_input_hash, validate_external_aggregate_proofs,
     };
     #[cfg(any(feature = "risc0", feature = "boundless"))]
     use super::{
@@ -916,47 +916,46 @@ mod tests {
     }
 
     #[test]
-    fn parses_shasta_proposal_input_hash_from_first_committed_word() {
+    fn parses_proposal_input_hash_from_first_committed_word() {
         let subproof_input_hash = B256::repeat_byte(0x22);
         let public_values = subproof_input_hash.as_slice().to_vec();
 
         assert_eq!(
-            parse_shasta_proposal_input_hash(&public_values).expect("parse proposal input hash"),
+            parse_proposal_input_hash(&public_values).expect("parse proposal input hash"),
             subproof_input_hash
         );
     }
 
     #[test]
-    fn rejects_non_exact_shasta_proposal_public_input_length() {
-        let err = parse_shasta_proposal_input_hash(&[0u8; 64]).expect_err("reject");
+    fn rejects_non_exact_proposal_public_input_length() {
+        let err = parse_proposal_input_hash(&[0u8; 64]).expect_err("reject");
         assert!(err.to_string().contains("expected 32 bytes"));
     }
 
     #[test]
     fn proposal_input_binding_rejects_carry_mismatch() {
         let carry = ProofCarryData::default();
-        let err =
-            ensure_shasta_proposal_input_matches_carry(B256::repeat_byte(0x99), &carry, "test")
-                .expect_err("mismatched carry hash");
+        let err = ensure_proposal_input_matches_carry(B256::repeat_byte(0x99), &carry, "test")
+            .expect_err("mismatched carry hash");
 
         assert!(err.to_string().contains("input hash mismatch"));
     }
 
     #[test]
-    fn parses_shasta_aggregation_input_hash_from_first_committed_word() {
+    fn parses_proposal_aggregation_input_hash_from_first_committed_word() {
         let agg_input_hash = B256::repeat_byte(0x33);
         let public_values = agg_input_hash.as_slice().to_vec();
 
         assert_eq!(
-            parse_shasta_aggregation_input_hash(&public_values)
+            parse_proposal_aggregation_input_hash(&public_values)
                 .expect("parse aggregation input hash"),
             agg_input_hash
         );
     }
 
     #[test]
-    fn rejects_short_shasta_aggregation_public_input_length() {
-        let err = parse_shasta_aggregation_input_hash(&[0u8; 31]).expect_err("reject");
+    fn rejects_short_proposal_aggregation_public_input_length() {
+        let err = parse_proposal_aggregation_input_hash(&[0u8; 31]).expect_err("reject");
         assert!(err.to_string().contains("expected at least 32 bytes"));
     }
 
@@ -984,7 +983,7 @@ mod tests {
             ..aggregate_proof_fixture()
         };
 
-        let result = std::panic::catch_unwind(|| build_shasta_aggregation_input(&[proof]));
+        let result = std::panic::catch_unwind(|| build_proposal_aggregation_input(&[proof]));
 
         assert!(result.is_ok(), "invalid carry data must not panic");
         let err = result
@@ -997,7 +996,7 @@ mod tests {
     fn aggregate_validator_accepts_native_local_proof() {
         assert!(
             validate_external_aggregate_proofs(
-                PipelineKey::ShastaNative,
+                PipelineKey::NativeLocal,
                 &[aggregate_proof_fixture()]
             )
             .is_ok()
@@ -1008,7 +1007,7 @@ mod tests {
     fn aggregate_validator_accepts_sgx_remote_proof() {
         assert!(
             validate_external_aggregate_proofs(
-                PipelineKey::ShastaSgx,
+                PipelineKey::SgxRemote,
                 &[aggregate_proof_fixture()]
             )
             .is_ok()
@@ -1020,7 +1019,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.proof = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSgx, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::SgxRemote, &[proof])
             .expect_err("missing proof bytes");
         assert!(
             err.to_string()
@@ -1033,7 +1032,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.uuid = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::Sp1Local, &[proof])
             .expect_err("missing uuid");
         assert!(
             err.to_string()
@@ -1047,7 +1046,7 @@ mod tests {
         proof.proof = None;
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::Sp1Local, &[proof])
             .expect_err("missing proof data");
         assert!(
             err.to_string()
@@ -1060,7 +1059,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::Risc0Local, &[proof])
             .expect_err("missing receipt");
         assert!(
             err.to_string()
@@ -1073,7 +1072,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::Risc0Network, &[proof])
             .expect_err("missing receipt");
         assert!(
             err.to_string()
@@ -1092,7 +1091,7 @@ mod tests {
             extra_data: None,
         };
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::Risc0Network, &[proof])
             .expect_err("missing carry");
         assert!(
             err.to_string()
@@ -1113,9 +1112,7 @@ mod tests {
             ),
         };
 
-        assert!(
-            validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof]).is_ok()
-        );
+        assert!(validate_external_aggregate_proofs(PipelineKey::Risc0Network, &[proof]).is_ok());
     }
 
     #[test]

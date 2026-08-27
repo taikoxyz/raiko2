@@ -19,3 +19,9 @@ rules.
 - **Proposal fork**: The Taiko proposal rules active for a network and proposal, such as Shasta or
   Unzen. Every Taiko network is on Unzen as of 2026-08-06; Shasta remains a real fork that earlier
   proposals were proved under. Clients should not select proposal forks in route names.
+- **Frozen identifier**: A `shasta`-spelled name that is part of a wire contract, an on-disk path,
+  or a persisted value, and so cannot be renamed without breaking live consumers. These include HTTP
+  routes such as `/prove/shasta`, request schemas such as `raiko2-shasta-request-v1`, `PipelineKey`
+  variants such as `ShastaSp1`, guest ELF and VK filenames, `xtask` profile names, and checked-in
+  fixture and regression paths. The spelling records when the identifier was introduced; it does not
+  select a fork. These names carry current Unzen work.

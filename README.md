@@ -212,11 +212,11 @@ flowchart LR
 
 ## Remote Prover Conformance
 
-`raiko2` owns the canonical remote prover request fixtures under:
+The `shasta` spelling in this section's route, schema, and fixture names is a frozen wire identifier
+kept for provider compatibility. It does not select a fork: these are the current endpoints, and
+they carry Unzen proving work.
 
-The `shasta` spelling in these route, schema, and fixture names is a frozen wire identifier kept for
-provider compatibility. It does not select a fork: these are the current endpoints, and they carry
-Unzen proving work.
+`raiko2` owns the canonical remote prover request fixtures under:
 
 - `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
 

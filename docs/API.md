@@ -419,6 +419,11 @@ Response fields:
 | `data.proof_uri` | string/null | Backend-neutral persisted proof URI (`memory://` or `gs://`). |
 | `data.error` | string/null | Terminal error detail when failed. |
 
+The `shasta` in `PipelineKey` variants and in the `proofs/<pipeline-key>/` segment of a `proof_uri`
+is a frozen identifier, not a fork selector. Renaming either would break stored artifacts and
+published proof URIs, so both keep the original spelling while carrying current Unzen work. See the
+`Frozen identifier` entry in [../CONTEXT.md](../CONTEXT.md).
+
 SP1 proposal artifacts and final aggregate artifacts have different payload contracts:
 
 - A proposal artifact is readable when it contains a non-null `proof`, or, only for

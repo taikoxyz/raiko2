@@ -11,19 +11,35 @@ It answers three separate questions:
 
 Use this file together with:
 
-- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at the revision pinned in `Cargo.lock`
+- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at rev `6c4d199`, which `Cargo.toml`
+  pins
 - `guests/risc0/src/crypto.rs`
 - `guests/sp1/src/crypto.rs`
 
 ## Fork Mapping
 
-`raiko2` maps `TaikoFork::Unzen` to Ethereum `SpecId::OSAKA`
-(`crates/primitives/src/chain_spec.rs:376`). Every other Taiko fork, including Shasta, falls
-through to `SpecId::SHANGHAI` (`:377`).
+The mapping that selects the guest precompile set is `TaikoSpecId::into_eth_spec` in `alethia-reth`
+`crates/evm/src/spec.rs`, at the revision raiko2 pins: `UNZEN` maps to `SpecId::OSAKA`, while
+`GENESIS`, `ONTAKE`, `PACAYA`, and `SHASTA` all map to `SpecId::SHANGHAI`.
+
+`raiko2` mirrors this host-side in `ForkId::as_spec_id`
+(`crates/primitives/src/chain_spec.rs:376-377`), where `TaikoFork::Unzen` maps to `SpecId::OSAKA`
+and every other Taiko fork falls through to `SpecId::SHANGHAI`. The two agree, but the mirror has
+no callers outside that file: it feeds chain-spec validation and preflight cache identity, not guest
+execution. Editing it does not change what the guest runs.
 
 This document describes `revm-precompile` version `34.0.0`, which is what both guests pin
-(`guests/sp1/Cargo.toml`, `guests/risc0/Cargo.toml`). The workspace lockfile also contains
-`41.0.0` for host-side crates; that is not the version the guests compile against.
+(`guests/sp1/Cargo.toml`, `guests/risc0/Cargo.toml`).
+
+A second copy, `revm-precompile 41.0.0`, is also compiled into both guests. It arrives
+unconditionally through `taiko-client-protocol` -> `alethia-reth-chainspec 1.3.0` ->
+`reth-chainspec 2.4.0` -> `alloy-evm` -> `revm 41.0.0`, and it appears in both guest lockfiles.
+The guests are excluded from the root workspace, so they carry their own lockfiles and the root
+lockfile does not govern them. The `41.0.0` copy is linked but sits off the execution path: the
+guest EVM runs `alethia-reth-block` and `alethia-reth-evm` at the pinned revision ->
+`reth-revm 2.0.0` -> `revm 38.0.0` -> `revm-precompile 34.0.0`. That is also the copy
+`install_crypto` registers hooks into, so guest hooks affect only `34.0.0`. The `41.0.0` copy has
+its own `install_crypto` global, which is never populated.
 
 In `34.0.0`, `SHANGHAI` collapses to `PrecompileSpecId::BERLIN` while `OSAKA` maps to
 `PrecompileSpecId::OSAKA`, composed as:
@@ -34,7 +50,12 @@ prague  = cancun + bls12_381::precompiles()
 cancun  = berlin + kzg_point_evaluation::POINT_EVALUATION
 berlin  = istanbul + modexp::BERLIN
 istanbul = byzantium + bn254 repricing + blake2::FUN
+byzantium = homestead + modexp::BYZANTIUM + bn254::{add,mul,pair}::BYZANTIUM
+homestead = ECRECOVER + SHA256 + RIPEMD160 + IDENTITY
 ```
+
+`revm` names its floor set `homestead`, though `0x01` through `0x04` were live from Frontier; the
+crate folds Frontier through Spurious Dragon into that set.
 
 Unzen therefore activates nine addresses that the previous `SHANGHAI` mapping never had: `0x0A`,
 `0x0B` through `0x11`, and `0x100`.
@@ -51,9 +72,9 @@ Every address below is active under Unzen. The `Crypto` trait exposes 17 overrid
 | `0x03` | `RIPEMD160` | Homestead | No | No |
 | `0x04` | `IDENTITY` | Homestead | No hook exists | No hook exists |
 | `0x05` | `MODEXP` | Byzantium, repriced by Berlin and Osaka | Yes | No |
-| `0x06` | `BN254_ADD` | Byzantium | Yes | Yes |
-| `0x07` | `BN254_MUL` | Byzantium | Yes | Yes |
-| `0x08` | `BN254_PAIRING` | Byzantium | No | No |
+| `0x06` | `BN254_ADD` | Byzantium, repriced by Istanbul | Yes | Yes |
+| `0x07` | `BN254_MUL` | Byzantium, repriced by Istanbul | Yes | Yes |
+| `0x08` | `BN254_PAIRING` | Byzantium, repriced by Istanbul | No | No |
 | `0x09` | `BLAKE2F` | Istanbul | No | No |
 | `0x0A` | `KZG_POINT_EVALUATION` | Cancun | No | No |
 | `0x0B` | `BLS12_381_G1_ADD` | Prague | No | No |
@@ -68,10 +89,13 @@ Every address below is active under Unzen. The `Crypto` trait exposes 17 overrid
 `0x04` `IDENTITY` is a byte copy with no cryptographic work, so the `Crypto` trait defines no hook
 for it.
 
-## Two Findings
+## Coverage Gaps
 
-**The eight precompiles newly activated by Unzen have no guest hook in either backend.** `0x0A` and
-`0x0B` through `0x11` run entirely on default backend implementations inside the zkVM.
+**Eight of the nine precompiles newly activated by Unzen have no guest hook in either backend.**
+`0x0A` and `0x0B` through `0x11` run their core operation on default backend implementations inside
+the zkVM. One nuance at `0x0A`: its versioned-hash step calls `crypto().sha256`, which both guests
+do hook, so only its `verify_kzg_proof` core is unaccelerated. The ninth newly active address,
+`0x100`, is covered by RISC0 but not SP1.
 
 **RISC0 and SP1 diverge on two addresses.** RISC0 overrides `modexp` and
 `secp256r1_verify_signature`; SP1 overrides neither. So `0x05` `MODEXP` and the newly active `0x100`
@@ -84,7 +108,8 @@ selects the `bn` crate for BN254 and enables neither `blst` nor `c-kzg`.
 
 Consequences:
 
-- BN254 operations use the `bn` backend, further overridden by guest hooks at `0x06` and `0x07`.
+- Both guests hook `0x06` and `0x07`, so the `bn` backend (the `substrate-bn` crate) governs only
+  `0x08` `BN254_PAIRING`.
 - BLS12-381 (`0x0B` through `0x11`) falls back to the pure-Rust `ark-bls12-381` implementation.
 - KZG (`0x0A`) falls back to the pure-Rust arkworks implementation rather than `c-kzg`.
 

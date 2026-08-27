@@ -1410,13 +1410,19 @@ Operator notes:
 - Enabling on-chain Boundless transaction replacement is an atomic image/config cutover. The new
   image requires `[prover.risc0.boundless.transaction]` with `max_fee_per_gas_wei`, while an old image
   rejects that table as unknown. Drain the old process, then switch the ConfigMap and image together;
-  rollback must likewise restore both. Runtime metadata omits the default unconfirmed-predecessor
-  marker so ordinary checkpoints remain readable by the previous image. A checkpoint that records a
-  confirmed earlier same-ID rebid carries the new marker explicitly; do not roll back across such a
-  record without migrating it, and never delete a paid provider checkpoint to force rollback.
+  rollback must likewise restore both. Runtime metadata omits the default false
+  unconfirmed-predecessor marker, which preserves previous-image readability only for records where
+  every new on-chain Boundless recovery field is absent, such as ordinary records without Boundless
+  progress and SP1-network checkpoints. Every on-chain Boundless checkpoint serializes
+  `request_digest` and `broadcast_from_block`, even when it has no confirmed predecessor, so rollback
+  across one of those records remains one-way unless the record is migrated. Never delete a paid
+  provider checkpoint to force rollback.
 - The mandatory pre-broadcast request checkpoint is bounded to ten seconds while the signer lane is
   serialized. If the runtime store cannot persist it within that budget, the submission fails before
-  reserving a nonce or broadcasting a transaction.
+  reserving a nonce or broadcasting a transaction. A store write can still commit while its caller
+  observes the bounded timeout. That ambiguous outcome leaves a durable but unbroadcast checkpoint,
+  which blocks the signer lane across restart until `lock_expires_at`. The first client retry after
+  that deadline clears the checkpoint; a subsequent retry resumes normal submission.
 - `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

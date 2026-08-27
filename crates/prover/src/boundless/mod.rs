@@ -232,6 +232,17 @@ impl<T> BoundlessDispatchResult<T> {
     }
 }
 
+fn expired_uncertain_dispatch_result<T>(
+    uncertain: &BoundlessUncertainSubmission,
+    error: RaikoError,
+) -> BoundlessDispatchResult<T> {
+    if uncertain.transaction_hashes.is_empty() && !uncertain.broadcast_may_have_succeeded {
+        BoundlessDispatchResult::error(error)
+    } else {
+        BoundlessDispatchResult::retain_checkpoint(error)
+    }
+}
+
 fn classify_uncertain_event_search_result(
     result: RaikoResult<Option<B256>>,
     now: u64,
@@ -3679,7 +3690,7 @@ impl BoundlessProver {
                             BoundlessDispatchResult::success(Some(tx_hash))
                         }
                         UncertainSubmissionResolution::Expired(error) => {
-                            BoundlessDispatchResult::retain_checkpoint(error)
+                            expired_uncertain_dispatch_result(&current_uncertain, error)
                         }
                     }
                 } else {
@@ -8373,6 +8384,38 @@ mod tests {
         assert!(state.uncertain_submission().is_some());
         assert!(state.recent.contains_key(&request.id));
         assert!(state.allocate_nonce(4, 4, 0).is_err());
+    }
+
+    #[test]
+    fn expired_uncertain_dispatch_checkpoint_policy_is_fail_closed() {
+        let cases = [
+            (Vec::new(), false, false, "provably unbroadcast"),
+            (Vec::new(), true, true, "ambiguous broadcast"),
+            (vec![test_digest(22)], false, true, "known transaction hash"),
+        ];
+
+        for (transaction_hashes, broadcast_may_have_succeeded, expected_retain, case) in cases {
+            let uncertain = super::BoundlessUncertainSubmission {
+                submission: test_submission(),
+                request: test_proof_request(),
+                signature: Bytes::from_static(b"fixture_signature"),
+                request_digest: test_digest(11),
+                value: U256::from(7),
+                nonce: 4,
+                broadcast_from_block: 100,
+                transaction_hashes,
+                gas_limit: Some(21_000),
+                broadcast_may_have_succeeded,
+            };
+
+            let result = super::expired_uncertain_dispatch_result::<()>(
+                &uncertain,
+                RaikoError::Guest("request lock expired".to_string()),
+            );
+
+            assert!(result.result.is_err(), "{case}");
+            assert_eq!(result.retain_checkpoint_on_error, expected_retain, "{case}");
+        }
     }
 
     #[tokio::test]

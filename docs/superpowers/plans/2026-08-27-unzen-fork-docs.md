@@ -1225,7 +1225,8 @@ git commit -m "docs: rewrite precompile status for Unzen and correct RISC0 hook 
 
 Run: `git diff --name-only main...HEAD`
 
-Expected: exactly these 15 paths and nothing else.
+At this point the branch still carries the spec and plan; they are removed in Step 7. Expected:
+exactly these 15 paths and nothing else.
 ```
 CONTEXT.md
 README.md
@@ -1293,14 +1294,52 @@ grep -rn "](#" README.md docs/*.md | grep -i shasta
 ```
 Expected: no output, or only links to `#legacy-v3-submit-shasta-batch-proof`, which still exists.
 
-- [ ] **Step 7: Push and open the PR**
+- [ ] **Step 7: Remove the working artifacts, then push and open a draft PR**
 
-The plan and spec are already committed on this branch, so only the push remains.
+The spec and plan are working artifacts for this change, not documentation the repository ships.
+Preserve them outside the repo first, then remove them from the branch.
+
+```bash
+mkdir -p /tmp/unzen-docs-artifacts
+cp docs/superpowers/specs/2026-08-27-unzen-fork-docs-design.md \
+   docs/superpowers/plans/2026-08-27-unzen-fork-docs.md \
+   /tmp/unzen-docs-artifacts/
+git rm -q docs/superpowers/specs/2026-08-27-unzen-fork-docs-design.md \
+          docs/superpowers/plans/2026-08-27-unzen-fork-docs.md
+git commit -m "docs: drop working spec and plan from the branch"
+```
+
+Confirm the net diff no longer contains them:
+
+```bash
+git diff --name-only main...HEAD -- docs/superpowers
+```
+Expected: no output.
+
+Then confirm the final net diff is exactly these 13 paths:
+```
+CONTEXT.md
+README.md
+docs/API.md
+docs/README.md
+docs/architecture.md
+docs/assets/readme-banner.png
+docs/assets/readme-banner.svg
+docs/development.md
+docs/gaiko2-remote-prover-integration.md
+docs/operations.md
+docs/precompile-status.md
+scripts/regression/README.md
+tests/fixtures/README.md
+```
+
+Push and open the PR as a **draft**:
 
 ```bash
 git push -u origin docs/unzen-fork-naming
 ```
 
-Then open a PR whose body states: the naming rule, the 11 files plus banner touched, that no code
-changed, and the three out-of-scope follow-ups recorded in the spec — foremost the hoodi verifier
-misregistration in `xtask/src/register_image.rs:417`.
+The draft PR body states: the naming rule, the 13 files touched, that no code changed, and the
+three out-of-scope follow-ups — foremost the hoodi verifier misregistration in
+`xtask/src/register_image.rs:417`.
+

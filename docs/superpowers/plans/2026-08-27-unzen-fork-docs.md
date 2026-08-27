@@ -80,7 +80,7 @@ Before:
 After:
 ```markdown
 - **Proposal proof**: A proof for one Taiko proposal. Public prover interfaces should use this term
-  instead of the legacy `batch` wording. The covered L2 blocks are contiguous; the HTTP prover
+  instead of the v3 `batch` wording. The covered L2 blocks are contiguous; the HTTP prover
 ```
 
 - [ ] **Step 3: Amend the `Proposal fork` glossary entry in `CONTEXT.md`**
@@ -117,23 +117,44 @@ After:
   activation and guest hook coverage.
 ```
 
-- [ ] **Step 5: Add the archive note to `docs/README.md`**
+- [ ] **Step 5: Extend the existing `## Historical Notes` section in `docs/README.md`**
 
-Append this as the final bullet of the "How to Use These Docs" list, immediately after the
-`gaiko2-remote-prover-integration.md` bullet that ends at line 29.
+Do NOT add a bullet to the "How to Use These Docs" list. `docs/README.md` already has a
+`## Historical Notes` section covering both `plans/` and `issues/`, and that is where this belongs.
 
+Do not call `docs/plans/` an archive. `docs/plans/README.md` defines six status values of which only
+`Archived` is historical, frames the directory as the home for notes "that should survive handoff",
+and the directory holds live drafts. Scope the claim to what is actually true: individual plans are
+point-in-time records.
+
+Before:
 ```markdown
-- Treat `docs/plans/` as a historical archive. Each plan records a decision as of its own date, so
-  its fork names, file paths, and command names are accurate for that moment and are not maintained
-  against current behavior. `README.md`, `docs/architecture.md`, and `docs/API.md` govern current
-  behavior.
+## Historical Notes
+
+The files under [`plans/`](plans) and [`issues/`](issues) are historical design, implementation,
+and review notes. They are useful background, but they are not the current source of truth for
+using or operating the project.
+```
+
+After:
+```markdown
+## Historical Notes
+
+The files under [`plans/`](plans) and [`issues/`](issues) are historical design, implementation,
+and review notes. They are useful background, but they are not the current source of truth for
+using or operating the project.
+
+Each plan records a decision as of its own date. Its fork names, file paths, and command names are
+not maintained against current behavior, so read them as point-in-time records rather than as
+current documentation.
 ```
 
 - [ ] **Step 6: Verify**
 
 Run: `grep -n "Shasta\|shasta\|SHASTA" CONTEXT.md docs/README.md`
-Expected: exactly one hit, `CONTEXT.md` line 19, reading `such as Shasta or`. `docs/README.md`
-returns nothing.
+Expected: exactly two hits, both in `CONTEXT.md` — line 19 ending `such as Shasta or` and line 20
+containing `Unzen. Every Taiko network is on Unzen as of 2026-08-06; Shasta remains a real fork`.
+Both are the deliberate glossary text from Step 3. `docs/README.md` returns nothing.
 
 - [ ] **Step 7: Commit**
 

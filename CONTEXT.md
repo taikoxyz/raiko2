@@ -8,7 +8,7 @@ task and artifact identity, publication, runtime storage, and proof URIs live in
 rules.
 
 - **Proposal proof**: A proof for one Taiko proposal. Public prover interfaces should use this term
-  instead of the legacy `batch` wording. The covered L2 blocks are contiguous; the HTTP prover
+  instead of the v3 `batch` wording. The covered L2 blocks are contiguous; the HTTP prover
   v4 request carries an inclusive `l2_block_number_start`/`l2_block_number_end` range instead of
   the legacy `l2_block_numbers` list.
 - **Aggregation proof**: A proof that aggregates multiple proposal proofs for submission.

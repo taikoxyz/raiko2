@@ -27,13 +27,13 @@ This directory contains the contributor- and operator-facing documentation for `
 - Read [operations.md](operations.md) for runtime configuration, Docker, and image publishing.
 - Read [gaiko2-remote-prover-integration.md](gaiko2-remote-prover-integration.md) when updating
   `gaiko2` to match the canonical remote prover protocol and conformance harness.
-- Treat `docs/plans/` as a historical archive. Each plan records a decision as of its own date, so
-  its fork names, file paths, and command names are accurate for that moment and are not maintained
-  against current behavior. `README.md`, `docs/architecture.md`, and `docs/API.md` govern current
-  behavior.
 
 ## Historical Notes
 
 The files under [`plans/`](plans) and [`issues/`](issues) are historical design, implementation,
 and review notes. They are useful background, but they are not the current source of truth for
 using or operating the project.
+
+Each plan records a decision as of its own date. Its fork names, file paths, and command names are
+not maintained against current behavior, so read them as point-in-time records rather than as
+current documentation.

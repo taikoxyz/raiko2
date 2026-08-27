@@ -1,15 +1,15 @@
-# Precompile Status for Shasta
+# Precompile Status for Unzen
 
-This document describes the precompile surface that is relevant to the current `raiko2`
-Shasta proving path.
+This document describes the precompile surface relevant to the current `raiko2` proving path. Every
+Taiko network runs the Unzen fork.
 
 It answers three separate questions:
 
-1. Which precompiles are active under the current Shasta fork mapping?
+1. Which precompiles are active under the Unzen fork mapping?
 2. Which active precompiles are routed through guest-specific crypto hooks?
-3. Which code paths exist in `revm-precompile` but are not active for Shasta?
+3. Where do the RISC0 and SP1 guests differ?
 
-Use this file together with the regression tests in:
+Use this file together with:
 
 - the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at the revision pinned in `Cargo.lock`
 - `guests/risc0/src/crypto.rs`
@@ -17,97 +17,99 @@ Use this file together with the regression tests in:
 
 ## Fork Mapping
 
-For the current Shasta path, `TaikoSpecId::SHASTA` maps to Ethereum `SpecId::SHANGHAI`, and
-`revm-precompile` maps `SHANGHAI` to the `BERLIN` precompile set.
+`raiko2` maps `TaikoFork::Unzen` to Ethereum `SpecId::OSAKA`
+(`crates/primitives/src/chain_spec.rs:376`). Every other Taiko fork, including Shasta, falls
+through to `SpecId::SHANGHAI` (`:377`).
 
-This means the active address set is exactly:
+This document describes `revm-precompile` version `34.0.0`, which is what both guests pin
+(`guests/sp1/Cargo.toml`, `guests/risc0/Cargo.toml`). The workspace lockfile also contains
+`41.0.0` for host-side crates; that is not the version the guests compile against.
 
-- `0x01` `ECRECOVER`
-- `0x02` `SHA256`
-- `0x03` `RIPEMD160`
-- `0x04` `IDENTITY`
-- `0x05` `MODEXP`
-- `0x06` `BN254_ADD`
-- `0x07` `BN254_MUL`
-- `0x08` `BN254_PAIRING`
-- `0x09` `BLAKE2F`
+In `34.0.0`, `SHANGHAI` collapses to `PrecompileSpecId::BERLIN` while `OSAKA` maps to
+`PrecompileSpecId::OSAKA`, composed as:
 
-Notably, Shasta does **not** activate:
+```
+osaka   = prague + modexp::OSAKA + secp256r1::P256VERIFY_OSAKA
+prague  = cancun + bls12_381::precompiles()
+cancun  = berlin + kzg_point_evaluation::POINT_EVALUATION
+berlin  = istanbul + modexp::BERLIN
+istanbul = byzantium + bn254 repricing + blake2::FUN
+```
 
-- `0x0A` `KZG_POINT_EVALUATION` (`CANCUN`)
-- `0x0B..0x11` `BLS12_*` (`PRAGUE`)
-- `0x0100` `P256VERIFY` (`OSAKA`)
+Unzen therefore activates nine addresses that the previous `SHANGHAI` mapping never had: `0x0A`,
+`0x0B` through `0x11`, and `0x100`.
 
-This is not a new regression introduced by the current dependency upgrade. The old Taiko-flavored
-`revm` path also mapped Taiko fork-specific specs to the `BERLIN` precompile set.
+## Active Precompiles and Guest Hook Coverage
 
-## Active Precompiles by Backend
+Every address below is active under Unzen. The `Crypto` trait exposes 17 overridable methods;
+`Risc0GuestCrypto` overrides 6 and `Sp1GuestCrypto` overrides 4.
 
-### RISC0
+| Address | Precompile | Introduced | RISC0 hook | SP1 hook |
+| --- | --- | --- | --- | --- |
+| `0x01` | `ECRECOVER` | Homestead | Yes | Yes |
+| `0x02` | `SHA256` | Homestead | Yes | Yes |
+| `0x03` | `RIPEMD160` | Homestead | No | No |
+| `0x04` | `IDENTITY` | Homestead | No hook exists | No hook exists |
+| `0x05` | `MODEXP` | Byzantium, repriced by Berlin and Osaka | Yes | No |
+| `0x06` | `BN254_ADD` | Byzantium | Yes | Yes |
+| `0x07` | `BN254_MUL` | Byzantium | Yes | Yes |
+| `0x08` | `BN254_PAIRING` | Byzantium | No | No |
+| `0x09` | `BLAKE2F` | Istanbul | No | No |
+| `0x0A` | `KZG_POINT_EVALUATION` | Cancun | No | No |
+| `0x0B` | `BLS12_381_G1_ADD` | Prague | No | No |
+| `0x0C` | `BLS12_381_G1_MSM` | Prague | No | No |
+| `0x0D` | `BLS12_381_G2_ADD` | Prague | No | No |
+| `0x0E` | `BLS12_381_G2_MSM` | Prague | No | No |
+| `0x0F` | `BLS12_381_PAIRING` | Prague | No | No |
+| `0x10` | `BLS12_381_MAP_FP_TO_G1` | Prague | No | No |
+| `0x11` | `BLS12_381_MAP_FP2_TO_G2` | Prague | No | No |
+| `0x100` | `P256VERIFY` | Osaka | Yes | No |
 
-| Address | Precompile | Active in Shasta | Guest hook |
-| --- | --- | --- | --- |
-| `0x01` | `ECRECOVER` | Yes | Yes |
-| `0x02` | `SHA256` | Yes | Yes |
-| `0x03` | `RIPEMD160` | Yes | No |
-| `0x04` | `IDENTITY` | Yes | N/A |
-| `0x05` | `MODEXP` | Yes | No |
-| `0x06` | `BN254_ADD` | Yes | No |
-| `0x07` | `BN254_MUL` | Yes | No |
-| `0x08` | `BN254_PAIRING` | Yes | No |
-| `0x09` | `BLAKE2F` | Yes | No |
+`0x04` `IDENTITY` is a byte copy with no cryptographic work, so the `Crypto` trait defines no hook
+for it.
 
-### SP1
+## Two Findings
 
-| Address | Precompile | Active in Shasta | Guest hook |
-| --- | --- | --- | --- |
-| `0x01` | `ECRECOVER` | Yes | Yes |
-| `0x02` | `SHA256` | Yes | Yes |
-| `0x03` | `RIPEMD160` | Yes | No |
-| `0x04` | `IDENTITY` | Yes | N/A |
-| `0x05` | `MODEXP` | Yes | No |
-| `0x06` | `BN254_ADD` | Yes | Yes |
-| `0x07` | `BN254_MUL` | Yes | Yes |
-| `0x08` | `BN254_PAIRING` | Yes | No |
-| `0x09` | `BLAKE2F` | Yes | No |
+**The eight precompiles newly activated by Unzen have no guest hook in either backend.** `0x0A` and
+`0x0B` through `0x11` run entirely on default backend implementations inside the zkVM.
 
-## Fallback Backends
+**RISC0 and SP1 diverge on two addresses.** RISC0 overrides `modexp` and
+`secp256r1_verify_signature`; SP1 overrides neither. So `0x05` `MODEXP` and the newly active `0x100`
+`P256VERIFY` run unaccelerated under SP1 but accelerated under RISC0.
 
-`revm-precompile` is active for the full Shasta address set above, but many operations still use
-its default backend implementations instead of guest-specific hooks.
+## Backend Selection
 
-For the current build graph, `revm-precompile` is compiled with `std` only. Optional accelerated
-backends such as `c-kzg`, `blst`, `secp256k1`, `gmp`, `p256-aws-lc-rs`, and `bn` are not enabled.
+Both guests build `revm-precompile` with `default-features = false, features = ["bn"]`. That
+selects the `bn` crate for BN254 and enables neither `blst` nor `c-kzg`.
 
-That means the current behavior is:
+Consequences:
 
-- `ECRECOVER`: active, but uses the guest hook instead of the crate default path.
-- `SHA256`: active, but uses the guest hook instead of the crate default path.
-- `RIPEMD160`: active, default backend.
-- `MODEXP`: active, default backend.
-- `BN254_ADD` / `BN254_MUL`:
-  - `RISC0`: active, default backend.
-  - `SP1`: active, guest hook.
-- `BN254_PAIRING`: active, default backend.
-- `BLAKE2F`: active, default backend.
+- BN254 operations use the `bn` backend, further overridden by guest hooks at `0x06` and `0x07`.
+- BLS12-381 (`0x0B` through `0x11`) falls back to the pure-Rust `ark-bls12-381` implementation.
+- KZG (`0x0A`) falls back to the pure-Rust arkworks implementation rather than `c-kzg`.
+
+The SP1 hooks are not syscall shims in the way the RISC0 hooks are. `Sp1GuestCrypto::sha256`
+delegates to `sha2::Digest`, `secp256k1_ecrecover` to `k256`, and the BN254 operations to hand
+written `BigUint` arithmetic. These depend on SP1's patched crate graph for acceleration rather than
+on direct precompile calls.
 
 ## KZG Clarification
 
-Shasta blob validation in `raiko2` does not rely on the EVM `0x0A` KZG point-evaluation precompile.
+Blob validation in `raiko2` does not use the EVM `0x0A` KZG point-evaluation precompile, even
+though Unzen activates it.
 
-Instead, the proving path computes and verifies KZG commitments and proof-of-equivalence data
-inside the guest/runtime utility code under `crates/primitives/src/blob/util.rs`.
+The proving path computes and verifies KZG commitments and proof-of-equivalence data inside the
+guest and runtime utility code under `crates/primitives/src/blob/util.rs`.
 
-So the fact that `0x0A` is not active under Shasta does **not** mean blob proof validation is
-missing.
+The absence of a guest hook for `0x0A` therefore says nothing about blob proof validation, which
+does not route through that precompile.
 
-## What This Does Not Prove
+## What This Document Does Not Establish
 
-This document and its regression tests prove:
+This document establishes the active Unzen precompile address set and the guest hook coverage
+`raiko2` installs today.
 
-- the active Shasta precompile address set;
-- the guest hook coverage that `raiko2` intentionally installs today.
-
-They do not prove that every active precompile is exercised by every proposal. Whether a given
-proposal actually touches `MODEXP`, `BN254_PAIRING`, or `BLAKE2F` still depends on transaction
-content and execution trace.
+It does not establish which of these precompiles real proposals actually reach. Whether Taiko
+execution ever touches `0x0A`, `0x0B` through `0x11`, `0x08`, or `0x09` depends on transaction
+content and execution trace, and has not been traced. Treat the newly activated addresses as a
+correctness surface that is now reachable in principle, not as a measured hot path.

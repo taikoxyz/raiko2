@@ -22,6 +22,7 @@ rules.
 - **Frozen identifier**: A `shasta`-spelled name that is part of a wire contract, an on-disk path,
   or a persisted value, and so cannot be renamed without breaking live consumers. These include HTTP
   routes such as `/prove/shasta`, request schemas such as `raiko2-shasta-request-v1`, `PipelineKey`
-  variants such as `ShastaSp1`, guest ELF and VK filenames, `xtask` profile names, and checked-in
-  fixture and regression paths. The spelling records when the identifier was introduced; it does not
+  variants such as `ShastaSp1`, proof-URI pipeline-key segments such as `shasta-sp1-local`, guest
+  ELF and VK filenames, `xtask` profile names, and checked-in fixture and regression paths. The
+  spelling records when the identifier was introduced; it does not
   select a fork. These names carry current Unzen work.

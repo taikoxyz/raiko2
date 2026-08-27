@@ -5,6 +5,7 @@ This directory contains the contributor- and operator-facing documentation for `
 ## Start Here
 
 - [Project overview](../README.md)
+- [Domain context](../CONTEXT.md)
 - [Architecture](architecture.md)
 - [API contract](API.md)
 - [Precompile status](precompile-status.md)

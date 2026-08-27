@@ -2,7 +2,7 @@
 
 ## Overview
 
-Raiko2 exposes a proposal-first `/v4` API for explicit proof-type proposal proving,
+Raiko2 exposes a `/v4` API for explicit proof-type proposal proving,
 aggregation, task lookup, status, and clear operations.
 
 Proof submission is asynchronous. Legacy `/v3/*` and `/proof/*` compatibility routes are kept in
@@ -321,7 +321,7 @@ Validation:
 - `proposals` may contain at most 1,024 items.
 - `aggregate=false` requires exactly one proposal.
 - `aggregate=true` accepts one or more contiguous proposals.
-- `proposals[].proposal_id` must fit the inbox protocol's `uint48` field.
+- `proposals[].proposal_id` must fit the on-chain `Proposal.id` `uint48` field.
 - `proposals[].proposal_id` values must be strictly increasing and contiguous.
 - `proposals[].l2_block_number_end` must be greater than or equal to
   `proposals[].l2_block_number_start`.
@@ -419,10 +419,12 @@ Response fields:
 | `data.proof_uri` | string/null | Backend-neutral persisted proof URI (`memory://` or `gs://`). |
 | `data.error` | string/null | Terminal error detail when failed. |
 
-The `shasta` in `PipelineKey` variants and in the `proofs/<pipeline-key>/` segment of a `proof_uri`
-is a frozen identifier, not a fork selector. Renaming either would break stored artifacts and
-published proof URIs, so both keep the original spelling while carrying current Unzen work. See the
-`Frozen identifier` entry in [../CONTEXT.md](../CONTEXT.md).
+`PipelineKey` variants such as `ShastaSp1`, and the `proofs/<pipeline-key>/` segment of a
+`proof_uri` such as `shasta-sp1-local`, are frozen identifiers rather than fork selectors. The
+variant name is stored in authoritative runtime state and the URI segment is part of published
+proof object names, so neither can be renamed without breaking live consumers. Both keep their
+original spelling while carrying current Unzen work. See the `Frozen identifier` entry in
+[../CONTEXT.md](../CONTEXT.md).
 
 SP1 proposal artifacts and final aggregate artifacts have different payload contracts:
 
@@ -607,7 +609,7 @@ POST /v3/proof/batch/shasta
 Content-Type: application/json
 ```
 
-Registers a legacy batch root task. The server expands it into proposal prove tasks and, when
+Registers a batch root task. The server expands it into proposal prove tasks and, when
 `aggregate=true`, an aggregation task. Configure remote lanes independently through `[prover.sgx]`
 and `[prover.sgxgeth]`; each table owns its `enabled`, `base_url`, and `timeout_ms` values.
 
@@ -657,7 +659,7 @@ and `[prover.sgxgeth]`; each table owns its `enabled`, `base_url`, and `timeout_
   checkpoint when the proof is built.
 - `proposal.l1_inclusion_block_number` is required. The server derives canonical proposal
   data from RPC; request-time internal manifest overrides are not accepted.
-- `proposal.proposal_id` must fit the inbox protocol's `uint48` field.
+- `proposal.proposal_id` must fit the on-chain `Proposal.id` `uint48` field.
 - `proposal.last_anchor_block_number` participates in anchor monotonicity validation.
 - `proof_type` mapping:
   - `native -> native/local` when `prover.native.enabled = true`; otherwise rejected

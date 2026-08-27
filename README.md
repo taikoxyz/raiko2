@@ -212,9 +212,9 @@ flowchart LR
 
 ## Remote Prover Conformance
 
-The `shasta` spelling in this section's route, schema, and fixture names is a frozen wire identifier
-kept for provider compatibility. It does not select a fork: these are the current endpoints, and
-they carry Unzen proving work.
+The `shasta` spelling in this section's route, schema, and fixture names is a frozen identifier kept
+for provider compatibility. It does not select a fork: these are the current endpoints, and they
+carry Unzen proving work. See the `Frozen identifier` entry in [CONTEXT.md](CONTEXT.md).
 
 `raiko2` owns the canonical remote prover request fixtures under:
 

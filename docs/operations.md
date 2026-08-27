@@ -201,7 +201,7 @@ mock instance id `0xDEAD_C0DE` when `--instance-id` is omitted.
 
 Use `GET /health` for simple liveness checks. `POST /prove/shasta` is not a lightweight signing
 smoke endpoint: `raiko2-sgx-prover` requires a complete `GuestInput` request envelope and runs the
-same Shasta guest validation path as the zk guests before signing the resulting public input.
+same guest validation path as the zk guests before signing the resulting public input.
 Use the main `raiko2` service or the regression scripts to build that request.
 
 ### Docker Compose
@@ -526,7 +526,7 @@ Expected release outputs:
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
 - TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
-- Shasta guest artifact assets:
+- Guest artifact assets:
   - `risc0_shasta_*.elf`
   - `sp1_shasta_*.elf`
   - `sp1_shasta_*.vk.bin`
@@ -693,7 +693,7 @@ does not consume it as a runtime trust anchor.
 
 #### 3. Verify Release Artifact Identity
 
-Derive the expected Shasta asset names from the release tag, require the GitHub Release to publish
+Derive the expected guest asset names from the release tag, require the GitHub Release to publish
 that exact set, then download and compare every byte with the tag checkout:
 
 ```bash
@@ -737,7 +737,7 @@ composition directory must identify the same programs.
 #### 4. Gate Host/Guest Compatibility
 
 First validate both provenance manifests, each backend's exact inventory, every recorded artifact,
-and the Shasta SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
+and the SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
 prevents a source mismatch from hiding an artifact, manifest, or SP1 failure:
 
 ```bash
@@ -932,6 +932,14 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta
 cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
+
+> **Warning — hoodi profiles resolve the Shasta verifier.** `xtask` reads
+> `/verifier_address_forks/SHASTA/<proof_type>` from the chain spec. In
+> `config/chain_spec_list_default.json`, `taiko_hoodi` carries different SP1 and RISC0 verifier
+> addresses under `SHASTA` and `UNZEN`, so `--profile hoodi-shasta` registers against the Shasta
+> verifiers on a network that has run Unzen since 2026-06-18. Verify the resolved address against
+> the `UNZEN` entry before using `--apply` on hoodi. `taiko_mainnet` entries are identical under
+> both forks and are unaffected.
 
 Current behavior:
 
@@ -1518,14 +1526,14 @@ while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
 `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional pair
 settings for hosted SP1 network verification. They point to the verifier-chain RPC and deployed
 Succinct verifier contract used after a network proof is fulfilled. This is separate from the Taiko
-Shasta verifier address used for proof registration and chain-spec data carried in proofs.
+Proposal verifier address used for proof registration and chain-spec data carried in proofs.
 
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.
 
 ## Preflight Concurrency
 
-Shasta preflight defaults are aligned with the old raiko hosted deployment shape:
+Preflight defaults are aligned with the old raiko hosted deployment shape:
 
 - `queue.workers=6` runs up to six queue tasks in parallel, matching the old hosted proving
   concurrency.

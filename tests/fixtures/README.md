@@ -1,5 +1,9 @@
 # Proposal GuestInput Fixture
 
+The `shasta` in this fixture's filename is a frozen identifier, not a fork selector. It is the
+current proposal fixture and exercises Unzen proving. See the `Frozen identifier` entry in
+[../../CONTEXT.md](../../CONTEXT.md).
+
 `shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` is a checked-in
 `GuestInput` fixture used by:
 

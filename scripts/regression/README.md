@@ -1,5 +1,9 @@
 # Proposal Regression Tool
 
+The `shasta` in the script, config, and directory names below is a frozen identifier, not a fork
+selector. These are the current tools and paths, and they exercise Unzen proving. See the
+`Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
+
 ## Setup
 
 ```bash
@@ -168,7 +172,7 @@ cargo run -r -p guest-launcher -- \
 ```
 
 For a direct `raiko2-sgx-prover` check without a `raiko2` server, convert the guest input into a
-Request envelope that includes the full `GuestInput` and post it to the SGX prover:
+request envelope that includes the full `GuestInput` and post it to the SGX prover:
 
 ```bash
 cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \

@@ -8,7 +8,8 @@ Home / [Docs](docs/README.md) / [Architecture](docs/architecture.md) / [API](doc
 
 Raiko2 is a proposal proof service for Taiko. It builds canonical guest inputs from RPC data,
 validates them, runs local or remote proving routes, and exposes a typed v4 API for
-asynchronous proposal-side proof requests. Every Taiko network runs the Unzen fork.
+asynchronous proposal-side proof requests. Every Taiko network runs the Unzen fork, and Raiko2
+proves proposals under it.
 
 ## At a Glance
 
@@ -157,7 +158,7 @@ The runtime is governed by these invariants:
 The detailed runtime lifecycle, publication transaction, recovery flow, and deployment sequence are
 illustrated in [Architecture](docs/architecture.md).
 
-1. `Preflight` resolves canonical proposal inputs from L1 and L2 RPC.
+1. `Preflight` resolves canonical guest inputs from L1 and L2 RPC.
 2. `Validation` checks request invariants and witness-derived data.
 3. `Prover` runs the selected backend and runner.
 4. `Aggregate` combines proposal proofs when the request asks for it.
@@ -213,6 +214,10 @@ flowchart LR
 
 `raiko2` owns the canonical remote prover request fixtures under:
 
+The `shasta` spelling in these route, schema, and fixture names is a frozen wire identifier kept for
+provider compatibility. It does not select a fork: these are the current endpoints, and they carry
+Unzen proving work.
+
 - `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
 
 The aggregate request fixture is the strict protocol golden for:
@@ -227,7 +232,8 @@ cargo test -p raiko2-prover --no-default-features \
   --test remote_prover_conformance -- --ignored --nocapture
 ```
 
-The harness builds the proposal request from the shared `GuestInput` fixture and posts it to:
+The harness builds the proposal request from the shared proposal `GuestInput` fixture under
+`tests/fixtures/` and posts it to:
 
 - `POST /prove/shasta`
 

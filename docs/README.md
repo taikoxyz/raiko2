@@ -21,12 +21,16 @@ This directory contains the contributor- and operator-facing documentation for `
 - Read [architecture.md](architecture.md) for component boundaries, runtime lifecycle fencing, proof
   publication, cancellation, recovery, and readiness flows.
 - Read [API.md](API.md) for request, response, and task lifecycle semantics.
-- Read [precompile-status.md](precompile-status.md) when you need the current Shasta precompile
+- Read [precompile-status.md](precompile-status.md) when you need the current Unzen precompile
   activation and guest hook coverage.
 - Read [development.md](development.md) for local workflows, fixture testing, guest builds, and benchmarking.
 - Read [operations.md](operations.md) for runtime configuration, Docker, and image publishing.
 - Read [gaiko2-remote-prover-integration.md](gaiko2-remote-prover-integration.md) when updating
   `gaiko2` to match the canonical remote prover protocol and conformance harness.
+- Treat `docs/plans/` as a historical archive. Each plan records a decision as of its own date, so
+  its fork names, file paths, and command names are accurate for that moment and are not maintained
+  against current behavior. `README.md`, `docs/architecture.md`, and `docs/API.md` govern current
+  behavior.
 
 ## Historical Notes
 

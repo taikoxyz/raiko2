@@ -444,14 +444,19 @@ fn validate_aggregation(aggregation: &Aggregation) -> Result<(), String> {
         if measurement.actual_mcycles == 0 || measurement.predicted_mcycles == 0 {
             return Err("aggregation measured mcycles must be non-zero".to_string());
         }
-        if measurement.enabled && !aggregation_measurement_is_accepted(measurement) {
+        let accepted = aggregation_measurement_is_accepted(measurement);
+        if measurement.enabled != accepted {
             return Err(
-                "enabled aggregation measurement exceeds accepted error budget".to_string(),
+                "aggregation measurement enabled state must match the accepted error budget"
+                    .to_string(),
             );
         }
         if measurement.enabled {
             enabled_counts.insert(measurement.child_count);
         }
+    }
+    if !aggregation.measurements.is_empty() && rows != HashSet::from([1, 2, 3, 4, 5]) {
+        return Err("aggregation measurements must exactly cover child counts 1..=5".to_string());
     }
 
     let mut calibrated_counts = HashSet::new();
@@ -816,14 +821,14 @@ mod tests {
         artifact["aggregation"]["provenance"]["image_id"] =
             json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
         artifact["aggregation"]["measurements"] = Value::Array(
-            calibrated_counts
-                .iter()
-                .map(|&child_count| {
+            (1..=5)
+                .map(|child_count| {
+                    let enabled = calibrated_counts.contains(&child_count);
                     json!({
                         "child_count": child_count,
-                        "actual_mcycles": 1,
-                        "predicted_mcycles": 1,
-                        "enabled": true
+                        "actual_mcycles": if enabled { 1 } else { 100 },
+                        "predicted_mcycles": if enabled { 1 } else { 200 },
+                        "enabled": enabled
                     })
                 })
                 .collect(),
@@ -956,6 +961,40 @@ mod tests {
     }
 
     #[test]
+    fn aggregation_calibration_rejects_incomplete_rows() {
+        let mut artifact = valid_artifact();
+        artifact["aggregation"]["provenance"]["image_id"] =
+            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
+        artifact["aggregation"]["measurements"] = json!([
+            {"child_count": 1, "actual_mcycles": 200, "predicted_mcycles": 180, "enabled": false},
+            {"child_count": 2, "actual_mcycles": 400, "predicted_mcycles": 360, "enabled": false},
+            {"child_count": 3, "actual_mcycles": 600, "predicted_mcycles": 540, "enabled": false},
+            {"child_count": 4, "actual_mcycles": 800, "predicted_mcycles": 720, "enabled": false}
+        ]);
+        assert!(parse(artifact).is_err());
+    }
+
+    #[test]
+    fn aggregation_calibration_rejects_passing_row_left_disabled() {
+        let mut artifact = valid_artifact();
+        artifact["aggregation"]["provenance"]["image_id"] =
+            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
+        artifact["aggregation"]["measurements"] = Value::Array(
+            (1..=5)
+                .map(|child_count| {
+                    json!({
+                        "child_count": child_count,
+                        "actual_mcycles": 180 * child_count,
+                        "predicted_mcycles": 180 * child_count,
+                        "enabled": false
+                    })
+                })
+                .collect(),
+        );
+        assert!(parse(artifact).is_err());
+    }
+
+    #[test]
     fn model_requires_an_aggregation_image_id_once_measurements_exist() {
         let mut artifact = valid_artifact();
         artifact["aggregation"]["measurements"] = json!([
@@ -975,6 +1014,52 @@ mod tests {
     #[test]
     fn model_embedded_artifact_validates() {
         super::validate_estimation_model().expect("embedded artifact validates");
+    }
+
+    #[test]
+    fn aggregation_calibration_rows_and_runtime_set_follow_the_fixed_acceptance_rule() {
+        let artifact = fixture_artifact();
+        let aggregation = &artifact.aggregation;
+        if aggregation.measurements.is_empty() {
+            assert!(aggregation.calibrated_counts.is_empty());
+            assert!(aggregation.provenance.image_id.is_none());
+            return;
+        }
+        let mut row_counts = HashSet::new();
+        let mut derived_counts = Vec::new();
+
+        assert_eq!(aggregation.measurements.len(), 5);
+        for row in &aggregation.measurements {
+            assert!(row_counts.insert(row.child_count));
+            assert_eq!(
+                row.predicted_mcycles,
+                aggregation.per_child_mcycles * u64::from(row.child_count)
+            );
+
+            let actual = u128::from(row.actual_mcycles);
+            let predicted = u128::from(row.predicted_mcycles);
+            let accepted = actual.abs_diff(predicted) * 100 <= actual * 10
+                && actual.saturating_sub(predicted) * 100 <= actual * 10;
+            assert_eq!(row.enabled, accepted);
+            if accepted {
+                derived_counts.push(row.child_count);
+            }
+        }
+        assert_eq!(row_counts, HashSet::from([1, 2, 3, 4, 5]));
+
+        derived_counts.sort_unstable();
+        let mut artifact_counts = aggregation.calibrated_counts.clone();
+        artifact_counts.sort_unstable();
+        assert_eq!(artifact_counts, derived_counts);
+
+        let mut runtime_counts = super::estimation_model()
+            .expect("runtime embedded model")
+            .0
+            .aggregation
+            .calibrated_counts
+            .clone();
+        runtime_counts.sort_unstable();
+        assert_eq!(runtime_counts, derived_counts);
     }
 
     #[test]

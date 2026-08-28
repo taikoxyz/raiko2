@@ -35,13 +35,21 @@ changing the default can happen only in a later, explicit configuration migratio
 
 ## Request Metadata Preparation
 
-Add `crates/prover/src/boundless/estimation.rs` as the authoritative implementation for estimated
-cycles and deterministic journals. `boundless/mod.rs` chooses one of two paths before constructing a
-Boundless request:
+Add `crates/prover/src/boundless/estimation.rs` as the evaluator and deterministic-journal module.
+It compile-time embeds `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json` with `include_str!`,
+deserializes and validates it once when an `Estimated` strategy is configured, and exposes typed
+estimation results to `boundless/mod.rs`. The JSON artifact is the single source of truth for model
+IDs, image IDs, coefficients, execution configuration, operating domains, and calibrated
+aggregation counts. `estimation.rs` contains no duplicated constants for those values; it owns only
+schema validation, checked arithmetic, domain checks, and journal derivation. An invalid embedded
+artifact is a build/configuration defect and rejects `Estimated` during startup rather than falling
+back at request time.
+
+`boundless/mod.rs` chooses one of two paths before constructing a Boundless request:
 
 1. `Estimated` decodes and validates the stage input, derives its journal, and estimates mcycles.
-2. `Evaluated` or `Fixed` runs the existing local RISC0 executor, obtains actual mcycles and journal,
-   and applies the configured quote strategy.
+2. `RaikoAgent`, `Evaluated`, or `Fixed` runs the existing local RISC0 executor, obtains actual
+   mcycles and journal, and applies the configured quote strategy.
 
 An estimated request records `quoted_mcycles_count = Some(estimate)` and
 `evaluated_mcycles_count = None`. A locally executed request, including an estimation fallback,
@@ -50,11 +58,20 @@ model ID.
 
 The runtime already persists quoted and evaluated counts, but `BoundlessSubmissionResume` currently
 drops them when reconstructing a checkpoint. Extend the backward-compatible resume payload with
-optional quote counts, strategy, and model ID. Polling an already submitted request keeps the
-persisted values; a newly constructed rebid uses the current strategy and records new values. The
-request digest, image reference, exact maximum price, and deadlines remain the authoritative
-recovery identity. Older checkpoints without the added optional fields retain the current recovery
-behavior and emit a warning that quote provenance is unavailable.
+quote counts, strategy, and model ID. These fields form the quote context of one request-ID lineage.
+Polling an already submitted request and constructing any rebid that reuses its request ID must use
+the persisted quote context, even if configuration or the embedded model changed after restart.
+Only a retry that rotates to a new request ID may compute a quote context from the current strategy
+and model. Therefore every rung that can fulfill one request ID has one unambiguous quote
+provenance.
+
+The added fields deserialize as optional for checkpoint compatibility. Existing runtime metadata
+already carries quoted and evaluated counts and must copy them into the resume payload. A legacy
+checkpoint with a stored quote but no strategy/model keeps that exact quote and reports unavailable
+provenance. If a legacy checkpoint lacks the quote itself, the service may poll its existing request
+but must fail closed instead of submitting a same-ID rebid; it may use current configuration only
+after the old request becomes terminal and rotation produces a new ID. The request digest, image
+reference, exact maximum price, and deadlines remain the authoritative recovery identity.
 
 ## Proposal Cycle Estimate
 
@@ -82,6 +99,8 @@ errors were within ten percent; the remaining sample was a 21.94-percent overquo
 operational target is no observed underquote beyond ten percent and at least 95 percent of absolute
 errors within ten percent. A new untouched holdout and the original zero-underquote gate are not
 prerequisites for this explicitly enabled strategy, and the design does not claim that they passed.
+The production Mainnet domain excludes the isolated 21.94-percent overquote, so all 19 admitted
+Mainnet evaluation samples are within the ten-percent absolute-error budget.
 
 The estimate is used directly; no calibration margin, 1,000-mcycle bucket, or 2,000-mcycle floor is
 applied. This is an explicit cost/latency trade-off: `with_cycles` is not a cryptographic execution
@@ -112,18 +131,29 @@ Commit a compact, reviewable artifact at
 - the decimal and scaled-integer coefficients;
 - Hoodi fit/calibration and Mainnet evaluation counts and diagnostics;
 - the fact that Mainnet influenced the M2 production choice and is not an untouched holdout;
-- the supported observed envelope and fallback rules.
+- the supported chain-conditioned operating domains.
 
 The Hoodi fit envelope alone does not cover Mainnet: 19 Mainnet samples are below its total-zkGas
-minimum and one is above its maximum. The opt-in operating envelope is therefore the union of the
-observed Hoodi fit and Mainnet evaluation inputs:
+minimum and one is above its maximum. A single union range would incorrectly admit the Cartesian
+product of both networks' extrema. The artifact therefore records separate, conjunctive domains:
 
 ```text
-chain_id: Taiko Hoodi or Taiko Mainnet
-block_count: 155..=192
-total_zkgas: 216_314_230..=562_107_601
+taiko_hoodi:
+  block_count: 155..=192
+  total_zkgas: 369_558_586..=459_162_040
+
+taiko_mainnet:
+  block_count: 184..=192
+  total_zkgas: 216_314_230..=310_638_954
+
 execution_po2: 20
 ```
+
+The isolated Mainnet sample at `562_107_601` zkGas remains in the diagnostics but does not extend
+the production domain because there are no observations across the intervening gap and its direct
+M2 estimate exceeds the accepted error budget. Mainnet inputs above `310_638_954` zkGas fall back to
+local execution until additional measurements justify a contiguous domain update. Bounds from one
+chain never admit a feature combination from the other chain.
 
 Before estimating, the request path compares the computed proposal image ID with the artifact,
 requires Unzen to be active for every input block, rejects any later active Taiko fork not covered by
@@ -216,6 +246,10 @@ Focused regression coverage must establish:
   underquote, 5.87-percent MAPE, and the single 21.94-percent overquote;
 - model artifact identity, Unzen activation, supported chain, execution configuration, and observed
   feature-envelope guards select either estimate or local fallback correctly;
+- the embedded JSON is the only source of model parameters, and malformed or internally
+  inconsistent artifact data rejects `Estimated` configuration;
+- Hoodi and Mainnet domains are evaluated independently, the isolated `562_107_601`-zkGas Mainnet
+  sample falls back, and no cross-chain union rectangle is accepted;
 - empty input and malformed structure fail directly;
 - zero/oversized zkGas and arithmetic overflow select the local fallback;
 - proposal journal derivation matches the RISC0 guest journal for a valid fixture;
@@ -224,8 +258,10 @@ Focused regression coverage must establish:
 - aggregation estimation scales with calibrated child count and rejects zero/mismatched vectors;
 - aggregation journal derivation matches the RISC0 guest journal for valid receipt-backed input;
 - estimated progress omits `evaluated_mcycles_count`, while evaluated and fallback progress retain it;
-- resumed submissions retain their persisted quote counts, strategy, and model ID, while a fresh
-  rebid records the current values;
+- resumed submissions and same-ID rebids retain their persisted quote counts, strategy, and model
+  ID across a simulated configuration/model change;
+- a rebid uses current quote configuration only after rotating to a new request ID;
+- a legacy resume without quote context cannot submit a same-ID rebid;
 - proposal and aggregation fulfillment validation remains unchanged.
 
 Because journal equality is proof-interface behavior, the complete change requires independent

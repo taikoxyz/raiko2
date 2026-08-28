@@ -2,10 +2,10 @@
 
 ## Goal
 
-Allow the RISC0 Boundless proposal and aggregation paths to construct the expected journal and
-estimate request cycles without first executing the guest locally. This removes the local dry-run
-from the normal Boundless submission path while retaining an explicit evaluated strategy and a
-bounded fallback for rare numeric failures.
+Allow an explicitly configured RISC0 Boundless proposal or aggregation path to construct the
+expected journal and estimate request cycles without first executing the guest locally. This removes
+the local dry-run from that opt-in path while retaining the existing default behavior, an explicit
+evaluated strategy, and a bounded local-execution fallback outside the estimator's supported domain.
 
 This change affects request pricing and timeout metadata only. Boundless still proves the original
 guest program over the original input, and the existing fulfillment verification remains the source
@@ -13,7 +13,7 @@ of truth for proof validity.
 
 ## Configuration
 
-Replace the misleading `raiko_agent` quote strategy with `estimated`:
+Add `estimated` to the existing quote strategy:
 
 ```toml
 [prover.risc0.boundless.batch_quote]
@@ -23,14 +23,15 @@ strategy = "estimated"
 strategy = "estimated"
 ```
 
-`QuoteSizing` contains `Estimated`, `Evaluated`, and `Fixed { mcycles }`. `Estimated` is the new
-default. The serialized name `raiko_agent` remains an alias for `Estimated` so an existing explicit
-configuration continues to deserialize, but it no longer retains a separate rounding codepath.
-Documentation and generated examples expose only `estimated`.
+`QuoteSizing` contains `RaikoAgent`, `Estimated`, `Evaluated`, and `Fixed { mcycles }`.
+`RaikoAgent` remains the default for this change and retains its current semantics: execute locally,
+then round batch requests to the next 1,000 mcycles with a 2,000-mcycle floor and aggregation
+requests to the next 100 mcycles with a 200-mcycle floor. It is deprecated in documentation but is
+not an alias and does not silently change behavior. Operators must explicitly select `estimated`.
 
 Only `Estimated` bypasses local execution. `Evaluated` keeps the exact local dry-run. `Fixed` keeps
-its current behavior, including local execution to obtain the journal, so this change does not
-silently alter that strategy beyond removing the retired enum variant.
+its current behavior, including local execution to obtain the journal. Retiring `raiko_agent` and
+changing the default can happen only in a later, explicit configuration migration.
 
 ## Request Metadata Preparation
 
@@ -44,8 +45,16 @@ Boundless request:
 
 An estimated request records `quoted_mcycles_count = Some(estimate)` and
 `evaluated_mcycles_count = None`. A locally executed request, including an estimation fallback,
-records both fields. No new persistence field or checkpoint schema version is required because the
-evaluated field is already optional.
+records both fields. Progress also records the selected quote strategy and, for an estimate, its
+model ID.
+
+The runtime already persists quoted and evaluated counts, but `BoundlessSubmissionResume` currently
+drops them when reconstructing a checkpoint. Extend the backward-compatible resume payload with
+optional quote counts, strategy, and model ID. Polling an already submitted request keeps the
+persisted values; a newly constructed rebid uses the current strategy and records new values. The
+request digest, image reference, exact maximum price, and deadlines remain the authoritative
+recovery identity. Older checkpoints without the added optional fields retain the current recovery
+behavior and emit a warning that quote provenance is unavailable.
 
 ## Proposal Cycle Estimate
 
@@ -61,10 +70,24 @@ mcycles = ceil(
 ```
 
 These M2 coefficients were fitted on the completed 80-sample Hoodi fit split; the separate 40-sample
-Hoodi calibration split was not used to change them. They were then evaluated against the available
-20-sample Mainnet holdout. On that Mainnet set, MAPE was 5.87 percent and 19 of 20 samples were
-within 10 percent. The estimate is used directly; the retired 1,000-mcycle bucket and 2,000-mcycle
-floor are not applied.
+Hoodi calibration split was not used to change them. The original experiment selected M1 before
+looking at Mainnet, and its strict zero-underquote decision correctly recommended retaining local
+pre-execution. M2 was selected later after inspecting the 20 Mainnet samples under a different
+product requirement: approximate auction cost and per-mcycle deadlines within about ten percent.
+Those 20 samples are therefore an evaluation set, not an untouched holdout.
+
+On the Mainnet evaluation set, direct M2 had 5.87 percent MAPE. Nineteen of 20 estimates were below
+actual cycles; the largest underquote was 108.59 mcycles, or 5.75 percent. Nineteen of 20 absolute
+errors were within ten percent; the remaining sample was a 21.94-percent overquote. The accepted
+operational target is no observed underquote beyond ten percent and at least 95 percent of absolute
+errors within ten percent. A new untouched holdout and the original zero-underquote gate are not
+prerequisites for this explicitly enabled strategy, and the design does not claim that they passed.
+
+The estimate is used directly; no calibration margin, 1,000-mcycle bucket, or 2,000-mcycle floor is
+applied. This is an explicit cost/latency trade-off: `with_cycles` is not a cryptographic execution
+limit, but the value scales the configured price cap and per-mcycle lock/fulfillment deadlines. An
+underestimate can therefore make an auction less attractive or expire it earlier. The accepted
+approximately ten-percent error budget applies to those effects, not to proof validity.
 
 Production code uses checked integer arithmetic rather than floating point. With a scale of
 `1_000_000_000_000`, the numerator is:
@@ -78,6 +101,37 @@ Production code uses checked integer arithmetic rather than floating point. With
 The result is divided by the scale with ceiling. Every conversion, sum, and multiplication is
 checked, and the final value must fit a positive `u32` mcycle count.
 
+### Proposal Model Identity and Operating Domain
+
+Commit a compact, reviewable artifact at
+`experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json`. It records at least:
+
+- model ID `risc0-zkgas-m2-v1` and the originating experiment model ID;
+- proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`;
+- RISC0 version `3.0.5`, `execution_po2 = 20`, source revision, ELF hash, and input-row hash;
+- the decimal and scaled-integer coefficients;
+- Hoodi fit/calibration and Mainnet evaluation counts and diagnostics;
+- the fact that Mainnet influenced the M2 production choice and is not an untouched holdout;
+- the supported observed envelope and fallback rules.
+
+The Hoodi fit envelope alone does not cover Mainnet: 19 Mainnet samples are below its total-zkGas
+minimum and one is above its maximum. The opt-in operating envelope is therefore the union of the
+observed Hoodi fit and Mainnet evaluation inputs:
+
+```text
+chain_id: Taiko Hoodi or Taiko Mainnet
+block_count: 155..=192
+total_zkgas: 216_314_230..=562_107_601
+execution_po2: 20
+```
+
+Before estimating, the request path compares the computed proposal image ID with the artifact,
+requires Unzen to be active for every input block, rejects any later active Taiko fork not covered by
+the artifact, and checks the operating envelope. An image, RISC0 execution configuration, fork,
+zkGas schedule, or feature-envelope mismatch emits a warning containing the model ID and falls back
+to local execution. Guest/RISC0 dependency upgrades must regenerate or explicitly reaffirm the
+artifact; the image-ID comparison is the runtime guard against a changed proposal program.
+
 ## Aggregation Cycle Estimate
 
 RISC0 aggregation cost is dominated by verifying each child receipt. Estimate it as:
@@ -86,11 +140,20 @@ RISC0 aggregation cost is dominated by verifying each child receipt. Estimate it
 aggregation_mcycles = 180 * child_receipt_count
 ```
 
-The 180-mcycle value is a deliberately simple per-child estimate. As a current-data check, the
-available Mainnet runtime snapshot contains 80 five-child RISC0 aggregations at 817 or 818 actual
-mcycles; the estimate is 900 mcycles, approximately ten percent conservative. The input must contain
-at least one receipt, and receipt and carry-data counts must match. Multiplication and conversion are
-checked.
+The 180-mcycle value is a deliberately simple per-child estimate. Historical operator observation
+puts a one-child aggregation near 175 mcycles. The available Mainnet runtime snapshot contains 80
+five-child aggregations at 817 or 818 mcycles, for which the estimate is 900 mcycles. The snapshot's
+deployed proposal image differs from the experiment proposal image, so these aggregation samples are
+from a different release cohort. They are supporting evidence only; they do not calibrate the
+current worktree aggregation ELF or prove a zero intercept.
+
+Before enabling estimated aggregation, execute the current aggregation image locally with valid
+receipt-backed inputs at child counts one through five and commit the image ID and results to the
+model artifact. Enable `180 * child_receipt_count` only for counts whose measured absolute error and
+underquote are within the accepted ten-percent budget. Counts without current-image measurements,
+including every count above five initially, fall back to local execution. A future image change also
+falls back until the measurements are refreshed. The input must contain at least one receipt, and
+receipt and carry-data counts must match. Multiplication and conversion are checked.
 
 ## Deterministic Journals
 
@@ -130,10 +193,14 @@ Structural errors fail immediately:
 - carry data, prover address, or aggregation linkage is invalid;
 - a derived journal has an unexpected length.
 
-Rare numeric estimation failures emit a warning and fall back to the existing local execute path:
+Estimation-domain and numeric failures emit a warning and fall back to the existing local execute
+path:
 
 - a proposal zkGas value is zero or cannot be represented by the estimator;
 - total zkGas, a scaled model term, or the final proposal estimate overflows;
+- proposal image ID, RISC0 execution configuration, chain/fork, or observed feature envelope does
+  not match the model artifact;
+- aggregation image ID or child count lacks current-image calibration;
 - aggregation child-count multiplication or final conversion overflows.
 
 If local execution also fails, its error is returned. A successful fallback uses the actual local
@@ -143,15 +210,22 @@ mcycles and journal and records `evaluated_mcycles_count = Some(actual)`.
 
 Focused regression coverage must establish:
 
-- `estimated` and the legacy serialized alias deserialize to the same strategy;
-- `raiko_agent` is no longer a distinct implementation path;
+- `raiko_agent` retains its current default behavior and `estimated` requires explicit selection;
 - checked proposal arithmetic matches the decimal M2 formula on all collected Mainnet samples;
+- direct-M2 regression tests assert 19 Mainnet underquotes, a maximum observed 5.75-percent
+  underquote, 5.87-percent MAPE, and the single 21.94-percent overquote;
+- model artifact identity, Unzen activation, supported chain, execution configuration, and observed
+  feature-envelope guards select either estimate or local fallback correctly;
 - empty input and malformed structure fail directly;
 - zero/oversized zkGas and arithmetic overflow select the local fallback;
 - proposal journal derivation matches the RISC0 guest journal for a valid fixture;
-- aggregation estimation scales with child count and rejects zero/mismatched vectors;
+- current-image aggregation executions cover child counts one through five before those counts are
+  enabled, while unmeasured counts fall back;
+- aggregation estimation scales with calibrated child count and rejects zero/mismatched vectors;
 - aggregation journal derivation matches the RISC0 guest journal for valid receipt-backed input;
 - estimated progress omits `evaluated_mcycles_count`, while evaluated and fallback progress retain it;
+- resumed submissions retain their persisted quote counts, strategy, and model ID, while a fresh
+  rebid records the current values;
 - proposal and aggregation fulfillment validation remains unchanged.
 
 Because journal equality is proof-interface behavior, the complete change requires independent
@@ -163,4 +237,4 @@ adversarial review and independent behavioral verification before it is ready fo
 - Do not change the zkGas protocol schedule or guest programs.
 - Do not add a second boolean feature flag or a network-specific coefficient.
 - Do not infer aggregation cycles from proposal zkGas.
-- Do not remove the explicit `evaluated` or `fixed` strategies.
+- Do not remove or silently reinterpret `raiko_agent`, `evaluated`, or `fixed` in this change.

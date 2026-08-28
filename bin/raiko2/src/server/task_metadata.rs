@@ -720,9 +720,6 @@ impl TaskRuntimeMetadata {
             && self.expires_at.is_some()
             && self.lock_expires_at.is_some()
             && self.submitted_at.is_some()
-            && self.quoted_mcycles_count.is_some()
-            && (self.evaluated_mcycles_count.is_some()
-                || matches!(self.quote_strategy, Some(BoundlessQuoteStrategy::Estimated)))
             && self.max_price_multiplier.is_some()
             && self.max_price_wei.is_some()
             && matches!(self.rebid_attempt, Some(attempt) if attempt > 0)
@@ -1564,6 +1561,23 @@ mod tests {
         assert_eq!(runtime.evaluated_mcycles_count, None);
         assert_eq!(runtime.quote_strategy, progress.quote_strategy);
         assert_eq!(runtime.quote_model_id, progress.quote_model_id);
+    }
+
+    #[test]
+    fn legacy_boundless_submission_without_quote_remains_resumable_for_polling() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.quoted_mcycles_count = None;
+        runtime.evaluated_mcycles_count = None;
+        runtime.quote_strategy = None;
+        runtime.quote_model_id = None;
+
+        assert!(runtime.has_boundless_submission_resume());
+        assert!(
+            runtime
+                .validate_remote_submission()
+                .expect("legacy checkpoint remains valid")
+                .is_some()
+        );
     }
 
     #[test]

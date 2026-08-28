@@ -2999,6 +2999,10 @@ mod tests {
         assert_eq!(resumed.expires_at, future_expires_at);
         assert_eq!(resumed.lock_expires_at, future_expires_at - 600);
         assert_eq!(resumed.submitted_at, future_expires_at - 900);
+        assert_eq!(resumed.quoted_mcycles_count, Some(6_000));
+        assert_eq!(resumed.evaluated_mcycles_count, Some(12_345));
+        assert_eq!(resumed.quote_strategy, Some(BoundlessQuoteStrategy::Fixed));
+        assert_eq!(resumed.quote_model_id, None);
         assert_eq!(resumed.max_price_multiplier, 4);
         assert_eq!(resumed.max_price_wei.as_deref(), Some("9000000000000"));
         assert_eq!(resumed.rebid_attempt, 3);

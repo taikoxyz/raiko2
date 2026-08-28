@@ -186,16 +186,18 @@ deployment_type = "base"
 [prover.risc0.boundless.deployment.overrides]
 order_stream_url = "https://base-mainnet.boundless.network"
 
-# Quote sizing per stage. Default `raiko_agent` rounds evaluated cycles up (batch: 1000-step,
-# 2000 floor; aggregation: 100-step, 200 floor). Use `evaluated` for the honest cycle count,
-# or `fixed` to pin the quote. A fixed quote underprices large proposals and overprices small ones.
+# Quote sizing per stage. Use `evaluated` for the honest cycle count, `estimated` to opt in to
+# the embedded estimation model, or `fixed` to pin the quote. A fixed quote underprices large
+# proposals and overprices small ones.
 [prover.risc0.boundless.batch_quote]
-strategy = "raiko_agent"
+strategy = "evaluated"
+# strategy = "estimated"
 # strategy = "fixed"
 # mcycles = 6000
 
 [prover.risc0.boundless.aggregation_quote]
-strategy = "raiko_agent"
+strategy = "evaluated"
+# strategy = "estimated"
 # strategy = "fixed"
 # mcycles = 200
 

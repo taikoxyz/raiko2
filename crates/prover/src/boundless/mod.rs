@@ -1,8 +1,11 @@
 #![allow(missing_docs)]
 
 pub mod aggregation;
-#[allow(dead_code)] // Task 1 establishes the private estimator API consumed by subsequent tasks.
+#[allow(dead_code)]
+// The validated artifact becomes runtime data when Estimated quote execution lands.
 mod estimation;
+
+pub use estimation::validate_estimation_model;
 
 pub use crate::boundless_config::{
     BOUNDLESS_TX_SEND_TIMEOUT_MS, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
@@ -64,10 +67,6 @@ use crate::{
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
-const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
-const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
-const AGGREGATION_QUOTED_MCYCLES_MIN: u32 = 200;
-const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -1633,33 +1632,6 @@ const fn no_lock_deadline(submitted_at: u64, lock_expires_at: u64, timeout: NoLo
     match timeout.action {
         BoundlessTimeoutAction::Rebid => rebid_deadline,
         BoundlessTimeoutAction::Abort => lock_expires_at,
-    }
-}
-
-const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
-    let rounded = if evaluated_mcycles == 0 {
-        0
-    } else {
-        evaluated_mcycles.div_ceil(BATCH_QUOTED_MCYCLES_STEP) * BATCH_QUOTED_MCYCLES_STEP
-    };
-    if rounded < BATCH_QUOTED_MCYCLES_MIN {
-        BATCH_QUOTED_MCYCLES_MIN
-    } else {
-        rounded
-    }
-}
-
-const fn quote_aggregation_mcycles(evaluated_mcycles: u32) -> u32 {
-    let rounded = if evaluated_mcycles == 0 {
-        0
-    } else {
-        evaluated_mcycles.div_ceil(AGGREGATION_QUOTED_MCYCLES_STEP)
-            * AGGREGATION_QUOTED_MCYCLES_STEP
-    };
-    if rounded < AGGREGATION_QUOTED_MCYCLES_MIN {
-        AGGREGATION_QUOTED_MCYCLES_MIN
-    } else {
-        rounded
     }
 }
 
@@ -4927,18 +4899,13 @@ where
 }
 
 impl BoundlessProver {
-    // Keep boundless order pricing aligned with the legacy raiko-agent strategy.
     const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
         let quote = match elf_type {
             ElfType::Batch => &self.config.batch_quote,
             ElfType::Aggregation => &self.config.aggregation_quote,
         };
         match quote {
-            QuoteSizing::RaikoAgent => match elf_type {
-                ElfType::Batch => quote_batch_mcycles(evaluated_mcycles_count),
-                ElfType::Aggregation => quote_aggregation_mcycles(evaluated_mcycles_count),
-            },
-            QuoteSizing::Evaluated => evaluated_mcycles_count,
+            QuoteSizing::Estimated | QuoteSizing::Evaluated => evaluated_mcycles_count,
             QuoteSizing::Fixed { mcycles } => *mcycles,
         }
     }
@@ -5272,9 +5239,9 @@ mod tests {
         missing_resume_event_action, next_boundless_tx_fees, no_lock_deadline,
         no_lock_timeout_for_attempt, now_secs, observe_boundless_transaction_hash,
         observe_boundless_transaction_receipts, parse_bool_result, parse_env_bool, parse_env_url,
-        prepare_boundless_funding, publish_boundless_progress, quote_batch_mcycles,
-        ready_boundless_submission_permit, reserve_boundless_funding_before_dispatch,
-        retry_external_bounded, retry_external_with_attempt_limit, run_after_submission_permit,
+        prepare_boundless_funding, publish_boundless_progress, ready_boundless_submission_permit,
+        reserve_boundless_funding_before_dispatch, retry_external_bounded,
+        retry_external_with_attempt_limit, run_after_submission_permit,
         send_boundless_transaction_with_replacements, should_defer_boundless_poll_timeout,
         should_rebid_unlocked_request, storage_uploader_config_from_env, take_rpc_result,
         terminalize_boundless_checkpoint, user_cycles_to_mcycles, validate_offer_params,
@@ -6853,30 +6820,15 @@ mod tests {
     }
 
     #[test]
-    fn quoted_mcycles_count_matches_raiko_agent_strategy() {
-        let prover = BoundlessProver::new(BoundlessConfig::default());
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
-    }
-
-    #[test]
-    fn aggregation_quote_matches_raiko_agent_strategy() {
-        let prover = BoundlessProver::new(BoundlessConfig::default());
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 0), 200);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 123), 200);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 200), 200);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 201), 300);
-    }
-
-    #[test]
     fn quoted_mcycles_count_dispatches_on_quote_sizing() {
         use super::QuoteSizing;
-        // RaikoAgent rounds (batch floor 2000, step 1000).
+        // Evaluated is the default and passes through.
         let prover = BoundlessProver::new(BoundlessConfig::default());
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 1_491);
 
-        // Evaluated passes through.
+        // Estimated uses the same fallback until the estimator is applied to a request.
         let cfg = BoundlessConfig {
-            batch_quote: QuoteSizing::Evaluated,
+            batch_quote: QuoteSizing::Estimated,
             ..Default::default()
         };
         assert_eq!(
@@ -7541,14 +7493,6 @@ mod tests {
             Some("https://taiko-mainnet.boundless.network")
         );
         assert_eq!(deployment.deployment_block, Some(4_819_525));
-    }
-
-    #[test]
-    fn quote_batch_mcycles_rounds_up_like_old_agent() {
-        assert_eq!(quote_batch_mcycles(0), 2_000);
-        assert_eq!(quote_batch_mcycles(1_491), 2_000);
-        assert_eq!(quote_batch_mcycles(2_000), 2_000);
-        assert_eq!(quote_batch_mcycles(2_001), 3_000);
     }
 
     #[test]

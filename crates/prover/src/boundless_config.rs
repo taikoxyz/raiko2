@@ -194,8 +194,8 @@ pub struct DeploymentConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
 pub enum QuoteSizing {
+    Estimated,
     #[default]
-    RaikoAgent,
     Evaluated,
     Fixed {
         mcycles: u32,
@@ -229,9 +229,7 @@ pub struct BoundlessConfig {
     pub transaction: Option<BoundlessTransactionConfig>,
     #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
-    #[serde(default)]
     pub batch_quote: QuoteSizing,
-    #[serde(default)]
     pub aggregation_quote: QuoteSizing,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_poll_interval_ms")]
@@ -477,8 +475,46 @@ mod tests {
     use super::{
         BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, BoundlessTransactionConfig,
         DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
-        DeploymentConfig, DeploymentType, TimeoutPolicy, validate_offer_spec,
+        DeploymentConfig, DeploymentType, QuoteSizing, TimeoutPolicy, validate_offer_spec,
     };
+
+    #[test]
+    fn quote_sizing_deserializes_estimated_strategy() {
+        let quote: QuoteSizing = serde_json::from_value(serde_json::json!({
+            "strategy": "estimated"
+        }))
+        .expect("estimated quote sizing should deserialize");
+
+        assert_eq!(quote, QuoteSizing::Estimated);
+    }
+
+    #[test]
+    fn quote_sizing_rejects_removed_raiko_agent_strategy() {
+        let error = serde_json::from_value::<QuoteSizing>(serde_json::json!({
+            "strategy": "raiko_agent"
+        }))
+        .expect_err("raiko_agent must no longer be a supported quote strategy");
+
+        assert!(error.to_string().contains("estimated"), "{error}");
+        assert!(error.to_string().contains("evaluated"), "{error}");
+        assert!(error.to_string().contains("fixed"), "{error}");
+    }
+
+    #[test]
+    fn explicit_boundless_config_requires_both_quote_stages() {
+        for missing_quote in ["batch_quote", "aggregation_quote"] {
+            let mut value = serde_json::to_value(BoundlessConfig::default())
+                .expect("serialize default Boundless config");
+            value
+                .as_object_mut()
+                .expect("Boundless config object")
+                .remove(missing_quote);
+
+            let error = serde_json::from_value::<BoundlessConfig>(value)
+                .expect_err("explicit Boundless config must require both quote stages");
+            assert!(error.to_string().contains(missing_quote), "{error}");
+        }
+    }
 
     #[test]
     fn default_config_uses_base_deployment() {
@@ -488,6 +524,8 @@ mod tests {
         assert_eq!(config.rebid_timeout_ms, DEFAULT_REBID_TIMEOUT_MS);
         assert_eq!(config.rebid_price_step_bps, DEFAULT_REBID_PRICE_STEP_BPS);
         assert_eq!(config.rebid_max_attempts, DEFAULT_REBID_MAX_ATTEMPTS);
+        assert_eq!(config.batch_quote, QuoteSizing::Evaluated);
+        assert_eq!(config.aggregation_quote, QuoteSizing::Evaluated);
     }
 
     #[test]

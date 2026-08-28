@@ -42,6 +42,7 @@ pairs = [
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz", l2_witness_rpc = "https://rpc.mainnet.taiko.xyz", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x3B6041173B80E77f038f3F2C0f9744f04837185e" },
   # Optional: override Boundless quote, offer, and runtime params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
+  # Quote fields omitted here inherit the corresponding required global stage table below.
   # Leave fixed quote overrides unset unless the target network has stable proof sizes.
 # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote = { strategy = "evaluated" } } },
   # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote = { strategy = "evaluated" }, rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", absolute_max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_sec = 120, lock_collateral = "20", timeouts = { mode = "per_mcycle", lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, dynamic_pricing_timeout_modifier = 2.0 } } } } },
@@ -186,9 +187,12 @@ deployment_type = "base"
 [prover.risc0.boundless.deployment.overrides]
 order_stream_url = "https://base-mainnet.boundless.network"
 
-# Quote sizing per stage. Use `evaluated` for the honest cycle count, `estimated` to opt in to
-# the embedded estimation model, or `fixed` to pin the quote. A fixed quote underprices large
-# proposals and overprices small ones.
+# Quote sizing per stage. Both tables are required in an explicit Boundless configuration.
+# Supported strategies are exactly `estimated`, `evaluated`, and `fixed`; the removed
+# `raiko_agent` value is rejected. Use `evaluated` for the exact local count, `estimated` to opt in
+# to the embedded proposal model and its warning-plus-local fallback, or `fixed` to pin the quote.
+# `fixed` still executes locally for the journal. Estimated aggregation currently falls back for
+# every child count because its calibrated-count set is empty.
 [prover.risc0.boundless.batch_quote]
 strategy = "evaluated"
 # strategy = "estimated"

@@ -3603,12 +3603,12 @@ impl BoundlessProver {
         if let Some(min_price) = min_price {
             offer_params.min_price(min_price);
         }
-        // No `.with_env(...)`: the input is carried by URL (`with_input_url` below), and every SDK
-        // request-builder layer that would consume a `GuestEnv` is short-circuited because
-        // `request_input`, `cycles`, and `journal` are all set — the storage layer skips env upload
-        // when `request_input` is present, and the preflight layer early-returns on set
-        // cycles+journal. `ensure_input_uploaded` already produced the uploaded bytes from the raw
-        // input, so building a second env here would just be a discarded multi-MB copy per rebid.
+        // No `.with_env(...)`: the input is carried by URL (`with_input_url` below), and the storage
+        // layer skips env upload when `request_input` is present. The shared SDK preflight layer used
+        // by Evaluated/Fixed requests may still best-effort download that URL to fill its executor
+        // cache. Estimated requests replace it with a request-scoped default layer, which has no
+        // downloader. `ensure_input_uploaded` already produced the bytes from the raw input, so
+        // building a second env here would just be a discarded multi-MB copy per rebid.
         let mut request_params = client
             .new_request()
             .with_program(elf.to_vec())

@@ -617,6 +617,8 @@ struct AggregationMeasurement {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashSet, str::FromStr};
+
     use alloy_primitives::U256;
     use raiko2_primitives::{
         ChainSpec, StatelessInput,
@@ -624,7 +626,9 @@ mod tests {
     };
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+    use serde::Deserialize;
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
 
     use super::{
         ActiveTaikoForkRank, EstimateUnavailable, ScaledCoefficients, estimate_mcycles,
@@ -973,6 +977,308 @@ mod tests {
         assert_eq!(
             estimate_mcycles(&coefficients, 1, 1),
             Err(EstimateUnavailable::Numeric)
+        );
+    }
+
+    #[test]
+    fn fixture_contract_rejects_untracked_rows() {
+        let artifact = fixture_artifact();
+        let rows = validation_fixture_rows();
+
+        assert_eq!(
+            hex::encode(Sha256::digest(VALIDATION_FIXTURE.as_bytes())),
+            "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767"
+        );
+        assert_eq!(
+            artifact.proposal.validation_fixture_sha256,
+            "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767"
+        );
+        assert_eq!(rows.len(), 60);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.network == "taiko_hoodi" && row.split == "calibration")
+                .count(),
+            40
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.network == "taiko_mainnet" && row.split == "evaluation")
+                .count(),
+            20
+        );
+    }
+
+    #[test]
+    fn fixture_diagnostics_reproduce_committed_model() {
+        let artifact = fixture_artifact();
+        let rows = validation_fixture_rows();
+        let coefficients = &artifact.proposal.coefficients;
+        let decimal = DecimalModel::from_coefficients(&coefficients.decimal);
+
+        let hoodi: Vec<_> = rows
+            .iter()
+            .filter(|row| row.network == "taiko_hoodi")
+            .collect();
+        let mainnet: Vec<_> = rows
+            .iter()
+            .filter(|row| row.network == "taiko_mainnet")
+            .collect();
+
+        let hoodi_continuous = diagnostics(&hoodi, |row| decimal.predict(row));
+        let hoodi_integer = diagnostics(&hoodi, |row| integer_predict(&coefficients.scaled, row));
+        assert_hoodi_diagnostics(
+            &hoodi_continuous,
+            &artifact.proposal.cohorts.hoodi.continuous,
+            17,
+            "0.094557",
+            "0.279512",
+            "0.279512",
+            0,
+        );
+        assert_hoodi_diagnostics(
+            &hoodi_integer,
+            &artifact.proposal.cohorts.hoodi.scaled_integer,
+            12,
+            "0.093492",
+            "0.264550",
+            "0.264550",
+            0,
+        );
+
+        let mainnet_continuous = diagnostics(&mainnet, |row| decimal.predict(row));
+        let mainnet_integer =
+            diagnostics(&mainnet, |row| integer_predict(&coefficients.scaled, row));
+        assert_mainnet_diagnostics(
+            &mainnet_continuous,
+            &artifact.proposal.cohorts.mainnet.continuous,
+            19,
+            "5.87",
+            "5.75",
+            1,
+            "21.94",
+        );
+        assert_mainnet_diagnostics(
+            &mainnet_integer,
+            &artifact.proposal.cohorts.mainnet.scaled_integer,
+            19,
+            "5.8422",
+            "5.7234",
+            1,
+            "21.9679",
+        );
+    }
+
+    const VALIDATION_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../experiments/risc0-zkgas/models/risc0-zkgas-m2-v1-validation.jsonl"
+    ));
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ValidationFixtureRow {
+        network: String,
+        split: String,
+        proposal_id: u64,
+        block_count: u64,
+        total_zkgas: u64,
+        actual_mcycles: u64,
+    }
+
+    struct DecimalModel {
+        intercept: f64,
+        total_zkgas: f64,
+        block_count: f64,
+    }
+
+    impl DecimalModel {
+        fn from_coefficients(coefficients: &super::DecimalCoefficients) -> Self {
+            Self {
+                intercept: parse_audit_decimal(&coefficients.intercept, "intercept"),
+                total_zkgas: parse_audit_decimal(&coefficients.total_zkgas, "total_zkgas"),
+                block_count: parse_audit_decimal(&coefficients.block_count, "block_count"),
+            }
+        }
+
+        fn predict(&self, row: &ValidationFixtureRow) -> f64 {
+            self.intercept
+                + self.total_zkgas * row.total_zkgas as f64
+                + self.block_count * row.block_count as f64
+        }
+    }
+
+    #[derive(Default)]
+    struct Diagnostics {
+        underquote_count: u32,
+        mape_percent: f64,
+        max_absolute_error_percent: f64,
+        max_underquote_percent: f64,
+        over_ten_percent_count: u32,
+        max_overquote_percent: f64,
+    }
+
+    fn fixture_artifact() -> super::ValidatedModelArtifact {
+        let artifact: super::ValidatedModelArtifact =
+            serde_json::from_str(super::EMBEDDED_MODEL).expect("committed model artifact JSON");
+        super::validate_artifact(&artifact).expect("committed model artifact validation");
+        artifact
+    }
+
+    fn validation_fixture_rows() -> Vec<ValidationFixtureRow> {
+        let mut rows = Vec::new();
+        let mut identities = HashSet::new();
+        for (line_number, line) in VALIDATION_FIXTURE.lines().enumerate() {
+            assert!(!line.trim().is_empty(), "fixture has an empty row");
+            let row: ValidationFixtureRow = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("fixture row {}: {error}", line_number + 1));
+            assert!(row.proposal_id > 0, "fixture proposal_id must be positive");
+            assert!(row.block_count > 0, "fixture block_count must be positive");
+            assert!(row.total_zkgas > 0, "fixture total_zkgas must be positive");
+            assert!(
+                row.actual_mcycles > 0,
+                "fixture actual_mcycles must be positive"
+            );
+            assert!(
+                matches!(
+                    (row.network.as_str(), row.split.as_str()),
+                    ("taiko_hoodi", "calibration") | ("taiko_mainnet", "evaluation")
+                ),
+                "fixture has an unsupported cohort"
+            );
+            assert!(
+                identities.insert((row.network.clone(), row.proposal_id)),
+                "fixture has duplicate network/proposal_id"
+            );
+            rows.push(row);
+        }
+        rows
+    }
+
+    fn parse_audit_decimal(value: &str, label: &str) -> f64 {
+        let parsed = f64::from_str(value)
+            .unwrap_or_else(|error| panic!("{label} audit decimal is malformed: {error}"));
+        assert!(
+            parsed.is_finite() && parsed != 0.0,
+            "{label} audit decimal must be finite and non-zero"
+        );
+        parsed
+    }
+
+    fn integer_predict(
+        coefficients: &super::ScaledCoefficients,
+        row: &ValidationFixtureRow,
+    ) -> f64 {
+        let numerator = u128::from(coefficients.intercept)
+            + u128::from(coefficients.total_zkgas) * u128::from(row.total_zkgas)
+            + u128::from(coefficients.block_count) * u128::from(row.block_count);
+        let scale = u128::from(coefficients.scale);
+        assert!(scale > 0, "scaled coefficients require a non-zero scale");
+        (numerator / scale + u128::from(!numerator.is_multiple_of(scale))) as f64
+    }
+
+    fn diagnostics(
+        rows: &[&ValidationFixtureRow],
+        prediction: impl Fn(&ValidationFixtureRow) -> f64,
+    ) -> Diagnostics {
+        assert!(!rows.is_empty(), "diagnostics require fixture rows");
+        let mut diagnostics = Diagnostics::default();
+        for row in rows {
+            let percent_error =
+                (prediction(row) - row.actual_mcycles as f64) * 100.0 / row.actual_mcycles as f64;
+            diagnostics.mape_percent += percent_error.abs();
+            diagnostics.max_absolute_error_percent = diagnostics
+                .max_absolute_error_percent
+                .max(percent_error.abs());
+            if percent_error < 0.0 {
+                diagnostics.underquote_count += 1;
+                diagnostics.max_underquote_percent =
+                    diagnostics.max_underquote_percent.max(-percent_error);
+            }
+            if percent_error > 10.0 {
+                diagnostics.over_ten_percent_count += 1;
+                diagnostics.max_overquote_percent =
+                    diagnostics.max_overquote_percent.max(percent_error);
+            }
+        }
+        diagnostics.mape_percent /= rows.len() as f64;
+        diagnostics
+    }
+
+    fn assert_hoodi_diagnostics(
+        actual: &Diagnostics,
+        artifact: &super::HoodiDiagnostics,
+        underquote_count: u32,
+        mape_percent: &str,
+        max_absolute_error_percent: &str,
+        max_underquote_percent: &str,
+        over_ten_percent_count: u32,
+    ) {
+        assert_eq!(artifact.underquote_count, underquote_count);
+        assert_eq!(artifact.mape_percent, mape_percent);
+        assert_eq!(
+            artifact.max_absolute_error_percent,
+            max_absolute_error_percent
+        );
+        assert_eq!(artifact.max_underquote_percent, max_underquote_percent);
+        assert_eq!(artifact.over_ten_percent_count, over_ten_percent_count);
+        assert_eq!(actual.underquote_count, artifact.underquote_count);
+        assert_percent_eq(actual.mape_percent, &artifact.mape_percent);
+        assert_percent_eq(
+            actual.max_absolute_error_percent,
+            &artifact.max_absolute_error_percent,
+        );
+        assert_percent_eq(
+            actual.max_underquote_percent,
+            &artifact.max_underquote_percent,
+        );
+        assert_eq!(
+            actual.over_ten_percent_count,
+            artifact.over_ten_percent_count
+        );
+    }
+
+    fn assert_mainnet_diagnostics(
+        actual: &Diagnostics,
+        artifact: &super::MainnetDiagnostics,
+        underquote_count: u32,
+        mape_percent: &str,
+        max_underquote_percent: &str,
+        overquote_over_ten_percent_count: u32,
+        max_overquote_percent: &str,
+    ) {
+        assert_eq!(artifact.underquote_count, underquote_count);
+        assert_eq!(artifact.mape_percent, mape_percent);
+        assert_eq!(artifact.max_underquote_percent, max_underquote_percent);
+        assert_eq!(
+            artifact.overquote_over_ten_percent_count,
+            overquote_over_ten_percent_count
+        );
+        assert_eq!(artifact.max_overquote_percent, max_overquote_percent);
+        assert_eq!(actual.underquote_count, artifact.underquote_count);
+        assert_percent_eq(actual.mape_percent, &artifact.mape_percent);
+        assert_percent_eq(
+            actual.max_underquote_percent,
+            &artifact.max_underquote_percent,
+        );
+        assert_eq!(
+            actual.over_ten_percent_count,
+            artifact.overquote_over_ten_percent_count
+        );
+        assert_percent_eq(
+            actual.max_overquote_percent,
+            &artifact.max_overquote_percent,
+        );
+    }
+
+    fn assert_percent_eq(actual: f64, expected: &str) {
+        let decimals = expected
+            .split_once('.')
+            .map_or(0, |(_, fraction)| fraction.len());
+        let expected = parse_audit_decimal(expected, "diagnostic");
+        let tolerance =
+            0.5 * 10_f64.powi(-i32::try_from(decimals).expect("decimal precision")) + 1e-9;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected {expected} +/- {tolerance}, got {actual}"
         );
     }
 }

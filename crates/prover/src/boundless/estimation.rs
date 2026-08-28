@@ -966,12 +966,18 @@ mod tests {
         artifact["aggregation"]["provenance"]["image_id"] =
             json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
         artifact["aggregation"]["measurements"] = json!([
-            {"child_count": 1, "actual_mcycles": 200, "predicted_mcycles": 180, "enabled": false},
-            {"child_count": 2, "actual_mcycles": 400, "predicted_mcycles": 360, "enabled": false},
-            {"child_count": 3, "actual_mcycles": 600, "predicted_mcycles": 540, "enabled": false},
-            {"child_count": 4, "actual_mcycles": 800, "predicted_mcycles": 720, "enabled": false}
+            {"child_count": 1, "actual_mcycles": 200, "predicted_mcycles": 160, "enabled": false},
+            {"child_count": 2, "actual_mcycles": 400, "predicted_mcycles": 320, "enabled": false},
+            {"child_count": 3, "actual_mcycles": 600, "predicted_mcycles": 480, "enabled": false},
+            {"child_count": 4, "actual_mcycles": 800, "predicted_mcycles": 640, "enabled": false}
         ]);
-        assert!(parse(artifact).is_err());
+        match parse(artifact) {
+            Err(error) => assert_eq!(
+                error,
+                "aggregation measurements must exactly cover child counts 1..=5"
+            ),
+            Ok(_) => panic!("incomplete aggregation calibration must be rejected"),
+        }
     }
 
     #[test]

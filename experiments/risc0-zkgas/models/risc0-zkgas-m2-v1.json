@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "model_id": "risc0-zkgas-m2-v1",
+  "originating_experiment_model": "M2",
+  "proposal": {
+    "provenance": {
+      "source_revision": "4f8300497aba75605b9b8568b1955faa1f7f04bc",
+      "image_id": "0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10",
+      "elf_sha256": "d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35",
+      "risc0_version": "3.0.5",
+      "execution_po2": 20
+    },
+    "raw_input_rows_sha256": "be824f1262862525aaa961e568feb1e7b911031256b7ddf1d3f7ef6b5236e18c",
+    "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767",
+    "coefficients": {
+      "decimal": {
+        "intercept": "511.8367085993759",
+        "total_zkgas": "0.000003714503729246405",
+        "block_count": "2.2737130481392764"
+      },
+      "scaled": {
+        "scale": 1000000000000,
+        "intercept": 511836708599376,
+        "total_zkgas": 3714504,
+        "block_count": 2273713048139
+      }
+    },
+    "domains": [
+      {
+        "network": "taiko_hoodi",
+        "block_count": { "minimum": 155, "maximum": 192 },
+        "total_zkgas": { "minimum": 369558586, "maximum": 459162040 }
+      },
+      {
+        "network": "taiko_mainnet",
+        "block_count": { "minimum": 184, "maximum": 192 },
+        "total_zkgas": { "minimum": 216314230, "maximum": 310638954 }
+      }
+    ],
+    "cohorts": {
+      "hoodi": {
+        "fit_count": 80,
+        "calibration_count": 40,
+        "continuous": {
+          "underquote_count": 17,
+          "mape_percent": "0.094557",
+          "max_absolute_error_percent": "0.279512",
+          "max_underquote_percent": "0.279512",
+          "over_ten_percent_count": 0
+        },
+        "scaled_integer": {
+          "underquote_count": 12,
+          "mape_percent": "0.093492",
+          "max_absolute_error_percent": "0.264550",
+          "max_underquote_percent": "0.264550",
+          "over_ten_percent_count": 0
+        }
+      },
+      "mainnet": {
+        "evaluation_count": 20,
+        "influenced_model_selection": true,
+        "untouched_holdout": false,
+        "continuous": {
+          "underquote_count": 19,
+          "mape_percent": "5.87",
+          "max_underquote_percent": "5.75",
+          "overquote_over_ten_percent_count": 1,
+          "max_overquote_percent": "21.94"
+        },
+        "scaled_integer": {
+          "underquote_count": 19,
+          "mape_percent": "5.8422",
+          "max_underquote_percent": "5.7234",
+          "overquote_over_ten_percent_count": 1,
+          "max_overquote_percent": "21.9679"
+        }
+      }
+    }
+  },
+  "aggregation": {
+    "per_child_mcycles": 180,
+    "provenance": {
+      "image_id": null,
+      "elf_sha256": "fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924",
+      "execution_po2": 20
+    },
+    "measurements": [],
+    "calibrated_counts": []
+  }
+}

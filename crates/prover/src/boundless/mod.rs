@@ -1,6 +1,8 @@
 #![allow(missing_docs)]
 
 pub mod aggregation;
+#[allow(dead_code)] // Task 1 establishes the private estimator API consumed by subsequent tasks.
+mod estimation;
 
 pub use crate::boundless_config::{
     BOUNDLESS_TX_SEND_TIMEOUT_MS, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,

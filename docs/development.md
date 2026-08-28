@@ -287,33 +287,43 @@ If a guest ELF changes and the target environment relies on onchain verifier tru
 register the new digests explicitly:
 
 ```bash
-cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
-cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
+# Registration defaults to the chain spec's SHASTA verifier entry, which is wrong on every network
+# that has activated Unzen. Derive the UNZEN verifiers and pass them explicitly. `jq -er` exits
+# non-zero when a network has no UNZEN verifier entry, so that case fails here instead of silently
+# registering against the wrong contract.
+NETWORK=taiko_hoodi        # or taiko_mainnet
+PROFILE=hoodi-shasta       # or mainnet-shasta
+SPEC=config/chain_spec_list_default.json
+
+RISC0_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.RISC0' "$SPEC")
+SP1_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.SP1' "$SPEC")
+echo "RISC0=$RISC0_VERIFIER SP1=$SP1_VERIFIER"   # both must be 0x... before continuing
+
+# Dry run. Previews exactly what the apply below sends.
+cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER"
+
+# Apply.
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER" \
+  --apply
 ```
 
-> **Warning — hoodi profiles resolve the Shasta verifier.** `xtask` reads
-> `/verifier_address_forks/SHASTA/<proof_type>` from the chain spec. In
-> `config/chain_spec_list_default.json`, `taiko_hoodi` carries different SP1 and RISC0 verifier
-> addresses under `SHASTA` and `UNZEN`, so `--profile hoodi-shasta` registers against the Shasta
-> verifiers on a network that has run Unzen since 2026-06-18.
->
-> Checking the resolved address is not itself a remedy: `resolve_profile` falls back to
-> `load_shasta_verifiers_from_chain_spec` unless both verifiers are passed explicitly. To register
-> against the Unzen contracts, read the `UNZEN` addresses for `taiko_hoodi` out of the chain spec
-> and override:
->
-> ```bash
-> PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all \
->   --risc0-verifier <UNZEN RISC0 address> \
->   --sp1-verifier <UNZEN SP1 address> \
->   --apply
-> ```
->
-> `taiko_mainnet` entries are currently identical under both forks, so mainnet is unaffected today —
-> but the `SHASTA` path is hardcoded for every profile, so re-check that before any `--apply` on
-> mainnet.
+> **Why the overrides are mandatory.** `resolve_profile` obtains both defaults from
+> `load_shasta_verifiers_from_chain_spec`, reading `/verifier_address_forks/SHASTA/<proof_type>`,
+> and `--risc0-verifier` / `--sp1-verifier` are the only things that override it
+> (`xtask/src/register_image.rs:335-347`). Running any `hoodi-shasta` or `mainnet-shasta` command
+> without them registers the guest digests against the Shasta verifier contracts. On `taiko_hoodi`
+> those are different addresses from the live Unzen ones, so the registration silently lands on the
+> obsolete contracts while the active verifiers stay unchanged. `taiko_mainnet` currently carries
+> identical addresses under both forks, so it is unaffected today, but that is incidental — the
+> `SHASTA` path is hardcoded for every profile. Fixing that hardcode is a code change tracked
+> separately.
+
 
 This `register-image` flow only covers zk guest digests (`risc0` image IDs and `sp1` verifier
 digests). SGX registration is separate: read `mr_enclave` from the baked

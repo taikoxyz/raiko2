@@ -31,11 +31,12 @@ This directory contains the contributor- and operator-facing documentation for `
 - Read [gaiko2-remote-prover-integration.md](gaiko2-remote-prover-integration.md) when updating
   `gaiko2` to match the canonical remote prover protocol and conformance harness.
 
-## Historical Notes
+## Design and Review Notes
 
-The files under [`plans/`](plans) and [`issues/`](issues) are historical design, implementation,
-and review notes. They are useful background, but they are not the current source of truth for
-using or operating the project.
+The files under [`plans/`](plans) and [`issues/`](issues) are design, implementation, and review
+notes. Not all of them are historical — `plans/README.md` tracks plans in `Draft for discussion`,
+`Accepted`, and `In progress` states alongside `Superseded` and `Archived` ones. None of them are
+normative for current behavior.
 
 Each plan records a decision as of its own date. Its fork names, file paths, and command names are
 not maintained against current behavior, so read them as point-in-time records rather than as

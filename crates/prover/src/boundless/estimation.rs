@@ -107,6 +107,9 @@ pub(crate) fn estimate_proposal(
         let Ok(difficulty) = u128::try_from(witness.block.header.difficulty) else {
             return Ok(Err(EstimateUnavailable::Numeric));
         };
+        if difficulty == 0 {
+            return Ok(Err(EstimateUnavailable::ZeroZkGas));
+        }
         total_zkgas = match total_zkgas.checked_add(difficulty) {
             Some(total_zkgas) => total_zkgas,
             None => return Ok(Err(EstimateUnavailable::Numeric)),
@@ -710,6 +713,11 @@ mod tests {
     };
 
     fn proposal_input(network: &str, block_count: usize, total_zkgas: u64) -> GuestInput {
+        let block_count_u64 = u64::try_from(block_count).expect("test block count");
+        assert!(block_count_u64 > 0, "proposal fixture needs witnesses");
+        let zkgas_per_block = total_zkgas / block_count_u64;
+        let remainder = total_zkgas % block_count_u64;
+        assert!(zkgas_per_block > 0, "proposal fixture needs non-zero zkGas");
         let mut chain_spec = ChainSpec {
             name: network.to_string(),
             ..Default::default()
@@ -718,7 +726,7 @@ mod tests {
             .hard_forks
             .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Block(0));
 
-        let mut input = GuestInput {
+        GuestInput {
             witnesses: (0..block_count)
                 .map(|index| {
                     let mut witness = StatelessInput {
@@ -728,15 +736,17 @@ mod tests {
                     witness.block.header.number = u64::try_from(index).expect("test block number");
                     witness.block.header.timestamp =
                         u64::try_from(index).expect("test block timestamp");
+                    witness.block.header.difficulty = U256::from(
+                        zkgas_per_block
+                            + u64::from(
+                                u64::try_from(index).expect("test witness index") < remainder,
+                            ),
+                    );
                     witness
                 })
                 .collect(),
             ..Default::default()
-        };
-        if let Some(first) = input.witnesses.first_mut() {
-            first.block.header.difficulty = U256::from(total_zkgas);
         }
-        input
     }
 
     fn proposal_result(
@@ -1199,14 +1209,25 @@ mod tests {
 
     #[test]
     fn proposal_zero_zkgas_is_unavailable() {
-        let input = proposal_input("taiko_hoodi", 155, 0);
+        let mut input = proposal_input("taiko_hoodi", 155, 369_558_586);
+        for witness in &mut input.witnesses {
+            witness.block.header.difficulty = U256::ZERO;
+        }
+
+        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::ZeroZkGas));
+    }
+
+    #[test]
+    fn proposal_mixed_zero_zkgas_is_unavailable() {
+        let mut input = proposal_input("taiko_hoodi", 155, 400_000_000);
+        input.witnesses[0].block.header.difficulty = U256::ZERO;
 
         assert_eq!(proposal_result(&input), Err(EstimateUnavailable::ZeroZkGas));
     }
 
     #[test]
     fn proposal_zkgas_checked_add_overflow_is_unavailable() {
-        let mut input = proposal_input("taiko_hoodi", 155, 0);
+        let mut input = proposal_input("taiko_hoodi", 155, 369_558_586);
         input.witnesses[0].block.header.difficulty = U256::from(u128::MAX);
         input.witnesses[1].block.header.difficulty = U256::from(1_u64);
 

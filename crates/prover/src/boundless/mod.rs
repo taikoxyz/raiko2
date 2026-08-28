@@ -5703,7 +5703,10 @@ mod tests {
         storage::{HttpDownloader, StandardUploader, StorageUploaderType},
     };
     use httpmock::{Method::GET, Method::POST, MockServer};
-    use raiko2_primitives::{Proof, ProofType, RaikoError};
+    use raiko2_primitives::{
+        ChainSpec, Proof, ProofType, RaikoError, StatelessInput,
+        chain_spec::{ForkCondition, ForkId, TaikoFork},
+    };
     use raiko2_primitives_shasta::{GuestInput, ShastaRisc0AggregationGuestInput};
     use raiko2_remote_poller::{
         RemotePollError, RemoteStatus, RemoteStatusReason, RemoteSubmission, RemoteSubmissionId,
@@ -8103,6 +8106,53 @@ mod tests {
 
         assert!(error.to_string().contains("without witnesses"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn quote_context_mixed_zero_proposal_falls_back_to_one_local_execution() {
+        let mut chain_spec = ChainSpec {
+            name: "taiko_hoodi".to_string(),
+            ..Default::default()
+        };
+        chain_spec
+            .hard_forks
+            .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Block(0));
+        let mut input = GuestInput {
+            witnesses: (0_u64..155)
+                .map(|number| {
+                    let mut witness = StatelessInput {
+                        chain_spec: chain_spec.clone(),
+                        ..Default::default()
+                    };
+                    witness.block.header.number = number;
+                    witness.block.header.timestamp = number;
+                    witness.block.header.difficulty = U256::from(2_580_645_u64);
+                    witness
+                })
+                .collect(),
+            ..Default::default()
+        };
+        input.witnesses[0].block.header.difficulty = U256::ZERO;
+        let encoded = bincode::serialize(&input).expect("encode proposal fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = Arc::clone(&calls);
+
+        let context = prepare_quote_context(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            &BoundlessStageInput::Proposal(Box::new(input)),
+            &encoded,
+            20,
+            move || execution_result(&execution_calls, 1_000, B256::repeat_byte(0x56).to_vec()),
+        )
+        .await
+        .expect("zero zkGas falls back to local execution");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(context.quoted_mcycles_count, 1_000);
+        assert_eq!(context.evaluated_mcycles_count, Some(1_000));
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
+        assert_eq!(context.model_id, None);
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ pub(crate) use v3::{AggregateProofRequest, BatchShastaRequest};
 pub(super) use v3::{BatchProofType, PublicProverArgs, ShastaProposal};
 
 use raiko2_primitives::{Proof, ShastaCheckpoint};
+use raiko2_prover::BoundlessQuoteStrategy;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
 use serde::Serialize;
 use serde_json::Value;
@@ -161,6 +162,10 @@ pub(crate) struct TaskRuntime {
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
     /// Exact escalated max price bid, in wei, as a decimal string (precise where the floored

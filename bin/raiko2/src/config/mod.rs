@@ -595,6 +595,14 @@ backend = "memory"
         let path = workspace_config("docker/config.compose.toml");
         let config = Config::from_file(&path).expect("parse docker config");
         config.validate().expect("validate docker config");
+        assert_eq!(
+            config.prover.risc0.boundless.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
+        assert_eq!(
+            config.prover.risc0.boundless.aggregation_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
     }
 
     #[test]

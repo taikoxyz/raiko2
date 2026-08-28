@@ -1750,6 +1750,11 @@ struct Submission {
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
     // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
     attempt: u64,
+    // Quote telemetry belongs to the exact persisted submission attempt. A restart may load a
+    // different quote config or embedded model, but resumed polling must keep publishing the
+    // provenance that created this request. Fresh submissions leave this unset and use the quote
+    // prepared by the current invocation.
+    resume_quote_provenance: Option<QuoteProvenance>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1800,6 +1805,33 @@ struct QuoteContext {
     journal: Vec<u8>,
     expected_input_hash: B256,
     isolated_builder: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuoteProvenance {
+    quoted_mcycles_count: u32,
+    evaluated_mcycles_count: Option<u32>,
+    strategy: Option<BoundlessQuoteStrategy>,
+    model_id: Option<String>,
+}
+
+fn quote_context_for_resume(prepared: &QuoteContext, submission: &Submission) -> QuoteContext {
+    let Some(provenance) = submission.resume_quote_provenance.as_ref() else {
+        // Task 9 owns the policy for legacy checkpoints that predate quote provenance. Retain the
+        // existing behavior for them until that migration policy is implemented.
+        return prepared.clone();
+    };
+    QuoteContext {
+        quoted_mcycles_count: provenance.quoted_mcycles_count,
+        evaluated_mcycles_count: provenance.evaluated_mcycles_count,
+        strategy: provenance.strategy.clone(),
+        model_id: provenance.model_id.clone(),
+        // The journal and its expected hash are deterministic functions of the current typed input,
+        // not market telemetry, and remain the fulfillment-validation source of truth.
+        journal: prepared.journal.clone(),
+        expected_input_hash: prepared.expected_input_hash,
+        isolated_builder: prepared.isolated_builder,
+    }
 }
 
 enum BoundlessStageInput {
@@ -2322,6 +2354,15 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
                 "Invalid stored Boundless submission: max_price_wei must be non-zero".to_string(),
             ));
         }
+        let resume_quote_provenance =
+            value
+                .quoted_mcycles_count
+                .map(|quoted_mcycles_count| QuoteProvenance {
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count: value.evaluated_mcycles_count,
+                    strategy: value.quote_strategy.clone(),
+                    model_id: value.quote_model_id.clone(),
+                });
         Ok(Self {
             market_request_id,
             provider_request_id: value.provider_request_id,
@@ -2335,6 +2376,7 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             max_price_multiplier: value.max_price_multiplier,
             max_price_wei,
             attempt: u64::from(value.rebid_attempt),
+            resume_quote_provenance,
         })
     }
 }
@@ -3428,6 +3470,7 @@ impl BoundlessProver {
             ),
             max_price_wei: U256::from(request.offer.maxPrice),
             attempt,
+            resume_quote_provenance: None,
         })
     }
 
@@ -4721,13 +4764,6 @@ impl BoundlessProver {
             BoundlessStageInput::Proposal(input) => Some(&input.proof_carry_data),
             BoundlessStageInput::Aggregation(_) => None,
         };
-        let fulfillment_context = FulfillmentContext {
-            proof_type: elf_type.proof_type_str(),
-            image_id,
-            block_image_id,
-            quote: &quote,
-            proposal_carry_data,
-        };
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
             observer
@@ -4766,12 +4802,14 @@ impl BoundlessProver {
         let mut input_cache: Option<UploadedInput> = None;
 
         loop {
+            let mut resume_quote = None;
             // Refresh the program URL per attempt (cheap cache hit unless a refresh is due) so late
             // rebids never carry an expired presigned program URL. The image id is unchanged.
             let program = self
                 .ensure_uploaded(client, elf_type, elf, image_id)
                 .await?;
             let submission = if let Some(mut submission) = resume_submission.take() {
+                let persisted_quote = quote_context_for_resume(&quote, &submission);
                 attempt = attempt.max(submission.attempt);
                 submission.attempt = attempt;
                 let resumed_without_transaction_hash = submission.remote_tx_hash.is_none();
@@ -4839,7 +4877,7 @@ impl BoundlessProver {
                     &image_ref,
                     &deployment,
                     self.config.offchain,
-                    &quote,
+                    &persisted_quote,
                 )
                 .await?;
                 if resumed_without_transaction_hash
@@ -4850,6 +4888,7 @@ impl BoundlessProver {
                         .clear_durable_blocker(request_digest)
                         .await;
                 }
+                resume_quote = Some(persisted_quote);
                 submission
             } else {
                 if exceeds_submission_budget(attempt, self.config.rebid_max_attempts) {
@@ -4882,6 +4921,14 @@ impl BoundlessProver {
                     request_reuse,
                 }))
                 .await?
+            };
+            let active_quote = resume_quote.as_ref().unwrap_or(&quote);
+            let fulfillment_context = FulfillmentContext {
+                proof_type: elf_type.proof_type_str(),
+                image_id,
+                block_image_id,
+                quote: active_quote,
+                proposal_carry_data,
             };
 
             tracing::info!(
@@ -5550,6 +5597,7 @@ mod tests {
             max_price_multiplier: 1,
             max_price_wei: U256::from(1),
             attempt: 1,
+            resume_quote_provenance: None,
         }
     }
 
@@ -6626,6 +6674,7 @@ mod tests {
             max_price_multiplier: 1,
             max_price_wei: U256::from(1),
             attempt: 1,
+            resume_quote_provenance: None,
         };
 
         publish_boundless_progress(
@@ -6697,6 +6746,7 @@ mod tests {
             max_price_multiplier: 1,
             max_price_wei: U256::from(1),
             attempt: 1,
+            resume_quote_provenance: None,
         };
 
         let error = publish_boundless_progress(
@@ -7065,6 +7115,78 @@ mod tests {
         assert_eq!(context.evaluated_mcycles_count, Some(1_311));
         assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Fixed));
         assert!(!context.isolated_builder);
+    }
+
+    #[test]
+    fn quote_context_resume_preserves_persisted_provenance_across_config_drift() {
+        let prepared = QuoteContext {
+            quoted_mcycles_count: 2_000,
+            evaluated_mcycles_count: Some(1_411),
+            strategy: Some(BoundlessQuoteStrategy::Fixed),
+            model_id: None,
+            journal: B256::repeat_byte(0x45).to_vec(),
+            expected_input_hash: B256::repeat_byte(0x45),
+            isolated_builder: false,
+        };
+        let resume = crate::BoundlessSubmissionResume {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: Some("0xtx".to_string()),
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(100),
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            expires_at: 2_000,
+            lock_expires_at: 1_500,
+            submitted_at: 1_000,
+            quoted_mcycles_count: Some(1_500),
+            evaluated_mcycles_count: Some(1_311),
+            quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+            quote_model_id: None,
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+        let submission = Submission::try_from(resume.clone()).expect("valid resume record");
+
+        let resumed = super::quote_context_for_resume(&prepared, &submission);
+
+        assert_eq!(resumed.quoted_mcycles_count, 1_500);
+        assert_eq!(resumed.evaluated_mcycles_count, Some(1_311));
+        assert_eq!(resumed.strategy, Some(BoundlessQuoteStrategy::Fixed));
+        assert_eq!(resumed.model_id, None);
+        assert_eq!(resumed.journal, prepared.journal);
+        assert_eq!(resumed.expected_input_hash, prepared.expected_input_hash);
+
+        let current_model_quote = QuoteContext {
+            quoted_mcycles_count: 2_222,
+            evaluated_mcycles_count: None,
+            strategy: Some(BoundlessQuoteStrategy::Estimated),
+            model_id: Some("current-model".to_string()),
+            journal: B256::repeat_byte(0x46).to_vec(),
+            expected_input_hash: B256::repeat_byte(0x46),
+            isolated_builder: true,
+        };
+        let mut estimated_resume = resume;
+        estimated_resume.quoted_mcycles_count = Some(1_234);
+        estimated_resume.evaluated_mcycles_count = None;
+        estimated_resume.quote_strategy = Some(BoundlessQuoteStrategy::Estimated);
+        estimated_resume.quote_model_id = Some("persisted-model".to_string());
+        let estimated_submission =
+            Submission::try_from(estimated_resume).expect("valid estimated resume record");
+
+        let resumed = super::quote_context_for_resume(&current_model_quote, &estimated_submission);
+
+        assert_eq!(resumed.quoted_mcycles_count, 1_234);
+        assert_eq!(resumed.evaluated_mcycles_count, None);
+        assert_eq!(resumed.strategy, Some(BoundlessQuoteStrategy::Estimated));
+        assert_eq!(resumed.model_id.as_deref(), Some("persisted-model"));
+        assert_eq!(resumed.journal, current_model_quote.journal);
+        assert_eq!(
+            resumed.expected_input_hash,
+            current_model_quote.expected_input_hash
+        );
     }
 
     #[tokio::test]

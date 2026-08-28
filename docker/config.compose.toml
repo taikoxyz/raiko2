@@ -63,6 +63,12 @@ signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 
+[prover.risc0.boundless.batch_quote]
+strategy = "evaluated"
+
+[prover.risc0.boundless.aggregation_quote]
+strategy = "evaluated"
+
 [prover.risc0.boundless.transaction]
 max_fee_per_gas_wei = "1000000000"
 

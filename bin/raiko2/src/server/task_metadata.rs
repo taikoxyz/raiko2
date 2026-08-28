@@ -722,10 +722,7 @@ impl TaskRuntimeMetadata {
             && self.submitted_at.is_some()
             && self.quoted_mcycles_count.is_some()
             && (self.evaluated_mcycles_count.is_some()
-                || matches!(
-                    self.quote_strategy,
-                    Some(BoundlessQuoteStrategy::Estimated)
-                ))
+                || matches!(self.quote_strategy, Some(BoundlessQuoteStrategy::Estimated)))
             && self.max_price_multiplier.is_some()
             && self.max_price_wei.is_some()
             && matches!(self.rebid_attempt, Some(attempt) if attempt > 0)

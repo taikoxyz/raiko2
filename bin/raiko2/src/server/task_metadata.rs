@@ -1639,12 +1639,13 @@ mod tests {
     #[test]
     fn boundless_progress_merge_allows_new_rung_with_identical_quote_provenance() {
         let mut runtime = complete_boundless_runtime();
+        runtime.remote_tx_hash = Some(format!("{:#x}", B256::repeat_byte(0x33)));
         let progress = BoundlessSubmissionProgress {
             provider_request_id: "0x1".to_string(),
-            remote_tx_hash: Some(format!("{:#x}", B256::repeat_byte(0x33))),
+            remote_tx_hash: None,
             request_id_has_confirmed_submission: true,
             request_digest: Some(format!("{}", B256::repeat_byte(0x22))),
-            broadcast_from_block: Some(9),
+            broadcast_from_block: Some(1),
             expires_at: 30,
             lock_expires_at: 20,
             submitted_at: 10,
@@ -1667,10 +1668,10 @@ mod tests {
         );
         assert_eq!(runtime.updated_at, 300);
         assert_eq!(runtime.provider_request_id.as_deref(), Some("0x1"));
-        assert_eq!(runtime.remote_tx_hash, progress.remote_tx_hash);
+        assert_eq!(runtime.remote_tx_hash, None);
         assert!(runtime.request_id_has_confirmed_submission);
         assert_eq!(runtime.request_digest, progress.request_digest);
-        assert_eq!(runtime.broadcast_from_block, Some(9));
+        assert_eq!(runtime.broadcast_from_block, Some(1));
         assert_eq!(runtime.submitted_at, Some(10));
         assert_eq!(runtime.lock_expires_at, Some(20));
         assert_eq!(runtime.expires_at, Some(30));

@@ -191,12 +191,10 @@ product of both networks' extrema. The artifact therefore records separate, conj
 
 ```text
 taiko_hoodi:
-  max_supported_fork: UNZEN
   block_count: 155..=192
   total_zkgas: 369_558_586..=459_162_040
 
 taiko_mainnet:
-  max_supported_fork: UNZEN
   block_count: 184..=192
   total_zkgas: 216_314_230..=310_638_954
 
@@ -209,15 +207,19 @@ M2 estimate exceeds the accepted error budget. Mainnet inputs above `310_638_954
 local execution until additional measurements justify a contiguous domain update. Bounds from one
 chain never admit a feature combination from the other chain.
 
-Before estimating, the request path requires Unzen to be active for every input block, reads the
-chain domain's `max_supported_fork` from the artifact, rejects an input whose effective Taiko fork
-is later, and checks the execution configuration and operating envelope. Deserialize the field
-through the repository's existing `ForkId` encoding and require its Taiko variant; the
-supported-fork ceiling is not duplicated as a Rust model constant. An execution-configuration, fork,
-zkGas-schedule, or feature-envelope mismatch emits a warning containing the model ID and falls back
-to local execution. It deliberately does not compare the running proposal image ID, ELF hash,
-source revision, or RISC0 SDK version with the artifact. Compatibility of those release identities
-is reviewed when the deployment selects `estimated`.
+Before estimating, a private `proposal_estimation_available(&GuestInput)` helper in
+`boundless/estimation.rs` inspects every witness's `chain_spec.hard_forks` at that witness block's
+number and timestamp. Estimation is available only when the highest active Taiko fork for every
+block is exactly `TaikoFork::Unzen`; a pre-Unzen input or a future later Taiko fork therefore returns
+unavailable. This is a Boundless-estimator implementation check, not a public validation API or a
+model-domain field.
+
+The request path also checks the artifact's execution configuration and chain-conditioned feature
+envelope. An unavailable fork, execution-configuration mismatch, zkGas-schedule mismatch, or
+feature-envelope mismatch emits a warning containing the model ID and falls back to local
+execution. It deliberately does not compare the running proposal image ID, ELF hash, source
+revision, or RISC0 SDK version with the artifact. Compatibility of those release identities is
+reviewed when the deployment selects `estimated`.
 
 ### Validation Fixture
 
@@ -302,8 +304,9 @@ path:
 
 - a proposal zkGas value is zero or cannot be represented by the estimator;
 - total zkGas, a scaled model term, or the final proposal estimate overflows;
-- proposal execution configuration, chain/fork, or observed feature envelope does not match the
-  model artifact;
+- the private proposal availability check rejects the active Taiko fork;
+- proposal execution configuration, chain, or observed feature envelope does not match the model
+  artifact;
 - aggregation child count is outside the calibrated set;
 - aggregation child-count multiplication or final conversion overflows.
 
@@ -329,9 +332,10 @@ Focused regression coverage must establish:
   underquote, and the single 21.94-percent overquote;
 - production-integer regression tests assert 19 Mainnet underquotes, 5.8422-percent MAPE, a maximum
   5.7234-percent underquote, and the single 21.9679-percent overquote;
-- model artifact schema, Unzen activation, supported chain, artifact-defined maximum Taiko fork,
-  execution configuration, and observed feature-envelope guards select either estimate or local
-  fallback correctly;
+- model artifact schema, supported chain, execution configuration, and observed feature-envelope
+  guards select either estimate or local fallback correctly;
+- the private Boundless proposal availability check accepts inputs whose highest active Taiko fork
+  is Unzen and selects local fallback for pre-Unzen or later-fork inputs;
 - the committed validation fixture has its recorded hash and exact 40-row Hoodi calibration and
   20-row Mainnet evaluation splits, and both sets' documented diagnostics are reproducible from it;
 - proposal and aggregation estimation do not compare the running ELF hash, image ID, source

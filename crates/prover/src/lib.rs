@@ -86,6 +86,14 @@ pub trait GuestInputCodec<I>: Send + Sync {
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundlessQuoteStrategy {
+    Estimated,
+    Evaluated,
+    Fixed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoundlessSubmissionProgress {
     pub provider_request_id: String,
@@ -111,6 +119,10 @@ pub struct BoundlessSubmissionProgress {
     pub offchain: bool,
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_model_id: Option<String>,
     pub max_price_multiplier: u32,
     /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
     /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
@@ -147,6 +159,14 @@ pub struct BoundlessSubmissionResume {
     /// Offer lock deadline in seconds since the UNIX epoch.
     pub lock_expires_at: u64,
     pub submitted_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_model_id: Option<String>,
     pub max_price_multiplier: u32,
     /// Exact escalated max price this submission bid, in wei, as a decimal string.
     pub max_price_wei: Option<String>,

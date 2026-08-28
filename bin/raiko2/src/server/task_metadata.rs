@@ -6,9 +6,9 @@ use raiko2_engine::{
 use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, ProofType, ShastaCheckpoint, proof_type::lowercase};
 use raiko2_prover::{
-    BoundlessSubmissionProgress, NetworkProverBackend, PendingProofCheckpointIdentity,
-    Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
-    boundless::BoundlessAccountBlocker, sp1_config::ExecutionMode,
+    BoundlessQuoteStrategy, BoundlessSubmissionProgress, NetworkProverBackend,
+    PendingProofCheckpointIdentity, Sp1FulfillmentStrategy, Sp1NetworkMode,
+    Sp1NetworkSubmissionProgress, boundless::BoundlessAccountBlocker, sp1_config::ExecutionMode,
 };
 use raiko2_runtime::{ProofArtifactDescriptor, RunnerStatus, RuntimeTaskRecord};
 use serde::{Deserialize, Serialize};
@@ -189,6 +189,10 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
     /// Exact escalated max price bid, in wei, as a decimal string. The floored
@@ -694,6 +698,8 @@ impl TaskRuntimeMetadata {
             || self.submitted_at.is_some()
             || self.quoted_mcycles_count.is_some()
             || self.evaluated_mcycles_count.is_some()
+            || self.quote_strategy.is_some()
+            || self.quote_model_id.is_some()
             || self.max_price_multiplier.is_some()
             || self.max_price_wei.is_some()
             || self.rebid_attempt.is_some()
@@ -715,7 +721,11 @@ impl TaskRuntimeMetadata {
             && self.lock_expires_at.is_some()
             && self.submitted_at.is_some()
             && self.quoted_mcycles_count.is_some()
-            && self.evaluated_mcycles_count.is_some()
+            && (self.evaluated_mcycles_count.is_some()
+                || matches!(
+                    self.quote_strategy,
+                    Some(BoundlessQuoteStrategy::Estimated)
+                ))
             && self.max_price_multiplier.is_some()
             && self.max_price_wei.is_some()
             && matches!(self.rebid_attempt, Some(attempt) if attempt > 0)
@@ -813,6 +823,8 @@ impl TaskRuntimeMetadata {
             || self.lock_expires_at.is_some()
             || self.quoted_mcycles_count.is_some()
             || self.evaluated_mcycles_count.is_some()
+            || self.quote_strategy.is_some()
+            || self.quote_model_id.is_some()
             || self.max_price_multiplier.is_some()
             || self.max_price_wei.is_some();
         let has_sp1_fields = self.sp1_network_mode.is_some()
@@ -968,6 +980,8 @@ impl TaskRuntimeMetadata {
             submitted_at: Some(progress.submitted_at),
             quoted_mcycles_count: progress.quoted_mcycles_count,
             evaluated_mcycles_count: progress.evaluated_mcycles_count,
+            quote_strategy: progress.quote_strategy.clone(),
+            quote_model_id: progress.quote_model_id.clone(),
             max_price_multiplier: Some(progress.max_price_multiplier),
             max_price_wei: progress.max_price_wei.clone(),
             rebid_attempt: Some(progress.rebid_attempt),
@@ -1210,6 +1224,8 @@ mod tests {
             submitted_at: Some(1),
             quoted_mcycles_count: Some(1),
             evaluated_mcycles_count: Some(1),
+            quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            quote_model_id: None,
             max_price_multiplier: Some(1),
             max_price_wei: Some("1".to_string()),
             rebid_attempt: Some(1),
@@ -1453,6 +1469,8 @@ mod tests {
             offchain: false,
             quoted_mcycles_count: Some(1),
             evaluated_mcycles_count: Some(1),
+            quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            quote_model_id: None,
             max_price_multiplier: 1,
             max_price_wei: Some("1".to_string()),
             rebid_attempt: 1,
@@ -1463,6 +1481,11 @@ mod tests {
                 .expect("initial checkpoint")
         );
         assert!(runtime.request_id_has_confirmed_submission);
+        assert_eq!(
+            runtime.quote_strategy,
+            Some(BoundlessQuoteStrategy::Evaluated)
+        );
+        assert_eq!(runtime.quote_model_id, None);
         progress.remote_tx_hash = Some("0xtx".to_string());
         assert!(
             !runtime
@@ -1510,6 +1533,40 @@ mod tests {
                 .downcast_ref::<RemoteSubmissionConflict>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn estimated_boundless_progress_without_evaluation_remains_resumable() {
+        let mut runtime = TaskRuntimeMetadata::default();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
+            expires_at: 200,
+            lock_expires_at: 180,
+            submitted_at: 100,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1_234),
+            evaluated_mcycles_count: None,
+            quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+            quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+
+        runtime
+            .merge_boundless_submission(&progress, 100)
+            .expect("estimated progress persists");
+
+        assert!(runtime.has_boundless_submission_resume());
+        assert_eq!(runtime.evaluated_mcycles_count, None);
+        assert_eq!(runtime.quote_strategy, progress.quote_strategy);
+        assert_eq!(runtime.quote_model_id, progress.quote_model_id);
     }
 
     #[test]

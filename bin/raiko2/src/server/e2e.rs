@@ -18,8 +18,8 @@ use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{
-    BoundlessSubmissionProgress, boundless_config::BoundlessTransactionConfig,
-    sp1::ProverMode as Sp1ProverMode,
+    BoundlessQuoteStrategy, BoundlessSubmissionProgress,
+    boundless_config::BoundlessTransactionConfig, sp1::ProverMode as Sp1ProverMode,
 };
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
@@ -3878,6 +3878,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
                 offchain: false,
                 quoted_mcycles_count: Some(6_000),
                 evaluated_mcycles_count: Some(12_345),
+                quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+                quote_model_id: None,
                 max_price_multiplier: 4,
                 max_price_wei: Some("9000000000000".to_string()),
                 rebid_attempt: 2,

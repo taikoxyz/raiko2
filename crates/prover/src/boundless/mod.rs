@@ -60,10 +60,11 @@ use url::Url;
 
 use crate::redact::redact_urls;
 use crate::{
-    BoundlessSubmissionProgress, BoundlessSubmissionResume, PendingProofCheckpointIdentity,
-    ProverProgress, ProverProgressObserver, encode_risc0_aggregation_seal_payload,
-    encode_risc0_proposal_seal_payload, ensure_shasta_proposal_input_matches_carry,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    BoundlessQuoteStrategy, BoundlessSubmissionProgress, BoundlessSubmissionResume,
+    PendingProofCheckpointIdentity, ProverProgress, ProverProgressObserver,
+    encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
+    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -1776,12 +1777,10 @@ struct FreshSubmissionContext<'a> {
     elf: &'a [u8],
     program: &'a UploadedProgram,
     offer_spec: &'a BoundlessOfferParams,
-    journal: &'a [u8],
+    quote: &'a QuoteContext,
     image_ref: &'a str,
     deployment: &'a str,
     observer: Option<&'a Arc<dyn ProverProgressObserver>>,
-    quoted_mcycles_count: u32,
-    evaluated_mcycles_count: u32,
     attempt: u64,
     // Per-proof input-upload cache. Uploaded once (first attempt) and reused across rebids; a fresh
     // presigned URL is minted only when the cached one nears expiry (see `ensure_input_uploaded`).
@@ -1792,6 +1791,145 @@ struct FreshSubmissionContext<'a> {
     request_reuse: RebidRequestReuse,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuoteContext {
+    quoted_mcycles_count: u32,
+    evaluated_mcycles_count: Option<u32>,
+    strategy: Option<BoundlessQuoteStrategy>,
+    model_id: Option<String>,
+    journal: Vec<u8>,
+    expected_input_hash: B256,
+    isolated_builder: bool,
+}
+
+enum BoundlessStageInput {
+    Proposal(Box<GuestInput>),
+    #[allow(dead_code)]
+    Aggregation(raiko2_primitives_shasta::ShastaRisc0AggregationGuestInput),
+}
+
+const ATTEMPTED_ESTIMATION_MODEL_ID: &str = "risc0-zkgas-m2-v1";
+
+async fn prepare_quote_context<F, Fut>(
+    elf_type: ElfType,
+    quote_sizing: &QuoteSizing,
+    stage_input: &BoundlessStageInput,
+    encoded_input: &[u8],
+    execution_po2: u32,
+    execute: F,
+) -> RaikoResult<QuoteContext>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = RaikoResult<(u32, Vec<u8>)>>,
+{
+    match (elf_type, stage_input) {
+        (ElfType::Batch, BoundlessStageInput::Proposal(_))
+        | (ElfType::Aggregation, BoundlessStageInput::Aggregation(_)) => {}
+        _ => {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "Boundless {} stage received the wrong typed guest input",
+                elf_type.stage_name()
+            )));
+        }
+    }
+    let estimate = if matches!(quote_sizing, QuoteSizing::Estimated) {
+        Some(match stage_input {
+            BoundlessStageInput::Proposal(input) => {
+                estimation::estimate_proposal(input, execution_po2)?
+            }
+            BoundlessStageInput::Aggregation(_) => estimation::estimate_aggregation(encoded_input)?,
+        })
+    } else {
+        None
+    };
+    prepare_quote_context_from_estimate(elf_type, quote_sizing, estimate, execute).await
+}
+
+async fn prepare_quote_context_from_estimate<F, Fut>(
+    elf_type: ElfType,
+    quote_sizing: &QuoteSizing,
+    estimate: Option<Result<estimation::EstimatedRequestMetadata, estimation::EstimateUnavailable>>,
+    execute: F,
+) -> RaikoResult<QuoteContext>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = RaikoResult<(u32, Vec<u8>)>>,
+{
+    let (
+        quoted_mcycles_count,
+        evaluated_mcycles_count,
+        strategy,
+        model_id,
+        journal,
+        isolated_builder,
+    ) = match quote_sizing {
+        QuoteSizing::Estimated => match estimate.ok_or_else(|| {
+            RaikoError::Guest("missing Boundless quote estimate result".to_string())
+        })? {
+            Ok(estimate) => (
+                estimate.mcycles,
+                None,
+                BoundlessQuoteStrategy::Estimated,
+                Some(estimate.model_id),
+                estimate.journal,
+                true,
+            ),
+            Err(reason) => {
+                tracing::warn!(
+                    model_id = ATTEMPTED_ESTIMATION_MODEL_ID,
+                    ?reason,
+                    "Boundless quote estimate unavailable; using one local evaluation"
+                );
+                let (evaluated_mcycles_count, journal) = execute().await?;
+                (
+                    evaluated_mcycles_count,
+                    Some(evaluated_mcycles_count),
+                    BoundlessQuoteStrategy::Estimated,
+                    None,
+                    journal,
+                    true,
+                )
+            }
+        },
+        QuoteSizing::Evaluated => {
+            let (evaluated_mcycles_count, journal) = execute().await?;
+            (
+                evaluated_mcycles_count,
+                Some(evaluated_mcycles_count),
+                BoundlessQuoteStrategy::Evaluated,
+                None,
+                journal,
+                false,
+            )
+        }
+        QuoteSizing::Fixed { mcycles } => {
+            let (evaluated_mcycles_count, journal) = execute().await?;
+            (
+                *mcycles,
+                Some(evaluated_mcycles_count),
+                BoundlessQuoteStrategy::Fixed,
+                None,
+                journal,
+                false,
+            )
+        }
+    };
+    let expected_input_hash = if elf_type.is_proposal() {
+        parse_shasta_proposal_input_hash(&journal)?
+    } else {
+        parse_shasta_aggregation_input_hash(&journal)?
+    };
+    Ok(QuoteContext {
+        quoted_mcycles_count,
+        evaluated_mcycles_count,
+        strategy: Some(strategy),
+        model_id,
+        journal,
+        expected_input_hash,
+        isolated_builder,
+    })
+}
+
 /// Verification and telemetry inputs that stay constant across one proof's whole fulfillment
 /// chain (status poll → fulfillment-read retry loop → fulfillment read). Built once per proof in
 /// `prove_boundless` and passed by reference, mirroring [`FreshSubmissionContext`] on the submit
@@ -1800,9 +1938,7 @@ struct FulfillmentContext<'a> {
     proof_type: &'static str,
     image_id: Digest,
     block_image_id: Option<Digest>,
-    expected_input_hash: B256,
-    quoted_mcycles_count: u32,
-    evaluated_mcycles_count: u32,
+    quote: &'a QuoteContext,
     proposal_carry_data: Option<&'a ProofCarryData>,
 }
 
@@ -1855,9 +1991,8 @@ async fn publish_boundless_progress(
     image_ref: &str,
     deployment: &str,
     offchain: bool,
-    mcycles_count: (u32, u32),
+    quote: &QuoteContext,
 ) -> RaikoResult<()> {
-    let (quoted_mcycles_count, evaluated_mcycles_count) = mcycles_count;
     let progress = ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
         provider_request_id: submission.provider_request_id.clone(),
         remote_tx_hash: submission.remote_tx_hash.clone(),
@@ -1869,8 +2004,10 @@ async fn publish_boundless_progress(
         image_ref: image_ref.to_string(),
         deployment: deployment.to_string(),
         offchain,
-        quoted_mcycles_count: Some(quoted_mcycles_count),
-        evaluated_mcycles_count: Some(evaluated_mcycles_count),
+        quoted_mcycles_count: Some(quote.quoted_mcycles_count),
+        evaluated_mcycles_count: quote.evaluated_mcycles_count,
+        quote_strategy: quote.strategy.clone(),
+        quote_model_id: quote.model_id.clone(),
         submitted_at: submission.submitted_at,
         max_price_multiplier: submission.max_price_multiplier,
         max_price_wei: Some(submission.max_price_wei.to_string()),
@@ -1886,19 +2023,13 @@ async fn publish_mandatory_boundless_progress(
     submission: &Submission,
     image_ref: &str,
     deployment: &str,
-    mcycles_count: (u32, u32),
+    quote: &QuoteContext,
     timeout: Duration,
 ) -> RaikoResult<()> {
     tokio::time::timeout(
         timeout,
         publish_boundless_progress(
-            observer,
-            permit,
-            submission,
-            image_ref,
-            deployment,
-            false,
-            mcycles_count,
+            observer, permit, submission, image_ref, deployment, false, quote,
         ),
     )
     .await
@@ -2013,7 +2144,7 @@ async fn checkpoint_boundless_tx_hash(
     submission: &Submission,
     image_ref: &str,
     deployment: &str,
-    mcycles_count: (u32, u32),
+    quote: &QuoteContext,
 ) {
     let checkpoint = async {
         let tx_hash_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
@@ -2024,7 +2155,7 @@ async fn checkpoint_boundless_tx_hash(
             image_ref,
             deployment,
             false,
-            mcycles_count,
+            quote,
         )
         .await
     };
@@ -2050,7 +2181,7 @@ async fn dispatch_offchain_after_checkpoint<F, Fut>(
     submission: Submission,
     image_ref: &str,
     deployment: &str,
-    mcycles_count: (u32, u32),
+    quote: &QuoteContext,
     dispatch: F,
 ) -> RaikoResult<Submission>
 where
@@ -2064,7 +2195,7 @@ where
         image_ref,
         deployment,
         true,
-        mcycles_count,
+        quote,
     )
     .await?;
     drop(permit);
@@ -3309,7 +3440,7 @@ impl BoundlessProver {
         permit: crate::SubmissionCheckpointPermit,
         image_ref: &str,
         deployment: &str,
-        mcycles_count: (u32, u32),
+        quote: &QuoteContext,
         attempt: u64,
     ) -> RaikoResult<Submission> {
         let submission = self.make_submission(request, attempt, false)?;
@@ -3319,7 +3450,7 @@ impl BoundlessProver {
             submission,
             image_ref,
             deployment,
-            mcycles_count,
+            quote,
             || async {
                 client
                     .submit_request_offchain(request)
@@ -4032,8 +4163,7 @@ impl BoundlessProver {
         observer: Option<&Arc<dyn ProverProgressObserver>>,
         image_ref: &str,
         deployment: &str,
-        quoted_mcycles_count: u32,
-        evaluated_mcycles_count: u32,
+        quote: &QuoteContext,
         attempt: u64,
         request_id_has_confirmed_submission: bool,
         reuse_search_from_block: Option<u64>,
@@ -4120,7 +4250,7 @@ impl BoundlessProver {
             &submission,
             image_ref,
             deployment,
-            (quoted_mcycles_count, evaluated_mcycles_count),
+            quote,
             BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT,
         )
         .await?;
@@ -4171,14 +4301,7 @@ impl BoundlessProver {
             }
         };
         run_after_submission_permit(submission_permit, || async {
-            checkpoint_boundless_tx_hash(
-                observer,
-                &submission,
-                image_ref,
-                deployment,
-                (quoted_mcycles_count, evaluated_mcycles_count),
-            )
-            .await;
+            checkpoint_boundless_tx_hash(observer, &submission, image_ref, deployment, quote).await;
         })
         .await;
 
@@ -4197,8 +4320,8 @@ impl BoundlessProver {
             context.elf,
             context.program,
             context.offer_spec,
-            context.quoted_mcycles_count,
-            context.journal.to_vec(),
+            context.quote.quoted_mcycles_count,
+            context.quote.journal.clone(),
             context.attempt,
             input_url,
             context.request_reuse.request_id,
@@ -4216,10 +4339,7 @@ impl BoundlessProver {
                     checkpoint_permit,
                     context.image_ref,
                     context.deployment,
-                    (
-                        context.quoted_mcycles_count,
-                        context.evaluated_mcycles_count,
-                    ),
+                    context.quote,
                     context.attempt,
                 )
                 .await;
@@ -4231,8 +4351,7 @@ impl BoundlessProver {
             context.observer,
             context.image_ref,
             context.deployment,
-            context.quoted_mcycles_count,
-            context.evaluated_mcycles_count,
+            context.quote,
             context.attempt,
             context.request_reuse.has_confirmed_submission,
             context.request_reuse.search_from_block,
@@ -4443,8 +4562,10 @@ impl BoundlessProver {
             "zkvm": "risc0",
             "runner": "network",
             "proof_type": context.proof_type,
-            "quoted_mcycles_count": context.quoted_mcycles_count,
-            "evaluated_mcycles_count": context.evaluated_mcycles_count,
+            "quoted_mcycles_count": context.quote.quoted_mcycles_count,
+            "evaluated_mcycles_count": context.quote.evaluated_mcycles_count,
+            "quote_strategy": context.quote.strategy,
+            "quote_model_id": context.quote.model_id,
             "boundless": {
                 "provider_request_id": submission.provider_request_id,
                 "remote_tx_hash": submission.remote_tx_hash,
@@ -4513,9 +4634,9 @@ impl BoundlessProver {
         if let ("proposal", Some(carry)) = (context.proof_type, context.proposal_carry_data) {
             ensure_shasta_proposal_input_matches_carry(input_hash, carry, "boundless")?;
         }
-        if input_hash != context.expected_input_hash {
+        if input_hash != context.quote.expected_input_hash {
             return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
-                "Boundless fulfillment journal does not match local dry-run journal".to_string(),
+                "Boundless fulfillment journal does not match prepared quote journal".to_string(),
             )));
         }
         let stage_metadata = self.boundless_stage_metadata(submission, context);
@@ -4567,11 +4688,22 @@ impl BoundlessProver {
         elf_type: ElfType,
         offer_spec: &BoundlessOfferParams,
         input: Bytes,
+        stage_input: BoundlessStageInput,
         elf: &[u8],
         block_image_id: Option<Digest>,
-        proposal_carry_data: Option<ProofCarryData>,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
+        let quote_sizing = self.quote_sizing(elf_type);
+        let execution_po2 = self.config.execution_po2;
+        let quote = prepare_quote_context(
+            elf_type,
+            quote_sizing,
+            &stage_input,
+            input.as_ref(),
+            execution_po2,
+            || Self::evaluate_guest(input.to_vec(), execution_po2, elf.to_vec()),
+        )
+        .await?;
         let client = self.client().await?;
         // The image id is deterministic in `elf`, so hash the multi-MB ELF once here and reuse it
         // for every per-attempt program refresh below instead of re-hashing each rebid rung.
@@ -4582,27 +4714,19 @@ impl BoundlessProver {
         let seed_program = self
             .ensure_uploaded(client, elf_type, elf, image_id)
             .await?;
-        // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
-        // occupy the async runtime threads that serve health/readiness probes.
-        let (evaluated_mcycles_count, journal) =
-            Self::evaluate_guest(input.to_vec(), self.config.execution_po2, elf.to_vec()).await?;
-        let expected_input_hash = if elf_type.is_proposal() {
-            parse_shasta_proposal_input_hash(&journal)?
-        } else {
-            parse_shasta_aggregation_input_hash(&journal)?
-        };
-        let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
         // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.
         let image_ref = alloy_primitives::hex::encode_prefixed(seed_program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
+        let proposal_carry_data = match &stage_input {
+            BoundlessStageInput::Proposal(input) => Some(&input.proof_carry_data),
+            BoundlessStageInput::Aggregation(_) => None,
+        };
         let fulfillment_context = FulfillmentContext {
             proof_type: elf_type.proof_type_str(),
             image_id,
             block_image_id,
-            expected_input_hash,
-            quoted_mcycles_count,
-            evaluated_mcycles_count,
-            proposal_carry_data: proposal_carry_data.as_ref(),
+            quote: &quote,
+            proposal_carry_data,
         };
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
@@ -4715,7 +4839,7 @@ impl BoundlessProver {
                     &image_ref,
                     &deployment,
                     self.config.offchain,
-                    (quoted_mcycles_count, evaluated_mcycles_count),
+                    &quote,
                 )
                 .await?;
                 if resumed_without_transaction_hash
@@ -4749,12 +4873,10 @@ impl BoundlessProver {
                     elf,
                     program: &program,
                     offer_spec,
-                    journal: &journal,
+                    quote: &quote,
                     image_ref: &image_ref,
                     deployment: &deployment,
                     observer: observer.as_ref(),
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
                     attempt,
                     input_cache: &mut input_cache,
                     request_reuse,
@@ -4854,9 +4976,9 @@ where
             ElfType::Batch,
             &self.config.offer_params.batch,
             input,
+            BoundlessStageInput::Proposal(Box::new(guest_input)),
             &elf,
             None,
-            Some(guest_input.proof_carry_data),
             observer,
         ))
         .await
@@ -4884,14 +5006,20 @@ where
                 .await?;
         let aggregation_input =
             build_boundless_aggregation_input(input.proofs, proposal_image_id).await?;
+        let decoded_aggregation_input =
+            bincode::deserialize(&aggregation_input).map_err(|error| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to decode built Boundless aggregation input: {error}"
+                ))
+            })?;
         let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
             &self.config.offer_params.aggregation,
             Bytes::from(aggregation_input),
+            BoundlessStageInput::Aggregation(decoded_aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
-            None,
             observer,
         ))
         .await
@@ -4899,14 +5027,10 @@ where
 }
 
 impl BoundlessProver {
-    const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
-        let quote = match elf_type {
+    const fn quote_sizing(&self, elf_type: ElfType) -> &QuoteSizing {
+        match elf_type {
             ElfType::Batch => &self.config.batch_quote,
             ElfType::Aggregation => &self.config.aggregation_quote,
-        };
-        match quote {
-            QuoteSizing::Estimated | QuoteSizing::Evaluated => evaluated_mcycles_count,
-            QuoteSizing::Fixed { mcycles } => *mcycles,
         }
     }
 }
@@ -5226,12 +5350,13 @@ mod tests {
     use super::{
         BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessAttemptError, BoundlessConfig,
         BoundlessFundingState, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
-        BoundlessStatusSource, BoundlessStorageDownloader, BoundlessSubmissionMetadata,
-        BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
-        BoundlessTxFees, BoundlessTxReceiptObservation, DeploymentConfig, DeploymentType, ElfType,
-        JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, MissingResumeEventAction,
-        NoLockTimeout, Submission, TimeoutPolicy, boundless_poll_error_statuses,
-        boundless_single_poll_error_status, boundless_terminal_outcome, classify_boundless_status,
+        BoundlessStageInput, BoundlessStatusSource, BoundlessStorageDownloader,
+        BoundlessSubmissionMetadata, BoundlessSubmissionState, BoundlessTerminalOutcome,
+        BoundlessTimeoutAction, BoundlessTxFees, BoundlessTxReceiptObservation, DeploymentConfig,
+        DeploymentType, ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS,
+        MissingResumeEventAction, NoLockTimeout, QuoteContext, Submission, TimeoutPolicy,
+        boundless_poll_error_statuses, boundless_single_poll_error_status,
+        boundless_terminal_outcome, classify_boundless_status,
         confirm_boundless_resume_before_market_poll, dispatch_offchain_after_checkpoint,
         ensure_boundless_broadcast_deadline, escalate_and_cap_market_prices,
         exact_boundless_submission_digest, exact_boundless_submission_event,
@@ -5239,7 +5364,8 @@ mod tests {
         missing_resume_event_action, next_boundless_tx_fees, no_lock_deadline,
         no_lock_timeout_for_attempt, now_secs, observe_boundless_transaction_hash,
         observe_boundless_transaction_receipts, parse_bool_result, parse_env_bool, parse_env_url,
-        prepare_boundless_funding, publish_boundless_progress, ready_boundless_submission_permit,
+        prepare_boundless_funding, prepare_quote_context, prepare_quote_context_from_estimate,
+        publish_boundless_progress, ready_boundless_submission_permit,
         reserve_boundless_funding_before_dispatch, retry_external_bounded,
         retry_external_with_attempt_limit, run_after_submission_permit,
         send_boundless_transaction_with_replacements, should_defer_boundless_poll_timeout,
@@ -5248,6 +5374,7 @@ mod tests {
         validate_resume_context,
     };
     use crate::boundless_config::{BoundlessTransactionConfig, default_batch_offer_params};
+    use crate::{BoundlessQuoteStrategy, boundless::estimation::EstimatedRequestMetadata};
     use alloy_primitives::{Address, B256, Bloom, Bytes, U256, address, utils::parse_ether};
     #[cfg(feature = "boundless-s3")]
     use boundless_market::storage::StorageUploaderConfig;
@@ -5266,6 +5393,7 @@ mod tests {
     };
     use httpmock::{Method::POST, MockServer};
     use raiko2_primitives::{Proof, ProofType, RaikoError};
+    use raiko2_primitives_shasta::{GuestInput, ShastaRisc0AggregationGuestInput};
     use raiko2_remote_poller::{
         RemotePollError, RemoteStatus, RemoteStatusReason, RemoteSubmission, RemoteSubmissionId,
     };
@@ -6507,7 +6635,7 @@ mod tests {
             "image",
             "deployment",
             true,
-            (1, 1),
+            &test_quote_context(),
         )
         .await
         .expect("checkpoint eventually persists");
@@ -6578,7 +6706,7 @@ mod tests {
             "image",
             "deployment",
             true,
-            (1, 1),
+            &test_quote_context(),
         )
         .await
         .expect_err("permanent runtime fence must stop checkpoint persistence");
@@ -6602,7 +6730,7 @@ mod tests {
             &test_submission(),
             "image",
             "deployment",
-            (1, 1),
+            &test_quote_context(),
             Duration::from_millis(20),
         )
         .await
@@ -6637,7 +6765,7 @@ mod tests {
             test_submission(),
             "image",
             "deployment",
-            (1, 1),
+            &test_quote_context(),
             move || async move {
                 assert!(persisted_for_call.load(Ordering::SeqCst));
                 assert!(permit_released_for_call.load(Ordering::SeqCst));
@@ -6668,7 +6796,7 @@ mod tests {
             test_submission(),
             "image",
             "deployment",
-            (1, 1),
+            &test_quote_context(),
             move || async move {
                 dispatched_for_call.fetch_add(1, Ordering::SeqCst);
                 Ok(U256::from(1))
@@ -6693,7 +6821,7 @@ mod tests {
             test_submission(),
             "image",
             "deployment",
-            (1, 1),
+            &test_quote_context(),
             move || async move {
                 dispatched_for_call.fetch_add(1, Ordering::SeqCst);
                 Err(RaikoError::Guest("uncertain transport failure".to_string()))
@@ -6716,7 +6844,7 @@ mod tests {
             test_submission(),
             "image",
             "deployment",
-            (1, 1),
+            &test_quote_context(),
             || async { Ok(U256::from(2)) },
         )
         .await
@@ -6809,6 +6937,18 @@ mod tests {
         default_batch_offer_params()
     }
 
+    fn test_quote_context() -> QuoteContext {
+        QuoteContext {
+            quoted_mcycles_count: 1,
+            evaluated_mcycles_count: Some(1),
+            strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            model_id: None,
+            journal: B256::ZERO.to_vec(),
+            expected_input_hash: B256::ZERO,
+            isolated_builder: false,
+        }
+    }
+
     #[test]
     fn elf_type_maps_to_proof_type_and_stage() {
         assert_eq!(ElfType::Batch.proof_type_str(), "proposal");
@@ -6819,42 +6959,181 @@ mod tests {
         assert!(!ElfType::Aggregation.is_proposal());
     }
 
-    #[test]
-    fn quoted_mcycles_count_dispatches_on_quote_sizing() {
-        use super::QuoteSizing;
-        // Evaluated is the default and passes through.
-        let prover = BoundlessProver::new(BoundlessConfig::default());
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 1_491);
+    fn execution_result(
+        calls: &Arc<AtomicUsize>,
+        mcycles: u32,
+        journal: Vec<u8>,
+    ) -> impl Future<Output = Result<(u32, Vec<u8>), RaikoError>> + use<> {
+        calls.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(Ok((mcycles, journal)))
+    }
 
-        // Estimated uses the same fallback until the estimator is applied to a request.
-        let cfg = BoundlessConfig {
-            batch_quote: QuoteSizing::Estimated,
+    #[tokio::test]
+    async fn quote_context_estimated_in_domain_skips_local_execution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+        let journal = B256::repeat_byte(0x11).to_vec();
+
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            Some(Ok(EstimatedRequestMetadata {
+                model_id: "risc0-zkgas-m2-v1".to_string(),
+                mcycles: 1_234,
+                journal: journal.clone(),
+            })),
+            move || execution_result(&execution_calls, 9_999, vec![]),
+        )
+        .await
+        .expect("in-domain estimate prepares a quote");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            context,
+            QuoteContext {
+                quoted_mcycles_count: 1_234,
+                evaluated_mcycles_count: None,
+                strategy: Some(BoundlessQuoteStrategy::Estimated),
+                model_id: Some("risc0-zkgas-m2-v1".to_string()),
+                journal,
+                expected_input_hash: B256::repeat_byte(0x11),
+                isolated_builder: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_context_estimated_unavailable_executes_once_and_records_actual_without_model() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+        let journal = B256::repeat_byte(0x22).to_vec();
+
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            Some(Err(super::estimation::EstimateUnavailable::Domain)),
+            move || execution_result(&execution_calls, 1_455, journal),
+        )
+        .await
+        .expect("unavailable estimate falls back to evaluation");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(context.quoted_mcycles_count, 1_455);
+        assert_eq!(context.evaluated_mcycles_count, Some(1_455));
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
+        assert_eq!(context.model_id, None);
+        assert!(context.isolated_builder);
+    }
+
+    #[tokio::test]
+    async fn quote_context_evaluated_executes_once_and_quotes_actual() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Evaluated,
+            None,
+            move || execution_result(&execution_calls, 1_377, B256::repeat_byte(0x33).to_vec()),
+        )
+        .await
+        .expect("evaluated quote prepares metadata");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(context.quoted_mcycles_count, 1_377);
+        assert_eq!(context.evaluated_mcycles_count, Some(1_377));
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Evaluated));
+        assert!(!context.isolated_builder);
+    }
+
+    #[tokio::test]
+    async fn quote_context_fixed_executes_once_but_quotes_configured_count() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Fixed { mcycles: 1_500 },
+            None,
+            move || execution_result(&execution_calls, 1_311, B256::repeat_byte(0x44).to_vec()),
+        )
+        .await
+        .expect("fixed quote prepares metadata");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(context.quoted_mcycles_count, 1_500);
+        assert_eq!(context.evaluated_mcycles_count, Some(1_311));
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Fixed));
+        assert!(!context.isolated_builder);
+    }
+
+    #[tokio::test]
+    async fn quote_context_malformed_proposal_does_not_fall_back_to_execution() {
+        let input = GuestInput::default();
+        let encoded = bincode::serialize(&input).expect("encode proposal fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+
+        let error = prepare_quote_context(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            &BoundlessStageInput::Proposal(Box::new(input)),
+            &encoded,
+            20,
+            move || execution_result(&execution_calls, 1_000, B256::repeat_byte(0x55).to_vec()),
+        )
+        .await
+        .expect_err("malformed proposal must be a structural error");
+
+        assert!(error.to_string().contains("without witnesses"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn quote_context_malformed_aggregation_does_not_fall_back_to_execution() {
+        let input = ShastaRisc0AggregationGuestInput {
+            receipts: vec![vec![0xff]],
             ..Default::default()
         };
-        assert_eq!(
-            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
-            1_188
-        );
+        let encoded = bincode::serialize(&input).expect("encode aggregation fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
 
-        // Fixed pins the value.
-        let cfg = BoundlessConfig {
-            batch_quote: QuoteSizing::Fixed { mcycles: 1_500 },
-            ..Default::default()
-        };
-        assert_eq!(
-            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
-            1_500
-        );
+        let error = prepare_quote_context(
+            ElfType::Aggregation,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            &BoundlessStageInput::Aggregation(input),
+            &encoded,
+            20,
+            move || execution_result(&execution_calls, 1_000, B256::repeat_byte(0x66).to_vec()),
+        )
+        .await
+        .expect_err("malformed aggregation must be a structural error");
 
-        // Aggregation Fixed pins independently.
-        let cfg = BoundlessConfig {
-            aggregation_quote: QuoteSizing::Fixed { mcycles: 320 },
-            ..Default::default()
-        };
-        assert_eq!(
-            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Aggregation, 1_188),
-            320
+        assert!(
+            error
+                .to_string()
+                .contains("receipt/proof carry count mismatch")
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn quote_context_aggregation_hash_comes_from_the_prepared_journal() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Aggregation,
+            &crate::boundless_config::QuoteSizing::Evaluated,
+            None,
+            move || execution_result(&execution_calls, 300, B256::repeat_byte(0x77).to_vec()),
+        )
+        .await
+        .expect("aggregation journal prepares metadata");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(context.expected_input_hash, B256::repeat_byte(0x77));
     }
 
     #[test]
@@ -7564,6 +7843,10 @@ mod tests {
             expires_at: 2_000,
             lock_expires_at: 1_500,
             submitted_at: 1_000,
+            quoted_mcycles_count: None,
+            evaluated_mcycles_count: None,
+            quote_strategy: None,
+            quote_model_id: None,
             max_price_multiplier: 1,
             max_price_wei: Some("1".to_string()),
             rebid_attempt: 1,
@@ -7650,6 +7933,10 @@ mod tests {
             expires_at: 2_000,
             lock_expires_at: 1_500,
             submitted_at: 1_000,
+            quoted_mcycles_count: None,
+            evaluated_mcycles_count: None,
+            quote_strategy: None,
+            quote_model_id: None,
             max_price_multiplier: 1,
             max_price_wei: Some("1".to_string()),
             rebid_attempt: 1,

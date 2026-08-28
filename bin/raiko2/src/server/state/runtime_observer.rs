@@ -2140,6 +2140,10 @@ fn build_pending_proof_checkpoint(
                 expires_at: required(runtime.expires_at, "expires_at")?,
                 lock_expires_at: required(runtime.lock_expires_at, "lock_expires_at")?,
                 submitted_at: required(runtime.submitted_at, "submitted_at")?,
+                quoted_mcycles_count: runtime.quoted_mcycles_count,
+                evaluated_mcycles_count: runtime.evaluated_mcycles_count,
+                quote_strategy: runtime.quote_strategy.clone(),
+                quote_model_id: runtime.quote_model_id.clone(),
                 max_price_multiplier: runtime.max_price_multiplier.ok_or_else(|| {
                     checkpoint_error("Boundless checkpoint is missing max_price_multiplier")
                 })?,
@@ -2233,8 +2237,8 @@ mod tests {
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_prover::{
-        BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
-        Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
+        BoundlessQuoteStrategy, BoundlessSubmissionProgress, Sp1FulfillmentStrategy,
+        Sp1NetworkMode, Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
     };
     use raiko2_runtime::test_support::{
         MemoryProofArtifactStore, ProofObjectStore, RuntimeStateObject, RuntimeStateStore,
@@ -2445,6 +2449,10 @@ mod tests {
             expires_at: 200,
             lock_expires_at: 180,
             submitted_at: 100,
+            quoted_mcycles_count: None,
+            evaluated_mcycles_count: None,
+            quote_strategy: None,
+            quote_model_id: None,
             max_price_multiplier: 1,
             max_price_wei: Some("1000".to_string()),
             rebid_attempt: 1,
@@ -2768,6 +2776,8 @@ mod tests {
             offchain: false,
             quoted_mcycles_count: Some(6_000),
             evaluated_mcycles_count: Some(12_345),
+            quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+            quote_model_id: None,
             max_price_multiplier: 4,
             max_price_wei: Some("9000000000000".to_string()),
             rebid_attempt,
@@ -2911,6 +2921,8 @@ mod tests {
                 offchain: false,
                 quoted_mcycles_count: Some(6_000),
                 evaluated_mcycles_count: Some(12_345),
+                quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+                quote_model_id: None,
                 max_price_multiplier: 4,
                 max_price_wei: Some("9000000000000".to_string()),
                 rebid_attempt: 3,
@@ -2944,6 +2956,11 @@ mod tests {
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
+        assert_eq!(
+            runtime_entry.quote_strategy,
+            Some(BoundlessQuoteStrategy::Fixed)
+        );
+        assert_eq!(runtime_entry.quote_model_id, None);
         assert_eq!(runtime_entry.max_price_multiplier, Some(4));
         assert_eq!(
             runtime_entry.max_price_wei.as_deref(),
@@ -3110,6 +3127,8 @@ mod tests {
                 offchain: false,
                 quoted_mcycles_count: Some(6_000),
                 evaluated_mcycles_count: Some(12_345),
+                quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+                quote_model_id: None,
                 max_price_multiplier: 4,
                 max_price_wei: Some("9000000000000".to_string()),
                 rebid_attempt: 3,
@@ -3554,6 +3573,8 @@ mod tests {
                 offchain: false,
                 quoted_mcycles_count: Some(164),
                 evaluated_mcycles_count: Some(164),
+                quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+                quote_model_id: None,
                 max_price_multiplier: 5,
                 max_price_wei: Some("162360000000000".to_string()),
                 rebid_attempt: 5,

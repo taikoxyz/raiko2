@@ -29,6 +29,12 @@ documentation. The serialized value `strategy = "raiko_agent"` is not an alias; 
 deserialization with a clear list of supported strategies so an old explicit configuration cannot
 silently change behavior.
 
+Selecting `Estimated` is also the release operator's assertion that the deployed guest and RISC0
+runtime remain compatible with the committed calibration. The request path does not pin or compare
+an ELF hash, image ID, source revision, or RISC0 SDK version. Those values remain model provenance
+for release review, not runtime gates. A release whose execution behavior has materially changed
+must use `Evaluated` until the operator has checked and, if necessary, refreshed the model artifact.
+
 Only `Estimated` bypasses local execution. `Evaluated` keeps the exact local dry-run. `Fixed` keeps
 its current behavior, including local execution to obtain the journal. To avoid silently choosing a
 replacement for an omitted strategy, an explicitly supplied Boundless configuration must contain
@@ -43,11 +49,12 @@ Add `crates/prover/src/boundless/estimation.rs` as the evaluator and determinist
 It compile-time embeds `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json` with `include_str!`,
 deserializes and validates it once when an `Estimated` strategy is configured, and exposes typed
 estimation results to `boundless/mod.rs`. The JSON artifact is the single source of truth for model
-IDs, image IDs, coefficients, execution configuration, operating domains, and calibrated
-aggregation counts. `estimation.rs` contains no duplicated constants for those values; it owns only
-schema validation, checked arithmetic, domain checks, and journal derivation. An invalid embedded
-artifact is a build/configuration defect and rejects `Estimated` during startup rather than falling
-back at request time.
+IDs, calibration provenance, coefficients, execution configuration, operating domains, and
+calibrated aggregation counts. `estimation.rs` contains no duplicated constants for those values;
+it owns only schema validation, checked arithmetic, domain checks, and journal derivation. An
+invalid embedded artifact is a build/configuration defect and rejects `Estimated` during startup
+rather than falling back at request time. Artifact validation checks its internal schema and values;
+it does not compare its release-provenance fields with the running binary.
 
 `boundless/mod.rs` chooses one of two paths before constructing a Boundless request:
 
@@ -95,6 +102,11 @@ during this design select `evaluated`, but their deployment repositories remain 
 and must be rechecked immediately before rollout. Known Masaya and legacy `raiko2-k8s`
 Hoodi/Tolba/Masaya configurations that still name `raiko_agent` must move to `evaluated` before they
 consume the new binary.
+
+For each later guest or RISC0 runtime release, the release owner must decide explicitly whether the
+existing calibration is still applicable. Keeping `estimated` means accepting that compatibility;
+switching the affected stage to `evaluated` is the safe rollout choice while measurements are being
+refreshed. Raiko2 does not make this release decision from embedded ELF or dependency identifiers.
 
 This repository updates `config.example.toml`, `docs/API.md`, and `docs/operations.md` to expose the
 three supported values and the required-stage-table rule. External configuration validators must
@@ -183,12 +195,13 @@ M2 estimate exceeds the accepted error budget. Mainnet inputs above `310_638_954
 local execution until additional measurements justify a contiguous domain update. Bounds from one
 chain never admit a feature combination from the other chain.
 
-Before estimating, the request path compares the computed proposal image ID with the artifact,
-requires Unzen to be active for every input block, rejects any later active Taiko fork not covered by
-the artifact, and checks the operating envelope. An image, RISC0 execution configuration, fork,
-zkGas schedule, or feature-envelope mismatch emits a warning containing the model ID and falls back
-to local execution. Guest/RISC0 dependency upgrades must regenerate or explicitly reaffirm the
-artifact; the image-ID comparison is the runtime guard against a changed proposal program.
+Before estimating, the request path requires Unzen to be active for every input block, rejects any
+later active Taiko fork not covered by the artifact, and checks the execution configuration and
+operating envelope. An execution-configuration, fork, zkGas-schedule, or feature-envelope mismatch
+emits a warning containing the model ID and falls back to local execution. It deliberately does not
+compare the running proposal image ID, ELF hash, source revision, or RISC0 SDK version with the
+artifact. Compatibility of those release identities is reviewed when the deployment selects
+`estimated`.
 
 ## Aggregation Cycle Estimate
 
@@ -208,10 +221,12 @@ current worktree aggregation ELF or prove a zero intercept.
 Before enabling estimated aggregation, execute the current aggregation image locally with valid
 receipt-backed inputs at child counts one through five and commit the image ID and results to the
 model artifact. Enable `180 * child_receipt_count` only for counts whose measured absolute error and
-underquote are within the accepted ten-percent budget. Counts without current-image measurements,
-including every count above five initially, fall back to local execution. A future image change also
-falls back until the measurements are refreshed. The input must contain at least one receipt, and
-receipt and carry-data counts must match. Multiplication and conversion are checked.
+underquote are within the accepted ten-percent budget. Counts outside the artifact's calibrated
+set, including every count above five initially, fall back to local execution. As with proposal
+estimation, the image ID is calibration provenance and is not compared at runtime. The release owner
+must keep aggregation on `Evaluated` after a materially changed aggregation guest until the measured
+counts have been checked or refreshed. The input must contain at least one receipt, and receipt and
+carry-data counts must match. Multiplication and conversion are checked.
 
 ## Deterministic Journals
 
@@ -256,9 +271,9 @@ path:
 
 - a proposal zkGas value is zero or cannot be represented by the estimator;
 - total zkGas, a scaled model term, or the final proposal estimate overflows;
-- proposal image ID, RISC0 execution configuration, chain/fork, or observed feature envelope does
-  not match the model artifact;
-- aggregation image ID or child count lacks current-image calibration;
+- proposal execution configuration, chain/fork, or observed feature envelope does not match the
+  model artifact;
+- aggregation child count is outside the calibrated set;
 - aggregation child-count multiplication or final conversion overflows.
 
 If local execution also fails, its error is returned. A successful fallback uses the actual local
@@ -278,8 +293,10 @@ Focused regression coverage must establish:
 - checked proposal arithmetic matches the decimal M2 formula on all collected Mainnet samples;
 - direct-M2 regression tests assert 19 Mainnet underquotes, a maximum observed 5.75-percent
   underquote, 5.87-percent MAPE, and the single 21.94-percent overquote;
-- model artifact identity, Unzen activation, supported chain, execution configuration, and observed
+- model artifact schema, Unzen activation, supported chain, execution configuration, and observed
   feature-envelope guards select either estimate or local fallback correctly;
+- proposal and aggregation estimation do not compare the running ELF hash, image ID, source
+  revision, or RISC0 SDK version with artifact provenance;
 - the embedded JSON is the only source of model parameters, and malformed or internally
   inconsistent artifact data rejects `Estimated` configuration;
 - Hoodi and Mainnet domains are evaluated independently, the isolated `562_107_601`-zkGas Mainnet
@@ -287,8 +304,8 @@ Focused regression coverage must establish:
 - empty input and malformed structure fail directly;
 - zero/oversized zkGas and arithmetic overflow select the local fallback;
 - proposal journal derivation matches the RISC0 guest journal for a valid fixture;
-- current-image aggregation executions cover child counts one through five before those counts are
-  enabled, while unmeasured counts fall back;
+- aggregation calibration records executions at child counts one through five before those counts
+  are enabled, while counts outside the calibrated set fall back;
 - aggregation estimation scales with calibrated child count and rejects zero/mismatched vectors;
 - aggregation journal derivation matches the RISC0 guest journal for valid receipt-backed input;
 - estimated progress omits `evaluated_mcycles_count`, while evaluated and fallback progress retain it;
@@ -308,3 +325,5 @@ adversarial review and independent behavioral verification before it is ready fo
 - Do not add a second user-visible feature/preflight flag or a network-specific coefficient.
 - Do not infer aggregation cycles from proposal zkGas.
 - Do not remove or silently reinterpret `evaluated` or `fixed` in this change.
+- Do not add a runtime ELF, image-ID, source-revision, or RISC0-version compatibility gate; selecting
+  `estimated` is a release decision.

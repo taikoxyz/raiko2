@@ -26,6 +26,10 @@ pub(crate) fn estimation_model() -> Result<&'static EstimationModel, String> {
         .map_err(Clone::clone)
 }
 
+pub(crate) fn estimation_model_id() -> Result<&'static str, String> {
+    Ok(estimation_model()?.0.model_id.as_str())
+}
+
 /// Validate the embedded quote-estimation model artifact.
 ///
 /// # Errors
@@ -714,19 +718,21 @@ mod tests {
             .hard_forks
             .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Block(0));
 
-        let mut input = GuestInput::default();
-        input.witnesses = (0..block_count)
-            .map(|index| {
-                let mut witness = StatelessInput {
-                    chain_spec: chain_spec.clone(),
-                    ..Default::default()
-                };
-                witness.block.header.number = u64::try_from(index).expect("test block number");
-                witness.block.header.timestamp =
-                    u64::try_from(index).expect("test block timestamp");
-                witness
-            })
-            .collect();
+        let mut input = GuestInput {
+            witnesses: (0..block_count)
+                .map(|index| {
+                    let mut witness = StatelessInput {
+                        chain_spec: chain_spec.clone(),
+                        ..Default::default()
+                    };
+                    witness.block.header.number = u64::try_from(index).expect("test block number");
+                    witness.block.header.timestamp =
+                        u64::try_from(index).expect("test block timestamp");
+                    witness
+                })
+                .collect(),
+            ..Default::default()
+        };
         if let Some(first) = input.witnesses.first_mut() {
             first.block.header.difficulty = U256::from(total_zkgas);
         }
@@ -854,11 +860,11 @@ mod tests {
                 "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767",
                 "coefficients": {
                     "decimal": {"intercept": "511.8367085993759", "total_zkgas": "0.000003714503729246405", "block_count": "2.2737130481392764"},
-                    "scaled": {"scale": 1000000000000u64, "intercept": 511836708599376u64, "total_zkgas": 3714504u64, "block_count": 2273713048139u64}
+                    "scaled": {"scale": 1_000_000_000_000_u64, "intercept": 511_836_708_599_376_u64, "total_zkgas": 3_714_504_u64, "block_count": 2_273_713_048_139_u64}
                 },
                 "domains": [
-                    {"network": "taiko_hoodi", "block_count": {"minimum": 155, "maximum": 192}, "total_zkgas": {"minimum": 369558586, "maximum": 459162040}},
-                    {"network": "taiko_mainnet", "block_count": {"minimum": 184, "maximum": 192}, "total_zkgas": {"minimum": 216314230, "maximum": 310638954}}
+                    {"network": "taiko_hoodi", "block_count": {"minimum": 155, "maximum": 192}, "total_zkgas": {"minimum": 369_558_586, "maximum": 459_162_040}},
+                    {"network": "taiko_mainnet", "block_count": {"minimum": 184, "maximum": 192}, "total_zkgas": {"minimum": 216_314_230, "maximum": 310_638_954}}
                 ],
                 "cohorts": {
                     "hoodi": {"fit_count": 80, "calibration_count": 40, "continuous": {"underquote_count": 17, "mape_percent": "0.094557", "max_absolute_error_percent": "0.279512", "max_underquote_percent": "0.279512", "over_ten_percent_count": 0}, "scaled_integer": {"underquote_count": 12, "mape_percent": "0.093492", "max_absolute_error_percent": "0.264550", "max_underquote_percent": "0.264550", "over_ten_percent_count": 0}},
@@ -874,6 +880,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn parse(value: Value) -> Result<super::EstimationModel, String> {
         super::parse_model(&value.to_string())
     }
@@ -1020,6 +1027,18 @@ mod tests {
     #[test]
     fn model_embedded_artifact_validates() {
         super::validate_estimation_model().expect("embedded artifact validates");
+    }
+
+    #[test]
+    fn model_id_accessor_reads_the_embedded_artifact() {
+        let artifact: Value =
+            serde_json::from_str(super::EMBEDDED_MODEL).expect("committed model artifact JSON");
+        assert_eq!(
+            super::estimation_model_id().expect("embedded artifact model id"),
+            artifact["model_id"]
+                .as_str()
+                .expect("model_id must be a string")
+        );
     }
 
     #[test]
@@ -1535,9 +1554,13 @@ mod tests {
         }
 
         fn predict(&self, row: &ValidationFixtureRow) -> f64 {
+            let total_zkgas = u32::try_from(row.total_zkgas)
+                .expect("fixture total_zkgas must fit the measured u32 range");
+            let block_count = u32::try_from(row.block_count)
+                .expect("fixture block_count must fit the measured u32 range");
             self.intercept
-                + self.total_zkgas * row.total_zkgas as f64
-                + self.block_count * row.block_count as f64
+                + self.total_zkgas * f64::from(total_zkgas)
+                + self.block_count * f64::from(block_count)
         }
     }
 
@@ -1607,7 +1630,8 @@ mod tests {
             + u128::from(coefficients.block_count) * u128::from(row.block_count);
         let scale = u128::from(coefficients.scale);
         assert!(scale > 0, "scaled coefficients require a non-zero scale");
-        (numerator / scale + u128::from(!numerator.is_multiple_of(scale))) as f64
+        let mcycles = numerator / scale + u128::from(!numerator.is_multiple_of(scale));
+        f64::from(u32::try_from(mcycles).expect("fixture estimate must fit u32 mcycles"))
     }
 
     fn diagnostics(
@@ -1617,8 +1641,10 @@ mod tests {
         assert!(!rows.is_empty(), "diagnostics require fixture rows");
         let mut diagnostics = Diagnostics::default();
         for row in rows {
-            let percent_error =
-                (prediction(row) - row.actual_mcycles as f64) * 100.0 / row.actual_mcycles as f64;
+            let actual_mcycles = f64::from(
+                u32::try_from(row.actual_mcycles).expect("fixture actual mcycles must fit u32"),
+            );
+            let percent_error = (prediction(row) - actual_mcycles) * 100.0 / actual_mcycles;
             diagnostics.mape_percent += percent_error.abs();
             diagnostics.max_absolute_error_percent = diagnostics
                 .max_absolute_error_percent
@@ -1634,7 +1660,8 @@ mod tests {
                     diagnostics.max_overquote_percent.max(percent_error);
             }
         }
-        diagnostics.mape_percent /= rows.len() as f64;
+        diagnostics.mape_percent /=
+            f64::from(u32::try_from(rows.len()).expect("fixture row count must fit u32"));
         diagnostics
     }
 

@@ -1954,8 +1954,6 @@ fn prepare_quote_journal_context(
     })
 }
 
-const ATTEMPTED_ESTIMATION_MODEL_ID: &str = "risc0-zkgas-m2-v1";
-
 async fn prepare_quote_context<F, Fut>(
     elf_type: ElfType,
     quote_sizing: &QuoteSizing,
@@ -2098,8 +2096,13 @@ where
                 true,
             ),
             Err(reason) => {
+                let model_id = estimation::estimation_model_id().map_err(|error| {
+                    RaikoError::InvalidRequestConfig(format!(
+                        "invalid Boundless estimation model: {error}"
+                    ))
+                })?;
                 tracing::warn!(
-                    model_id = ATTEMPTED_ESTIMATION_MODEL_ID,
+                    model_id,
                     ?reason,
                     "Boundless quote estimate unavailable; using one local evaluation"
                 );

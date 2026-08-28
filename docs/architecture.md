@@ -1,6 +1,6 @@
 # Architecture
 
-Raiko2 is a Shasta proof orchestration service. It turns a normalized v4 proof request into a
+Raiko2 is a proposal proof orchestration service. It turns a normalized v4 proof request into a
 durable proposal or aggregation proof while keeping request identity, execution state, remote
 provider checkpoints, and published proof artifacts recoverable across process restarts.
 
@@ -65,7 +65,7 @@ flowchart TB
   Publication --> ObjectRepo
 
   Projection --> Engine["Engine and scheduler<br/>leases, dependencies, retries"]
-  Engine --> Pipeline["Shasta pipeline"]
+  Engine --> Pipeline["Proposal pipeline"]
   Pipeline --> RPC["L1, L2, beacon, and witness RPC"]
   Pipeline --> Prover["Local, Boundless, SP1, or remote SGX prover"]
   Engine --> Observer["RuntimeObserver<br/>event adapter"]

@@ -36,7 +36,7 @@ use boundless_market::{
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
     price_oracle::{Amount, Asset},
-    request_builder::{OfferParams, StandardRequestBuilder},
+    request_builder::{OfferParams, RequestBuilder, StandardRequestBuilder},
     storage::{
         FileStorageDownloader, GcsStorageDownloader, HttpDownloader, StandardUploader,
         StorageDownloader, StorageError, StorageUploaderType,
@@ -721,13 +721,38 @@ fn is_definitive_boundless_broadcast_rejection(error: &str) -> bool {
 }
 
 type BoundlessStatusRegistry = Arc<Mutex<HashMap<RemoteSubmissionId, BoundlessSubmissionState>>>;
+type BoundlessRequestBuilder =
+    StandardRequestBuilder<DynProvider, StandardUploader, BoundlessStorageDownloader>;
 type BoundlessClient = Client<
     DynProvider,
     StandardUploader,
     BoundlessStorageDownloader,
-    StandardRequestBuilder<DynProvider, StandardUploader, BoundlessStorageDownloader>,
+    BoundlessRequestBuilder,
     PrivateKeySigner,
 >;
+
+#[allow(clippy::default_trait_access)]
+fn isolated_request_builder(client: &BoundlessClient) -> RaikoResult<BoundlessRequestBuilder> {
+    let mut builder = client
+        .request_builder
+        .as_ref()
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(
+                "Boundless request builder is not configured".to_string(),
+            )
+        })?
+        .clone();
+    builder.preflight_layer = Default::default();
+    builder.skip_preflight = Some(true);
+    Ok(builder)
+}
+
+fn boundless_request_build_error(error: &impl std::fmt::Debug) -> RaikoError {
+    RaikoError::InvalidRequestConfig(format!(
+        "Failed to build boundless request: {}",
+        redact_urls(&format!("{error:?}"))
+    ))
+}
 
 /// Downloader used by the Boundless requestor client.
 ///
@@ -3259,9 +3284,11 @@ impl BoundlessProver {
     /// hit. Building the `GuestEnv` from `input` and encoding it (both multi-MB copies) happen only
     /// in the cache-miss branch — a rebid rung that hits the cache skips the env construction, the
     /// encode, and the upload. The env is used solely to produce the uploaded bytes: the request
-    /// itself carries the input by URL (`with_input_url`), and every SDK layer that would otherwise
-    /// consume a `with_env(...)` value is short-circuited because raiko2 sets `request_input`,
-    /// `cycles`, and `journal` explicitly, so no `GuestEnv` is threaded into `build_request`.
+    /// itself carries the input by URL (`with_input_url`). Although raiko2 sets `request_input`,
+    /// `cycles`, and `journal` explicitly, the SDK's shared preflight layer still performs a
+    /// best-effort URL download to fill its executor cache. Estimated requests therefore replace
+    /// that layer with a request-scoped default before building; no `GuestEnv` is threaded into
+    /// `build_request`.
     async fn ensure_input_uploaded(
         &self,
         client: &BoundlessClient,
@@ -3322,19 +3349,19 @@ impl BoundlessProver {
         .map_err(|err| RaikoError::Guest(format!("Boundless dry-run task failed: {err}")))?
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn build_request(
         &self,
         client: &BoundlessClient,
+        quote: &QuoteContext,
         elf: &[u8],
         program: &UploadedProgram,
         offer_spec: &BoundlessOfferParams,
-        mcycles_count: u32,
-        journal: Vec<u8>,
         attempt: u64,
         input_url: Url,
         reuse_request_id: Option<U256>,
     ) -> RaikoResult<ProofRequest> {
+        let mcycles_count = quote.quoted_mcycles_count;
         let ValidatedOfferParams {
             max_price,
             min_price,
@@ -3396,7 +3423,7 @@ impl BoundlessProver {
             .with_groth16_proof()
             .with_cycles(u64::from(mcycles_count) * MILLION_CYCLES)
             .with_image_id(program.image_id)
-            .with_journal(Journal::new(journal))
+            .with_journal(Journal::new(quote.journal.clone()))
             .with_offer(offer_params);
         request_params = request_params
             .with_input_url(input_url)
@@ -3409,17 +3436,24 @@ impl BoundlessProver {
             })?;
             request_params = request_params.with_request_id(request_id);
         }
+        let isolated_builder = if quote.isolated_builder {
+            Some(isolated_request_builder(client)?)
+        } else {
+            None
+        };
+        let isolated_builder = isolated_builder.as_ref();
         let mut request = retry_external("build boundless request", || {
             let request_params = request_params.clone();
             async move {
-                Box::pin(client.build_request(request_params))
-                    .await
-                    .map_err(|e| {
-                        RaikoError::InvalidRequestConfig(format!(
-                            "Failed to build boundless request: {}",
-                            redact_urls(&format!("{e:?}"))
-                        ))
-                    })
+                if let Some(builder) = isolated_builder.as_ref() {
+                    Box::pin(builder.build(request_params))
+                        .await
+                        .map_err(|error| boundless_request_build_error(&error))
+                } else {
+                    Box::pin(client.build_request(request_params))
+                        .await
+                        .map_err(|error| boundless_request_build_error(&error))
+                }
             }
         })
         .await?;
@@ -4360,11 +4394,10 @@ impl BoundlessProver {
             .await?;
         let request = Box::pin(self.build_request(
             context.client,
+            context.quote,
             context.elf,
             context.program,
             context.offer_spec,
-            context.quote.quoted_mcycles_count,
-            context.quote.journal.clone(),
             context.attempt,
             input_url,
             context.request_reuse.request_id,
@@ -5395,26 +5428,26 @@ mod tests {
     #[cfg(feature = "boundless-s3")]
     use super::should_initialize_s3_downloader;
     use super::{
-        BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessAttemptError, BoundlessConfig,
-        BoundlessFundingState, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
-        BoundlessStageInput, BoundlessStatusSource, BoundlessStorageDownloader,
+        BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessAttemptError, BoundlessClient,
+        BoundlessConfig, BoundlessFundingState, BoundlessPollSubmission, BoundlessPricingMode,
+        BoundlessProver, BoundlessStageInput, BoundlessStatusSource, BoundlessStorageDownloader,
         BoundlessSubmissionMetadata, BoundlessSubmissionState, BoundlessTerminalOutcome,
         BoundlessTimeoutAction, BoundlessTxFees, BoundlessTxReceiptObservation, DeploymentConfig,
-        DeploymentType, ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS,
-        MissingResumeEventAction, NoLockTimeout, QuoteContext, Submission, TimeoutPolicy,
-        boundless_poll_error_statuses, boundless_single_poll_error_status,
-        boundless_terminal_outcome, classify_boundless_status,
+        DeploymentType, ElfType, JsonRpcError, JsonRpcResponse, MILLION_CYCLES,
+        MIN_REBID_TIMEOUT_MS, MissingResumeEventAction, NoLockTimeout, PrivateKeySigner,
+        QuoteContext, Submission, TimeoutPolicy, UploadedProgram, boundless_poll_error_statuses,
+        boundless_single_poll_error_status, boundless_terminal_outcome, classify_boundless_status,
         confirm_boundless_resume_before_market_poll, dispatch_offchain_after_checkpoint,
         ensure_boundless_broadcast_deadline, escalate_and_cap_market_prices,
         exact_boundless_submission_digest, exact_boundless_submission_event,
         exceeds_submission_budget, is_definitive_boundless_broadcast_rejection,
-        missing_resume_event_action, next_boundless_tx_fees, no_lock_deadline,
-        no_lock_timeout_for_attempt, now_secs, observe_boundless_transaction_hash,
-        observe_boundless_transaction_receipts, parse_bool_result, parse_env_bool, parse_env_url,
-        prepare_boundless_funding, prepare_quote_context, prepare_quote_context_from_estimate,
-        publish_boundless_progress, ready_boundless_submission_permit,
-        reserve_boundless_funding_before_dispatch, retry_external_bounded,
-        retry_external_with_attempt_limit, run_after_submission_permit,
+        isolated_request_builder, missing_resume_event_action, next_boundless_tx_fees,
+        no_lock_deadline, no_lock_timeout_for_attempt, now_secs,
+        observe_boundless_transaction_hash, observe_boundless_transaction_receipts,
+        parse_bool_result, parse_env_bool, parse_env_url, prepare_boundless_funding,
+        prepare_quote_context, prepare_quote_context_from_estimate, publish_boundless_progress,
+        ready_boundless_submission_permit, reserve_boundless_funding_before_dispatch,
+        retry_external_bounded, retry_external_with_attempt_limit, run_after_submission_permit,
         send_boundless_transaction_with_replacements, should_defer_boundless_poll_timeout,
         should_rebid_unlocked_request, storage_uploader_config_from_env, take_rpc_result,
         terminalize_boundless_checkpoint, user_cycles_to_mcycles, validate_offer_params,
@@ -5426,7 +5459,7 @@ mod tests {
     #[cfg(feature = "boundless-s3")]
     use boundless_market::storage::StorageUploaderConfig;
     use boundless_market::{
-        ProofRequest, RequestId,
+        Client, ProofRequest, RequestId,
         alloy::{
             consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom},
             network::Ethereum,
@@ -5435,10 +5468,12 @@ mod tests {
             transports::mock::Asserter,
         },
         contracts::{Offer, Predicate, RequestInput, Requirements},
+        deployments::BASE,
+        input::GuestEnv,
         price_oracle::{Amount, Asset},
-        storage::StorageUploaderType,
+        storage::{HttpDownloader, StandardUploader, StorageUploaderType},
     };
-    use httpmock::{Method::POST, MockServer};
+    use httpmock::{Method::GET, Method::POST, MockServer};
     use raiko2_primitives::{Proof, ProofType, RaikoError};
     use raiko2_primitives_shasta::{GuestInput, ShastaRisc0AggregationGuestInput};
     use raiko2_remote_poller::{
@@ -6999,6 +7034,131 @@ mod tests {
         }
     }
 
+    async fn isolated_request_builder_test_client(
+        rpc_url: Url,
+        downloader: BoundlessStorageDownloader,
+    ) -> BoundlessClient {
+        Client::builder()
+            .with_rpc_url(rpc_url)
+            .with_deployment(Some(BASE.clone()))
+            .with_uploader(None::<StandardUploader>)
+            .with_downloader(downloader)
+            .with_signer(None::<PrivateKeySigner>)
+            .with_skip_preflight(false)
+            .build()
+            .await
+            .expect("build test Boundless client")
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct IsolatedBuilderObservation {
+        input_downloads: usize,
+        builder_chain_id_calls: usize,
+        cached_cycles: u64,
+        cached_journal: Vec<u8>,
+        shared_skip_preflight: Option<bool>,
+    }
+
+    async fn observe_request_builder_side_effects(
+        quote: &QuoteContext,
+    ) -> IsolatedBuilderObservation {
+        const SENTINEL_CYCLES: u64 = 424_242;
+        let sentinel_journal = b"shared-cache-sentinel".to_vec();
+        let input = b"just-uploaded-input".to_vec();
+        let encoded_env = GuestEnv::from_stdin(input.clone())
+            .encode()
+            .expect("encode guest env fixture");
+        let server = MockServer::start_async().await;
+        let input_mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/input");
+                then.status(200).body(encoded_env);
+            })
+            .await;
+        let input_url = Url::parse(&server.url("/input")).expect("input fixture URL");
+        let chain_id_mock = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/rpc").body_contains("eth_chainId");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 0,
+                        "result": "0x2105",
+                    }));
+            })
+            .await;
+
+        let image_id = risc0_zkvm::Digest::from([7_u32; 8]);
+        let downloader = BoundlessStorageDownloader {
+            http: HttpDownloader::default(),
+            file: None,
+            gcs: None,
+            #[cfg(feature = "boundless-s3")]
+            s3: None,
+        };
+        let client = isolated_request_builder_test_client(
+            Url::parse(&server.url("/rpc")).expect("RPC fixture URL"),
+            downloader,
+        )
+        .await;
+        let shared_executor = client
+            .request_builder
+            .as_ref()
+            .expect("shared request builder")
+            .preflight_layer
+            .executor_cloned();
+        shared_executor
+            .insert_execution_data(
+                &image_id.to_string(),
+                &input,
+                SENTINEL_CYCLES,
+                sentinel_journal,
+            )
+            .await;
+        let pricing_rpc_baseline = chain_id_mock.hits_async().await;
+        let prover = BoundlessProver::new(BoundlessConfig::default());
+        let program = UploadedProgram {
+            image_id,
+            url: Url::parse(&server.url("/program")).expect("program fixture URL"),
+            refresh_at: SystemTime::now() + Duration::from_mins(1),
+        };
+
+        prover
+            .build_request(
+                &client,
+                quote,
+                b"not-an-executable-elf",
+                &program,
+                &sample_offer(),
+                0,
+                input_url,
+                Some(RequestId::u256(Address::repeat_byte(0x44), 1)),
+            )
+            .await
+            .expect("build request fixture");
+
+        let (cached, cached_journal) = shared_executor
+            .execute_program(&image_id.to_string(), b"not-an-executable-elf", &input)
+            .await
+            .expect("read shared executor sentinel");
+
+        IsolatedBuilderObservation {
+            input_downloads: input_mock.hits_async().await,
+            builder_chain_id_calls: chain_id_mock
+                .hits_async()
+                .await
+                .saturating_sub(pricing_rpc_baseline),
+            cached_cycles: cached.total_cycles,
+            cached_journal,
+            shared_skip_preflight: client
+                .request_builder
+                .as_ref()
+                .expect("shared request builder")
+                .skip_preflight,
+        }
+    }
+
     #[test]
     fn elf_type_maps_to_proof_type_and_stage() {
         assert_eq!(ElfType::Batch.proof_type_str(), "proposal");
@@ -7115,6 +7275,153 @@ mod tests {
         assert_eq!(context.evaluated_mcycles_count, Some(1_311));
         assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Fixed));
         assert!(!context.isolated_builder);
+    }
+
+    #[tokio::test]
+    async fn isolated_request_builder_estimated_build_avoids_shared_sdk_side_effects() {
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            Some(Ok(EstimatedRequestMetadata {
+                model_id: "risc0-zkgas-m2-v1".to_string(),
+                mcycles: 1_000,
+                journal: B256::repeat_byte(0x51).to_vec(),
+            })),
+            || execution_result(&Arc::new(AtomicUsize::new(0)), 9_999, vec![]),
+        )
+        .await
+        .expect("prepare estimated quote");
+
+        let observation = observe_request_builder_side_effects(&context).await;
+
+        assert_eq!(
+            observation,
+            IsolatedBuilderObservation {
+                input_downloads: 0,
+                // One chain-id read belongs to the normal offer layer. The shared builder makes a
+                // second one before requestor pricing; isolation must omit that second read.
+                builder_chain_id_calls: 1,
+                cached_cycles: 424_242,
+                cached_journal: b"shared-cache-sentinel".to_vec(),
+                shared_skip_preflight: Some(false),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_request_builder_has_fresh_executor_cache() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/rpc").body_contains("eth_chainId");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 0,
+                        "result": "0x2105",
+                    }));
+            })
+            .await;
+        let downloader = BoundlessStorageDownloader {
+            http: HttpDownloader::default(),
+            file: None,
+            gcs: None,
+            #[cfg(feature = "boundless-s3")]
+            s3: None,
+        };
+        let mut client = isolated_request_builder_test_client(
+            Url::parse(&server.url("/rpc")).expect("RPC fixture URL"),
+            downloader,
+        )
+        .await;
+        let shared_builder = client
+            .request_builder
+            .as_ref()
+            .expect("shared request builder");
+        let shared_executor = shared_builder.preflight_layer.executor_cloned();
+        let image_id = risc0_zkvm::Digest::from([8_u32; 8]);
+        let input = b"cache-isolation-input";
+        shared_executor
+            .insert_execution_data(
+                &image_id.to_string(),
+                input,
+                515_151,
+                b"shared-only-journal".to_vec(),
+            )
+            .await;
+
+        let isolated_builder = isolated_request_builder(&client).expect("isolate request builder");
+        let isolated_executor = isolated_builder.preflight_layer.executor_cloned();
+
+        assert_eq!(shared_builder.skip_preflight, Some(false));
+        assert_eq!(isolated_builder.skip_preflight, Some(true));
+        isolated_executor
+            .execute_program(&image_id.to_string(), b"not-an-executable-elf", input)
+            .await
+            .expect_err("fresh executor must not see the shared cache entry");
+        let (cached, journal) = shared_executor
+            .execute_program(&image_id.to_string(), b"not-an-executable-elf", input)
+            .await
+            .expect("shared executor retains its cache entry");
+        assert_eq!(cached.total_cycles, 515_151);
+        assert_eq!(journal, b"shared-only-journal");
+
+        client.request_builder = None;
+        let Err(error) = isolated_request_builder(&client) else {
+            panic!("missing request builder must be a configuration error");
+        };
+        assert!(matches!(error, RaikoError::InvalidRequestConfig(message)
+            if message == "Boundless request builder is not configured"));
+    }
+
+    #[tokio::test]
+    async fn isolated_request_builder_fallback_executes_once_then_avoids_sdk_side_effects() {
+        let execution_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = execution_calls.clone();
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated,
+            Some(Err(super::estimation::EstimateUnavailable::Domain)),
+            move || execution_result(&observed_calls, 1_000, B256::repeat_byte(0x52).to_vec()),
+        )
+        .await
+        .expect("prepare estimated fallback quote");
+
+        let observation = observe_request_builder_side_effects(&context).await;
+
+        assert_eq!(execution_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.input_downloads, 0);
+        assert_eq!(observation.builder_chain_id_calls, 1);
+        assert_eq!(observation.cached_cycles, 424_242);
+        assert_eq!(
+            observation.cached_journal,
+            b"shared-cache-sentinel".to_vec()
+        );
+        assert_eq!(observation.shared_skip_preflight, Some(false));
+    }
+
+    #[tokio::test]
+    async fn isolated_request_builder_evaluated_and_fixed_retain_shared_sdk_path() {
+        for sizing in [
+            crate::boundless_config::QuoteSizing::Evaluated,
+            crate::boundless_config::QuoteSizing::Fixed { mcycles: 1_000 },
+        ] {
+            let context =
+                prepare_quote_context_from_estimate(ElfType::Batch, &sizing, None, || {
+                    std::future::ready(Ok((1_000, B256::repeat_byte(0x53).to_vec())))
+                })
+                .await
+                .expect("prepare locally evaluated quote");
+
+            let observation = observe_request_builder_side_effects(&context).await;
+
+            assert_eq!(observation.input_downloads, 1);
+            assert_eq!(observation.builder_chain_id_calls, 2);
+            assert_eq!(observation.cached_cycles, 1_000 * MILLION_CYCLES);
+            assert_eq!(observation.cached_journal, context.journal);
+            assert_eq!(observation.shared_skip_preflight, Some(false));
+        }
     }
 
     #[test]

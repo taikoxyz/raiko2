@@ -53,11 +53,15 @@ pub use sp1_config::{
 use alloy::sol_types::SolValue;
 use alloy_primitives::Bytes;
 use alloy_primitives::{Address, B256};
+use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data,
-    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
+    instance::{
+        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
+        words_to_bytes_le,
+    },
     proof_carry_from_proof,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
@@ -404,6 +408,32 @@ pub(crate) fn validated_shasta_proposal_input(carry: &ProofCarryData) -> RaikoRe
         || RaikoError::InvalidRequestConfig("invalid shasta proof carry data".to_string()),
     )?;
     Ok(hash_shasta_subproof_input(carry))
+}
+
+pub(crate) fn validated_shasta_zk_aggregation_output(
+    image_id: [u32; 8],
+    proof_carry_data_vec: Vec<ProofCarryData>,
+    prover_address: Address,
+) -> RaikoResult<B256> {
+    let block_inputs = proof_carry_data_vec
+        .iter()
+        .map(validated_shasta_proposal_input)
+        .collect::<RaikoResult<Vec<_>>>()?;
+    let input = ShastaZkAggregationGuestInput {
+        image_id,
+        block_inputs,
+        proof_carry_data_vec,
+        prover_address,
+    };
+    let image_id_b256 = B256::from(words_to_bytes_le(&image_id));
+
+    aggregate_shasta_zk_with_verifier(&input, image_id_b256, |_index, _input| Ok(())).map_err(
+        |error| {
+            RaikoError::InvalidRequestConfig(format!(
+                "invalid shasta ZK aggregation input: {error:#}"
+            ))
+        },
+    )
 }
 
 pub(crate) fn expected_shasta_aggregate_input(

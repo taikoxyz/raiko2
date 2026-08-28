@@ -5,10 +5,10 @@ use raiko2_primitives::{
     RaikoError, RaikoResult,
     chain_spec::{ForkId, TaikoFork},
 };
-use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::{GuestInput, ShastaRisc0AggregationGuestInput};
 use serde::Deserialize;
 
-use crate::validated_shasta_proposal_input;
+use crate::{validated_shasta_proposal_input, validated_shasta_zk_aggregation_output};
 
 const EMBEDDED_MODEL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -119,6 +119,63 @@ pub(crate) fn estimate_proposal(
         Ok(mcycles) => mcycles,
         Err(unavailable) => return Ok(Err(unavailable)),
     };
+    Ok(Ok(EstimatedRequestMetadata {
+        model_id: model.0.model_id.clone(),
+        mcycles,
+        journal,
+    }))
+}
+
+pub(crate) fn estimate_aggregation(
+    encoded_input: &[u8],
+) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
+    let model = estimation_model().map_err(|error| {
+        RaikoError::InvalidRequestConfig(format!("invalid Boundless estimation model: {error}"))
+    })?;
+    estimate_aggregation_with_model(encoded_input, model)
+}
+
+fn estimate_aggregation_with_model(
+    encoded_input: &[u8],
+    model: &EstimationModel,
+) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
+    let input: ShastaRisc0AggregationGuestInput =
+        bincode::deserialize(encoded_input).map_err(|error| {
+            RaikoError::InvalidRequestConfig(format!(
+                "failed to decode Boundless aggregation input: {error}"
+            ))
+        })?;
+    if input.receipts.len() != input.proof_carry_data_vec.len() {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "aggregation receipt/proof carry count mismatch: {} vs {}",
+            input.receipts.len(),
+            input.proof_carry_data_vec.len()
+        )));
+    }
+
+    let Ok(child_count) = u32::try_from(input.receipts.len()) else {
+        return Ok(Err(EstimateUnavailable::Numeric));
+    };
+    let journal = validated_shasta_zk_aggregation_output(
+        input.image_id,
+        input.proof_carry_data_vec,
+        input.prover_address,
+    )?
+    .as_slice()
+    .to_vec();
+
+    let aggregation = &model.0.aggregation;
+    if !aggregation.calibrated_counts.contains(&child_count) {
+        return Ok(Err(EstimateUnavailable::Domain));
+    }
+    let Some(mcycles) = aggregation
+        .per_child_mcycles
+        .checked_mul(u64::from(child_count))
+        .and_then(|mcycles| u32::try_from(mcycles).ok())
+    else {
+        return Ok(Err(EstimateUnavailable::Numeric));
+    };
+
     Ok(Ok(EstimatedRequestMetadata {
         model_id: model.0.model_id.clone(),
         mcycles,
@@ -619,20 +676,28 @@ struct AggregationMeasurement {
 mod tests {
     use std::{collections::HashSet, str::FromStr};
 
-    use alloy_primitives::U256;
+    use alloy_primitives::{Address, B256, U256, Uint, address, b256};
+    use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
     use raiko2_primitives::{
         ChainSpec, StatelessInput,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
-    use raiko2_primitives_shasta::GuestInput;
+    use raiko2_primitives_shasta::{
+        GuestInput, ShastaRisc0AggregationGuestInput, ShastaZkAggregationGuestInput,
+        instance::words_to_bytes_le,
+    };
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+    use raiko2_protocol_shasta::shasta::{
+        Checkpoint, ProofCarryData, ShastaTransitionInput, TransitionInputData,
+    };
     use serde::Deserialize;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
 
     use super::{
-        ActiveTaikoForkRank, EstimateUnavailable, ScaledCoefficients, estimate_mcycles,
-        estimate_proposal, supported_active_taiko_fork,
+        ActiveTaikoForkRank, EstimateUnavailable, ScaledCoefficients, estimate_aggregation,
+        estimate_aggregation_with_model, estimate_mcycles, estimate_proposal,
+        supported_active_taiko_fork,
     };
 
     fn proposal_input(network: &str, block_count: usize, total_zkgas: u64) -> GuestInput {
@@ -667,6 +732,104 @@ mod tests {
         input: &GuestInput,
     ) -> Result<super::EstimatedRequestMetadata, EstimateUnavailable> {
         estimate_proposal(input, 20).expect("structurally valid proposal input")
+    }
+
+    fn aggregation_carries() -> Vec<ProofCarryData> {
+        let first_hash = b256!("1111111111111111111111111111111111111111111111111111111111111111");
+        let first_checkpoint_hash =
+            b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        vec![
+            ProofCarryData {
+                chain_id: 167_000,
+                verifier: address!("00000000000000000000000000000000000000aa"),
+                transition_input: TransitionInputData {
+                    proposal_id: 1,
+                    proposal_hash: first_hash,
+                    parent_proposal_hash: B256::ZERO,
+                    parent_block_hash: b256!(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ),
+                    actual_prover: address!("00000000000000000000000000000000000000bb"),
+                    transition: ShastaTransitionInput {
+                        proposer: Address::ZERO,
+                        timestamp: 101,
+                    },
+                    checkpoint: Checkpoint {
+                        blockNumber: Uint::from(10_u64),
+                        blockHash: first_checkpoint_hash,
+                        stateRoot: b256!(
+                            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        ),
+                    },
+                },
+            },
+            ProofCarryData {
+                chain_id: 167_000,
+                verifier: address!("00000000000000000000000000000000000000aa"),
+                transition_input: TransitionInputData {
+                    proposal_id: 2,
+                    proposal_hash: b256!(
+                        "2222222222222222222222222222222222222222222222222222222222222222"
+                    ),
+                    parent_proposal_hash: first_hash,
+                    parent_block_hash: first_checkpoint_hash,
+                    actual_prover: address!("00000000000000000000000000000000000000bb"),
+                    transition: ShastaTransitionInput {
+                        proposer: Address::ZERO,
+                        timestamp: 102,
+                    },
+                    checkpoint: Checkpoint {
+                        blockNumber: Uint::from(11_u64),
+                        blockHash: b256!(
+                            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                        ),
+                        stateRoot: b256!(
+                            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                        ),
+                    },
+                },
+            },
+        ]
+    }
+
+    fn encoded_aggregation(
+        carries: Vec<ProofCarryData>,
+        receipts: Vec<Vec<u8>>,
+        image_id: [u32; 8],
+        prover_address: Address,
+    ) -> Vec<u8> {
+        bincode::serialize(&ShastaRisc0AggregationGuestInput {
+            image_id,
+            proof_carry_data_vec: carries,
+            receipts,
+            prover_address,
+        })
+        .expect("encode aggregation fixture")
+    }
+
+    fn aggregation_model(
+        calibrated_counts: &[u32],
+        per_child_mcycles: u64,
+    ) -> super::EstimationModel {
+        let mut artifact = valid_artifact();
+        artifact["aggregation"]["per_child_mcycles"] = json!(per_child_mcycles);
+        artifact["aggregation"]["provenance"]["image_id"] =
+            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
+        artifact["aggregation"]["measurements"] = Value::Array(
+            calibrated_counts
+                .iter()
+                .map(|&child_count| {
+                    json!({
+                        "child_count": child_count,
+                        "actual_mcycles": 1,
+                        "predicted_mcycles": 1,
+                        "enabled": true
+                    })
+                })
+                .collect(),
+        );
+        artifact["aggregation"]["calibrated_counts"] = json!(calibrated_counts);
+        parse(artifact).expect("valid calibrated aggregation model")
     }
 
     fn valid_artifact() -> Value {
@@ -976,6 +1139,187 @@ mod tests {
 
         assert_eq!(
             estimate_mcycles(&coefficients, 1, 1),
+            Err(EstimateUnavailable::Numeric)
+        );
+    }
+
+    #[test]
+    fn aggregation_malformed_bincode_is_a_direct_error() {
+        assert!(estimate_aggregation(&[0xff, 0x00]).is_err());
+    }
+
+    #[test]
+    fn aggregation_zero_children_is_a_direct_error() {
+        let encoded = encoded_aggregation(vec![], vec![], [0; 8], Address::ZERO);
+
+        assert!(estimate_aggregation(&encoded).is_err());
+    }
+
+    #[test]
+    fn aggregation_receipt_carry_count_mismatch_is_a_direct_error() {
+        let encoded = encoded_aggregation(
+            vec![aggregation_carries().remove(0)],
+            vec![],
+            [0; 8],
+            Address::ZERO,
+        );
+
+        assert!(estimate_aggregation(&encoded).is_err());
+    }
+
+    #[test]
+    fn aggregation_nonzero_prover_address_is_a_direct_error() {
+        let encoded = encoded_aggregation(
+            vec![aggregation_carries().remove(0)],
+            vec![vec![0xff]],
+            [0; 8],
+            address!("0000000000000000000000000000000000000001"),
+        );
+
+        assert!(estimate_aggregation(&encoded).is_err());
+    }
+
+    #[test]
+    fn aggregation_invalid_uint48_is_a_direct_error_without_panicking() {
+        let mut invalid_timestamp = aggregation_carries().remove(0);
+        invalid_timestamp.transition_input.transition.timestamp = 1_u64 << 48;
+        let mut invalid_proposal_id = aggregation_carries().remove(0);
+        invalid_proposal_id.transition_input.proposal_id = 1_u64 << 48;
+
+        for carry in [invalid_timestamp, invalid_proposal_id] {
+            let encoded = encoded_aggregation(vec![carry], vec![vec![0xff]], [0; 8], Address::ZERO);
+            let result = std::panic::catch_unwind(|| estimate_aggregation(&encoded));
+
+            assert!(result.is_ok(), "invalid uint48 must not panic");
+            assert!(result.expect("checked above").is_err());
+        }
+    }
+
+    #[test]
+    fn aggregation_invalid_carry_sequence_is_a_direct_error() {
+        let mut carries = aggregation_carries();
+        carries[1].transition_input.proposal_id = 3;
+        let encoded =
+            encoded_aggregation(carries, vec![vec![0xff], vec![0xfe]], [0; 8], Address::ZERO);
+
+        assert!(estimate_aggregation(&encoded).is_err());
+    }
+
+    #[test]
+    fn aggregation_invalid_carry_linkage_is_a_direct_error() {
+        let mut carries = aggregation_carries();
+        carries[1].transition_input.parent_proposal_hash = B256::repeat_byte(0x77);
+        let encoded =
+            encoded_aggregation(carries, vec![vec![0xff], vec![0xfe]], [0; 8], Address::ZERO);
+
+        assert!(estimate_aggregation(&encoded).is_err());
+    }
+
+    #[test]
+    fn aggregation_valid_input_matches_shared_output_with_little_endian_image_words() {
+        let carries = aggregation_carries();
+        let image_id = [
+            0x0102_0304,
+            0x1112_1314,
+            0x2122_2324,
+            0x3132_3334,
+            0x4142_4344,
+            0x5152_5354,
+            0x6162_6364,
+            0x7172_7374,
+        ];
+        let block_inputs = carries.iter().map(hash_shasta_subproof_input).collect();
+        let zk_input = ShastaZkAggregationGuestInput {
+            image_id,
+            block_inputs,
+            proof_carry_data_vec: carries.clone(),
+            prover_address: Address::ZERO,
+        };
+        let image_id_b256 = B256::from(words_to_bytes_le(&image_id));
+        let expected =
+            aggregate_shasta_zk_with_verifier(&zk_input, image_id_b256, |_index, _input| Ok(()))
+                .expect("shared aggregation output");
+        let encoded = encoded_aggregation(
+            carries,
+            // Deliberately not valid receipt encodings: journal derivation must not inspect them.
+            vec![vec![0xff], vec![0xfe]],
+            image_id,
+            Address::ZERO,
+        );
+        let model = aggregation_model(&[2], 180);
+
+        let estimate = estimate_aggregation_with_model(&encoded, &model)
+            .expect("structurally valid aggregation")
+            .expect("calibrated aggregation count");
+
+        assert_eq!(estimate.journal, expected.as_slice());
+        assert_eq!(estimate.journal.len(), 32);
+        assert_eq!(estimate.mcycles, 360);
+        assert_eq!(estimate.model_id, "risc0-zkgas-m2-v1");
+    }
+
+    #[test]
+    fn aggregation_embedded_empty_calibrated_set_fails_closed() {
+        let encoded = encoded_aggregation(
+            vec![aggregation_carries().remove(0)],
+            vec![vec![0xff]],
+            [0; 8],
+            Address::ZERO,
+        );
+
+        assert_eq!(
+            estimate_aggregation(&encoded).expect("structurally valid aggregation"),
+            Err(EstimateUnavailable::Domain)
+        );
+    }
+
+    #[test]
+    fn aggregation_uncalibrated_count_is_unavailable() {
+        let encoded = encoded_aggregation(
+            aggregation_carries(),
+            vec![vec![0xff], vec![0xfe]],
+            [0; 8],
+            Address::ZERO,
+        );
+        let model = aggregation_model(&[1], 180);
+
+        assert_eq!(
+            estimate_aggregation_with_model(&encoded, &model)
+                .expect("structurally valid aggregation"),
+            Err(EstimateUnavailable::Domain)
+        );
+    }
+
+    #[test]
+    fn aggregation_checked_multiply_overflow_is_unavailable() {
+        let encoded = encoded_aggregation(
+            aggregation_carries(),
+            vec![vec![0xff], vec![0xfe]],
+            [0; 8],
+            Address::ZERO,
+        );
+        let model = aggregation_model(&[2], u64::MAX);
+
+        assert_eq!(
+            estimate_aggregation_with_model(&encoded, &model)
+                .expect("structurally valid aggregation"),
+            Err(EstimateUnavailable::Numeric)
+        );
+    }
+
+    #[test]
+    fn aggregation_final_u32_conversion_overflow_is_unavailable() {
+        let encoded = encoded_aggregation(
+            aggregation_carries(),
+            vec![vec![0xff], vec![0xfe]],
+            [0; 8],
+            Address::ZERO,
+        );
+        let model = aggregation_model(&[2], u64::from(u32::MAX));
+
+        assert_eq!(
+            estimate_aggregation_with_model(&encoded, &model)
+                .expect("structurally valid aggregation"),
             Err(EstimateUnavailable::Numeric)
         );
     }

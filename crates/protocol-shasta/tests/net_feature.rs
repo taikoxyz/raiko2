@@ -6,7 +6,7 @@
 use alloy_primitives::{Bytes, U256, b256};
 use raiko2_protocol_shasta::shasta::constants::{
     DERIVATION_SOURCE_MAX_BLOCKS, TAIKO_DEVNET_CHAIN_ID, TAIKO_HOODI_CHAIN_ID,
-    TAIKO_MAINNET_CHAIN_ID, TAIKO_MASAYA_CHAIN_ID, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
+    TAIKO_MAINNET_CHAIN_ID, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
     derivation_source_max_blocks_for_chain_timestamp, max_anchor_offset_for_chain,
     min_base_fee_for_chain, shasta_fork_condition_for_chain, shasta_fork_timestamp_for_chain,
     timestamp_max_offset_for_chain,
@@ -54,10 +54,6 @@ fn manifest_codec_uses_taiko_client_default_manifest() {
 fn shasta_chain_constants_are_chain_aware() {
     assert_eq!(
         shasta_fork_timestamp_for_chain(TAIKO_DEVNET_CHAIN_ID).expect("devnet timestamp"),
-        0
-    );
-    assert_eq!(
-        shasta_fork_timestamp_for_chain(TAIKO_MASAYA_CHAIN_ID).expect("masaya timestamp"),
         0
     );
     assert_eq!(max_anchor_offset_for_chain(TAIKO_MAINNET_CHAIN_ID), 512);

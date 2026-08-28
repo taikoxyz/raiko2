@@ -178,7 +178,8 @@ Commit a compact, reviewable artifact at
 
 - model ID `risc0-zkgas-m2-v1` and the originating experiment model ID;
 - proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`;
-- RISC0 version `3.0.5`, `execution_po2 = 20`, source revision, ELF hash, and input-row hash;
+- RISC0 version `3.0.5`, `execution_po2 = 20`, source revision, ELF hash, raw input-row hash,
+  and validation-fixture hash;
 - the decimal and scaled-integer coefficients;
 - Hoodi fit/calibration and Mainnet evaluation counts and diagnostics;
 - the fact that Mainnet influenced the M2 production choice and is not an untouched holdout;
@@ -190,10 +191,12 @@ product of both networks' extrema. The artifact therefore records separate, conj
 
 ```text
 taiko_hoodi:
+  max_supported_fork: UNZEN
   block_count: 155..=192
   total_zkgas: 369_558_586..=459_162_040
 
 taiko_mainnet:
+  max_supported_fork: UNZEN
   block_count: 184..=192
   total_zkgas: 216_314_230..=310_638_954
 
@@ -206,13 +209,30 @@ M2 estimate exceeds the accepted error budget. Mainnet inputs above `310_638_954
 local execution until additional measurements justify a contiguous domain update. Bounds from one
 chain never admit a feature combination from the other chain.
 
-Before estimating, the request path requires Unzen to be active for every input block, rejects any
-later active Taiko fork not covered by the artifact, and checks the execution configuration and
-operating envelope. An execution-configuration, fork, zkGas-schedule, or feature-envelope mismatch
-emits a warning containing the model ID and falls back to local execution. It deliberately does not
-compare the running proposal image ID, ELF hash, source revision, or RISC0 SDK version with the
-artifact. Compatibility of those release identities is reviewed when the deployment selects
-`estimated`.
+Before estimating, the request path requires Unzen to be active for every input block, reads the
+chain domain's `max_supported_fork` from the artifact, rejects an input whose effective Taiko fork
+is later, and checks the execution configuration and operating envelope. Deserialize the field
+through the repository's existing `ForkId` encoding and require its Taiko variant; the
+supported-fork ceiling is not duplicated as a Rust model constant. An execution-configuration, fork,
+zkGas-schedule, or feature-envelope mismatch emits a warning containing the model ID and falls back
+to local execution. It deliberately does not compare the running proposal image ID, ELF hash,
+source revision, or RISC0 SDK version with the artifact. Compatibility of those release identities
+is reviewed when the deployment selects `estimated`.
+
+### Validation Fixture
+
+Commit `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1-validation.jsonl` with the 40 successful
+Hoodi calibration rows and 20 successful Mainnet evaluation rows. Each compact row contains
+`network`, `split`, `proposal_id`, `block_count`, `total_zkgas`, and `actual_mcycles`; the Mainnet
+rows use `split = "evaluation"` because they are no longer described as an untouched holdout. This
+fixture is validation evidence, not a second runtime source for coefficients or domains. The model
+artifact records its SHA-256 and the expected split counts.
+
+Regression tests load the committed fixture and model artifact together, require the fixture hash,
+schema, unique `(network, proposal_id)` keys, and exact 40/20 split counts to match, then recompute
+the documented continuous-model and production-integer diagnostics. Tests must not depend on the
+original machine-local collection directory. The raw cohort remains identified by its independent
+input-row hash for traceability.
 
 ## Aggregation Cycle Estimate
 
@@ -309,8 +329,11 @@ Focused regression coverage must establish:
   underquote, and the single 21.94-percent overquote;
 - production-integer regression tests assert 19 Mainnet underquotes, 5.8422-percent MAPE, a maximum
   5.7234-percent underquote, and the single 21.9679-percent overquote;
-- model artifact schema, Unzen activation, supported chain, execution configuration, and observed
-  feature-envelope guards select either estimate or local fallback correctly;
+- model artifact schema, Unzen activation, supported chain, artifact-defined maximum Taiko fork,
+  execution configuration, and observed feature-envelope guards select either estimate or local
+  fallback correctly;
+- the committed validation fixture has its recorded hash and exact 40-row Hoodi calibration and
+  20-row Mainnet evaluation splits, and both sets' documented diagnostics are reproducible from it;
 - proposal and aggregation estimation do not compare the running ELF hash, image ID, source
   revision, or RISC0 SDK version with artifact provenance;
 - the embedded JSON is the only source of model parameters, and malformed or internally

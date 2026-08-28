@@ -131,6 +131,18 @@ holdout gates, and an explicit shadow-mode recommendation. Exit 0 means every se
 passed; exit 4 means retain local pre-execution. Passing is evidence for a later shadow experiment,
 not permission to copy a coefficient directly into production.
 
+## Committed validation fixture
+
+`models/risc0-zkgas-m2-v1-validation.jsonl` is the compact, reviewable projection used to reproduce
+the production-estimator diagnostics. It contains all 40 successful Hoodi calibration rows and all
+20 successful Mainnet evaluation rows, with only the network, split, proposal ID, block count,
+total zkGas, and actual mcycles retained. Mainnet rows are labeled `evaluation` rather than
+`holdout` because Mainnet influenced the production model choice.
+
+The production model artifact records this file's SHA-256 and expected split counts. Regression
+tests validate those identities before recomputing diagnostics; the fixture is evidence and does
+not replace the model artifact as the runtime source of coefficients or operating domains.
+
 ## Unit tests
 
 Tests use fixtures and mocked subprocesses; they do not contact RPC endpoints or run RISC0:

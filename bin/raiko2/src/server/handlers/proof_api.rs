@@ -545,7 +545,7 @@ async fn build_external_aggregate_submission(
         sp1_context,
     )?;
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
-    validate_external_aggregate_proofs(route.pipeline_key(), &req.proofs)
+    validate_external_aggregate_proofs(route.pipeline_key(), pair.l2_spec.chain_id, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
     let request_fingerprint = external_aggregate_request_fingerprint(
         state.runtime.environment(),
@@ -3210,6 +3210,68 @@ mod tests {
             .expect_err("mismatched aggregate ids must be rejected");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert!(error.message.contains("match proofs length"));
+    }
+
+    #[tokio::test]
+    async fn external_aggregate_admission_rejects_masaya_carry_for_hoodi() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "aggregate-carry-chain-mismatch",
+        ))?);
+        let mut config = Config::default();
+        config.prover.sgx.enabled = true;
+        config.prover.sgx.base_url = "http://sgx.example".to_string();
+        let state = AppState::from_parts(
+            Arc::new(config),
+            Arc::new(StaticPipelineFactory::default()),
+            runtime,
+        );
+
+        let hoodi_carry = raiko2_protocol_shasta::shasta::ProofCarryData {
+            chain_id: 167_013,
+            ..Default::default()
+        };
+        let masaya_carry = raiko2_protocol_shasta::shasta::ProofCarryData {
+            chain_id: 167_011,
+            ..Default::default()
+        };
+        let proof_with_carry = |carry| Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(alloy_primitives::B256::ZERO),
+            extra_data: Some(
+                raiko2_primitives_shasta::encode_proof_carry_data(carry)
+                    .expect("encode proof carry"),
+            ),
+            ..Proof::default()
+        };
+        let request = AggregateProofRequest {
+            aggregation_ids: Vec::new(),
+            proofs: vec![
+                proof_with_carry(&hoodi_carry),
+                proof_with_carry(&masaya_carry),
+            ],
+            proof_type: BatchProofType::Sgx,
+            network: Some("taiko_hoodi".to_string()),
+            l1_network: Some("hoodi".to_string()),
+            graffiti: None,
+            prover: None,
+            blob_proof_type: None,
+            prover_args: PublicProverArgs::default(),
+        };
+
+        let error = match build_external_aggregate_submission(&state, request).await {
+            Ok(_) => panic!("Masaya carry must not be admitted for the taiko_hoodi pair"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .message
+                .contains("proof 1 proof carry chain_id mismatch: expected 167013, got 167011"),
+            "unexpected admission error: {}",
+            error.message
+        );
+        Ok(())
     }
     use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};

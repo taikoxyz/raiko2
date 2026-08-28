@@ -1,7 +1,14 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use raiko2_primitives::{
+    RaikoError, RaikoResult,
+    chain_spec::{ForkId, TaikoFork},
+};
+use raiko2_primitives_shasta::GuestInput;
 use serde::Deserialize;
+
+use crate::validated_shasta_proposal_input;
 
 const EMBEDDED_MODEL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -19,8 +26,184 @@ pub(crate) fn estimation_model() -> Result<&'static EstimationModel, String> {
         .map_err(Clone::clone)
 }
 
+/// Validate the embedded quote-estimation model artifact.
+///
+/// # Errors
+///
+/// Returns an error when the embedded JSON is malformed, unsupported, or internally inconsistent.
 pub fn validate_estimation_model() -> Result<(), String> {
     estimation_model().map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EstimateUnavailable {
+    ExecutionPo2,
+    Fork,
+    Chain,
+    Domain,
+    ZeroZkGas,
+    Numeric,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EstimatedRequestMetadata {
+    pub model_id: String,
+    pub mcycles: u32,
+    pub journal: Vec<u8>,
+}
+
+pub(crate) fn estimate_proposal(
+    input: &GuestInput,
+    execution_po2: u32,
+) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
+    let first_witness = input.witnesses.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot estimate Boundless proposal without witnesses".to_string(),
+        )
+    })?;
+    let journal = validated_shasta_proposal_input(&input.proof_carry_data)?
+        .as_slice()
+        .to_vec();
+    let model = estimation_model().map_err(|error| {
+        RaikoError::InvalidRequestConfig(format!("invalid Boundless estimation model: {error}"))
+    })?;
+    let proposal = &model.0.proposal;
+
+    if execution_po2 != proposal.provenance.execution_po2 {
+        return Ok(Err(EstimateUnavailable::ExecutionPo2));
+    }
+    if !proposal_estimation_available(input) {
+        return Ok(Err(EstimateUnavailable::Fork));
+    }
+
+    let network = first_witness.chain_spec.name.as_str();
+    if input
+        .witnesses
+        .iter()
+        .any(|witness| witness.chain_spec.name != network)
+    {
+        return Ok(Err(EstimateUnavailable::Chain));
+    }
+    let Some(domain) = proposal
+        .domains
+        .iter()
+        .find(|domain| domain.network == network)
+    else {
+        return Ok(Err(EstimateUnavailable::Chain));
+    };
+
+    let block_count =
+        u128::try_from(input.witnesses.len()).map_err(|_| EstimateUnavailable::Numeric);
+    let block_count = match block_count {
+        Ok(block_count) => block_count,
+        Err(unavailable) => return Ok(Err(unavailable)),
+    };
+    let mut total_zkgas = 0_u128;
+    for witness in &input.witnesses {
+        let Ok(difficulty) = u128::try_from(witness.block.header.difficulty) else {
+            return Ok(Err(EstimateUnavailable::Numeric));
+        };
+        total_zkgas = match total_zkgas.checked_add(difficulty) {
+            Some(total_zkgas) => total_zkgas,
+            None => return Ok(Err(EstimateUnavailable::Numeric)),
+        };
+    }
+    if total_zkgas == 0 {
+        return Ok(Err(EstimateUnavailable::ZeroZkGas));
+    }
+    if !domain.block_count.contains(block_count) || !domain.total_zkgas.contains(total_zkgas) {
+        return Ok(Err(EstimateUnavailable::Domain));
+    }
+
+    let mcycles = match estimate_mcycles(&proposal.coefficients.scaled, total_zkgas, block_count) {
+        Ok(mcycles) => mcycles,
+        Err(unavailable) => return Ok(Err(unavailable)),
+    };
+    Ok(Ok(EstimatedRequestMetadata {
+        model_id: model.0.model_id.clone(),
+        mcycles,
+        journal,
+    }))
+}
+
+fn estimate_mcycles(
+    coefficients: &ScaledCoefficients,
+    total_zkgas: u128,
+    block_count: u128,
+) -> Result<u32, EstimateUnavailable> {
+    let scale = u128::from(coefficients.scale);
+    if scale == 0 {
+        return Err(EstimateUnavailable::Numeric);
+    }
+    let zkgas_term = total_zkgas
+        .checked_mul(u128::from(coefficients.total_zkgas))
+        .ok_or(EstimateUnavailable::Numeric)?;
+    let block_count_term = block_count
+        .checked_mul(u128::from(coefficients.block_count))
+        .ok_or(EstimateUnavailable::Numeric)?;
+    let numerator = u128::from(coefficients.intercept)
+        .checked_add(zkgas_term)
+        .and_then(|value| value.checked_add(block_count_term))
+        .ok_or(EstimateUnavailable::Numeric)?;
+    let mcycles = (numerator / scale)
+        .checked_add(u128::from(!numerator.is_multiple_of(scale)))
+        .ok_or(EstimateUnavailable::Numeric)?;
+    let mcycles = u32::try_from(mcycles).map_err(|_| EstimateUnavailable::Numeric)?;
+    if mcycles == 0 {
+        return Err(EstimateUnavailable::Numeric);
+    }
+    Ok(mcycles)
+}
+
+impl InclusiveRange {
+    fn contains(&self, value: u128) -> bool {
+        (u128::from(self.minimum)..=u128::from(self.maximum)).contains(&value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ActiveTaikoForkRank {
+    Hekla,
+    Ontake,
+    Pacaya,
+    Shasta,
+    Unzen,
+    #[cfg(test)]
+    Future,
+}
+
+const fn active_taiko_fork_rank(fork: TaikoFork) -> ActiveTaikoForkRank {
+    match fork {
+        TaikoFork::Hekla => ActiveTaikoForkRank::Hekla,
+        TaikoFork::Ontake => ActiveTaikoForkRank::Ontake,
+        TaikoFork::Pacaya => ActiveTaikoForkRank::Pacaya,
+        TaikoFork::Shasta => ActiveTaikoForkRank::Shasta,
+        TaikoFork::Unzen => ActiveTaikoForkRank::Unzen,
+    }
+}
+
+const fn supported_active_taiko_fork(highest: Option<ActiveTaikoForkRank>) -> bool {
+    matches!(highest, Some(ActiveTaikoForkRank::Unzen))
+}
+
+fn proposal_estimation_available(input: &GuestInput) -> bool {
+    input.witnesses.iter().all(|witness| {
+        let highest = witness
+            .chain_spec
+            .hard_forks
+            .iter()
+            .filter_map(|(fork_id, condition)| match fork_id {
+                ForkId::Taiko(fork)
+                    if condition
+                        .active(witness.block.header.number, witness.block.header.timestamp) =>
+                {
+                    Some(active_taiko_fork_rank(*fork))
+                }
+                ForkId::Standard(_) | ForkId::Taiko(_) => None,
+            })
+            .max();
+        supported_active_taiko_fork(highest)
+    })
 }
 
 fn parse_model(input: &str) -> Result<EstimationModel, String> {
@@ -434,7 +617,53 @@ struct AggregationMeasurement {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::U256;
+    use raiko2_primitives::{
+        ChainSpec, StatelessInput,
+        chain_spec::{ForkCondition, ForkId, TaikoFork},
+    };
+    use raiko2_primitives_shasta::GuestInput;
+    use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use serde_json::{Value, json};
+
+    use super::{
+        ActiveTaikoForkRank, EstimateUnavailable, ScaledCoefficients, estimate_mcycles,
+        estimate_proposal, supported_active_taiko_fork,
+    };
+
+    fn proposal_input(network: &str, block_count: usize, total_zkgas: u64) -> GuestInput {
+        let mut chain_spec = ChainSpec {
+            name: network.to_string(),
+            ..Default::default()
+        };
+        chain_spec
+            .hard_forks
+            .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Block(0));
+
+        let mut input = GuestInput::default();
+        input.witnesses = (0..block_count)
+            .map(|index| {
+                let mut witness = StatelessInput {
+                    chain_spec: chain_spec.clone(),
+                    ..Default::default()
+                };
+                witness.block.header.number = u64::try_from(index).expect("test block number");
+                witness.block.header.timestamp =
+                    u64::try_from(index).expect("test block timestamp");
+                witness
+            })
+            .collect();
+        if let Some(first) = input.witnesses.first_mut() {
+            first.block.header.difficulty = U256::from(total_zkgas);
+        }
+        input
+    }
+
+    fn proposal_result(
+        input: &GuestInput,
+    ) -> Result<super::EstimatedRequestMetadata, EstimateUnavailable> {
+        estimate_proposal(input, 20).expect("structurally valid proposal input")
+    }
 
     fn valid_artifact() -> Value {
         json!({
@@ -579,5 +808,171 @@ mod tests {
     #[test]
     fn model_embedded_artifact_validates() {
         super::validate_estimation_model().expect("embedded artifact validates");
+    }
+
+    #[test]
+    fn proposal_empty_witnesses_are_a_direct_error() {
+        assert!(estimate_proposal(&GuestInput::default(), 20).is_err());
+    }
+
+    #[test]
+    fn proposal_malformed_carry_is_a_direct_error_before_hashing() {
+        let mut input = proposal_input("taiko_hoodi", 155, 369_558_586);
+        input.proof_carry_data.transition_input.transition.timestamp = 1_u64 << 48;
+
+        assert!(estimate_proposal(&input, 20).is_err());
+    }
+
+    #[test]
+    fn proposal_valid_carry_produces_the_exact_subproof_journal() {
+        let input = proposal_input("taiko_hoodi", 155, 369_558_586);
+        let expected = hash_shasta_subproof_input(&input.proof_carry_data);
+
+        let estimate = proposal_result(&input).expect("proposal estimate available");
+
+        assert_eq!(estimate.journal.len(), 32);
+        assert_eq!(estimate.journal, expected.as_slice());
+        assert_eq!(estimate.model_id, "risc0-zkgas-m2-v1");
+    }
+
+    #[test]
+    fn proposal_hoodi_domain_accepts_its_lower_and_upper_boundaries() {
+        let lower = proposal_input("taiko_hoodi", 155, 369_558_586);
+        let upper = proposal_input("taiko_hoodi", 192, 459_162_040);
+
+        assert_eq!(proposal_result(&lower).unwrap().mcycles, 2_237);
+        assert!(proposal_result(&upper).is_ok());
+    }
+
+    #[test]
+    fn proposal_mainnet_domain_accepts_its_lower_and_upper_boundaries() {
+        let lower = proposal_input("taiko_mainnet", 184, 216_314_230);
+        let upper = proposal_input("taiko_mainnet", 192, 310_638_954);
+
+        assert!(proposal_result(&lower).is_ok());
+        assert!(proposal_result(&upper).is_ok());
+    }
+
+    #[test]
+    fn proposal_chain_domains_do_not_admit_the_other_chain_rectangle() {
+        let hoodi_with_mainnet_zkgas = proposal_input("taiko_hoodi", 155, 216_314_230);
+        let mainnet_with_hoodi_zkgas = proposal_input("taiko_mainnet", 184, 369_558_586);
+
+        assert_eq!(
+            proposal_result(&hoodi_with_mainnet_zkgas),
+            Err(EstimateUnavailable::Domain)
+        );
+        assert_eq!(
+            proposal_result(&mainnet_with_hoodi_zkgas),
+            Err(EstimateUnavailable::Domain)
+        );
+    }
+
+    #[test]
+    fn proposal_mainnet_isolated_high_zkgas_sample_is_unavailable() {
+        let input = proposal_input("taiko_mainnet", 192, 562_107_601);
+
+        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::Domain));
+    }
+
+    #[test]
+    fn proposal_unknown_or_inconsistent_chain_is_unavailable() {
+        let unknown = proposal_input("taiko_unknown", 184, 216_314_230);
+        let mut inconsistent = proposal_input("taiko_mainnet", 184, 216_314_230);
+        inconsistent.witnesses[183].chain_spec.name = "taiko_hoodi".to_string();
+
+        assert_eq!(proposal_result(&unknown), Err(EstimateUnavailable::Chain));
+        assert_eq!(
+            proposal_result(&inconsistent),
+            Err(EstimateUnavailable::Chain)
+        );
+    }
+
+    #[test]
+    fn proposal_execution_po2_must_match_the_artifact() {
+        let input = proposal_input("taiko_hoodi", 155, 369_558_586);
+
+        assert_eq!(
+            estimate_proposal(&input, 19).unwrap(),
+            Err(EstimateUnavailable::ExecutionPo2)
+        );
+    }
+
+    #[test]
+    fn proposal_every_witness_must_have_unzen_as_the_highest_active_taiko_fork() {
+        let mut input = proposal_input("taiko_hoodi", 155, 369_558_586);
+        let last = input.witnesses.last_mut().unwrap();
+        last.chain_spec.hard_forks.clear();
+        last.chain_spec
+            .hard_forks
+            .insert(ForkId::Taiko(TaikoFork::Shasta), ForkCondition::Block(0));
+
+        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::Fork));
+    }
+
+    #[test]
+    fn proposal_ordered_fork_classifier_rejects_a_synthetic_post_unzen_rank() {
+        assert!(supported_active_taiko_fork(Some(
+            ActiveTaikoForkRank::Unzen
+        )));
+        assert!(!supported_active_taiko_fork(Some(
+            ActiveTaikoForkRank::Future
+        )));
+    }
+
+    #[test]
+    fn proposal_zero_zkgas_is_unavailable() {
+        let input = proposal_input("taiko_hoodi", 155, 0);
+
+        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::ZeroZkGas));
+    }
+
+    #[test]
+    fn proposal_zkgas_checked_add_overflow_is_unavailable() {
+        let mut input = proposal_input("taiko_hoodi", 155, 0);
+        input.witnesses[0].block.header.difficulty = U256::from(u128::MAX);
+        input.witnesses[1].block.header.difficulty = U256::from(1_u64);
+
+        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::Numeric));
+    }
+
+    #[test]
+    fn proposal_formula_checked_add_and_multiply_overflow_are_unavailable() {
+        let add_overflow = ScaledCoefficients {
+            scale: 1,
+            intercept: 1,
+            total_zkgas: 1,
+            block_count: 1,
+        };
+        let multiply_overflow = ScaledCoefficients {
+            scale: 1,
+            intercept: 1,
+            total_zkgas: u64::MAX,
+            block_count: 1,
+        };
+
+        assert_eq!(
+            estimate_mcycles(&add_overflow, u128::MAX, 1),
+            Err(EstimateUnavailable::Numeric)
+        );
+        assert_eq!(
+            estimate_mcycles(&multiply_overflow, u128::MAX, 1),
+            Err(EstimateUnavailable::Numeric)
+        );
+    }
+
+    #[test]
+    fn proposal_formula_final_u32_conversion_overflow_is_unavailable() {
+        let coefficients = ScaledCoefficients {
+            scale: 1,
+            intercept: u64::from(u32::MAX) + 1,
+            total_zkgas: 1,
+            block_count: 1,
+        };
+
+        assert_eq!(
+            estimate_mcycles(&coefficients, 1, 1),
+            Err(EstimateUnavailable::Numeric)
+        );
     }
 }

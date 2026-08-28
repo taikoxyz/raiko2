@@ -390,13 +390,20 @@ pub(crate) fn ensure_shasta_proposal_input_matches_carry(
     carry: &ProofCarryData,
     source: &str,
 ) -> RaikoResult<()> {
-    let expected_input = hash_shasta_subproof_input(carry);
+    let expected_input = validated_shasta_proposal_input(carry)?;
     if input_hash != expected_input {
         return Err(RaikoError::Guest(format!(
             "{source} proposal input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
         )));
     }
     Ok(())
+}
+
+pub(crate) fn validated_shasta_proposal_input(carry: &ProofCarryData) -> RaikoResult<B256> {
+    build_shasta_commitment_from_proof_carry_data_vec(std::slice::from_ref(carry)).ok_or_else(
+        || RaikoError::InvalidRequestConfig("invalid shasta proof carry data".to_string()),
+    )?;
+    Ok(hash_shasta_subproof_input(carry))
 }
 
 pub(crate) fn expected_shasta_aggregate_input(

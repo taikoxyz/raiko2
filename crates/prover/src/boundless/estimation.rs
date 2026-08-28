@@ -280,7 +280,7 @@ fn is_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn is_semver_triplet(value: &str) -> bool {
@@ -519,6 +519,20 @@ mod tests {
 
         let mut artifact = valid_artifact();
         artifact["proposal"]["provenance"]["image_id"] = json!("0xnot-an-image");
+        assert!(parse(artifact).is_err());
+    }
+
+    #[test]
+    fn model_rejects_correct_length_non_hex_sha256() {
+        let mut artifact = valid_artifact();
+        artifact["proposal"]["provenance"]["elf_sha256"] = json!("g".repeat(64));
+        assert!(parse(artifact).is_err());
+    }
+
+    #[test]
+    fn model_rejects_correct_length_non_hex_image_id() {
+        let mut artifact = valid_artifact();
+        artifact["proposal"]["provenance"]["image_id"] = json!(format!("0x{}", "g".repeat(64)));
         assert!(parse(artifact).is_err());
     }
 

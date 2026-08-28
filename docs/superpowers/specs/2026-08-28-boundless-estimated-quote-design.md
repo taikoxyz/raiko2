@@ -141,6 +141,13 @@ pre-execution. M2 was selected later after inspecting the 20 Mainnet samples und
 product requirement: approximate auction cost and per-mcycle deadlines within about ten percent.
 Those 20 samples are therefore an evaluation set, not an untouched holdout.
 
+On the 40-row Hoodi calibration split, the continuous fitted M2 model produced 17 underquotes,
+0.094557 percent MAPE, and a maximum absolute error of 0.279512 percent, which was also the maximum
+underquote; no row exceeded ten-percent absolute error. Applying the production scaled-integer
+coefficients and final ceiling produced 12 underquotes, 0.093492 percent MAPE, and a maximum
+absolute error and underquote of 0.264550 percent; again, no row exceeded ten-percent absolute
+error.
+
 On the Mainnet evaluation set, the continuous fitted M2 model had 5.87 percent MAPE. Nineteen of 20
 predictions were below actual cycles; the largest underquote was 108.59 mcycles, or 5.75 percent.
 Nineteen of 20 absolute errors were within ten percent; the remaining sample was a 21.94-percent
@@ -327,10 +334,15 @@ Focused regression coverage must establish:
   normal SDK pricing check;
 - building an `Estimated` request does not download its just-uploaded URL input, invoke the local
   guest executor, or read or modify the shared client's executor cache;
-- checked proposal arithmetic matches the decimal M2 formula on all collected Mainnet samples;
-- continuous-M2 regression tests assert 5.87-percent MAPE, a maximum observed 5.75-percent
-  underquote, and the single 21.94-percent overquote;
-- production-integer regression tests assert 19 Mainnet underquotes, 5.8422-percent MAPE, a maximum
+- checked proposal arithmetic matches the decimal M2 formula across the committed Hoodi calibration
+  and Mainnet evaluation rows;
+- Hoodi continuous-M2 regression tests assert 17 underquotes, 0.094557-percent MAPE, a maximum
+  0.279512-percent absolute error and underquote, and zero rows beyond ten-percent absolute error;
+- Hoodi production-integer regression tests assert 12 underquotes, 0.093492-percent MAPE, a maximum
+  0.264550-percent absolute error and underquote, and zero rows beyond ten-percent absolute error;
+- Mainnet continuous-M2 regression tests assert 19 underquotes, 5.87-percent MAPE, a maximum
+  observed 5.75-percent underquote, and the single 21.94-percent overquote;
+- Mainnet production-integer regression tests assert 19 underquotes, 5.8422-percent MAPE, a maximum
   5.7234-percent underquote, and the single 21.9679-percent overquote;
 - model artifact schema, supported chain, execution configuration, and observed feature-envelope
   guards select either estimate or local fallback correctly;

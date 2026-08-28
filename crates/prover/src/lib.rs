@@ -53,15 +53,15 @@ pub use sp1_config::{
 use alloy::sol_types::SolValue;
 use alloy_primitives::Bytes;
 use alloy_primitives::{Address, B256};
+#[cfg(feature = "boundless")]
 use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+#[cfg(feature = "boundless")]
+use raiko2_primitives_shasta::instance::words_to_bytes_le;
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data,
-    instance::{
-        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        words_to_bytes_le,
-    },
+    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
     proof_carry_from_proof,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
@@ -430,6 +430,7 @@ pub(crate) fn validated_shasta_proposal_input(carry: &ProofCarryData) -> RaikoRe
     Ok(hash_shasta_subproof_input(carry))
 }
 
+#[cfg(feature = "boundless")]
 pub(crate) fn validated_shasta_zk_aggregation_output(
     image_id: [u32; 8],
     proof_carry_data_vec: Vec<ProofCarryData>,

@@ -1007,6 +1007,17 @@ impl TaskRuntimeMetadata {
                 .into());
             }
             std::cmp::Ordering::Greater => {
+                if self.provider_request_id == candidate.provider_request_id
+                    && (self.quoted_mcycles_count != candidate.quoted_mcycles_count
+                        || self.evaluated_mcycles_count != candidate.evaluated_mcycles_count
+                        || self.quote_strategy != candidate.quote_strategy
+                        || self.quote_model_id != candidate.quote_model_id)
+                {
+                    return Err(RemoteSubmissionConflict::new(
+                        "Boundless quote provenance changed across attempts sharing one provider request id",
+                    )
+                    .into());
+                }
                 *self = candidate;
                 return Ok(true);
             }
@@ -1527,6 +1538,101 @@ mod tests {
                 .downcast_ref::<RemoteSubmissionConflict>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn boundless_progress_merge_rejects_same_request_quote_provenance_drift() {
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
+            expires_at: 200,
+            lock_expires_at: 180,
+            submitted_at: 100,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1_234),
+            evaluated_mcycles_count: None,
+            quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+            quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+        let mut durable = TaskRuntimeMetadata::default();
+        durable
+            .merge_boundless_submission(&progress, 100)
+            .expect("initial checkpoint");
+
+        let mut drifted = Vec::new();
+        let mut quoted = progress.clone();
+        quoted.quoted_mcycles_count = Some(1_235);
+        drifted.push(("quoted_mcycles_count", quoted));
+        let mut evaluated = progress.clone();
+        evaluated.evaluated_mcycles_count = Some(1_234);
+        drifted.push(("evaluated_mcycles_count", evaluated));
+        let mut strategy = progress.clone();
+        strategy.quote_strategy = Some(BoundlessQuoteStrategy::Evaluated);
+        drifted.push(("quote_strategy", strategy));
+        let mut model = progress.clone();
+        model.quote_model_id = Some("replacement-model".to_string());
+        drifted.push(("quote_model_id", model));
+
+        for (field, mut candidate) in drifted {
+            candidate.rebid_attempt = 2;
+            let mut runtime = durable.clone();
+            let error = runtime
+                .merge_boundless_submission(&candidate, 200)
+                .expect_err("same request id must preserve quote provenance");
+
+            assert!(
+                error.downcast_ref::<RemoteSubmissionConflict>().is_some(),
+                "{field} drift must produce a RemoteSubmissionConflict: {error:#}"
+            );
+            assert_eq!(
+                runtime, durable,
+                "{field} drift must not mutate durable state"
+            );
+        }
+    }
+
+    #[test]
+    fn boundless_progress_merge_allows_new_quote_context_after_request_id_rotation() {
+        let mut runtime = complete_boundless_runtime();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x2".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: false,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x22))),
+            broadcast_from_block: Some(90),
+            expires_at: 400,
+            lock_expires_at: 380,
+            submitted_at: 300,
+            image_ref: "0xrotated-image".to_string(),
+            deployment: "taiko".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(2_000),
+            evaluated_mcycles_count: Some(1_500),
+            quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+            quote_model_id: None,
+            max_price_multiplier: 2,
+            max_price_wei: Some("2".to_string()),
+            rebid_attempt: 2,
+        };
+
+        assert!(
+            runtime
+                .merge_boundless_submission(&progress, 300)
+                .expect("rotated request id accepts a new quote context")
+        );
+        assert_eq!(runtime.provider_request_id.as_deref(), Some("0x2"));
+        assert_eq!(runtime.quoted_mcycles_count, Some(2_000));
+        assert_eq!(runtime.evaluated_mcycles_count, Some(1_500));
+        assert_eq!(runtime.quote_strategy, Some(BoundlessQuoteStrategy::Fixed));
+        assert_eq!(runtime.quote_model_id, None);
     }
 
     #[test]

@@ -362,7 +362,7 @@ struct QuoteContext {
 }
 ```
 
-Progress and resume payloads add optional `quote_strategy` and `quote_model_id`; resume also adds optional quoted/evaluated counts. `Fixed` records `quoted = fixed` and `evaluated = actual`. Successful Estimated fallback records `quoted = actual`, `evaluated = actual`, strategy Estimated, and the attempted model ID. Estimated success records `quoted = estimate`, `evaluated = None`.
+Progress and resume payloads add optional `quote_strategy` and `quote_model_id`; resume also adds optional quoted/evaluated counts. `Fixed` records `quoted = fixed` and `evaluated = actual`. Successful Estimated fallback records `quoted = actual`, `evaluated = actual`, strategy Estimated, and model ID `None`; the attempted model ID appears only in the fallback warning. Estimated success records `quoted = estimate`, `evaluated = None`.
 
 **Step 1: Write failing quote-preparation tests**
 

@@ -1,6 +1,14 @@
-# Shasta Fixture
+# Proposal GuestInput Fixture
 
-`shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` is a checked-in Shasta
+The `shasta` in this fixture's filename is a frozen identifier, not a fork selector. See the
+`Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
+
+The fixture's contents do predate Unzen. Its blocks are mainnet `9051439`-`9051630`, timestamped
+2026-07-22, and mainnet activated Unzen on 2026-08-06, so it exercises the pre-Unzen
+`SpecId::SHANGHAI` rules. It is still the checked-in fixture the tests below use; there is no
+post-activation replacement yet.
+
+`shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` is a checked-in
 `GuestInput` fixture used by:
 
 - `bin/raiko2/src/server/fixture.rs`

@@ -4,8 +4,8 @@
 
 Allow an explicitly configured RISC0 Boundless proposal or aggregation path to construct the
 expected journal and estimate request cycles without first executing the guest locally. This removes
-the local dry-run from that opt-in path while retaining the existing default behavior, an explicit
-evaluated strategy, and a bounded local-execution fallback outside the estimator's supported domain.
+the local dry-run from that opt-in path while retaining explicit evaluated and fixed strategies and
+a bounded local-execution fallback outside the estimator's supported domain.
 
 This change affects request pricing and timeout metadata only. Boundless still proves the original
 guest program over the original input, and the existing fulfillment verification remains the source
@@ -13,7 +13,7 @@ of truth for proof validity.
 
 ## Configuration
 
-Add `estimated` to the existing quote strategy:
+Use `estimated` as an explicit quote strategy:
 
 ```toml
 [prover.risc0.boundless.batch_quote]
@@ -23,15 +23,19 @@ strategy = "estimated"
 strategy = "estimated"
 ```
 
-`QuoteSizing` contains `RaikoAgent`, `Estimated`, `Evaluated`, and `Fixed { mcycles }`.
-`RaikoAgent` remains the default for this change and retains its current semantics: execute locally,
-then round batch requests to the next 1,000 mcycles with a 2,000-mcycle floor and aggregation
-requests to the next 100 mcycles with a 200-mcycle floor. It is deprecated in documentation but is
-not an alias and does not silently change behavior. Operators must explicitly select `estimated`.
+`QuoteSizing` contains only `Estimated`, `Evaluated`, and `Fixed { mcycles }`. Remove the
+`RaikoAgent` variant together with its batch/aggregation rounding constants, helpers, tests, and
+documentation. The serialized value `strategy = "raiko_agent"` is not an alias; it fails
+deserialization with a clear list of supported strategies so an old explicit configuration cannot
+silently change behavior.
 
 Only `Estimated` bypasses local execution. `Evaluated` keeps the exact local dry-run. `Fixed` keeps
-its current behavior, including local execution to obtain the journal. Retiring `raiko_agent` and
-changing the default can happen only in a later, explicit configuration migration.
+its current behavior, including local execution to obtain the journal. To avoid silently choosing a
+replacement for an omitted strategy, an explicitly supplied Boundless configuration must contain
+both `batch_quote` and `aggregation_quote`. Remove the field-level serde defaults for those two
+tables. The internal `BoundlessConfig::default()` uses `Evaluated` only when the entire inactive
+Boundless configuration is omitted; per-network overrides remain optional and inherit the explicit
+base strategies.
 
 ## Request Metadata Preparation
 
@@ -48,8 +52,17 @@ back at request time.
 `boundless/mod.rs` chooses one of two paths before constructing a Boundless request:
 
 1. `Estimated` decodes and validates the stage input, derives its journal, and estimates mcycles.
-2. `RaikoAgent`, `Evaluated`, or `Fixed` runs the existing local RISC0 executor, obtains actual
-   mcycles and journal, and applies the configured quote strategy.
+2. `Evaluated` or `Fixed` runs the existing local RISC0 executor, obtains actual mcycles and journal,
+   and applies the configured quote strategy.
+
+For `Estimated`, clone the SDK `StandardRequestBuilder` for that request and set its public
+`skip_preflight` field to `Some(true)`. This is not a new raiko2 TOML option: selecting `Estimated`
+implies the SDK setting. Raiko2 already supplies `request_input`, `cycles`, `journal`, and `image_id`,
+so the SDK preflight layer returns without executing the guest; `skip_preflight` additionally
+disables the later requestor pricing preflight, which could otherwise execute locally after a
+best-effort cache-fill failure. The request-scoped clone leaves the shared client and the
+`Evaluated`/`Fixed` SDK pricing checks unchanged. An estimation fallback still uses this builder
+after raiko2 has performed its one intentional local execution, preventing an SDK-side second run.
 
 An estimated request records `quoted_mcycles_count = Some(estimate)` and
 `evaluated_mcycles_count = None`. A locally executed request, including an estimation fallback,
@@ -72,6 +85,21 @@ provenance. If a legacy checkpoint lacks the quote itself, the service may poll 
 but must fail closed instead of submitting a same-ID rebid; it may use current configuration only
 after the old request becomes terminal and rotation produces a new ID. The request digest, image
 reference, exact maximum price, and deadlines remain the authoritative recovery identity.
+
+## Configuration Migration
+
+Removing `raiko_agent` is an intentional breaking configuration cleanup. Before deploying a binary
+with this change, every enabled Boundless environment must explicitly select `estimated`,
+`evaluated`, or `fixed` for both stages. The Mainnet and Hoodi deployment configurations inspected
+during this design select `evaluated`, but their deployment repositories remain the source of truth
+and must be rechecked immediately before rollout. Known Masaya and legacy `raiko2-k8s`
+Hoodi/Tolba/Masaya configurations that still name `raiko_agent` must move to `evaluated` before they
+consume the new binary.
+
+This repository updates `config.example.toml`, `docs/API.md`, and `docs/operations.md` to expose the
+three supported values and the required-stage-table rule. External configuration validators must
+accept `estimated` and reject `raiko_agent` in coordinated follow-up changes. This repository does
+not perform any deployment or rollout.
 
 ## Proposal Cycle Estimate
 
@@ -240,7 +268,13 @@ mcycles and journal and records `evaluated_mcycles_count = Some(actual)`.
 
 Focused regression coverage must establish:
 
-- `raiko_agent` retains its current default behavior and `estimated` requires explicit selection;
+- `raiko_agent` is rejected, its rounding implementation is absent, and `estimated` requires
+  explicit selection;
+- an operator-supplied Boundless configuration requires both stage quote tables, while an omitted
+  inactive Boundless configuration retains the internal `Evaluated` default;
+- `Estimated` uses a request-scoped SDK builder with `skip_preflight = Some(true)`, while `Evaluated`
+  and `Fixed` preserve the normal SDK pricing check;
+- an SDK cache-fill failure cannot invoke local guest execution for an `Estimated` request;
 - checked proposal arithmetic matches the decimal M2 formula on all collected Mainnet samples;
 - direct-M2 regression tests assert 19 Mainnet underquotes, a maximum observed 5.75-percent
   underquote, 5.87-percent MAPE, and the single 21.94-percent overquote;
@@ -271,6 +305,6 @@ adversarial review and independent behavioral verification before it is ready fo
 
 - No Boundless proof or auction submission is needed to calibrate or test the estimator.
 - Do not change the zkGas protocol schedule or guest programs.
-- Do not add a second boolean feature flag or a network-specific coefficient.
+- Do not add a second user-visible feature/preflight flag or a network-specific coefficient.
 - Do not infer aggregation cycles from proposal zkGas.
-- Do not remove or silently reinterpret `raiko_agent`, `evaluated`, or `fixed` in this change.
+- Do not remove or silently reinterpret `evaluated` or `fixed` in this change.

@@ -1600,6 +1600,93 @@ mod tests {
     }
 
     #[test]
+    fn boundless_progress_merge_rejects_legacy_quote_upgrade_for_same_request_id() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.quoted_mcycles_count = None;
+        runtime.evaluated_mcycles_count = None;
+        runtime.quote_strategy = None;
+        runtime.quote_model_id = None;
+        let durable = runtime.clone();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: false,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(1),
+            expires_at: 3,
+            lock_expires_at: 2,
+            submitted_at: 1,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1_234),
+            evaluated_mcycles_count: None,
+            quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+            quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 2,
+        };
+
+        let error = runtime
+            .merge_boundless_submission(&progress, 200)
+            .expect_err("same request id cannot add provenance missing from a legacy checkpoint");
+
+        assert!(error.downcast_ref::<RemoteSubmissionConflict>().is_some());
+        assert_eq!(runtime, durable);
+    }
+
+    #[test]
+    fn boundless_progress_merge_allows_new_rung_with_identical_quote_provenance() {
+        let mut runtime = complete_boundless_runtime();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: Some(format!("{:#x}", B256::repeat_byte(0x33))),
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x22))),
+            broadcast_from_block: Some(9),
+            expires_at: 30,
+            lock_expires_at: 20,
+            submitted_at: 10,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1),
+            evaluated_mcycles_count: Some(1),
+            quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            quote_model_id: None,
+            max_price_multiplier: 2,
+            max_price_wei: Some("2".to_string()),
+            rebid_attempt: 2,
+        };
+
+        assert!(
+            runtime
+                .merge_boundless_submission(&progress, 300)
+                .expect("a new rung may update non-provenance fields")
+        );
+        assert_eq!(runtime.updated_at, 300);
+        assert_eq!(runtime.provider_request_id.as_deref(), Some("0x1"));
+        assert_eq!(runtime.remote_tx_hash, progress.remote_tx_hash);
+        assert!(runtime.request_id_has_confirmed_submission);
+        assert_eq!(runtime.request_digest, progress.request_digest);
+        assert_eq!(runtime.broadcast_from_block, Some(9));
+        assert_eq!(runtime.submitted_at, Some(10));
+        assert_eq!(runtime.lock_expires_at, Some(20));
+        assert_eq!(runtime.expires_at, Some(30));
+        assert_eq!(runtime.quoted_mcycles_count, Some(1));
+        assert_eq!(runtime.evaluated_mcycles_count, Some(1));
+        assert_eq!(
+            runtime.quote_strategy,
+            Some(BoundlessQuoteStrategy::Evaluated)
+        );
+        assert_eq!(runtime.quote_model_id, None);
+        assert_eq!(runtime.max_price_multiplier, Some(2));
+        assert_eq!(runtime.max_price_wei.as_deref(), Some("2"));
+        assert_eq!(runtime.rebid_attempt, Some(2));
+    }
+
+    #[test]
     fn boundless_progress_merge_allows_new_quote_context_after_request_id_rotation() {
         let mut runtime = complete_boundless_runtime();
         let progress = BoundlessSubmissionProgress {

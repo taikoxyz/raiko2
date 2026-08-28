@@ -3213,7 +3213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_aggregate_admission_rejects_masaya_carry_for_hoodi() -> Result<()> {
+    async fn external_aggregate_admission_rejects_mismatched_carry_chain_id() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "aggregate-carry-chain-mismatch",
         ))?);
@@ -3230,7 +3230,7 @@ mod tests {
             chain_id: 167_013,
             ..Default::default()
         };
-        let masaya_carry = raiko2_protocol_shasta::shasta::ProofCarryData {
+        let mismatched_chain_carry = raiko2_protocol_shasta::shasta::ProofCarryData {
             chain_id: 167_011,
             ..Default::default()
         };
@@ -3247,7 +3247,7 @@ mod tests {
             aggregation_ids: Vec::new(),
             proofs: vec![
                 proof_with_carry(&hoodi_carry),
-                proof_with_carry(&masaya_carry),
+                proof_with_carry(&mismatched_chain_carry),
             ],
             proof_type: BatchProofType::Sgx,
             network: Some("taiko_hoodi".to_string()),
@@ -3259,7 +3259,7 @@ mod tests {
         };
 
         let error = match build_external_aggregate_submission(&state, request).await {
-            Ok(_) => panic!("Masaya carry must not be admitted for the taiko_hoodi pair"),
+            Ok(_) => panic!("mismatched carry chain_id must not be admitted"),
             Err(error) => error,
         };
 
@@ -3267,7 +3267,7 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("proof 1 proof carry chain_id mismatch: expected 167013, got 167011"),
+                .contains("proof 1 carry chain_id mismatch: expected 167013, got 167011"),
             "unexpected admission error: {}",
             error.message
         );

@@ -625,7 +625,7 @@ pub fn validate_external_aggregate_proofs(
         let carry = require_external_aggregate_proof_carry(index, proof)?;
         if carry.chain_id != expected_chain_id {
             return Err(RaikoError::InvalidRequestConfig(format!(
-                "proof {index} proof carry chain_id mismatch: expected {expected_chain_id}, got {}",
+                "proof {index} carry chain_id mismatch: expected {expected_chain_id}, got {}",
                 carry.chain_id
             )));
         }

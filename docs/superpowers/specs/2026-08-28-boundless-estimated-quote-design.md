@@ -62,14 +62,22 @@ it does not compare its release-provenance fields with the running binary.
 2. `Evaluated` or `Fixed` runs the existing local RISC0 executor, obtains actual mcycles and journal,
    and applies the configured quote strategy.
 
-For `Estimated`, clone the SDK `StandardRequestBuilder` for that request and set its public
-`skip_preflight` field to `Some(true)`. This is not a new raiko2 TOML option: selecting `Estimated`
-implies the SDK setting. Raiko2 already supplies `request_input`, `cycles`, `journal`, and `image_id`,
-so the SDK preflight layer returns without executing the guest; `skip_preflight` additionally
-disables the later requestor pricing preflight, which could otherwise execute locally after a
-best-effort cache-fill failure. The request-scoped clone leaves the shared client and the
-`Evaluated`/`Fixed` SDK pricing checks unchanged. An estimation fallback still uses this builder
-after raiko2 has performed its one intentional local execution, preventing an SDK-side second run.
+For `Estimated`, clone the SDK `StandardRequestBuilder` for that request, replace the clone's public
+`preflight_layer` with `Default::default()`, and set its public `skip_preflight` field to `Some(true)`.
+This is not a new raiko2 TOML option: selecting `Estimated` implies both SDK changes. Merely cloning
+the builder is insufficient because the cloned `PreflightLayer` contains a `LocalExecutor` whose
+cache state is shared through `Arc`. The default replacement has a fresh executor cache and no
+downloader. Build the request through this isolated builder directly; calling
+`client.build_request(...)` would select the client's shared builder and defeat the isolation.
+
+Raiko2 already supplies `request_input`, `cycles`, `journal`, and `image_id`. The replacement
+preflight layer therefore accepts those values without guest execution; its best-effort URL-input
+cache fill cannot download the just-uploaded input because the replacement has no downloader, and
+it cannot insert estimated data into the shared client's executor cache. `skip_preflight` separately
+disables the later requestor pricing check. The request-scoped replacement leaves the shared client
+and the `Evaluated`/`Fixed` preflight cache and pricing checks unchanged. An estimation fallback
+still uses this isolated builder after raiko2 has performed its one intentional local execution,
+preventing an SDK-side download, cache mutation, or second execution.
 
 An estimated request records `quoted_mcycles_count = Some(estimate)` and
 `evaluated_mcycles_count = None`. A locally executed request, including an estimation fallback,
@@ -133,14 +141,17 @@ pre-execution. M2 was selected later after inspecting the 20 Mainnet samples und
 product requirement: approximate auction cost and per-mcycle deadlines within about ten percent.
 Those 20 samples are therefore an evaluation set, not an untouched holdout.
 
-On the Mainnet evaluation set, direct M2 had 5.87 percent MAPE. Nineteen of 20 estimates were below
-actual cycles; the largest underquote was 108.59 mcycles, or 5.75 percent. Nineteen of 20 absolute
-errors were within ten percent; the remaining sample was a 21.94-percent overquote. The accepted
-operational target is no observed underquote beyond ten percent and at least 95 percent of absolute
-errors within ten percent. A new untouched holdout and the original zero-underquote gate are not
-prerequisites for this explicitly enabled strategy, and the design does not claim that they passed.
-The production Mainnet domain excludes the isolated 21.94-percent overquote, so all 19 admitted
-Mainnet evaluation samples are within the ten-percent absolute-error budget.
+On the Mainnet evaluation set, the continuous fitted M2 model had 5.87 percent MAPE. Nineteen of 20
+predictions were below actual cycles; the largest underquote was 108.59 mcycles, or 5.75 percent.
+Nineteen of 20 absolute errors were within ten percent; the remaining sample was a 21.94-percent
+overquote. Applying the scaled-integer coefficients and final ceiling used by production gives 19
+underquotes, 5.8422 percent MAPE, a maximum 108-mcycle or 5.7234-percent underquote, and a
+547-mcycle or 21.9679-percent overquote for the isolated sample. The accepted operational target is
+no observed underquote beyond ten percent and at least 95 percent of absolute errors within ten
+percent. A new untouched holdout and the original zero-underquote gate are not prerequisites for
+this explicitly enabled strategy, and the design does not claim that they passed. The production
+Mainnet domain excludes the isolated overquote, so all 19 admitted Mainnet evaluation samples are
+within the ten-percent absolute-error budget.
 
 The estimate is used directly; no calibration margin, 1,000-mcycle bucket, or 2,000-mcycle floor is
 applied. This is an explicit cost/latency trade-off: `with_cycles` is not a cryptographic execution
@@ -277,7 +288,8 @@ path:
 - aggregation child-count multiplication or final conversion overflows.
 
 If local execution also fails, its error is returned. A successful fallback uses the actual local
-mcycles and journal and records `evaluated_mcycles_count = Some(actual)`.
+mcycles and journal and records `quoted_mcycles_count = Some(actual)` and
+`evaluated_mcycles_count = Some(actual)`.
 
 ## Verification
 
@@ -287,12 +299,16 @@ Focused regression coverage must establish:
   explicit selection;
 - an operator-supplied Boundless configuration requires both stage quote tables, while an omitted
   inactive Boundless configuration retains the internal `Evaluated` default;
-- `Estimated` uses a request-scoped SDK builder with `skip_preflight = Some(true)`, while `Evaluated`
-  and `Fixed` preserve the normal SDK pricing check;
-- an SDK cache-fill failure cannot invoke local guest execution for an `Estimated` request;
+- `Estimated` uses a request-scoped SDK builder with a default replacement `preflight_layer` and
+  `skip_preflight = Some(true)`, while `Evaluated` and `Fixed` retain the shared preflight layer and
+  normal SDK pricing check;
+- building an `Estimated` request does not download its just-uploaded URL input, invoke the local
+  guest executor, or read or modify the shared client's executor cache;
 - checked proposal arithmetic matches the decimal M2 formula on all collected Mainnet samples;
-- direct-M2 regression tests assert 19 Mainnet underquotes, a maximum observed 5.75-percent
-  underquote, 5.87-percent MAPE, and the single 21.94-percent overquote;
+- continuous-M2 regression tests assert 5.87-percent MAPE, a maximum observed 5.75-percent
+  underquote, and the single 21.94-percent overquote;
+- production-integer regression tests assert 19 Mainnet underquotes, 5.8422-percent MAPE, a maximum
+  5.7234-percent underquote, and the single 21.9679-percent overquote;
 - model artifact schema, Unzen activation, supported chain, execution configuration, and observed
   feature-envelope guards select either estimate or local fallback correctly;
 - proposal and aggregation estimation do not compare the running ELF hash, image ID, source

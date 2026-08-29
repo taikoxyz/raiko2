@@ -52,6 +52,7 @@ sp1 = ["dep:sp1-sdk"]
 boundless = ["risc0", "dep:boundless-market"]
 boundless-s3 = ["boundless", "boundless-market/s3"]
 [dev-dependencies]
+sha2.workspace = true
 httpmock = "0.7"
 alloy-signer = "=1.8.3"
 alloy-sol-types.workspace = true

@@ -173,6 +173,8 @@ struct BenchReport {
     total_instruction_count: Option<u64>,
     total_syscall_count: Option<u64>,
     touched_memory_addresses: Option<u64>,
+    risc0_image_id: Option<String>,
+    risc0_input_bytes: Option<u64>,
     risc0_user_cycles: Option<u64>,
     risc0_padded_cycles: Option<u64>,
     risc0_segment_count: Option<u64>,
@@ -205,6 +207,8 @@ impl BenchReport {
             total_instruction_count: None,
             total_syscall_count: None,
             touched_memory_addresses: None,
+            risc0_image_id: None,
+            risc0_input_bytes: None,
             risc0_user_cycles: None,
             risc0_padded_cycles: None,
             risc0_segment_count: None,
@@ -916,6 +920,8 @@ struct OpcodeLabExecution {
 struct Risc0ProposalExecution {
     public_values: String,
     wall_time_ms: u64,
+    image_id: String,
+    input_bytes: u64,
     user_cycles: u64,
     padded_cycles: u64,
     segment_count: u64,
@@ -932,11 +938,14 @@ fn risc0_padded_cycles(po2_values: impl IntoIterator<Item = u32>) -> u64 {
 fn apply_risc0_execution_metadata(report: &mut BenchReport, execution: &Risc0ProposalExecution) {
     report.public_values = execution.public_values.clone();
     report.wall_time_ms = execution.wall_time_ms;
+    report.risc0_image_id = Some(execution.image_id.clone());
+    report.risc0_input_bytes = Some(execution.input_bytes);
     report.risc0_user_cycles = Some(execution.user_cycles);
     report.risc0_padded_cycles = Some(execution.padded_cycles);
     report.risc0_segment_count = Some(execution.segment_count);
     report.risc0_po2_counts = execution.po2_counts.clone();
     report.set_primary_workload_metric("risc0_padded_cycles", execution.padded_cycles);
+    report.push_workload_metric("risc0_input_bytes", execution.input_bytes);
     report.push_workload_metric("risc0_user_cycles", execution.user_cycles);
     report.push_workload_metric("risc0_segment_count", execution.segment_count);
 }
@@ -948,6 +957,9 @@ async fn execute_risc0_proposal_blocking(
 ) -> Result<Risc0ProposalExecution> {
     tokio::task::spawn_blocking(move || {
         let encoded = bincode::serialize(&input).context("serialize RISC0 guest input")?;
+        let input_bytes = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
+        let image_id =
+            risc0_zkvm::compute_image_id(&elf).context("compute RISC0 proposal image ID")?;
         let mut env_builder = risc0_zkvm::ExecutorEnv::builder();
         env_builder
             .write_frame(encoded.as_slice())
@@ -982,6 +994,8 @@ async fn execute_risc0_proposal_blocking(
         Ok(Risc0ProposalExecution {
             public_values,
             wall_time_ms,
+            image_id: hex::encode_prefixed(image_id.as_bytes()),
+            input_bytes,
             user_cycles,
             padded_cycles,
             segment_count: u64::try_from(session.segments.len()).unwrap_or(u64::MAX),
@@ -1174,6 +1188,8 @@ async fn run_risc0_proposal(
     record_memory_snapshot(&mut report, "proposal:risc0_after_execute_run");
 
     println!("public_values: {}", report.public_values);
+    println!("risc0_image_id: {}", execution.image_id);
+    println!("risc0_input_bytes: {}", execution.input_bytes);
     println!("risc0_user_cycles: {}", execution.user_cycles);
     println!("risc0_padded_cycles: {}", execution.padded_cycles);
     println!("risc0_segment_count: {}", execution.segment_count);
@@ -1252,8 +1268,9 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BenchReport, ProofType, Stage, apply_sp1_metadata, read_input,
-        read_opcode_lab_input_list, risc0_padded_cycles,
+        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage,
+        apply_risc0_execution_metadata, apply_sp1_metadata, read_input, read_opcode_lab_input_list,
+        risc0_padded_cycles,
     };
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
@@ -1501,6 +1518,37 @@ mod tests {
     #[test]
     fn risc0_padded_cycles_sum_segment_po2s() {
         assert_eq!(risc0_padded_cycles([10, 11, 10]), 4096);
+    }
+
+    #[test]
+    fn risc0_metadata_reports_encoded_input_bytes() {
+        let mut report = BenchReport::new(
+            "proposal",
+            "execute",
+            "compressed",
+            "input.json".to_string(),
+        );
+        let execution = Risc0ProposalExecution {
+            public_values: "0x12".to_string(),
+            wall_time_ms: 7,
+            image_id: "0xabcd".to_string(),
+            input_bytes: 123,
+            user_cycles: 456,
+            padded_cycles: 512,
+            segment_count: 1,
+            po2_counts: Vec::new(),
+        };
+
+        apply_risc0_execution_metadata(&mut report, &execution);
+
+        assert_eq!(report.risc0_image_id.as_deref(), Some("0xabcd"));
+        assert_eq!(report.risc0_input_bytes, Some(123));
+        assert!(
+            report
+                .workload_metrics
+                .iter()
+                .any(|entry| { entry.label == "risc0_input_bytes" && entry.count == 123 })
+        );
     }
 
     #[test]

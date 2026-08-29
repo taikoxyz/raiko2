@@ -2734,6 +2734,8 @@ fn task_runtime_view(
         submitted_at: runtime.submitted_at,
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
+        quote_strategy: runtime.quote_strategy,
+        quote_model_id: runtime.quote_model_id,
         max_price_multiplier: runtime.max_price_multiplier,
         max_price_wei: runtime.max_price_wei,
         sp1_network_mode: runtime

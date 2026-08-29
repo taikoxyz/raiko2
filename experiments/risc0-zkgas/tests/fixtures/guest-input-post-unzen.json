@@ -1,0 +1,28 @@
+{
+  "taiko": {
+    "proposal_id": 42,
+    "chain_spec": {
+      "name": "taiko_mainnet",
+      "chain_id": 167000,
+      "is_taiko": true
+    }
+  },
+  "proposal_ancestor_headers": [{"number": 99}],
+  "proposal_state_nodes": ["0x01", "0x02", "0x03"],
+  "witnesses": [
+    {
+      "block": {
+        "header": {"number": 100, "timestamp": 1786021200, "difficulty": "0x64"},
+        "body": {"transactions": [{"id": 1}, {"id": 2}]}
+      },
+      "witness": {"state": ["0xaa"], "state_indices": [0, 1], "codes": ["0x60"]}
+    },
+    {
+      "block": {
+        "header": {"number": 101, "timestamp": 1786021201, "difficulty": "0xc8"},
+        "body": {"transactions": [{"id": 3}]}
+      },
+      "witness": {"state": [], "state_indices": [2], "codes": ["0x61", "0x62"]}
+    }
+  ]
+}

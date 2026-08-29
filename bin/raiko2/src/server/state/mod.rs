@@ -22,7 +22,9 @@ use raiko2_pipeline::{
 };
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
-    boundless::BoundlessAccountBlocker, gaiko2::Gaiko2Prover, native::NativeProver,
+    boundless::{BoundlessAccountBlocker, QuoteSizing, validate_estimation_model},
+    gaiko2::Gaiko2Prover,
+    native::NativeProver,
 };
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
@@ -166,6 +168,56 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
             })
         })
         .collect()
+}
+
+fn validate_enabled_boundless_estimation_models(
+    config: &Config,
+    pairs: &[ResolvedNetworkPair],
+    pipelines: &[PipelineRegistration],
+) -> Result<()> {
+    validate_enabled_boundless_estimation_models_with(config, pairs, pipelines, || {
+        validate_estimation_model()
+    })
+}
+
+fn validate_enabled_boundless_estimation_models_with<F>(
+    config: &Config,
+    pairs: &[ResolvedNetworkPair],
+    pipelines: &[PipelineRegistration],
+    mut validate_model: F,
+) -> Result<()>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let boundless_enabled = pipelines
+        .iter()
+        .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
+    if !boundless_enabled {
+        return Ok(());
+    }
+
+    for pair in pairs {
+        let effective = config
+            .prover
+            .risc0
+            .boundless
+            .apply_pair_override(&pair.boundless)
+            .with_context(|| format!("Boundless configuration error for rpc pair {}", pair.key))?;
+        if matches!(&effective.batch_quote, QuoteSizing::Estimated)
+            || matches!(&effective.aggregation_quote, QuoteSizing::Estimated)
+        {
+            validate_model()
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "Boundless estimation model validation failed for rpc pair {}",
+                        pair.key
+                    )
+                })?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
@@ -456,11 +508,16 @@ impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
         config.validate()?;
         let pipeline_registrations = enabled_pipeline_registrations(&config)?;
+        let resolved_pairs = config.rpc.resolved_pairs()?;
+        validate_enabled_boundless_estimation_models(
+            &config,
+            &resolved_pairs,
+            &pipeline_registrations,
+        )?;
         let runtime = Arc::new(build_runtime(&config).await?);
         runtime.set_lifecycle_observer(runtime_lifecycle_observer());
         initialize_runtime(&config, &runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
-        let resolved_pairs = config.rpc.resolved_pairs()?;
         let boundless_enabled = pipeline_registrations
             .iter()
             .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
@@ -952,6 +1009,34 @@ mod tests {
         config.runtime.preflight_cache = PreflightCacheMode::Off;
         assert!(preflight_coordinator(&config, &runtime, &pair).is_none());
         Ok(())
+    }
+
+    #[test]
+    fn estimated_pair_override_validates_the_estimation_model_at_startup() {
+        let mut config = Config::default();
+        config.prover.risc0.boundless.offchain = true;
+        let mut pair = preflight_cache_test_pair();
+        pair.boundless.batch_quote = Some(QuoteSizing::Estimated);
+        let pipelines = [PipelineRegistration {
+            pipeline_key: PipelineKey::ShastaRisc0Network,
+            proof_type: ProofType::Risc0,
+            runner: RunnerKind::Network,
+            remote_url: None,
+        }];
+        let mut validation_calls = 0;
+
+        let error =
+            validate_enabled_boundless_estimation_models_with(&config, &[pair], &pipelines, || {
+                validation_calls += 1;
+                Err("model artifact rejected".to_string())
+            })
+            .expect_err("an effective estimated pair must validate the model");
+
+        assert_eq!(validation_calls, 1);
+        assert!(
+            format!("{error:#}").contains("model artifact rejected"),
+            "{error:#}"
+        );
     }
 
     impl PipelineFactory for ShutdownProbeFactory {

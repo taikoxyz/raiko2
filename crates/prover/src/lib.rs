@@ -53,8 +53,12 @@ pub use sp1_config::{
 use alloy::sol_types::SolValue;
 use alloy_primitives::Bytes;
 use alloy_primitives::{Address, B256};
+#[cfg(feature = "boundless")]
+use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+#[cfg(feature = "boundless")]
+use raiko2_primitives_shasta::instance::words_to_bytes_le;
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data,
     instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
@@ -82,6 +86,14 @@ pub trait GuestInputCodec<I>: Send + Sync {
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundlessQuoteStrategy {
+    Estimated,
+    Evaluated,
+    Fixed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoundlessSubmissionProgress {
     pub provider_request_id: String,
@@ -107,6 +119,10 @@ pub struct BoundlessSubmissionProgress {
     pub offchain: bool,
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_model_id: Option<String>,
     pub max_price_multiplier: u32,
     /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
     /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
@@ -143,6 +159,14 @@ pub struct BoundlessSubmissionResume {
     /// Offer lock deadline in seconds since the UNIX epoch.
     pub lock_expires_at: u64,
     pub submitted_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_model_id: Option<String>,
     pub max_price_multiplier: u32,
     /// Exact escalated max price this submission bid, in wei, as a decimal string.
     pub max_price_wei: Option<String>,
@@ -390,13 +414,47 @@ pub(crate) fn ensure_shasta_proposal_input_matches_carry(
     carry: &ProofCarryData,
     source: &str,
 ) -> RaikoResult<()> {
-    let expected_input = hash_shasta_subproof_input(carry);
+    let expected_input = validated_shasta_proposal_input(carry)?;
     if input_hash != expected_input {
         return Err(RaikoError::Guest(format!(
             "{source} proposal input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
         )));
     }
     Ok(())
+}
+
+pub(crate) fn validated_shasta_proposal_input(carry: &ProofCarryData) -> RaikoResult<B256> {
+    build_shasta_commitment_from_proof_carry_data_vec(std::slice::from_ref(carry)).ok_or_else(
+        || RaikoError::InvalidRequestConfig("invalid shasta proof carry data".to_string()),
+    )?;
+    Ok(hash_shasta_subproof_input(carry))
+}
+
+#[cfg(feature = "boundless")]
+pub(crate) fn validated_shasta_zk_aggregation_output(
+    image_id: [u32; 8],
+    proof_carry_data_vec: Vec<ProofCarryData>,
+    prover_address: Address,
+) -> RaikoResult<B256> {
+    let block_inputs = proof_carry_data_vec
+        .iter()
+        .map(validated_shasta_proposal_input)
+        .collect::<RaikoResult<Vec<_>>>()?;
+    let input = ShastaZkAggregationGuestInput {
+        image_id,
+        block_inputs,
+        proof_carry_data_vec,
+        prover_address,
+    };
+    let image_id_b256 = B256::from(words_to_bytes_le(&image_id));
+
+    aggregate_shasta_zk_with_verifier(&input, image_id_b256, |_index, _input| Ok(())).map_err(
+        |error| {
+            RaikoError::InvalidRequestConfig(format!(
+                "invalid shasta ZK aggregation input: {error:#}"
+            ))
+        },
+    )
 }
 
 pub(crate) fn expected_shasta_aggregate_input(

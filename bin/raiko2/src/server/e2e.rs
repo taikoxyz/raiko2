@@ -12,14 +12,14 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use raiko2_engine::{Engine, ProposalTaskRequest, ProverTaskConfig};
+use raiko2_engine::{AggregationTaskRequest, Engine, ProposalTaskRequest, ProverTaskConfig};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{
-    BoundlessSubmissionProgress, boundless_config::BoundlessTransactionConfig,
-    sp1::ProverMode as Sp1ProverMode,
+    BoundlessQuoteStrategy, BoundlessSubmissionProgress,
+    boundless_config::BoundlessTransactionConfig, sp1::ProverMode as Sp1ProverMode,
 };
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
@@ -38,8 +38,8 @@ use super::fixture::{
 };
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
-    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
-    publication_proof_artifact_refs,
+    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_task_ref,
+    proposal_task_ref, publication_proof_artifact_refs,
 };
 use crate::config::{Config, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::test_support::{MemoryProofArtifactStore, RuntimeStore};
@@ -3878,6 +3878,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
                 offchain: false,
                 quoted_mcycles_count: Some(6_000),
                 evaluated_mcycles_count: Some(12_345),
+                quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+                quote_model_id: None,
                 max_price_multiplier: 4,
                 max_price_wei: Some("9000000000000".to_string()),
                 rebid_attempt: 2,
@@ -3885,6 +3887,42 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             updated_at,
         )
         .expect("persist canonical Boundless progress");
+    let aggregate_request = AggregationTaskRequest {
+        request_id: "aggregate-request".to_string(),
+        proposal_ids: vec![3],
+        prover_config: ProverTaskConfig::default(),
+    };
+    metadata.aggregate_requested = true;
+    metadata.aggregate_task_id = Some(aggregate_task_ref(
+        PipelineKey::ShastaRisc0Network,
+        &aggregate_request,
+    ));
+    metadata.aggregate_request = Some(aggregate_request);
+    metadata
+        .upsert_aggregate_runtime(
+            &BoundlessSubmissionProgress {
+                provider_request_id: "0xaggregate".to_string(),
+                remote_tx_hash: None,
+                request_id_has_confirmed_submission: false,
+                request_digest: None,
+                broadcast_from_block: None,
+                expires_at: 223_456,
+                lock_expires_at: 223_300,
+                submitted_at: 223_000,
+                image_ref: "0xaggregate-image".to_string(),
+                deployment: "base".to_string(),
+                offchain: false,
+                quoted_mcycles_count: Some(900),
+                evaluated_mcycles_count: None,
+                quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+                quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+                max_price_multiplier: 1,
+                max_price_wei: Some("1000".to_string()),
+                rebid_attempt: 1,
+            },
+            updated_at,
+        )
+        .expect("persist aggregate Boundless progress");
     let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0Network);
 
     state
@@ -3918,7 +3956,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .expect("upsert task");
 
     let (status, res) = get_json(&app, "/v3/tasks/task_runtime_fallback").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["data"]["route"], "risc0/network");
     assert_eq!(res["data"]["status"], "proving");
     assert_eq!(res["data"]["runtime"]["runner_status"], "allocated");
@@ -3953,6 +3991,16 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         12345
     );
     assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["quote_strategy"],
+        "fixed"
+    );
+    assert!(
+        res["data"]["proposals"][0]["runtime"]
+            .get("quote_model_id")
+            .is_none(),
+        "fixed quote must omit an absent model ID: {res}"
+    );
+    assert_eq!(
         res["data"]["proposals"][0]["runtime"]["submitted_at"],
         123000
     );
@@ -3967,6 +4015,18 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],
         false
+    );
+    assert_eq!(
+        res["data"]["aggregate"]["runtime"]["provider_request_id"],
+        "0xaggregate"
+    );
+    assert_eq!(
+        res["data"]["aggregate"]["runtime"]["quote_strategy"],
+        "estimated"
+    );
+    assert_eq!(
+        res["data"]["aggregate"]["runtime"]["quote_model_id"],
+        "risc0-zkgas-m2-v1"
     );
 
     let runtime_task = state

@@ -46,7 +46,7 @@ base strategies.
 ## Request Metadata Preparation
 
 Add `crates/prover/src/boundless/estimation.rs` as the evaluator and deterministic-journal module.
-It compile-time embeds `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json` with `include_str!`,
+It compile-time embeds `crates/prover/models/risc0-zkgas.json` with `include_str!`,
 deserializes and validates it once when an `Estimated` strategy is configured, and exposes typed
 estimation results to `boundless/mod.rs`. The JSON artifact is the single source of truth for model
 IDs, calibration provenance, coefficients, execution configuration, operating domains, and
@@ -180,13 +180,14 @@ checked, and the final value must fit a positive `u32` mcycle count.
 
 ### Proposal Model Identity and Operating Domain
 
-Commit a compact, reviewable artifact at
-`experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json`. It records at least:
+Commit a compact, reviewable runtime artifact at `crates/prover/models/risc0-zkgas.json`. It is
+generated from the versioned fixture and policy under
+`tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/` and records at least:
 
 - model ID `risc0-zkgas-m2-v1` and the originating experiment model ID;
 - proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`;
-- RISC0 version `3.0.5`, `execution_po2 = 20`, source revision, ELF hash, raw input-row hash,
-  and validation-fixture hash;
+- RISC0 version `3.0.5`, `execution_po2 = 20`, source revision, ELF hash, generator-config hash,
+  compact input-row hash, and validation-fixture hash;
 - the decimal and scaled-integer coefficients;
 - Hoodi fit/calibration and Mainnet evaluation counts and diagnostics;
 - the fact that Mainnet influenced the M2 production choice and is not an untouched holdout;
@@ -230,8 +231,10 @@ reviewed when the deployment selects `estimated`.
 
 ### Validation Fixture
 
-Commit `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1-validation.jsonl` with the 40 successful
-Hoodi calibration rows and 20 successful Mainnet evaluation rows. Each compact row contains
+Commit `tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/validation.jsonl` with the 40 successful Hoodi
+calibration rows and 20 successful Mainnet evaluation rows. The same versioned directory also keeps
+the 80 Hoodi fit rows and explicit policy/provenance config used by the deterministic generator.
+Each compact row contains
 `network`, `split`, `proposal_id`, `block_count`, `total_zkgas`, and `actual_mcycles`; the Mainnet
 rows use `split = "evaluation"` because they are no longer described as an untouched holdout. This
 fixture is validation evidence, not a second runtime source for coefficients or domains. The model
@@ -240,8 +243,10 @@ artifact records its SHA-256 and the expected split counts.
 Regression tests load the committed fixture and model artifact together, require the fixture hash,
 schema, unique `(network, proposal_id)` keys, and exact 40/20 split counts to match, then recompute
 the documented continuous-model and production-integer diagnostics. Tests must not depend on the
-original machine-local collection directory. The raw cohort remains identified by its independent
-input-row hash for traceability.
+original machine-local collection directory. The reviewed generator config binds the raw cohort's
+source/build/chain-spec hashes and fixed 10% policy, while the compact input hash binds every fitted
+or evaluated numeric row. Later calibrations start with model ID `risc0-zkgas-m2-auto`; generation
+replaces it in the committed fixture and runtime artifact with a 16-hex content-addressed suffix.
 
 ## Aggregation Cycle Estimate
 

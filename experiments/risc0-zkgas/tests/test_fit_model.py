@@ -4,11 +4,20 @@ import hashlib
 import json
 import math
 import pathlib
+import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ARTIFACT_PATH = ROOT / "models" / "risc0-zkgas-m2-v1.json"
-FIXTURE_PATH = ROOT / "models" / "risc0-zkgas-m2-v1-validation.jsonl"
+REPO_ROOT = ROOT.parents[1]
+ARTIFACT_PATH = REPO_ROOT / "crates" / "prover" / "models" / "risc0-zkgas.json"
+FIXTURE_PATH = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "risc0-zkgas"
+    / "2026-08-28-m2-v1"
+    / "validation.jsonl"
+)
 FIXTURE_SHA256 = "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767"
 
 EXPECTED = {
@@ -114,7 +123,8 @@ def diagnostics(rows, predict):
         "mape_percent": sum(abs(error) for error in errors) / len(errors),
         "max_absolute_error_percent": max(abs(error) for error in errors),
         "max_underquote_percent": max([-error for error in errors if error < 0], default=0.0),
-        "over_ten_percent_count": sum(error > 10 for error in errors),
+        "over_ten_percent_count": sum(abs(error) > 10 for error in errors),
+        "overquote_over_ten_percent_count": sum(error > 10 for error in errors),
         "max_overquote_percent": max([error for error in errors if error > 0], default=0.0),
     }
 
@@ -122,21 +132,16 @@ def diagnostics(rows, predict):
 def assert_diagnostics(actual, artifact, expected):
     assert artifact == expected
     for field, expected_value in artifact.items():
-        actual_field = (
-            "over_ten_percent_count"
-            if field == "overquote_over_ten_percent_count"
-            else field
-        )
         if isinstance(expected_value, int):
-            assert actual[actual_field] == expected_value
+            assert actual[field] == expected_value
             continue
         expected_float = parse_audit_decimal(expected_value, field)
         precision = len(expected_value.partition(".")[2])
         tolerance = 0.5 * 10 ** -precision + 1e-9
-        assert abs(actual[actual_field] - expected_float) <= tolerance
+        assert abs(actual[field] - expected_float) <= tolerance
 
 
-def test_committed_fixture_reproduces_quote_diagnostics():
+def assert_committed_fixture_reproduces_quote_diagnostics():
     artifact = json.loads(ARTIFACT_PATH.read_text())
     rows = load_fixture()
     proposal = artifact["proposal"]
@@ -169,3 +174,8 @@ def test_committed_fixture_reproduces_quote_diagnostics():
         proposal["cohorts"]["mainnet"]["scaled_integer"],
         EXPECTED["mainnet"]["scaled_integer"],
     )
+
+
+class CommittedFixtureTests(unittest.TestCase):
+    def test_committed_fixture_reproduces_quote_diagnostics(self):
+        assert_committed_fixture_reproduces_quote_diagnostics()

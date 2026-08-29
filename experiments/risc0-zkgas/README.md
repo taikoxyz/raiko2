@@ -125,29 +125,54 @@ one-sided margins from Hoodi before evaluating the untouched Mainnet holdout.
   --report-out /tmp/raiko2-risc0-zkgas-cycles/report.md
 ```
 
-The JSON artifact records all candidate coefficients, Hoodi largest-positive-residual margins, the
+The experiment JSON records all candidate coefficients, Hoodi largest-positive-residual margins, the
 selected model, feature envelope, 1,000-mcycle bucket policy with a 2,000-mcycle minimum, Mainnet
 holdout gates, and an explicit shadow-mode recommendation. Exit 0 means every selected-model gate
 passed; exit 4 means retain local pre-execution. Passing is evidence for a later shadow experiment,
-not permission to copy a coefficient directly into production.
+not permission to copy a coefficient directly into production. Production packaging is performed
+only by `scripts/modeling/risc0_zkgas_model.py` through the stable `just` recipes below.
 
 ## Committed validation fixture
 
-`models/risc0-zkgas-m2-v1-validation.jsonl` is the compact, reviewable projection used to reproduce
-the production-estimator diagnostics. It contains all 40 successful Hoodi calibration rows and all
-20 successful Mainnet evaluation rows, with only the network, split, proposal ID, block count,
-total zkGas, and actual mcycles retained. Mainnet rows are labeled `evaluation` rather than
-`holdout` because Mainnet influenced the production model choice.
+`tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/` contains the compact, reviewable production inputs:
+80 Hoodi fit rows in `hoodi-fit.jsonl`, the 40 Hoodi calibration plus 20 Mainnet evaluation rows in
+`validation.jsonl`, and manual provenance/domain policy in `config.json`. Every row retains only the
+network, split, proposal ID, block count, total zkGas, and actual mcycles. Mainnet rows are labeled
+`evaluation` because Mainnet influenced the production model choice.
 
-The production model artifact records this file's SHA-256 and expected split counts. Regression
-tests validate those identities before recomputing diagnostics; the fixture is evidence and does
-not replace the model artifact as the runtime source of coefficients or operating domains.
+The generator deterministically refits M2 from the Hoodi fit rows, validates explicit domain
+endpoints and the admitted 10% error budget, and writes `crates/prover/models/risc0-zkgas.json`.
+Its `raw_input_rows_sha256` is SHA-256 over the canonical `hoodi-fit.jsonl` bytes followed by the
+canonical `validation.jsonl` bytes, so a refresh never requires copying a hash by hand. The artifact
+also records a canonical generator-config hash; the reviewed config pins every collector build hash,
+the per-network chain-spec hash, and the fixed 10% acceptance policy.
+Check or refresh it with an existing Python 3.11+ virtual environment:
+
+```sh
+PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model
+PYTHON_BIN=/path/to/venv/bin/python just update-risc0-zkgas-model \
+  tests/fixtures/risc0-zkgas/2026-08-28-m2-v1 \
+  tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/config.json \
+  /path/to/hoodi/samples.jsonl \
+  /path/to/mainnet/samples.jsonl
+```
+
+The generator projects successful Hoodi `fit`/`calibration` rows and normalizes successful Mainnet
+`holdout` rows to the committed `evaluation` split. It rejects mixed collector cohorts and requires
+their source revision, guest image, RISC0 version, execution parameters, and artifact hashes to match
+the reviewed config. It re-derives mcycles from each successful row's authoritative RISC0 user-cycle
+count and validates the collector identity fields. An exact rebuild may retain the current legacy
+model ID. For a changed calibration, start from a new fixture directory and set the input config's
+model ID to `risc0-zkgas-m2-auto`; the generator writes a content-addressed ID into both the fixture
+config and runtime artifact. Reusing that ID for different coefficients, inputs, or provenance is
+rejected even when the output paths differ.
+The runtime artifact remains the single source for coefficients and operating domains.
 
 ## Unit tests
 
-Tests use fixtures and mocked subprocesses; they do not contact RPC endpoints or run RISC0:
+Tests use fixtures and mocked subprocesses; they do not contact RPC endpoints or run RISC0. The
+stable recipe runs both the production generator and experiment suites:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 /path/to/venv/bin/python -m unittest discover \
-  -s experiments/risc0-zkgas/tests -v
+PYTHON_BIN=/path/to/venv/bin/python just test-risc0-zkgas-model
 ```

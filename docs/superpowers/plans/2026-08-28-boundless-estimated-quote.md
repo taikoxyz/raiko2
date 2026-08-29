@@ -15,7 +15,7 @@
 - Do not change guest source or generated ELFs.
 - Do not add a public preflight flag, runtime ELF/image/version gate, or network-specific coefficient.
 - Treat malformed stage input and invalid carry linkage as direct request errors. Treat model-domain, execution-configuration, fork, zero/overflow, and uncalibrated-count failures as warning-plus-one-local-execution fallback.
-- Use `apply_patch` for repository edits. Run Python only from `experiments/risc0-zkgas/.venv/bin/python`.
+- Use `apply_patch` for repository edits. Run Python through an existing virtual environment.
 - Preserve unrelated worktree changes. Commit each coherent task only after its focused red/green checks pass.
 - Before completion, run independent adversarial review and independent behavioral verification because journal equality, request pricing, and durable rebid state are cross-crate behavior.
 
@@ -23,7 +23,7 @@
 
 **Files:**
 
-- Create: `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json`
+- Create: `crates/prover/models/risc0-zkgas.json`
 - Create: `crates/prover/src/boundless/estimation.rs`
 - Modify: `crates/prover/src/boundless/mod.rs`
 
@@ -43,7 +43,7 @@ pub fn validate_estimation_model() -> Result<(), String>;
 ```rust
 include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json"
+    "/models/risc0-zkgas.json"
 ))
 ```
 
@@ -51,7 +51,7 @@ The artifact schema contains:
 
 - `schema_version = 1`, `model_id = "risc0-zkgas-m2-v1"`, and originating experiment model `M2`;
 - provenance: source revision `4f8300497aba75605b9b8568b1955faa1f7f04bc`, proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`, proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, RISC0 `3.0.5`, and `execution_po2 = 20`;
-- raw input row SHA-256 `be824f1262862525aaa961e568feb1e7b911031256b7ddf1d3f7ef6b5236e18c` and validation fixture SHA-256 `dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767`;
+- generated config SHA-256, compact input-row SHA-256 `0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328`, and validation fixture SHA-256 `dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767`;
 - decimal proposal coefficients and scaled integer coefficients with scale `1_000_000_000_000`;
 - independent Hoodi and Mainnet conjunctive domains from the approved design;
 - exact cohort counts and documented diagnostics for Hoodi calibration and Mainnet evaluation;
@@ -88,7 +88,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/prover/src/boundless/estimation.rs crates/prover/src/boundless/mod.rs experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json
+git add crates/prover/src/boundless/estimation.rs crates/prover/src/boundless/mod.rs crates/prover/models/risc0-zkgas.json
 git commit -m "feat(boundless): embed quote estimation model"
 ```
 
@@ -243,7 +243,7 @@ git commit -m "feat(boundless): estimate proposal quote metadata"
 
 **Step 1: Write failing regression tests**
 
-Rust tests load the artifact plus `risc0-zkgas-m2-v1-validation.jsonl`, require its SHA-256, six-field row schema, unique `(network, proposal_id)` keys, and exact 40 Hoodi calibration/20 Mainnet evaluation rows. Recompute both continuous and integer predictions and assert the artifact diagnostics with tight tolerances:
+Rust tests load the artifact plus `tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/validation.jsonl`, require its SHA-256, six-field row schema, unique `(network, proposal_id)` keys, and exact 40 Hoodi calibration/20 Mainnet evaluation rows. Recompute both continuous and integer predictions and assert the artifact diagnostics with tight tolerances:
 
 - Hoodi continuous: 17 underquotes, MAPE 0.094557%, maximum absolute/underquote 0.279512%, zero rows over 10%;
 - Hoodi integer: 12 underquotes, MAPE 0.093492%, maximum absolute/underquote 0.264550%, zero rows over 10%;
@@ -256,7 +256,7 @@ Run:
 
 ```bash
 cargo test -p raiko2-prover --features boundless boundless::estimation::tests::fixture_
-experiments/risc0-zkgas/.venv/bin/python -m pytest experiments/risc0-zkgas/tests/test_fit_model.py -q
+/path/to/venv/bin/python -m pytest experiments/risc0-zkgas/tests/test_fit_model.py -q
 ```
 
 Expected: FAIL until the fixture loaders and artifact diagnostics are wired.
@@ -274,7 +274,7 @@ Expected: PASS, with the Python experiment suite still reporting 23 passing test
 **Step 4: Commit**
 
 ```bash
-git add crates/prover/src/boundless/estimation.rs experiments/risc0-zkgas/tests/test_fit_model.py experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json
+git add crates/prover/src/boundless/estimation.rs experiments/risc0-zkgas/tests/test_fit_model.py crates/prover/models/risc0-zkgas.json
 git commit -m "test(boundless): lock quote model diagnostics"
 ```
 
@@ -414,7 +414,7 @@ git commit -m "feat(boundless): prepare estimated quote context"
 **Files:**
 
 - Create: `crates/prover/examples/boundless_aggregation_calibration.rs`
-- Modify: `experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json`
+- Modify: `crates/prover/models/risc0-zkgas.json`
 - Modify: `crates/prover/src/boundless/estimation.rs`
 
 **Step 1: Implement a reproducible local calibration example**
@@ -451,7 +451,7 @@ Expected: PASS. If no count passes, proposal Estimated remains implementable but
 **Step 5: Commit**
 
 ```bash
-git add crates/prover/examples/boundless_aggregation_calibration.rs crates/prover/src/boundless/estimation.rs experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json
+git add crates/prover/examples/boundless_aggregation_calibration.rs crates/prover/src/boundless/estimation.rs crates/prover/models/risc0-zkgas.json
 git commit -m "test(boundless): calibrate aggregation cycle estimate"
 ```
 
@@ -620,7 +620,7 @@ cargo fmt --all -- --check
 cargo test -p raiko2-prover --features boundless
 cargo test -p raiko2-runtime boundless_submission
 cargo test -p raiko2 config::prover
-experiments/risc0-zkgas/.venv/bin/python -m pytest experiments/risc0-zkgas/tests -q
+/path/to/venv/bin/python -m pytest experiments/risc0-zkgas/tests -q
 git diff --check
 ```
 

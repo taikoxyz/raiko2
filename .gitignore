@@ -6,7 +6,10 @@
 TODO.md
 .worktrees/
 test.json
-.codex
+.codex/*
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/raiko2-risc0-zkgas-calibration/
 __pycache__/
 *.pyc
 core.[0-9]*

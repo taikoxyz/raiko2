@@ -29,6 +29,20 @@ build-sp1-toolchain-image tag="raiko2-sp1-toolchain:local" *args:
 bench-guest backend="sp1" *args:
     cargo run -r -p xtask -- bench-guest {{backend}} {{args}}
 
+check-risc0-zkgas-model:
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN:?set PYTHON_BIN to an existing virtualenv Python}" scripts/modeling/risc0_zkgas_model.py check
+
+test-risc0-zkgas-model:
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN:?set PYTHON_BIN to an existing virtualenv Python}" -m unittest discover -s scripts/modeling/tests -v
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN:?set PYTHON_BIN to an existing virtualenv Python}" -m unittest discover -s experiments/risc0-zkgas/tests -v
+
+update-risc0-zkgas-model fixture_dir config hoodi_samples mainnet_samples:
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN:?set PYTHON_BIN to an existing virtualenv Python}" scripts/modeling/risc0_zkgas_model.py update \
+        --fixture-dir "{{fixture_dir}}" \
+        --config "{{config}}" \
+        --hoodi-samples "{{hoodi_samples}}" \
+        --mainnet-samples "{{mainnet_samples}}"
+
 release-image backend tag repository="us-docker.pkg.dev/evmchain/images/raiko2" *args:
     @if [ "{{backend}}" = "host" ]; then \
         cargo run -r -p xtask --no-default-features --features image-release -- release-image {{backend}} --tag {{tag}} --repository {{repository}} {{args}}; \

@@ -12,8 +12,11 @@ use crate::{validated_shasta_proposal_input, validated_shasta_zk_aggregation_out
 
 const EMBEDDED_MODEL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json"
+    "/models/risc0-zkgas.json"
 ));
+const MODEL_ID_PREFIX: &str = "risc0-zkgas-m2-";
+const LEGACY_MODEL_ID: &str = "risc0-zkgas-m2-v1";
+const CONTENT_ID_HEX_LENGTH: usize = 16;
 
 static ESTIMATION_MODEL: OnceLock<Result<EstimationModel, String>> = OnceLock::new();
 
@@ -281,14 +284,21 @@ fn validate_artifact(artifact: &ValidatedModelArtifact) -> Result<(), String> {
     if artifact.schema_version != 1 {
         return Err("unsupported estimation model schema_version".to_string());
     }
-    if artifact.model_id != "risc0-zkgas-m2-v1" {
-        return Err("unsupported estimation model_id".to_string());
+    let content_id = artifact.model_id.strip_prefix(MODEL_ID_PREFIX);
+    if artifact.model_id != LEGACY_MODEL_ID
+        && !content_id.is_some_and(|suffix| is_hex(suffix, CONTENT_ID_HEX_LENGTH))
+    {
+        return Err("unsupported estimation model_id family".to_string());
     }
     if artifact.originating_experiment_model != "M2" {
         return Err("unsupported originating experiment model".to_string());
     }
 
     validate_release_provenance(&artifact.proposal.provenance, "proposal")?;
+    validate_sha256(
+        &artifact.proposal.generator_config_sha256,
+        "proposal generator config",
+    )?;
     validate_sha256(
         &artifact.proposal.raw_input_rows_sha256,
         "proposal raw input rows",
@@ -556,6 +566,7 @@ struct ValidatedModelArtifact {
 #[serde(deny_unknown_fields)]
 struct Proposal {
     provenance: ReleaseProvenance,
+    generator_config_sha256: String,
     raw_input_rows_sha256: String,
     validation_fixture_sha256: String,
     coefficients: ProposalCoefficients,
@@ -866,6 +877,7 @@ mod tests {
                     "risc0_version": "3.0.5",
                     "execution_po2": 20
                 },
+                "generator_config_sha256": "51d680db2dd5f63c86b29f8558f7f0bfda586525805ad45fa15ad91a817f4bce",
                 "raw_input_rows_sha256": "be824f1262862525aaa961e568feb1e7b911031256b7ddf1d3f7ef6b5236e18c",
                 "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767",
                 "coefficients": {
@@ -920,13 +932,25 @@ mod tests {
     }
 
     #[test]
-    fn model_rejects_wrong_schema_or_model_ids() {
+    fn model_rejects_wrong_schema_or_unsupported_model_id_family() {
         let mut artifact = valid_artifact();
         artifact["schema_version"] = json!(2);
         assert!(parse(artifact).is_err());
         let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("");
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
         artifact["model_id"] = json!("other-model");
         assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-");
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-v2");
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-0123456789abcdef");
+        assert!(parse(artifact).is_ok());
     }
 
     #[test]
@@ -937,6 +961,10 @@ mod tests {
 
         let mut artifact = valid_artifact();
         artifact["proposal"]["provenance"]["image_id"] = json!("0xnot-an-image");
+        assert!(parse(artifact).is_err());
+
+        let mut artifact = valid_artifact();
+        artifact["proposal"]["generator_config_sha256"] = json!("not-a-sha256");
         assert!(parse(artifact).is_err());
     }
 
@@ -1545,7 +1573,7 @@ mod tests {
 
     const VALIDATION_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../experiments/risc0-zkgas/models/risc0-zkgas-m2-v1-validation.jsonl"
+        "/../../tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/validation.jsonl"
     ));
 
     #[derive(Debug, Deserialize)]

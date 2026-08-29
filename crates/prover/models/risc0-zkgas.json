@@ -10,7 +10,8 @@
       "risc0_version": "3.0.5",
       "execution_po2": 20
     },
-    "raw_input_rows_sha256": "be824f1262862525aaa961e568feb1e7b911031256b7ddf1d3f7ef6b5236e18c",
+    "generator_config_sha256": "51d680db2dd5f63c86b29f8558f7f0bfda586525805ad45fa15ad91a817f4bce",
+    "raw_input_rows_sha256": "0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328",
     "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767",
     "coefficients": {
       "decimal": {
@@ -28,13 +29,25 @@
     "domains": [
       {
         "network": "taiko_hoodi",
-        "block_count": { "minimum": 155, "maximum": 192 },
-        "total_zkgas": { "minimum": 369558586, "maximum": 459162040 }
+        "block_count": {
+          "minimum": 155,
+          "maximum": 192
+        },
+        "total_zkgas": {
+          "minimum": 369558586,
+          "maximum": 459162040
+        }
       },
       {
         "network": "taiko_mainnet",
-        "block_count": { "minimum": 184, "maximum": 192 },
-        "total_zkgas": { "minimum": 216314230, "maximum": 310638954 }
+        "block_count": {
+          "minimum": 184,
+          "maximum": 192
+        },
+        "total_zkgas": {
+          "minimum": 216314230,
+          "maximum": 310638954
+        }
       }
     ],
     "cohorts": {

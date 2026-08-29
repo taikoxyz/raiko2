@@ -201,7 +201,7 @@ mock instance id `0xDEAD_C0DE` when `--instance-id` is omitted.
 
 Use `GET /health` for simple liveness checks. `POST /prove/shasta` is not a lightweight signing
 smoke endpoint: `raiko2-sgx-prover` requires a complete `GuestInput` request envelope and runs the
-same Shasta guest validation path as the zk guests before signing the resulting public input.
+same guest validation path as the zk guests before signing the resulting public input.
 Use the main `raiko2` service or the regression scripts to build that request.
 
 ### Docker Compose
@@ -526,7 +526,15 @@ Expected release outputs:
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
 - TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
-- Shasta guest artifact assets:
+
+The `shasta` in these guest artifact filenames is a frozen identifier, not a fork selector. These
+are the current guest ELF and VK assets, and they carry the rules for every fork they support, not
+just one. On-chain registration is keyed on the RISC0 image ID or the SP1 VK hash, each computed
+from the built bytes. A rename by itself therefore does not require re-registration; only a rebuild
+that changes those bytes does. See the `Frozen identifier` entry
+in [../CONTEXT.md](../CONTEXT.md).
+
+- Guest artifact assets:
   - `risc0_shasta_*.elf`
   - `sp1_shasta_*.elf`
   - `sp1_shasta_*.vk.bin`
@@ -693,7 +701,7 @@ does not consume it as a runtime trust anchor.
 
 #### 3. Verify Release Artifact Identity
 
-Derive the expected Shasta asset names from the release tag, require the GitHub Release to publish
+Derive the expected guest asset names from the release tag, require the GitHub Release to publish
 that exact set, then download and compare every byte with the tag checkout:
 
 ```bash
@@ -737,7 +745,7 @@ composition directory must identify the same programs.
 #### 4. Gate Host/Guest Compatibility
 
 First validate both provenance manifests, each backend's exact inventory, every recorded artifact,
-and the Shasta SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
+and the SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
 prevents a source mismatch from hiding an artifact, manifest, or SP1 failure:
 
 ```bash
@@ -925,13 +933,43 @@ Guest builds and image releases do not update verifier trust lists automatically
 When a checked-in guest ELF changes, register the new digests explicitly with `xtask`:
 
 ```bash
-# Built-in profiles are environment-specific. Pick the profile or explicit RPC/verifier overrides
-# that match the target verifier network.
-cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
-cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
+# Registration defaults to the chain spec's SHASTA verifier entry, which is wrong on every network
+# that has activated Unzen. Derive the UNZEN verifiers and pass them explicitly. `jq -er` exits
+# non-zero when a network has no UNZEN verifier entry, so that case fails here instead of silently
+# registering against the wrong contract.
+NETWORK=taiko_hoodi        # or taiko_mainnet
+PROFILE=hoodi-shasta       # or mainnet-shasta
+SPEC=config/chain_spec_list_default.json
+
+RISC0_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.RISC0' "$SPEC")
+SP1_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.SP1' "$SPEC")
+echo "RISC0=$RISC0_VERIFIER SP1=$SP1_VERIFIER"   # both must be 0x... before continuing
+
+# Dry run. Previews exactly what the apply below sends.
+cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER"
+
+# Apply.
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER" \
+  --apply
 ```
+
+> **Why the overrides are mandatory.** `resolve_profile` obtains both defaults from
+> `load_shasta_verifiers_from_chain_spec`, reading `/verifier_address_forks/SHASTA/<proof_type>`,
+> and `--risc0-verifier` / `--sp1-verifier` are the only things that override it
+> (`xtask/src/register_image.rs:335-347`). Running any `hoodi-shasta` or `mainnet-shasta` command
+> without them registers the guest digests against the Shasta verifier contracts. On `taiko_hoodi`
+> those are different addresses from the live Unzen ones, so the registration silently lands on the
+> obsolete contracts while the active verifiers stay unchanged. `taiko_mainnet` currently carries
+> identical addresses under both forks, so it is unaffected today, but that is incidental — the
+> `SHASTA` path is hardcoded for every profile. Fixing that hardcode is a code change tracked
+> separately.
+
 
 Current behavior:
 
@@ -1552,14 +1590,14 @@ while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
 `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional pair
 settings for hosted SP1 network verification. They point to the verifier-chain RPC and deployed
 Succinct verifier contract used after a network proof is fulfilled. This is separate from the Taiko
-Shasta verifier address used for proof registration and chain-spec data carried in proofs.
+Proposal verifier address used for proof registration and chain-spec data carried in proofs.
 
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.
 
 ## Preflight Concurrency
 
-Shasta preflight defaults are aligned with the old raiko hosted deployment shape:
+Preflight defaults are aligned with the old raiko hosted deployment shape:
 
 - `queue.workers=6` runs up to six queue tasks in parallel, matching the old hosted proving
   concurrency.

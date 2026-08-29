@@ -1,4 +1,4 @@
-![Raiko2 — Taiko proof orchestration for Shasta](docs/assets/readme-banner.png)
+![Raiko2 — Taiko proof orchestration](docs/assets/readme-banner.png)
 
 [![CI status](https://img.shields.io/github/actions/workflow/status/taikoxyz/raiko2/ci.yml?branch=main&label=CI)](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml)
 
@@ -6,9 +6,10 @@ Home / [Docs](docs/README.md) / [Architecture](docs/architecture.md) / [API](doc
 [Development](docs/development.md) / [Operations](docs/operations.md) /
 [Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
-Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
+Raiko2 is a proposal proof service for Taiko. It builds canonical guest inputs from RPC data,
 validates them, runs local or remote proving routes, and exposes a typed v4 API for
-asynchronous proposal-side proof requests.
+asynchronous proposal-side proof requests. Every Taiko network runs the Unzen fork, and Raiko2
+proves proposals under it.
 
 ## At a Glance
 
@@ -16,7 +17,7 @@ asynchronous proposal-side proof requests.
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
-- Shasta-first pipeline for preflight, validation, proving, and aggregation
+- Proposal pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
 - Exactly one live instance per isolated runtime namespace; replacements never overlap
 - GCS for durable operation or explicitly opted-in ephemeral memory mode, with no cross-namespace data sharing
@@ -157,7 +158,7 @@ The runtime is governed by these invariants:
 The detailed runtime lifecycle, publication transaction, recovery flow, and deployment sequence are
 illustrated in [Architecture](docs/architecture.md).
 
-1. `Preflight` resolves canonical Shasta inputs from L1 and L2 RPC.
+1. `Preflight` resolves canonical guest inputs from L1 and L2 RPC.
 2. `Validation` checks request invariants and witness-derived data.
 3. `Prover` runs the selected backend and runner.
 4. `Aggregate` combines proposal proofs when the request asks for it.
@@ -179,7 +180,7 @@ flowchart LR
 - The legacy v3 contract remains documented and covered by compatibility tests while the code is
   still present.
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
-- Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
+- Proposal manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
 - Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
   admission-time `zk_any` for proposal sampling. V4 accepts `native` for smoke tests and
@@ -202,7 +203,7 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
-- `sgx/remote` submits Shasta proving to the dedicated remote SGX runtime. This repo now ships
+- `sgx/remote` submits proposal proving to the dedicated remote SGX runtime. This repo now ships
   `raiko2-sgx-prover` for `proof_type=sgx`; that runtime can run in `tee` or `native` mode
   without changing the remote API. `proof_type=sgxgeth` is served by an external remote prover
   implementation such as `gaiko2` over the same remote protocol.
@@ -210,6 +211,11 @@ flowchart LR
   add a dockerized `raiko2` for regression work.
 
 ## Remote Prover Conformance
+
+The `shasta` spelling in this section's route, schema, and fixture names is a frozen identifier kept
+for provider compatibility. It does not select a fork: these are the current endpoints, and the
+proposal in the request determines which fork rules apply. See the `Frozen identifier` entry in
+[CONTEXT.md](CONTEXT.md).
 
 `raiko2` owns the canonical remote prover request fixtures under:
 
@@ -227,13 +233,14 @@ cargo test -p raiko2-prover --no-default-features \
   --test remote_prover_conformance -- --ignored --nocapture
 ```
 
-The harness builds the proposal request from the shared Shasta `GuestInput` fixture and posts it to:
+The harness builds the proposal request from the shared proposal `GuestInput` fixture under
+`tests/fixtures/` and posts it to:
 
 - `POST /prove/shasta`
 
 This harness targets providers whose `/prove/shasta` input is the v1
 `raiko2-shasta-request-v1` packet with `payload.guest_input`. `raiko2-sgx-prover` consumes the
-same request shape and runs the Shasta guest validation path before signing.
+same request shape and runs the guest validation path before signing.
 
 It then builds a live aggregate request from the returned proposal proof and posts that derived
 request to:

@@ -7,9 +7,10 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import pathlib
-import statistics
 import sys
+import tempfile
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -24,6 +25,7 @@ LEGACY_MODEL_ID = "risc0-zkgas-m2-v1"
 LEGACY_CONTENT_SHA256 = "b605227454337a5ed429c2e328dd1a86dc70246101cbf0fce5926340d7a24f2d"
 AUTO_MODEL_ID = f"{MODEL_ID_PREFIX}auto"
 CONTENT_ID_HEX_LENGTH = 16
+MAX_DIAGNOSTIC_DECIMAL_PLACES = 18
 UNZEN_TIMESTAMPS = {
     "taiko_hoodi": 1_781_787_600,
     "taiko_mainnet": 1_786_021_200,
@@ -271,12 +273,19 @@ def validate_config(config: Mapping[str, Any]) -> None:
             {"continuous", "scaled_integer"},
             f"{network} diagnostic decimal places",
         )
-        rust_uint(places["continuous"], 32, f"{network} continuous decimal places")
-        rust_uint(
+        continuous_places = rust_uint(
+            places["continuous"], 32, f"{network} continuous decimal places"
+        )
+        integer_places = rust_uint(
             places["scaled_integer"],
             32,
             f"{network} scaled integer decimal places",
         )
+        if max(continuous_places, integer_places) > MAX_DIAGNOSTIC_DECIMAL_PLACES:
+            raise ModelError(
+                f"{network} diagnostic decimal places must not exceed "
+                f"{MAX_DIAGNOSTIC_DECIMAL_PLACES}"
+            )
     if not isinstance(mainnet["influenced_model_selection"], bool) or not isinstance(
         mainnet["untouched_holdout"], bool
     ):
@@ -291,13 +300,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
 
 def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
-    if set(aggregation) != {
-        "per_child_mcycles",
-        "provenance",
-        "measurements",
-        "calibrated_counts",
-    }:
-        raise ModelError("aggregation config has an unsupported schema")
+    aggregation = require_keys(
+        aggregation,
+        {
+            "per_child_mcycles",
+            "provenance",
+            "measurements",
+            "calibrated_counts",
+        },
+        "aggregation config",
+    )
     per_child_mcycles = aggregation.get("per_child_mcycles")
     rust_uint(
         per_child_mcycles,
@@ -310,9 +322,11 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
     if not isinstance(measurements, list) or not isinstance(calibrated_counts, list):
         raise ModelError("aggregation measurements and calibrated_counts must be lists")
 
-    provenance = aggregation["provenance"]
-    if set(provenance) != {"image_id", "elf_sha256", "execution_po2"}:
-        raise ModelError("aggregation provenance has an unsupported schema")
+    provenance = require_keys(
+        aggregation["provenance"],
+        {"image_id", "elf_sha256", "execution_po2"},
+        "aggregation provenance",
+    )
     image_id = provenance["image_id"]
     is_uncalibrated = not measurements and not calibrated_counts
     if image_id is None:
@@ -338,13 +352,11 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
     measured_counts: set[int] = set()
     enabled_counts: set[int] = set()
     for measurement in measurements:
-        if set(measurement) != {
-            "child_count",
-            "actual_mcycles",
-            "predicted_mcycles",
-            "enabled",
-        }:
-            raise ModelError("aggregation measurement has an unsupported schema")
+        measurement = require_keys(
+            measurement,
+            {"child_count", "actual_mcycles", "predicted_mcycles", "enabled"},
+            "aggregation measurement",
+        )
         child_count = rust_uint(
             measurement.get("child_count"),
             32,
@@ -368,6 +380,13 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
             "aggregation predicted_mcycles",
             nonzero=True,
         )
+        expected_prediction = per_child_mcycles * child_count
+        if expected_prediction > (1 << 64) - 1:
+            raise ModelError("aggregation prediction must fit u64")
+        if predicted != expected_prediction:
+            raise ModelError(
+                "aggregation predicted_mcycles must equal per_child_mcycles * child_count"
+            )
         enabled = measurement.get("enabled")
         if not isinstance(enabled, bool):
             raise ModelError("aggregation enabled must be a boolean")
@@ -523,10 +542,18 @@ def compact_row(row: Mapping[str, Any], label: str) -> dict[str, Any]:
     compact = {
         "network": row.get("network"),
         "split": row.get("split"),
-        "proposal_id": positive_int(row.get("proposal_id"), f"{label} proposal_id"),
-        "block_count": positive_int(row.get("block_count"), f"{label} block_count"),
-        "total_zkgas": positive_int(row.get("total_zkgas"), f"{label} total_zkgas"),
-        "actual_mcycles": positive_int(actual, f"{label} actual_mcycles"),
+        "proposal_id": rust_uint(
+            row.get("proposal_id"), 32, f"{label} proposal_id", nonzero=True
+        ),
+        "block_count": rust_uint(
+            row.get("block_count"), 32, f"{label} block_count", nonzero=True
+        ),
+        "total_zkgas": rust_uint(
+            row.get("total_zkgas"), 32, f"{label} total_zkgas", nonzero=True
+        ),
+        "actual_mcycles": rust_uint(
+            actual, 32, f"{label} actual_mcycles", nonzero=True
+        ),
     }
     if compact["network"] not in {"taiko_hoodi", "taiko_mainnet"}:
         raise ModelError(f"{label} has unsupported network {compact['network']!r}")
@@ -565,7 +592,7 @@ def jsonl_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
 
 
 def artifact_bytes(artifact: Mapping[str, Any]) -> bytes:
-    return (json.dumps(artifact, indent=2) + "\n").encode()
+    return (json.dumps(artifact, indent=2, sort_keys=True) + "\n").encode()
 
 
 def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -617,11 +644,24 @@ def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[
     return [augmented[row][-1] for row in range(size)]
 
 
+def left_fold_sum(values: Iterable[float], start: float = 0.0) -> float:
+    total = start
+    for value in values:
+        total += value
+    return total
+
+
+def left_fold_mean(values: Sequence[float]) -> float:
+    if not values:
+        raise ModelError("cannot average an empty fit column")
+    return left_fold_sum(values) / len(values)
+
+
 def fit_m2(rows: Sequence[Mapping[str, Any]]) -> dict[str, Decimal]:
     features = ("total_zkgas", "block_count")
     columns = [[float(row[feature]) for row in rows] for feature in features]
     target = [float(row["actual_mcycles"]) for row in rows]
-    means = [statistics.fmean(column) for column in columns]
+    means = [left_fold_mean(column) for column in columns]
     scales = [
         max(abs(value - mean) for value in column)
         for column, mean in zip(columns, means)
@@ -632,21 +672,27 @@ def fit_m2(rows: Sequence[Mapping[str, Any]]) -> dict[str, Decimal]:
         [(value - mean) / scale for value in column]
         for column, mean, scale in zip(columns, means, scales)
     ]
-    centered_target = [value - statistics.fmean(target) for value in target]
+    target_mean = left_fold_mean(target)
+    centered_target = [value - target_mean for value in target]
     gram = [
         [
-            sum(left * right for left, right in zip(normalized[i], normalized[j]))
+            left_fold_sum(
+                left * right for left, right in zip(normalized[i], normalized[j])
+            )
             for j in range(len(features))
         ]
         for i in range(len(features))
     ]
     rhs = [
-        sum(value * target_value for value, target_value in zip(column, centered_target))
+        left_fold_sum(
+            value * target_value
+            for value, target_value in zip(column, centered_target)
+        )
         for column in normalized
     ]
     normalized_coefficients = solve_linear_system(gram, rhs)
     slopes = [value / scale for value, scale in zip(normalized_coefficients, scales)]
-    intercept = statistics.fmean(target) - sum(
+    intercept = target_mean - left_fold_sum(
         slope * mean for slope, mean in zip(slopes, means)
     )
     fitted = {"intercept": intercept, **dict(zip(features, slopes))}
@@ -811,6 +857,7 @@ def generate_artifact(
     config: Mapping[str, Any],
     fit_rows: Sequence[Mapping[str, Any]],
     validation_rows: Sequence[Mapping[str, Any]],
+    fit_payload: bytes,
     validation_payload: bytes,
 ) -> dict[str, Any]:
     validate_config(config)
@@ -855,6 +902,10 @@ def generate_artifact(
         fit_rows
     ) + len(validation_rows):
         raise ModelError("fixtures contain an unsupported network or split")
+    if fit_payload != jsonl_bytes(hoodi_fit):
+        raise ModelError("hoodi-fit.jsonl must use canonical compact JSONL bytes")
+    if validation_payload != jsonl_bytes(validation_rows):
+        raise ModelError("validation.jsonl must use canonical compact JSONL bytes")
 
     decimal = fit_m2(hoodi_fit)
     scaled = scaled_coefficients(config, decimal)
@@ -888,7 +939,7 @@ def generate_artifact(
             "provenance": proposal_config["provenance"],
             "generator_config_sha256": generator_config_sha256(config),
             "raw_input_rows_sha256": hashlib.sha256(
-                jsonl_bytes(hoodi_fit) + validation_payload
+                fit_payload + validation_payload
             ).hexdigest(),
             "validation_fixture_sha256": hashlib.sha256(validation_payload).hexdigest(),
             "coefficients": {
@@ -943,11 +994,14 @@ def resolve_paths(
 def check(args: argparse.Namespace) -> int:
     _, config_path, fit_path, validation_path = resolve_paths(args)
     config = read_json(config_path)
+    fit_payload = fit_path.read_bytes()
     fit_rows = project_rows(read_jsonl(fit_path), "fit fixture")
     validation_payload = validation_path.read_bytes()
     validation_rows = project_rows(read_jsonl(validation_path), "validation fixture")
     expected = artifact_bytes(
-        generate_artifact(config, fit_rows, validation_rows, validation_payload)
+        generate_artifact(
+            config, fit_rows, validation_rows, fit_payload, validation_payload
+        )
     )
     try:
         actual = args.model.read_bytes()
@@ -990,14 +1044,31 @@ def existing_fixture_artifact(fixture_dir: pathlib.Path) -> Mapping[str, Any] | 
     if not any(path.exists() for path in data_paths):
         return None
     if not config_path.exists() or not all(path.exists() for path in data_paths):
-        raise ModelError(f"fixture directory {fixture_dir} is incomplete")
+        return None
     config = read_json(config_path)
+    fit_payload = fit_path.read_bytes()
     fit_rows = project_rows(read_jsonl(fit_path), "existing fit fixture")
     validation_payload = validation_path.read_bytes()
     validation_rows = project_rows(
         read_jsonl(validation_path), "existing validation fixture"
     )
-    return generate_artifact(config, fit_rows, validation_rows, validation_payload)
+    return generate_artifact(
+        config, fit_rows, validation_rows, fit_payload, validation_payload
+    )
+
+
+def atomic_write(path: pathlib.Path, payload: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    os.close(descriptor)
+    temporary_path = pathlib.Path(temporary_name)
+    try:
+        temporary_path.write_bytes(payload)
+        temporary_path.chmod(0o644)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def update(args: argparse.Namespace) -> int:
@@ -1031,7 +1102,9 @@ def update(args: argparse.Namespace) -> int:
     validation_rows = [*calibration, *mainnet_rows]
     fit_payload = jsonl_bytes(fit_rows)
     validation_payload = jsonl_bytes(validation_rows)
-    artifact = generate_artifact(config, fit_rows, validation_rows, validation_payload)
+    artifact = generate_artifact(
+        config, fit_rows, validation_rows, fit_payload, validation_payload
+    )
     artifact_payload = artifact_bytes(artifact)
     output_config = copy.deepcopy(config)
     output_config["model_id"] = artifact["model_id"]
@@ -1061,11 +1134,11 @@ def update(args: argparse.Namespace) -> int:
                 "fixture directory already belongs to a different model_id"
             )
     fixture_dir.mkdir(parents=True, exist_ok=True)
-    (fixture_dir / "config.json").write_bytes(config_payload)
-    (fixture_dir / "hoodi-fit.jsonl").write_bytes(fit_payload)
-    (fixture_dir / "validation.jsonl").write_bytes(validation_payload)
+    atomic_write(fixture_dir / "config.json", config_payload)
+    atomic_write(fixture_dir / "hoodi-fit.jsonl", fit_payload)
+    atomic_write(fixture_dir / "validation.jsonl", validation_payload)
     args.model.parent.mkdir(parents=True, exist_ok=True)
-    args.model.write_bytes(artifact_payload)
+    atomic_write(args.model, artifact_payload)
     print(f"updated {args.model}")
     return 0
 

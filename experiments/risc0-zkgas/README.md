@@ -146,10 +146,15 @@ Its `raw_input_rows_sha256` is SHA-256 over the canonical `hoodi-fit.jsonl` byte
 canonical `validation.jsonl` bytes, so a refresh never requires copying a hash by hand. The artifact
 also records a canonical generator-config hash; the reviewed config pins every collector build hash,
 the per-network chain-spec hash, and the fixed 10% acceptance policy.
-Check or refresh it with an existing Python 3.11+ virtual environment:
+Check or refresh it with an existing Python 3.11+ virtual environment. The check recipe accepts an
+explicit fixture and model path so a newly generated version can be verified before it becomes the
+repository default:
 
 ```sh
 PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model
+PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model \
+  tests/fixtures/risc0-zkgas/<new-version> \
+  crates/prover/models/risc0-zkgas.json
 PYTHON_BIN=/path/to/venv/bin/python just update-risc0-zkgas-model \
   tests/fixtures/risc0-zkgas/2026-08-28-m2-v1 \
   tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/config.json \
@@ -162,7 +167,10 @@ The generator projects successful Hoodi `fit`/`calibration` rows and normalizes 
 their source revision, guest image, RISC0 version, execution parameters, and artifact hashes to match
 the reviewed config. It re-derives mcycles from each successful row's authoritative RISC0 user-cycle
 count and validates the collector identity fields. An exact rebuild may retain the current legacy
-model ID. For a changed calibration, start from a new fixture directory and set the input config's
+model ID. The initial packaging-only metadata transition retained the pre-content-addressed
+`risc0-zkgas-m2-v1` identity as a one-time compatibility exception because quote semantics did not
+change. Any later artifact change requires a generated content-addressed ID. For a changed calibration,
+start from a new fixture directory and set the input config's
 model ID to `risc0-zkgas-m2-auto`; the generator writes a content-addressed ID into both the fixture
 config and runtime artifact. Reusing that ID for different coefficients, inputs, or provenance is
 rejected even when the output paths differ.

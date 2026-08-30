@@ -31,6 +31,8 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - `xtask/`: automation entrypoints, including guest build orchestration.
 - `guests/`: standalone guest program sources for `risc0` and `sp1`; not part of the workspace.
 - `crates/guests/elf`: built guest ELF assets consumed by the host. Never hand-edit generated ELF files.
+- `crates/prover/models`: generated prover model artifacts. Regenerate them through the documented
+  model tooling; do not hand-edit coefficients, domains, diagnostics, or provenance.
 
 ## Change Routing
 
@@ -84,6 +86,7 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
   - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository us-docker.pkg.dev/evmchain/images/raiko2`
 - RISC0 zkGas model:
   - `PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model`
+  - `PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model <fixture-dir> <model.json>`
   - `PYTHON_BIN=/path/to/venv/bin/python just test-risc0-zkgas-model`
   - `PYTHON_BIN=/path/to/venv/bin/python just update-risc0-zkgas-model <fixture-dir> <config.json> <hoodi-samples.jsonl> <mainnet-samples.jsonl>`
   - For a new calibration, use a new fixture directory and set the input config model ID to

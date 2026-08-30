@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import argparse
+import copy
+import hashlib
 import json
 import importlib.util
+import math
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from decimal import Decimal
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -97,6 +103,253 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         )
         self.assertIn("runtime model matches generated artifact", result.stdout)
 
+    def test_fit_m2_reductions_are_explicit_left_folds(self):
+        rows = [
+            json.loads(line)
+            for line in (FIXTURE_DIR / "hoodi-fit.jsonl").read_text().splitlines()
+        ]
+        expected = {
+            name: Decimal(value)
+            for name, value in json.loads(MODEL.read_text())["proposal"][
+                "coefficients"
+            ]["decimal"].items()
+        }
+
+        with mock.patch(
+            "builtins.sum",
+            side_effect=lambda values, start=0: math.fsum(values) + start,
+        ):
+            actual = MODEL_TOOL.fit_m2(rows)
+
+        self.assertEqual(actual, expected)
+
+    def test_artifact_bytes_are_canonical_across_key_order(self):
+        first = {"z": {"b": 2, "a": 1}, "a": 0}
+        reordered = {"a": 0, "z": {"a": 1, "b": 2}}
+
+        self.assertEqual(
+            MODEL_TOOL.artifact_bytes(first),
+            MODEL_TOOL.artifact_bytes(reordered),
+        )
+
+    def test_check_rejects_noncanonical_fit_fixture_bytes(self):
+        variants = {}
+        original_rows = [
+            json.loads(line)
+            for line in (FIXTURE_DIR / "hoodi-fit.jsonl").read_text().splitlines()
+        ]
+        whitespace = (FIXTURE_DIR / "hoodi-fit.jsonl").read_bytes().replace(
+            b'{"network"', b' {"network"', 1
+        )
+        variants["whitespace"] = whitespace
+        junk_rows = copy.deepcopy(original_rows)
+        junk_rows[0]["junk"] = True
+        variants["junk field"] = b"".join(
+            (json.dumps(row, separators=(",", ":")) + "\n").encode()
+            for row in junk_rows
+        )
+        variants["failure row"] = (
+            (FIXTURE_DIR / "hoodi-fit.jsonl").read_bytes()
+            + b'{"status":"failure"}\n'
+        )
+
+        for label, payload in variants.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                fixture = pathlib.Path(directory) / "fixture"
+                shutil.copytree(FIXTURE_DIR, fixture)
+                (fixture / "hoodi-fit.jsonl").write_bytes(payload)
+
+                result = self.run_cli(
+                    "check", "--fixture-dir", fixture, "--model", MODEL
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr or result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_check_binds_both_canonical_fixture_payloads_to_raw_input_hash(self):
+        artifact = json.loads(MODEL.read_text())
+        expected_hash = hashlib.sha256(
+            (FIXTURE_DIR / "hoodi-fit.jsonl").read_bytes()
+            + (FIXTURE_DIR / "validation.jsonl").read_bytes()
+        ).hexdigest()
+        self.assertEqual(
+            artifact["proposal"]["raw_input_rows_sha256"], expected_hash
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory) / "fixture"
+            shutil.copytree(FIXTURE_DIR, fixture)
+            validation = fixture / "validation.jsonl"
+            validation.write_bytes(b" " + validation.read_bytes())
+
+            result = self.run_cli(
+                "check", "--fixture-dir", fixture, "--model", MODEL
+            )
+
+        self.assertEqual(result.returncode, 2, result.stderr or result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_aggregation_prediction_must_equal_checked_linear_formula(self):
+        aggregation = copy.deepcopy(
+            json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
+        )
+        aggregation["provenance"]["image_id"] = "0x" + "1" * 64
+        aggregation["measurements"] = [
+            {
+                "child_count": count,
+                "actual_mcycles": 180 * count,
+                "predicted_mcycles": 180 * count,
+                "enabled": True,
+            }
+            for count in range(1, 6)
+        ]
+        aggregation["calibrated_counts"] = list(range(1, 6))
+        MODEL_TOOL.validate_aggregation(aggregation)
+
+        aggregation["measurements"][2]["predicted_mcycles"] += 1
+        with self.assertRaisesRegex(
+            MODEL_TOOL.ModelError, "predicted_mcycles must equal"
+        ):
+            MODEL_TOOL.validate_aggregation(aggregation)
+
+    def test_aggregation_prediction_multiplication_rejects_u64_overflow(self):
+        aggregation = copy.deepcopy(
+            json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
+        )
+        aggregation["per_child_mcycles"] = 1 << 63
+        aggregation["provenance"]["image_id"] = "0x" + "1" * 64
+        aggregation["measurements"] = [
+            {
+                "child_count": 2,
+                "actual_mcycles": 1,
+                "predicted_mcycles": 1,
+                "enabled": False,
+            }
+        ]
+
+        with self.assertRaisesRegex(MODEL_TOOL.ModelError, "prediction must fit u64"):
+            MODEL_TOOL.validate_aggregation(aggregation)
+
+    def test_validation_rejects_unbounded_diagnostic_precision_without_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            fixture = temporary / "fixture"
+            shutil.copytree(FIXTURE_DIR, fixture)
+            config = json.loads((fixture / "config.json").read_text())
+            config["proposal"]["cohorts"]["hoodi"][
+                "diagnostic_decimal_places"
+            ]["continuous"] = 10_000
+            (fixture / "config.json").write_text(json.dumps(config))
+
+            result = self.run_cli(
+                "check", "--fixture-dir", fixture, "--model", MODEL
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("diagnostic decimal places", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_compact_fixture_numerics_must_fit_rust_u32(self):
+        base = {
+            "network": "taiko_hoodi",
+            "split": "fit",
+            "proposal_id": 1,
+            "block_count": 1,
+            "total_zkgas": 1,
+            "actual_mcycles": 1,
+        }
+        for field in ("proposal_id", "block_count", "total_zkgas", "actual_mcycles"):
+            with self.subTest(field=field):
+                row = {**base, field: 1 << 32}
+                with self.assertRaisesRegex(MODEL_TOOL.ModelError, "must fit u32"):
+                    MODEL_TOOL.compact_row(row, "fixture row")
+
+    def test_aggregation_schema_errors_are_model_errors(self):
+        with self.assertRaises(MODEL_TOOL.ModelError):
+            MODEL_TOOL.validate_aggregation(None)
+
+    def test_cli_schema_validation_errors_exit_two_without_traceback(self):
+        cases = (
+            ("config is not a mapping", []),
+            ("aggregation is not a mapping", {"aggregation": None}),
+        )
+        for label, replacement in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                temporary = pathlib.Path(directory)
+                fixture = temporary / "fixture"
+                shutil.copytree(FIXTURE_DIR, fixture)
+                if isinstance(replacement, list):
+                    config = replacement
+                else:
+                    config = json.loads((fixture / "config.json").read_text())
+                    config.update(replacement)
+                (fixture / "config.json").write_text(json.dumps(config))
+
+                result = self.run_cli(
+                    "check", "--fixture-dir", fixture, "--model", MODEL
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_update_recovers_an_incomplete_fixture_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            fixture = temporary / "fixture"
+            fixture.mkdir()
+            shutil.copy2(FIXTURE_DIR / "config.json", fixture / "config.json")
+            shutil.copy2(
+                FIXTURE_DIR / "hoodi-fit.jsonl", fixture / "hoodi-fit.jsonl"
+            )
+            hoodi, mainnet = self.write_collectors(temporary)
+            model = temporary / "risc0-zkgas.json"
+
+            result = self.run_cli(
+                "update",
+                "--config",
+                fixture / "config.json",
+                "--hoodi-samples",
+                hoodi,
+                "--mainnet-samples",
+                mainnet,
+                "--fixture-dir",
+                fixture,
+                "--model",
+                model,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertEqual(model.read_bytes(), MODEL.read_bytes())
+            self.assertTrue((fixture / "validation.jsonl").is_file())
+
+    def test_interrupted_atomic_write_preserves_the_existing_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            fixture = temporary / "fixture"
+            shutil.copytree(FIXTURE_DIR, fixture)
+            model = temporary / "risc0-zkgas.json"
+            shutil.copy2(MODEL, model)
+            hoodi, mainnet = self.write_collectors(temporary)
+            original_config = (fixture / "config.json").read_bytes()
+            args = argparse.Namespace(
+                fixture_dir=fixture,
+                config=fixture / "config.json",
+                model=model,
+                hoodi_samples=hoodi,
+                mainnet_samples=mainnet,
+            )
+            original_write = pathlib.Path.write_bytes
+
+            def torn_write(path, payload):
+                original_write(path, payload[:10])
+                raise OSError("simulated interrupted write")
+
+            with mock.patch.object(pathlib.Path, "write_bytes", torn_write):
+                with self.assertRaisesRegex(OSError, "simulated interrupted write"):
+                    MODEL_TOOL.update(args)
+
+            self.assertEqual((fixture / "config.json").read_bytes(), original_config)
+
     def test_check_rejects_runtime_model_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             drifted_model = pathlib.Path(directory) / "risc0-zkgas.json"
@@ -177,6 +430,10 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
             self.assertRegex(
                 changed["model_id"], r"^risc0-zkgas-m2-[0-9a-f]{16}$"
             )
+            self.assertEqual(
+                json.loads((fixture_output / "config.json").read_text())["model_id"],
+                changed["model_id"],
+            )
             self.assertNotEqual(
                 changed["proposal"]["coefficients"]["decimal"],
                 current["proposal"]["coefficients"]["decimal"],
@@ -196,7 +453,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
@@ -224,7 +481,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
@@ -251,7 +508,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
@@ -279,7 +536,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
@@ -306,7 +563,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
@@ -338,7 +595,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
@@ -492,13 +749,13 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                     "--mainnet-samples",
                     mainnet,
                     "--fixture-dir",
-                    FIXTURE_DIR,
+                    temporary / "fixture-output",
                     "--model",
                     temporary / "risc0-zkgas.json",
                 )
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(missing_field, result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(missing_field, result.stderr)
 
     def test_update_rejects_inconsistent_authoritative_cycle_fields(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -519,13 +776,94 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "--mainnet-samples",
                 mainnet,
                 "--fixture-dir",
-                FIXTURE_DIR,
+                temporary / "fixture-output",
                 "--model",
                 temporary / "risc0-zkgas.json",
             )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not match risc0_user_cycles", result.stderr)
+
+    def test_update_rejects_compact_actual_mcycles_in_raw_collector_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            hoodi, mainnet = self.write_collectors(temporary)
+            rows = [json.loads(line) for line in hoodi.read_text().splitlines()]
+            rows[0]["actual_mcycles"] = rows[0]["evaluated_mcycles_count"]
+            hoodi.write_text(
+                "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+            )
+
+            result = self.run_cli(
+                "update",
+                "--config",
+                FIXTURE_DIR / "config.json",
+                "--hoodi-samples",
+                hoodi,
+                "--mainnet-samples",
+                mainnet,
+                "--fixture-dir",
+                temporary / "fixture-output",
+                "--model",
+                temporary / "risc0-zkgas.json",
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must not provide compact actual_mcycles", result.stderr)
+
+    def test_update_rejects_wrong_successful_row_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            hoodi, mainnet = self.write_collectors(temporary)
+            rows = [json.loads(line) for line in hoodi.read_text().splitlines()][1:]
+            hoodi.write_text(
+                "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+            )
+
+            result = self.run_cli(
+                "update",
+                "--config",
+                FIXTURE_DIR / "config.json",
+                "--hoodi-samples",
+                hoodi,
+                "--mainnet-samples",
+                mainnet,
+                "--fixture-dir",
+                temporary / "fixture-output",
+                "--model",
+                temporary / "risc0-zkgas.json",
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("expected 80 Hoodi fit rows, found 79", result.stderr)
+
+    def test_update_accepts_ceil_mcycles_for_nonintegral_million_cycles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            hoodi, mainnet = self.write_collectors(temporary)
+            rows = [json.loads(line) for line in hoodi.read_text().splitlines()]
+            rows[0]["risc0_user_cycles"] = (
+                rows[0]["evaluated_mcycles_count"] * 1_000_000 - 1
+            )
+            hoodi.write_text(
+                "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+            )
+
+            result = self.run_cli(
+                "update",
+                "--config",
+                FIXTURE_DIR / "config.json",
+                "--hoodi-samples",
+                hoodi,
+                "--mainnet-samples",
+                mainnet,
+                "--fixture-dir",
+                temporary / "fixture-output",
+                "--model",
+                temporary / "risc0-zkgas.json",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_check_rejects_config_values_that_runtime_schema_rejects(self):
         cases = (
@@ -589,8 +927,8 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                     "check", "--config", config_path, "--model", MODEL
                 )
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(expected_error, result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
 
     def test_scaled_coefficients_must_fit_nonzero_rust_u64_fields(self):
         config = {"proposal": {"coefficients": {"scale": 1}}}

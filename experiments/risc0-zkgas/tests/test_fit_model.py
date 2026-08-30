@@ -62,9 +62,7 @@ def parse_audit_decimal(value, label):
         parsed = float(value)
     except ValueError as error:
         raise AssertionError(f"{label} audit decimal is malformed") from error
-    assert math.isfinite(parsed) and parsed != 0.0, (
-        f"{label} audit decimal must be finite and non-zero"
-    )
+    assert math.isfinite(parsed), f"{label} audit decimal must be finite"
     return parsed
 
 
@@ -177,5 +175,8 @@ def assert_committed_fixture_reproduces_quote_diagnostics():
 
 
 class CommittedFixtureTests(unittest.TestCase):
+    def test_audit_decimal_accepts_zero(self):
+        self.assertEqual(parse_audit_decimal("0.0", "zero"), 0.0)
+
     def test_committed_fixture_reproduces_quote_diagnostics(self):
         assert_committed_fixture_reproduces_quote_diagnostics()

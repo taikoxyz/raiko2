@@ -12,6 +12,8 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Use `docs/API.md` for request/response contracts, config keys, and environment variables.
 - Use `config.example.toml` as the canonical config shape.
 - Use `.codex/skills/raiko2-image-release/SKILL.md` for image build-and-publish sequencing.
+- Use `.codex/skills/raiko2-risc0-zkgas-calibration/SKILL.md` for RISC0 zkGas cycle
+  recalibration and production model packaging.
 - Use `docs/solutions/` for documented solutions to past problems and workflow learnings, organized
   by category with YAML frontmatter (`module`, `tags`, `problem_type`).
 - Use `CONCEPTS.md` for shared domain vocabulary covering project-specific entities, named processes,
@@ -29,6 +31,8 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - `xtask/`: automation entrypoints, including guest build orchestration.
 - `guests/`: standalone guest program sources for `risc0` and `sp1`; not part of the workspace.
 - `crates/guests/elf`: built guest ELF assets consumed by the host. Never hand-edit generated ELF files.
+- `crates/prover/models`: generated prover model artifacts. Regenerate them through the documented
+  model tooling; do not hand-edit coefficients, domains, diagnostics, or provenance.
 
 ## Change Routing
 
@@ -80,12 +84,24 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Image release:
   - `just release-image <backend> <tag>`
   - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository us-docker.pkg.dev/evmchain/images/raiko2`
+- RISC0 zkGas model:
+  - `PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model`
+  - `PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model <fixture-dir> <model.json>`
+  - `PYTHON_BIN=/path/to/venv/bin/python just test-risc0-zkgas-model`
+  - `PYTHON_BIN=/path/to/venv/bin/python just update-risc0-zkgas-model <fixture-dir> <config.json> <hoodi-samples.jsonl> <mainnet-samples.jsonl>`
+  - For a new calibration, use a new fixture directory and set the input config model ID to
+    `risc0-zkgas-m2-auto`; the generator writes the resolved content-addressed ID.
 - Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
 
 ## Project Skill Rule
 
 For image release or image publication tasks, read `.codex/skills/raiko2-image-release/SKILL.md`
 before acting.
+
+For RISC0 zkGas cycle sampling or model refresh tasks, read
+`.codex/skills/raiko2-risc0-zkgas-calibration/SKILL.md` before acting. Run Python through an
+existing Python 3.11+ virtual environment, passed as `PYTHON_BIN=/path/to/venv/bin/python`; do not
+create a new environment unless the user explicitly asks.
 
 Do not use this repository to perform Tolba or GKE rollout. Keep `release-image` scoped to guest
 ELF refresh, image build/push, digest capture, and optional `register-image` checks only.

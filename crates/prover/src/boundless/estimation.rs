@@ -12,8 +12,11 @@ use crate::{validated_shasta_proposal_input, validated_shasta_zk_aggregation_out
 
 const EMBEDDED_MODEL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../experiments/risc0-zkgas/models/risc0-zkgas-m2-v1.json"
+    "/models/risc0-zkgas.json"
 ));
+const MODEL_ID_PREFIX: &str = "risc0-zkgas-m2-";
+const LEGACY_MODEL_ID: &str = "risc0-zkgas-m2-v1";
+const CONTENT_ID_HEX_LENGTH: usize = 16;
 
 static ESTIMATION_MODEL: OnceLock<Result<EstimationModel, String>> = OnceLock::new();
 
@@ -281,14 +284,21 @@ fn validate_artifact(artifact: &ValidatedModelArtifact) -> Result<(), String> {
     if artifact.schema_version != 1 {
         return Err("unsupported estimation model schema_version".to_string());
     }
-    if artifact.model_id != "risc0-zkgas-m2-v1" {
-        return Err("unsupported estimation model_id".to_string());
+    let content_id = artifact.model_id.strip_prefix(MODEL_ID_PREFIX);
+    if artifact.model_id != LEGACY_MODEL_ID
+        && !content_id.is_some_and(|suffix| is_hex(suffix, CONTENT_ID_HEX_LENGTH))
+    {
+        return Err("unsupported estimation model_id family".to_string());
     }
     if artifact.originating_experiment_model != "M2" {
         return Err("unsupported originating experiment model".to_string());
     }
 
     validate_release_provenance(&artifact.proposal.provenance, "proposal")?;
+    validate_sha256(
+        &artifact.proposal.generator_config_sha256,
+        "proposal generator config",
+    )?;
     validate_sha256(
         &artifact.proposal.raw_input_rows_sha256,
         "proposal raw input rows",
@@ -451,6 +461,16 @@ fn validate_aggregation(aggregation: &Aggregation) -> Result<(), String> {
         if measurement.actual_mcycles == 0 || measurement.predicted_mcycles == 0 {
             return Err("aggregation measured mcycles must be non-zero".to_string());
         }
+        let runtime_prediction = aggregation
+            .per_child_mcycles
+            .checked_mul(u64::from(measurement.child_count))
+            .ok_or_else(|| "aggregation runtime prediction overflows u64".to_string())?;
+        if measurement.predicted_mcycles != runtime_prediction {
+            return Err(
+                "aggregation predicted_mcycles must equal per_child_mcycles * child_count"
+                    .to_string(),
+            );
+        }
         let accepted = aggregation_measurement_is_accepted(measurement);
         if measurement.enabled != accepted {
             return Err(
@@ -556,6 +576,7 @@ struct ValidatedModelArtifact {
 #[serde(deny_unknown_fields)]
 struct Proposal {
     provenance: ReleaseProvenance,
+    generator_config_sha256: String,
     raw_input_rows_sha256: String,
     validation_fixture_sha256: String,
     coefficients: ProposalCoefficients,
@@ -840,10 +861,19 @@ mod tests {
             (1..=5)
                 .map(|child_count| {
                     let enabled = calibrated_counts.contains(&child_count);
+                    let predicted_mcycles = per_child_mcycles
+                        .checked_mul(u64::from(child_count))
+                        .expect("aggregation model fixture prediction");
                     json!({
                         "child_count": child_count,
-                        "actual_mcycles": if enabled { 1 } else { 100 },
-                        "predicted_mcycles": if enabled { 1 } else { 200 },
+                        "actual_mcycles": if enabled {
+                            predicted_mcycles
+                        } else {
+                            predicted_mcycles
+                                .checked_mul(2)
+                                .expect("aggregation model fixture rejected measurement")
+                        },
+                        "predicted_mcycles": predicted_mcycles,
                         "enabled": enabled
                     })
                 })
@@ -866,7 +896,8 @@ mod tests {
                     "risc0_version": "3.0.5",
                     "execution_po2": 20
                 },
-                "raw_input_rows_sha256": "be824f1262862525aaa961e568feb1e7b911031256b7ddf1d3f7ef6b5236e18c",
+                "generator_config_sha256": "51d680db2dd5f63c86b29f8558f7f0bfda586525805ad45fa15ad91a817f4bce",
+                "raw_input_rows_sha256": "0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328",
                 "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767",
                 "coefficients": {
                     "decimal": {"intercept": "511.8367085993759", "total_zkgas": "0.000003714503729246405", "block_count": "2.2737130481392764"},
@@ -920,13 +951,25 @@ mod tests {
     }
 
     #[test]
-    fn model_rejects_wrong_schema_or_model_ids() {
+    fn model_rejects_wrong_schema_or_unsupported_model_id_family() {
         let mut artifact = valid_artifact();
         artifact["schema_version"] = json!(2);
         assert!(parse(artifact).is_err());
         let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("");
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
         artifact["model_id"] = json!("other-model");
         assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-");
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-v2");
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-0123456789abcdef");
+        assert!(parse(artifact).is_ok());
     }
 
     #[test]
@@ -937,6 +980,10 @@ mod tests {
 
         let mut artifact = valid_artifact();
         artifact["proposal"]["provenance"]["image_id"] = json!("0xnot-an-image");
+        assert!(parse(artifact).is_err());
+
+        let mut artifact = valid_artifact();
+        artifact["proposal"]["generator_config_sha256"] = json!("not-a-sha256");
         assert!(parse(artifact).is_err());
     }
 
@@ -983,10 +1030,10 @@ mod tests {
         artifact["aggregation"]["provenance"]["image_id"] =
             json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
         artifact["aggregation"]["measurements"] = json!([
-            {"child_count": 1, "actual_mcycles": 200, "predicted_mcycles": 160, "enabled": false},
-            {"child_count": 2, "actual_mcycles": 400, "predicted_mcycles": 320, "enabled": false},
-            {"child_count": 3, "actual_mcycles": 600, "predicted_mcycles": 480, "enabled": false},
-            {"child_count": 4, "actual_mcycles": 800, "predicted_mcycles": 640, "enabled": false}
+            {"child_count": 1, "actual_mcycles": 400, "predicted_mcycles": 180, "enabled": false},
+            {"child_count": 2, "actual_mcycles": 800, "predicted_mcycles": 360, "enabled": false},
+            {"child_count": 3, "actual_mcycles": 1200, "predicted_mcycles": 540, "enabled": false},
+            {"child_count": 4, "actual_mcycles": 1600, "predicted_mcycles": 720, "enabled": false}
         ]);
         match parse(artifact) {
             Err(error) => assert_eq!(
@@ -1015,6 +1062,60 @@ mod tests {
                 .collect(),
         );
         assert!(parse(artifact).is_err());
+    }
+
+    #[test]
+    fn aggregation_calibration_rejects_predictions_unrelated_to_runtime_formula() {
+        let mut artifact = valid_artifact();
+        artifact["aggregation"]["provenance"]["image_id"] =
+            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
+        artifact["aggregation"]["measurements"] = Value::Array(
+            (1..=5)
+                .map(|child_count| {
+                    json!({
+                        "child_count": child_count,
+                        "actual_mcycles": 400 * child_count,
+                        "predicted_mcycles": 400 * child_count,
+                        "enabled": true
+                    })
+                })
+                .collect(),
+        );
+        artifact["aggregation"]["calibrated_counts"] = json!([1, 2, 3, 4, 5]);
+
+        match parse(artifact) {
+            Err(error) => assert_eq!(
+                error,
+                "aggregation predicted_mcycles must equal per_child_mcycles * child_count"
+            ),
+            Ok(_) => panic!("calibration must use the same prediction as the runtime quote"),
+        }
+    }
+
+    #[test]
+    fn aggregation_calibration_rejects_runtime_prediction_overflow() {
+        let mut artifact = valid_artifact();
+        artifact["aggregation"]["per_child_mcycles"] = json!(u64::MAX);
+        artifact["aggregation"]["provenance"]["image_id"] =
+            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
+        artifact["aggregation"]["measurements"] = Value::Array(
+            (1..=5)
+                .map(|child_count| {
+                    json!({
+                        "child_count": child_count,
+                        "actual_mcycles": u64::MAX,
+                        "predicted_mcycles": u64::MAX,
+                        "enabled": true
+                    })
+                })
+                .collect(),
+        );
+        artifact["aggregation"]["calibrated_counts"] = json!([1, 2, 3, 4, 5]);
+
+        match parse(artifact) {
+            Err(error) => assert_eq!(error, "aggregation runtime prediction overflows u64"),
+            Ok(_) => panic!("overflowing aggregation calibration must be rejected"),
+        }
     }
 
     #[test]
@@ -1068,7 +1169,10 @@ mod tests {
             assert!(row_counts.insert(row.child_count));
             assert_eq!(
                 row.predicted_mcycles,
-                aggregation.per_child_mcycles * u64::from(row.child_count)
+                aggregation
+                    .per_child_mcycles
+                    .checked_mul(u64::from(row.child_count))
+                    .expect("validated aggregation prediction")
             );
 
             let actual = u128::from(row.actual_mcycles);
@@ -1429,7 +1533,8 @@ mod tests {
             [0; 8],
             Address::ZERO,
         );
-        let model = aggregation_model(&[2], u64::MAX);
+        let mut model = aggregation_model(&[2], 180);
+        model.0.aggregation.per_child_mcycles = u64::MAX;
 
         assert_eq!(
             estimate_aggregation_with_model(&encoded, &model)
@@ -1545,7 +1650,7 @@ mod tests {
 
     const VALIDATION_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../experiments/risc0-zkgas/models/risc0-zkgas-m2-v1-validation.jsonl"
+        "/../../tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/validation.jsonl"
     ));
 
     #[derive(Debug, Deserialize)]
@@ -1591,7 +1696,8 @@ mod tests {
         mape_percent: f64,
         max_absolute_error_percent: f64,
         max_underquote_percent: f64,
-        over_ten_percent_count: u32,
+        absolute_over_ten_percent_count: u32,
+        overquote_over_ten_percent_count: u32,
         max_overquote_percent: f64,
     }
 
@@ -1635,10 +1741,7 @@ mod tests {
     fn parse_audit_decimal(value: &str, label: &str) -> f64 {
         let parsed = f64::from_str(value)
             .unwrap_or_else(|error| panic!("{label} audit decimal is malformed: {error}"));
-        assert!(
-            parsed.is_finite() && parsed != 0.0,
-            "{label} audit decimal must be finite and non-zero"
-        );
+        assert!(parsed.is_finite(), "{label} audit decimal must be finite");
         parsed
     }
 
@@ -1675,8 +1778,13 @@ mod tests {
                 diagnostics.max_underquote_percent =
                     diagnostics.max_underquote_percent.max(-percent_error);
             }
+            if percent_error.abs() > 10.0 {
+                diagnostics.absolute_over_ten_percent_count += 1;
+            }
             if percent_error > 10.0 {
-                diagnostics.over_ten_percent_count += 1;
+                diagnostics.overquote_over_ten_percent_count += 1;
+            }
+            if percent_error > 0.0 {
                 diagnostics.max_overquote_percent =
                     diagnostics.max_overquote_percent.max(percent_error);
             }
@@ -1714,7 +1822,7 @@ mod tests {
             &artifact.max_underquote_percent,
         );
         assert_eq!(
-            actual.over_ten_percent_count,
+            actual.absolute_over_ten_percent_count,
             artifact.over_ten_percent_count
         );
     }
@@ -1743,7 +1851,7 @@ mod tests {
             &artifact.max_underquote_percent,
         );
         assert_eq!(
-            actual.over_ten_percent_count,
+            actual.overquote_over_ten_percent_count,
             artifact.overquote_over_ten_percent_count
         );
         assert_percent_eq(
@@ -1763,5 +1871,36 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "expected {expected} +/- {tolerance}, got {actual}"
         );
+    }
+
+    #[test]
+    fn audit_decimal_accepts_zero_diagnostics() {
+        assert_eq!(parse_audit_decimal("0.00", "diagnostic"), 0.0);
+    }
+
+    #[test]
+    fn diagnostics_distinguish_absolute_thresholds_from_overquotes() {
+        let underquote = ValidationFixtureRow {
+            network: "taiko_hoodi".to_string(),
+            split: "calibration".to_string(),
+            proposal_id: 1,
+            block_count: 1,
+            total_zkgas: 1,
+            actual_mcycles: 100,
+        };
+        let small_overquote = ValidationFixtureRow {
+            network: "taiko_hoodi".to_string(),
+            split: "calibration".to_string(),
+            proposal_id: 2,
+            block_count: 1,
+            total_zkgas: 1,
+            actual_mcycles: 100,
+        };
+        let rows = [&underquote, &small_overquote];
+        let actual = diagnostics(&rows, |row| if row.proposal_id == 1 { 80.0 } else { 105.0 });
+
+        assert_eq!(actual.absolute_over_ten_percent_count, 1);
+        assert_eq!(actual.overquote_over_ten_percent_count, 0);
+        assert_eq!(actual.max_overquote_percent, 5.0);
     }
 }

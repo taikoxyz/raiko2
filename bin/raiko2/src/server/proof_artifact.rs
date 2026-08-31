@@ -26,7 +26,7 @@ impl ProofArtifactPayload {
                         && proof.uuid.is_some()
                         && proof.extra_data.is_some())
             }
-            Self::AggregateInput => raiko2_prover::validate_external_aggregate_proofs(
+            Self::AggregateInput => raiko2_prover::validate_external_aggregate_proof_metadata(
                 pipeline_key,
                 std::slice::from_ref(proof),
             )

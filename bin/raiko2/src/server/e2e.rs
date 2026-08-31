@@ -290,27 +290,27 @@ fn risc0_boundless_fixture_app() -> (
     app_with_observed_risc0_boundless_fixture_engine(config)
 }
 
+fn fixture_external_proof_extra_data() -> Value {
+    let carry = ProofCarryData {
+        chain_id: 167_001,
+        ..ProofCarryData::default()
+    };
+    encode_proof_carry_data(&carry).expect("encode proof carry data")
+}
+
 fn sp1_external_proof(proof_hex: String) -> Value {
     json!({
         "proof": proof_hex,
         "input": format!("{:#066x}", 0),
         "uuid": "fixture-sp1-vk",
-        "extra_data": {
-            "sp1": {
-                "proof_carry_data": {
-                    "chain_id": 167001
-                }
-            }
-        }
+        "extra_data": fixture_external_proof_extra_data()
     })
 }
 
 fn risc0_boundless_external_proof() -> Value {
-    let extra_data =
-        encode_proof_carry_data(&ProofCarryData::default()).expect("encode proof carry data");
     json!({
         "quote": "0xfixture-boundless-receipt",
-        "extra_data": extra_data
+        "extra_data": fixture_external_proof_extra_data()
     })
 }
 
@@ -318,11 +318,7 @@ fn fixture_external_aggregate_proof() -> Proof {
     Proof {
         proof: Some(format!("0x{}", "11".repeat(89))),
         input: Some(alloy_primitives::B256::ZERO),
-        extra_data: Some(json!({
-            "shasta": {
-                "proof_carry_data": {}
-            }
-        })),
+        extra_data: Some(fixture_external_proof_extra_data()),
         ..Proof::default()
     }
 }

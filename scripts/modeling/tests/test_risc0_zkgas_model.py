@@ -19,7 +19,11 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "modeling" / "risc0_zkgas_model.py"
 FIXTURE_DIR = (
-    ROOT / "tests" / "fixtures" / "risc0-zkgas" / "2026-08-28-m2-v1"
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "risc0-zkgas"
+    / "2026-08-31-m2-global-cap-v2"
 )
 MODEL = ROOT / "crates" / "prover" / "models" / "risc0-zkgas.json"
 MODULE_SPEC = importlib.util.spec_from_file_location("risc0_zkgas_model", SCRIPT)
@@ -76,7 +80,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "image_id": provenance["image_id"],
                 "risc0_image_id": provenance["image_id"],
                 "risc0_version": provenance["risc0_version"],
-                "execution_po2": provenance["execution_po2"],
+                "execution_po2": provenance["min_execution_po2"],
                 "artifact_hashes": artifact_hashes,
             }
 
@@ -574,7 +578,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("legacy model_id is reserved", result.stderr)
+        self.assertIn("does not match model content", result.stderr)
 
     def test_update_rejects_collector_provenance_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -718,7 +722,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("guest_launcher_binary_sha256 does not match config", result.stderr)
 
-    def test_update_rejects_rebinding_legacy_id_to_new_collector_provenance(self):
+    def test_update_rejects_rebinding_current_id_to_new_collector_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)
             hoodi, mainnet = self.write_collectors(temporary)
@@ -755,7 +759,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("legacy model_id is reserved", result.stderr)
+        self.assertIn("does not match model content", result.stderr)
 
     def test_update_rejects_reusing_a_new_model_identity_for_changed_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -997,9 +1001,9 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
             (
                 "u32 execution overflow",
                 lambda config: config["proposal"]["provenance"].__setitem__(
-                    "execution_po2", 1 << 32
+                    "min_execution_po2", 1 << 32
                 ),
-                "proposal execution_po2 must fit u32",
+                "proposal min_execution_po2 must fit u32",
             ),
             (
                 "u64 coefficient overflow",
@@ -1045,6 +1049,20 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_error, result.stderr)
 
+    def test_proposal_policy_uses_a_global_cap_and_calibrated_minimum_po2(self):
+        config = json.loads((FIXTURE_DIR / "config.json").read_text())
+
+        MODEL_TOOL.validate_config(config)
+        self.assertEqual(config["schema_version"], 2)
+        self.assertEqual(config["proposal"]["max_total_zkgas"], 500_000_000)
+        self.assertNotIn("domains", config["proposal"])
+        self.assertEqual(
+            config["proposal"]["provenance"]["min_execution_po2"], 20
+        )
+        self.assertNotIn(
+            "execution_po2", config["proposal"]["provenance"]
+        )
+
     def test_scaled_coefficients_must_fit_nonzero_rust_u64_fields(self):
         config = {"proposal": {"coefficients": {"scale": 1}}}
         with self.assertRaisesRegex(
@@ -1070,11 +1088,30 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         ):
             MODEL_TOOL.resolve_model_id(artifact, "risc0-zkgas-m2-v1")
 
-    def test_update_rejects_an_explicit_domain_that_admits_over_budget_observation(self):
+    def test_check_rejects_a_zero_global_zkgas_cap(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)
             config = json.loads((FIXTURE_DIR / "config.json").read_text())
-            config["proposal"]["domains"][1]["total_zkgas"]["maximum"] = 562_107_601
+            config["proposal"]["max_total_zkgas"] = 0
+            config_path = temporary / "config.json"
+            config_path.write_text(json.dumps(config))
+
+            result = self.run_cli(
+                "check",
+                "--config",
+                config_path,
+                "--model",
+                MODEL,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proposal max_total_zkgas must be non-zero", result.stderr)
+
+    def test_check_rejects_a_cap_that_admits_an_over_budget_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            config = json.loads((FIXTURE_DIR / "config.json").read_text())
+            config["proposal"]["max_total_zkgas"] = 562_107_601
             config_path = temporary / "config.json"
             config_path.write_text(json.dumps(config))
 
@@ -1088,38 +1125,6 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exceeds the configured 10% error budget", result.stderr)
-
-    def test_check_rejects_a_domain_boundary_without_an_observation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = pathlib.Path(directory)
-            config = json.loads((FIXTURE_DIR / "config.json").read_text())
-            config["proposal"]["domains"][0]["total_zkgas"]["minimum"] += 1
-            config_path = temporary / "config.json"
-            config_path.write_text(json.dumps(config))
-
-            result = self.run_cli(
-                "check",
-                "--config",
-                config_path,
-                "--model",
-                MODEL,
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must equal an observed value", result.stderr)
-
-    def test_check_rejects_duplicate_domains(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = pathlib.Path(directory)
-            config = json.loads((FIXTURE_DIR / "config.json").read_text())
-            config["proposal"]["domains"].append(config["proposal"]["domains"][0])
-            config_path = temporary / "config.json"
-            config_path.write_text(json.dumps(config))
-
-            result = self.run_cli("check", "--config", config_path, "--model", MODEL)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("exactly once", result.stderr)
 
     def test_check_rejects_unsupported_model_id_family(self):
         with tempfile.TemporaryDirectory() as directory:

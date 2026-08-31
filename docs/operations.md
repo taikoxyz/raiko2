@@ -1405,12 +1405,12 @@ Operator notes:
   itself does not submit a proof; the normal Boundless request still proves the original guest and
   input. It is an explicit auction-cost/timeout optimization with an approximately ten-percent
   operational error target, not a proof-validity shortcut.
-- Proposal estimation currently supports exact-Unzen inputs with `execution_po2 = 20` within two
-  separate operating domains: Hoodi admits `155..=192` blocks and
-  `369558586..=459162040` total zkGas; Mainnet admits `184..=192` blocks and
-  `216314230..=310638954` total zkGas. Pre-Unzen, later-fork, other-chain, and out-of-domain inputs
-  emit a warning and perform exactly one local evaluation. A malformed or structurally invalid input
-  fails directly rather than falling back.
+- Proposal estimation currently supports any non-empty exact-Unzen input with
+  `execution_po2 >= 20`, non-zero zkGas in every witness, and checked total zkGas at or below
+  `500000000`. It does not gate on network name or block count; block count remains an M2 formula
+  input. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic-overflow
+  inputs emit a warning and perform exactly one local evaluation. A malformed or structurally
+  invalid input fails directly rather than falling back.
 - Estimated aggregation currently performs that warning-plus-local fallback for every child count.
   Its committed calibrated-count set is empty: the current aggregation guest has
   `disable-dev-mode`, so it rejected development receipts before valid current-image cycle

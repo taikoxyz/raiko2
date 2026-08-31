@@ -1250,14 +1250,14 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   from the typed guest input and estimates cycles without executing the guest locally. The
   estimation step itself does not submit a proof; the normal Boundless request still proves the
   original guest program and input. It has an operational target of approximately ten-percent quote
-  error. When the proposal is outside the model domain, raiko2 emits a warning and performs exactly
+  error. When the proposal is outside the model policy, raiko2 emits a warning and performs exactly
   one local execution, using that actual cycle count and journal. Structural input errors still fail
   directly.
-- The current proposal model admits exact-Unzen inputs with `execution_po2 = 20` only in these
-  chain-conditioned domains: Hoodi has `block_count = 155..=192` and
-  `total_zkgas = 369558586..=459162040`; Mainnet has `block_count = 184..=192` and
-  `total_zkgas = 216314230..=310638954`. Pre-Unzen, later-fork, other-chain, and out-of-domain
-  inputs use the warning-plus-local fallback. Bounds from different chains are not combined.
+- The current proposal model admits any non-empty exact-Unzen input when `execution_po2 >= 20`,
+  every witness has non-zero zkGas in `block.header.difficulty`, and their checked sum is at most
+  `500000000`. Network names and block counts do not gate estimation; block count remains an M2
+  formula input. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic
+  overflow inputs use the warning-plus-local fallback.
 - Estimated aggregation is currently fail-closed to local evaluation for every child count. The
   committed current-image calibration set is empty because the calibration guest, built with
   `disable-dev-mode`, rejected development receipts before valid cycle measurements could be

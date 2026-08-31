@@ -1433,12 +1433,13 @@ Operator notes:
   review, but the request path does not compare those values with the running binary. The release
   owner decides whether a new guest/runtime remains compatible: retain `estimated` only after that
   review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
-- That review is currently outstanding. The committed artifact pins proposal ELF SHA-256
+- The committed artifact pins proposal ELF SHA-256
   `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the proposal
   guest rebuilt by raiko2 #242; the shipped `crates/guests/elf/risc0_shasta_proposal.elf` no longer
   hashes to that value. The calibration therefore describes a guest that is not the one being
-  proved. Treat `estimated` as unavailable for the proposal stage until the model is recalibrated
-  against the deployed guest, or the drift has been reviewed and explicitly accepted.
+  proved. This release-pairing drift is known and explicitly accepted for quote-price and timeout
+  sizing when the release selects `estimated`; it does not affect proof validity. Select
+  `evaluated` instead when the running guest's exact local cycle count is required.
 - `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.

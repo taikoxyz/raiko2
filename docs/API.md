@@ -1274,7 +1274,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   remain compatible with the committed calibration. Raiko2 does not runtime-check the ELF hash,
   image ID, source revision, or RISC0 SDK version. The committed proposal calibration currently
   predates the guest rebuilt by raiko2 #242 and does not describe the shipped
-  `risc0_shasta_proposal.elf`, so that assertion is not satisfied today. There is no user-visible `skip_preflight` option:
+  `risc0_shasta_proposal.elf`. This known release-pairing drift is explicitly accepted for
+  quote-price and timeout sizing when the release selects `estimated`; it does not affect proof
+  validity. There is no user-visible `skip_preflight` option:
   the Estimated path internally uses an isolated SDK request builder and does not mutate the shared
   preflight cache. `evaluated` uses the exact local dry-run count; `fixed` pins the quoted count but
   still executes locally to obtain and validate the journal.

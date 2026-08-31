@@ -521,9 +521,7 @@ pub struct BoundlessConfig {
     pub transaction: Option<raiko2_prover::boundless_config::BoundlessTransactionConfig>,
     #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
-    #[serde(default)]
     pub batch_quote: QuoteSizing,
-    #[serde(default)]
     pub aggregation_quote: QuoteSizing,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_boundless_poll_interval_ms")]
@@ -669,8 +667,9 @@ const fn default_boundless_rebid_max_attempts() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, ProverRoutesOverride,
-        REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
+        BoundlessPairConfig, MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig,
+        ProverRoutesOverride, REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig,
+        ZkAnyTargetConfig,
     };
     use raiko2_pipeline::RunnerKind;
     use raiko2_primitives::ProofType;
@@ -698,6 +697,71 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn explicitly_supplied_boundless_table_requires_both_quote_stages() {
+        for missing_quote in ["batch_quote", "aggregation_quote"] {
+            let mut value = toml::Value::try_from(ProverConfig::default())
+                .expect("serialize default prover config");
+            value
+                .get_mut("risc0")
+                .and_then(toml::Value::as_table_mut)
+                .expect("RISC0 config table")
+                .get_mut("boundless")
+                .and_then(toml::Value::as_table_mut)
+                .expect("Boundless config table")
+                .remove(missing_quote);
+
+            let serialized = toml::to_string(&value).expect("serialize mutated prover config");
+            let error = toml::from_str::<ProverConfig>(&serialized)
+                .expect_err("explicit Boundless table must require both quote stages");
+            assert!(error.to_string().contains(missing_quote), "{error}");
+        }
+    }
+
+    #[test]
+    fn omitted_inactive_boundless_table_defaults_to_evaluated_quotes() {
+        let config: ProverConfig = toml::from_str(
+            r#"
+[risc0]
+enabled = false
+"#,
+        )
+        .expect("omitted inactive Boundless table should deserialize");
+
+        assert_eq!(
+            config.risc0.boundless.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
+        assert_eq!(
+            config.risc0.boundless.aggregation_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
+    }
+
+    #[test]
+    fn pair_omission_inherits_base_quote_strategies() {
+        let mut config = boundless_network_config();
+        config.risc0.boundless.batch_quote =
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated;
+        config.risc0.boundless.aggregation_quote =
+            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 200 };
+
+        let effective = config
+            .risc0
+            .boundless
+            .apply_pair_override(&BoundlessPairConfig::default())
+            .expect("pair without quote overrides should retain base strategies");
+
+        assert_eq!(
+            effective.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
+        assert_eq!(
+            effective.aggregation_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 200 }
+        );
     }
 
     #[test]

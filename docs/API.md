@@ -1070,7 +1070,10 @@ Returns the root-task view derived from the original batch request.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
-  `evaluated_mcycles_count`.
+  `evaluated_mcycles_count`. The optional `quote_strategy` and `quote_model_id` fields identify how
+  that request-ID lineage was quoted. They may be absent on checkpoints written by an older binary;
+  `evaluated_mcycles_count` is absent for a successful model estimate and present after local
+  execution.
 - Terminal root task records use the configurable `runtime.terminal_task_ttl_secs` retention policy,
   which defaults to six hours. Artifact manifests and pending publication intents, including
   external aggregation inputs, are reclaimed independently when no runtime task record references
@@ -1237,12 +1240,35 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
 - `prover.risc0.boundless.batch_quote` and `prover.risc0.boundless.aggregation_quote` select how
-  proposal and aggregation quote cycles are sized for `risc0/network`. Each is a table with
-  `strategy = "raiko_agent"` (default; rounds the evaluated dry-run mcycle count up locally — batch
-  to the next `1000` mcycles with a `2000` mcycle floor, aggregation to the next `100` mcycles with a
-  `200` mcycle floor), `"evaluated"` (use the local dry-run mcycle count as-is), or `"fixed"` with a
-  positive `mcycles` value.
-  `rpc.pairs[*].boundless` can override either table for one `(network, l1_network)` pair.
+  proposal and aggregation quote cycles are sized for `risc0/network`. An explicitly supplied
+  Boundless configuration must contain both tables. Each table accepts exactly one of
+  `strategy = "estimated"`, `"evaluated"`, or `"fixed"`; `fixed` also requires a positive
+  `mcycles` value. The removed `raiko_agent` value is rejected and must be migrated explicitly.
+  `rpc.pairs[*].boundless` may override either table for one `(network, l1_network)` pair; an omitted
+  pair field inherits the corresponding required global table.
+- `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
+  from the typed guest input and estimates cycles without executing the guest locally. The
+  estimation step itself does not submit a proof; the normal Boundless request still proves the
+  original guest program and input. It has an operational target of approximately ten-percent quote
+  error. When the proposal is outside the model domain, raiko2 emits a warning and performs exactly
+  one local execution, using that actual cycle count and journal. Structural input errors still fail
+  directly.
+- The current proposal model admits exact-Unzen inputs with `execution_po2 = 20` only in these
+  chain-conditioned domains: Hoodi has `block_count = 155..=192` and
+  `total_zkgas = 369558586..=459162040`; Mainnet has `block_count = 184..=192` and
+  `total_zkgas = 216314230..=310638954`. Pre-Unzen, later-fork, other-chain, and out-of-domain
+  inputs use the warning-plus-local fallback. Bounds from different chains are not combined.
+- Estimated aggregation is currently fail-closed to local evaluation for every child count. The
+  committed current-image calibration set is empty because the calibration guest, built with
+  `disable-dev-mode`, rejected development receipts before valid cycle measurements could be
+  collected. Do not treat child counts one through five as enabled until valid current-image
+  measurements are committed.
+- Selecting `estimated` is the release owner's assertion that the deployed guest and RISC0 runtime
+  remain compatible with the committed calibration. Raiko2 does not runtime-check the ELF hash,
+  image ID, source revision, or RISC0 SDK version. There is no user-visible `skip_preflight` option:
+  the Estimated path internally uses an isolated SDK request builder and does not mutate the shared
+  preflight cache. `evaluated` uses the exact local dry-run count; `fixed` pins the quoted count but
+  still executes locally to obtain and validate the journal.
 - `prover.risc0.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It must be at least `1000` ms and is separate from the overall

@@ -1392,11 +1392,39 @@ Operator notes:
   remain available until every manifest that references it is gone, then the bucket lifecycle may
   reclaim it. Canonical preflight objects have an independent finite-age lifecycle because expiration
   is handled as a cache miss and rebuild.
-- Proposal requests are sized by `prover.risc0.boundless.batch_quote`. The default
-  `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
-  `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`
-  value.
-- Aggregation requests are sized by `prover.risc0.boundless.aggregation_quote` (same strategies).
+- Proposal and aggregation requests are sized by `prover.risc0.boundless.batch_quote` and
+  `prover.risc0.boundless.aggregation_quote`. When Boundless configuration is supplied explicitly,
+  both stage tables are required. Each table accepts exactly `strategy = "estimated"`,
+  `"evaluated"`, or `"fixed"`; `fixed` also requires a positive `mcycles` value. The removed
+  `raiko_agent` value is intentionally rejected: migrate every old explicit configuration before
+  rolling out this binary. Pair-specific `rpc.pairs[*].boundless` quote fields remain optional and
+  inherit the corresponding global stage table when omitted.
+- `evaluated` performs the exact local guest dry-run and quotes its cycle count. `fixed` still runs
+  the guest locally to obtain the journal, but quotes the configured count. `estimated` derives the
+  expected journal and quote from the typed input without local guest execution. The estimation step
+  itself does not submit a proof; the normal Boundless request still proves the original guest and
+  input. It is an explicit auction-cost/timeout optimization with an approximately ten-percent
+  operational error target, not a proof-validity shortcut.
+- Proposal estimation currently supports exact-Unzen inputs with `execution_po2 = 20` within two
+  separate operating domains: Hoodi admits `155..=192` blocks and
+  `369558586..=459162040` total zkGas; Mainnet admits `184..=192` blocks and
+  `216314230..=310638954` total zkGas. Pre-Unzen, later-fork, other-chain, and out-of-domain inputs
+  emit a warning and perform exactly one local evaluation. A malformed or structurally invalid input
+  fails directly rather than falling back.
+- Estimated aggregation currently performs that warning-plus-local fallback for every child count.
+  Its committed calibrated-count set is empty: the current aggregation guest has
+  `disable-dev-mode`, so it rejected development receipts before valid current-image cycle
+  measurements could be collected. Counts one through five are calibration targets, not enabled
+  estimates. Keep aggregation on `evaluated` unless the local fallback behavior is explicitly
+  acceptable; enable direct estimates only after valid current-image measurements are committed.
+- `estimated` does not expose a `skip_preflight` configuration flag. It internally builds through a
+  request-scoped SDK builder with an independent preflight layer, so the successful estimate and its
+  local fallback do not download the uploaded input or read or modify the shared executor cache.
+  `evaluated` and `fixed` retain the shared SDK preflight behavior.
+- The model artifact records ELF, image, source-revision, and RISC0-version provenance for release
+  review, but the request path does not compare those values with the running binary. The release
+  owner decides whether a new guest/runtime remains compatible: retain `estimated` only after that
+  review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
 - `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.
@@ -1480,7 +1508,13 @@ Operator notes:
 - `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid
   fields (including `rebid_price_step_bps`), and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
-- The local dry-run validates guest execution and prepares the request journal.
+- Boundless progress and resume metadata optionally carries `quoted_mcycles_count`,
+  `evaluated_mcycles_count`, `quote_strategy`, and `quote_model_id` for checkpoint compatibility.
+  A successful estimate leaves `evaluated_mcycles_count` absent; evaluated, fixed, and Estimated
+  fallback requests record the actual local count. Same-request-ID rebids preserve the persisted
+  quote and provenance across restart or configuration/model changes; only request-ID rotation may
+  use the current quote strategy. A legacy checkpoint without a stored quote remains pollable but
+  fails closed before a same-ID rebid.
 
 Optional `zk_any` request sampling is configured at the server level:
 

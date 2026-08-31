@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan.
 
-**Goal:** Add an opt-in Boundless `estimated` quote strategy that derives the RISC0 journal and cycle quote without local proposal/aggregation execution when the input is inside a committed calibration domain, while preserving one-execution local fallback and durable quote provenance.
+**Goal:** Add an opt-in Boundless `estimated` quote strategy that derives the RISC0 journal and cycle quote without local proposal/aggregation execution when the input satisfies the committed operating policy, while preserving one-execution local fallback and durable quote provenance.
 
-**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, operating-domain selection, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration continues to choose the strategy per stage; the embedded JSON is the only runtime source for coefficients, domains, model identity, and calibrated aggregation counts.
+**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, operating-policy selection, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration continues to choose the strategy per stage; the embedded JSON is the only runtime source for coefficients, the global zkGas cap, model identity, and calibrated aggregation counts.
 
 **Tech Stack:** Rust 2024 workspace, serde/serde_json, bincode, RISC Zero 3.0.5, boundless-market 2.0.0, Tokio, TOML configuration, Python 3.11 experiment venv for fixture diagnostics.
 
@@ -14,7 +14,7 @@
 
 - Do not change guest source or generated ELFs.
 - Do not add a public preflight flag, runtime ELF/image/version gate, or network-specific coefficient.
-- Treat malformed stage input and invalid carry linkage as direct request errors. Treat model-domain, execution-configuration, fork, zero/overflow, and uncalibrated-count failures as warning-plus-one-local-execution fallback.
+- Treat malformed stage input and invalid carry linkage as direct request errors. Treat operating-policy, execution-configuration, fork, zero/overflow, and uncalibrated-count failures as warning-plus-one-local-execution fallback.
 - Use `apply_patch` for repository edits. Run Python through an existing virtual environment.
 - Preserve unrelated worktree changes. Commit each coherent task only after its focused red/green checks pass.
 - Before completion, run independent adversarial review and independent behavioral verification because journal equality, request pricing, and durable rebid state are cross-crate behavior.
@@ -49,19 +49,19 @@ include_str!(concat!(
 
 The artifact schema contains:
 
-- `schema_version = 1`, `model_id = "risc0-zkgas-m2-v1"`, and originating experiment model `M2`;
-- provenance: source revision `4f8300497aba75605b9b8568b1955faa1f7f04bc`, proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`, proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, RISC0 `3.0.5`, and `execution_po2 = 20`;
+- `schema_version = 2`, content-addressed model ID `risc0-zkgas-m2-5adefe56336d7238`, and originating experiment model `M2`;
+- provenance: source revision `4f8300497aba75605b9b8568b1955faa1f7f04bc`, proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`, proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, RISC0 `3.0.5`, and `min_execution_po2 = 20`;
 - generated config SHA-256, compact input-row SHA-256 `0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328`, and validation fixture SHA-256 `dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767`;
 - decimal proposal coefficients and scaled integer coefficients with scale `1_000_000_000_000`;
-- independent Hoodi and Mainnet conjunctive domains from the approved design;
+- global proposal operating cap `max_total_zkgas = 500_000_000`; network and block count are not availability gates;
 - exact cohort counts and documented diagnostics for Hoodi calibration and Mainnet evaluation;
 - aggregation formula `per_child_mcycles = 180`, current aggregation image provenance, and the measured child-count rows produced in Task 7. The runtime calibrated set is derived only from rows with both absolute error and underquote within 10 percent.
 
-Validation rejects unknown fields, wrong schema/model IDs, zero scale/coefficient values, duplicate or inverted domains, unsupported domain names, diagnostics/count inconsistencies, invalid SHA-256/image formats, duplicated aggregation child counts, aggregation rows outside `1..=5`, and aggregation rows marked enabled outside the accepted error rule. Release provenance is validated for shape only and is not compared with the running binary.
+Validation rejects unknown fields, wrong schema/model IDs, zero scale/coefficient/minimum-po2/cap values, diagnostics/count inconsistencies, invalid SHA-256/image formats, duplicated aggregation child counts, aggregation rows outside `1..=5`, and aggregation rows marked enabled outside the accepted error rule. Release provenance is validated for shape only and is not compared with the running binary.
 
 **Step 1: Write failing schema tests**
 
-Add unit tests in `estimation.rs` that parse a valid minimal artifact string and reject malformed JSON, missing fields, unknown fields, wrong model/schema IDs, invalid hashes, inverted domains, and inconsistent aggregation calibration rows. Add a test proving production parameters are read from the parsed artifact rather than Rust constants.
+Add unit tests in `estimation.rs` that parse a valid minimal artifact string and reject malformed JSON, missing fields, unknown fields, wrong model/schema IDs, invalid hashes, zero operating-policy values, and inconsistent aggregation calibration rows. Add a test proving production parameters are read from the parsed artifact rather than Rust constants.
 
 Run:
 
@@ -73,7 +73,7 @@ Expected: FAIL because the module, schema, and artifact do not exist.
 
 **Step 2: Implement the private serde schema and validation**
 
-Use private `#[serde(deny_unknown_fields)]` structs. Store decimal coefficients as strings for auditability and parse them only in fixture-regression tests; runtime arithmetic reads only the scaled integer fields from the artifact. Keep all coefficient/domain/calibrated-count values out of Rust constants.
+Use private `#[serde(deny_unknown_fields)]` structs. Store decimal coefficients as strings for auditability and parse them only in fixture-regression tests; runtime arithmetic reads only the scaled integer fields from the artifact. Keep all coefficient/operating-policy/calibrated-count values out of Rust constants.
 
 **Step 3: Add the artifact with proposal data and an initially empty aggregation calibration list**
 
@@ -198,9 +198,9 @@ Build small in-memory `GuestInput` values and cover:
 
 - empty witnesses is a direct error;
 - a valid carry produces exactly the 32-byte `hash_shasta_subproof_input` journal after non-panicking carry validation;
-- Hoodi and Mainnet chain names select only their own domain;
-- lower/upper domain boundaries estimate successfully;
-- Mainnet `562_107_601`, cross-chain rectangle combinations, unknown chain, and `execution_po2 != 20` are unavailable;
+- network names and observed block-count ranges do not gate estimation;
+- total zkGas `500_000_000` estimates successfully and `500_000_001` is unavailable;
+- `execution_po2 >= 20` is available and a lower value is unavailable;
 - every witness must have highest active Taiko fork exactly Unzen; pre-Unzen is unavailable. Unit-test the ordered active-fork classifier with a private synthetic rank above Unzen so future Taiko enum variants cannot be accepted accidentally, without adding a production fork variant;
 - zero difficulty and checked-add/multiply/final-conversion overflow are unavailable;
 - the integer result is the ceiling of the artifact formula and fits positive `u32`.
@@ -217,9 +217,9 @@ Expected: FAIL because the proposal estimator is absent.
 
 Expose or reuse the shared Shasta carry-vector validation path so `hash_shasta_subproof_input` is never called on out-of-range uint48 fields. Do not duplicate proposal journal rules in `boundless/mod.rs`.
 
-**Step 3: Implement chain/fork/domain extraction and checked integer arithmetic**
+**Step 3: Implement fork/policy extraction and checked integer arithmetic**
 
-Read each `witness.block.header.number`, `timestamp`, and `difficulty`; require one consistent supported chain domain; sum `difficulty` through checked `u128` conversion/addition; multiply and add all scaled terms with checked arithmetic; ceiling-divide by artifact scale; and convert to positive `u32`.
+Read each `witness.block.header.number`, `timestamp`, and `difficulty`; require exact Unzen and a non-empty witness list; sum non-zero `difficulty` through checked `u128` conversion/addition; require the total at or below the artifact cap; multiply and add all scaled terms with checked arithmetic; ceiling-divide by artifact scale; and convert to positive `u32`.
 
 **Step 4: Re-run the focused tests**
 
@@ -243,7 +243,7 @@ git commit -m "feat(boundless): estimate proposal quote metadata"
 
 **Step 1: Write failing regression tests**
 
-Rust tests load the artifact plus `tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/validation.jsonl`, require its SHA-256, six-field row schema, unique `(network, proposal_id)` keys, and exact 40 Hoodi calibration/20 Mainnet evaluation rows. Recompute both continuous and integer predictions and assert the artifact diagnostics with tight tolerances:
+Rust tests load the artifact plus `tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/validation.jsonl`, require its SHA-256, six-field row schema, unique `(network, proposal_id)` keys, and exact 40 Hoodi calibration/20 Mainnet evaluation rows. Recompute both continuous and integer predictions and assert the artifact diagnostics with tight tolerances:
 
 - Hoodi continuous: 17 underquotes, MAPE 0.094557%, maximum absolute/underquote 0.279512%, zero rows over 10%;
 - Hoodi integer: 12 underquotes, MAPE 0.093492%, maximum absolute/underquote 0.264550%, zero rows over 10%;
@@ -368,7 +368,7 @@ Progress and resume payloads add optional `quote_strategy` and `quote_model_id`;
 
 Inject an execution closure/counter into a test-only metadata-preparation helper and cover:
 
-- Estimated in-domain does not call local execution;
+- Estimated when available under the operating policy does not call local execution;
 - Estimated unavailable calls local execution exactly once and quotes actual;
 - Evaluated calls once and quotes actual;
 - Fixed calls once for journal/evaluation and quotes fixed;
@@ -587,7 +587,7 @@ git commit -m "fix(boundless): persist rebid quote provenance"
 
 **Step 1: Update the canonical documentation**
 
-Document exactly three strategies, both required explicit stage tables, per-pair inheritance, Estimated's no-local-execution fast path, warning-plus-local fallback, 10% operational error target, current proposal domains, current aggregation calibrated set from Task 7, release-owner compatibility responsibility, optional progress/resume fields, and intentional rejection of `raiko_agent`.
+Document exactly three strategies, both required explicit stage tables, per-pair inheritance, Estimated's no-local-execution fast path, warning-plus-local fallback, the empirical 10% publication gate, current proposal operating policy, current aggregation calibrated set from Task 7, release-owner compatibility responsibility, optional progress/resume fields, and intentional rejection of `raiko_agent`.
 
 State explicitly that Estimated does not expose `skip_preflight`, does not submit a proof during estimation, and does not runtime-check ELF/image/revision/RISC0 version.
 
@@ -651,7 +651,7 @@ Give the reviewer the original approved spec and complete diff. Require review o
 
 **Step 5: Request independent behavioral verification**
 
-Have a tester independently run the focused model/config/prover/runtime suites and exercise in-domain proposal estimation, out-of-domain one-execution fallback, calibrated/unconfigured aggregation counts, serialization compatibility, and builder isolation. Fix confirmed failures and ask the tester to rerun affected checks.
+Have a tester independently run the focused model/config/prover/runtime suites and exercise available proposal estimation, operating-policy one-execution fallback, calibrated/unconfigured aggregation counts, serialization compatibility, and builder isolation. Fix confirmed failures and ask the tester to rerun affected checks.
 
 **Step 6: Final readiness check**
 

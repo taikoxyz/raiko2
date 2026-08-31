@@ -8,6 +8,17 @@ to size Boundless proposal orders.
 The experiment measures the current RISC0 proposal guest only. It does not estimate aggregation
 cycles, change the protocol zkGas schedule, or change production quoting behavior.
 
+> **Production-policy amendment (2026-08-31):** The experiment gates below record the original
+> conservative study design; they are not the current runtime availability contract. The shipped
+> opt-in `estimated` strategy deliberately uses exact Unzen, `execution_po2 >= 20`, non-empty
+> witnesses with non-zero zkGas, checked arithmetic, and total zkGas at or below `500_000_000`.
+> Network, observed block-count/zkGas rectangles, and runtime ELF/image matching do not gate it.
+> Release owners enabling `estimated` accept unmeasured cycle drift across guest pairings and
+> extrapolation outside collected rectangles; the empirical 10% budget gates concrete collected
+> observations during model publication or refresh, not every future request. Use `evaluated` when
+> exact cycles are required. The current source of truth is the estimated-quote design spec,
+> `docs/API.md`, and the generated model artifact.
+
 The decision target is the Boundless quote bucket, not the best unconstrained regression score. The
 current `raiko_agent` strategy rounds proposal estimates up to 1,000 mcycle steps with a 2,000
 mcycle minimum. A useful estimator must avoid underquoting while keeping the resulting bucket close

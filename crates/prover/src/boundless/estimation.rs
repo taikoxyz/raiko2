@@ -913,6 +913,17 @@ mod tests {
     }
 
     #[test]
+    fn model_rejects_zero_min_execution_po2() {
+        let mut artifact = valid_artifact();
+        artifact["proposal"]["provenance"]["min_execution_po2"] = json!(0);
+
+        let Err(error) = parse(artifact) else {
+            panic!("zero minimum execution po2 must be rejected");
+        };
+        assert_eq!(error, "proposal min_execution_po2 must be non-zero");
+    }
+
+    #[test]
     fn model_rejects_invalid_hashes() {
         let mut artifact = valid_artifact();
         artifact["proposal"]["provenance"]["elf_sha256"] = json!("not-a-sha256");
@@ -1200,6 +1211,7 @@ mod tests {
 
         assert_eq!(estimate.journal.len(), 32);
         assert_eq!(estimate.journal, expected.as_slice());
+        assert_eq!(estimate.mcycles, 2_237);
         assert_eq!(estimate.model_id, "risc0-zkgas-m2-5adefe56336d7238");
     }
 

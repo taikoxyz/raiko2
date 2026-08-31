@@ -25,8 +25,6 @@ DEFAULT_FIXTURE_DIR = (
 )
 DEFAULT_MODEL = ROOT / "crates" / "prover" / "models" / "risc0-zkgas.json"
 MODEL_ID_PREFIX = "risc0-zkgas-m2-"
-LEGACY_MODEL_ID = "risc0-zkgas-m2-v1"
-LEGACY_CONTENT_SHA256 = "b605227454337a5ed429c2e328dd1a86dc70246101cbf0fce5926340d7a24f2d"
 AUTO_MODEL_ID = f"{MODEL_ID_PREFIX}auto"
 CONTENT_ID_HEX_LENGTH = 16
 MAX_DIAGNOSTIC_DECIMAL_PLACES = 18
@@ -145,7 +143,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         or len(model_id) == len(MODEL_ID_PREFIX)
     ):
         raise ModelError("unsupported model_id family")
-    if model_id not in {LEGACY_MODEL_ID, AUTO_MODEL_ID} and not is_lower_hex(
+    if model_id != AUTO_MODEL_ID and not is_lower_hex(
         model_id[len(MODEL_ID_PREFIX) :], CONTENT_ID_HEX_LENGTH
     ):
         raise ModelError(
@@ -611,12 +609,7 @@ def resolve_model_id(artifact: dict[str, Any], configured_model_id: str) -> None
     identity.pop("model_id")
     digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
     expected = f"{MODEL_ID_PREFIX}{digest[:CONTENT_ID_HEX_LENGTH]}"
-    if configured_model_id == LEGACY_MODEL_ID:
-        if digest != LEGACY_CONTENT_SHA256:
-            raise ModelError(
-                "legacy model_id is reserved for the approved v1 content"
-            )
-    elif configured_model_id == AUTO_MODEL_ID:
+    if configured_model_id == AUTO_MODEL_ID:
         artifact["model_id"] = expected
     elif configured_model_id != expected:
         raise ModelError(

@@ -24,10 +24,12 @@ Keep collection, policy review, and packaging separate.
    `just check-risc0-zkgas-model <new-fixture-dir> crates/prover/models/risc0-zkgas.json` with the same
    interpreter. An observation admitted by the configured global cap that exceeds the 10% error
    budget must stop the refresh.
-6. When promoting a new model, update every explicit audit pin in the Python and Rust fixture tests,
-   the default fixture directory in the generator and `justfile`, and the documented API operating
-   policy. These are review gates, not a second coefficient source. Run the focused prover tests
-   after updating them.
+6. When promoting a new model, update every explicit audit pin in the Python and Rust fixture tests;
+   the default fixture directory in the generator and `justfile`; `config.example.toml`;
+   `docs/API.md`; `docs/operations.md`; `experiments/risc0-zkgas/README.md`; the Boundless estimated
+   quote design and implementation-plan documents; and this skill plus the zkGas guidance in
+   `AGENTS.md`. These are review gates, not a second coefficient source. Run the focused prover
+   tests after updating them.
 
 Review against the accepted approximation contract: an implementation is eligible when it matches
 the documented mechanical admission and fallback rules. The product accepts estimated/local cycle
@@ -38,7 +40,7 @@ in-policy observation beyond that budget requires re-evaluating the model, cap, 
 theoretical future mismatch, lack of an untouched holdout, or lack of observed rectangles does not
 change runtime availability. Use `evaluated` when exact local cycles are required.
 
-The legacy `risc0-zkgas-m2-v1` ID has exactly one compatibility exception: its initial
-packaging-only metadata transition retained the ID because quote semantics did not change. Any later
-artifact or calibration change must use the generated content-addressed ID. This workflow updates
-repository artifacts only. Do not deploy, roll out, or change quote strategy.
+The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record and is rejected by the current
+schema-v2 generator and runtime parser. Every schema-v2 artifact or calibration change must use the
+generated content-addressed ID. This workflow updates repository artifacts only. Do not deploy,
+roll out, or change quote strategy.

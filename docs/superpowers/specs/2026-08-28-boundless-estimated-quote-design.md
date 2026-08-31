@@ -116,6 +116,13 @@ existing calibration is still applicable. Keeping `estimated` means accepting th
 switching the affected stage to `evaluated` is the safe rollout choice while measurements are being
 refreshed. Raiko2 does not make this release decision from embedded ELF or dependency identifiers.
 
+The schema-v2 artifact introduced by this change intentionally retains the measured pre-#242
+proposal ELF `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`. It was not
+recalibrated against the post-#242 `main` ELF or the v0.6.0 release guest. Enabling `estimated` with
+either different ELF therefore accepts unmeasured cycle drift for quote price and timeout sizing;
+it does not affect proof validity. The exact calibration identity remains recorded for audit, but it
+is deliberately not a runtime availability gate.
+
 This repository updates `config.example.toml`, `docs/API.md`, and `docs/operations.md` to expose the
 three supported values and the required-stage-table rule. External configuration validators must
 accept `estimated` and reject `raiko_agent` in coordinated follow-up changes. This repository does

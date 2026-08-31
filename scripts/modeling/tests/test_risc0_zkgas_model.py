@@ -1006,6 +1006,13 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 "proposal min_execution_po2 must fit u32",
             ),
             (
+                "zero minimum execution po2",
+                lambda config: config["proposal"]["provenance"].__setitem__(
+                    "min_execution_po2", 0
+                ),
+                "proposal min_execution_po2 must be non-zero",
+            ),
+            (
                 "u64 coefficient overflow",
                 lambda config: config["proposal"]["coefficients"].__setitem__(
                     "scale", 1 << 64
@@ -1078,15 +1085,15 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 },
             )
 
-    def test_legacy_model_id_is_reserved_for_the_approved_v1_content(self):
-        artifact = json.loads(MODEL.read_text())
-        artifact["proposal"]["generator_config_sha256"] = "0" * 64
+    def test_schema_v2_rejects_the_legacy_v1_model_id(self):
+        config = json.loads((FIXTURE_DIR / "config.json").read_text())
+        config["model_id"] = "risc0-zkgas-m2-v1"
 
         with self.assertRaisesRegex(
             MODEL_TOOL.ModelError,
-            "legacy model_id is reserved for the approved v1 content",
+            "new model_id must be content-addressed or use risc0-zkgas-m2-auto",
         ):
-            MODEL_TOOL.resolve_model_id(artifact, "risc0-zkgas-m2-v1")
+            MODEL_TOOL.validate_config(config)
 
     def test_check_rejects_a_zero_global_zkgas_cap(self):
         with tempfile.TemporaryDirectory() as directory:

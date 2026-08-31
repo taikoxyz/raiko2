@@ -141,8 +141,15 @@ production inputs:
 the network, split, proposal ID, block count, total zkGas, and actual mcycles. Mainnet rows are
 labeled `evaluation` because Mainnet influenced the production model choice.
 The prior `2026-08-28-m2-v1/` fixture remains byte-for-byte unchanged as the audit record for the
-schema-v1 domain policy. The v2 fixture copies its sample rows and changes only the versioned schema
-and operating-policy config.
+schema-v1 domain policy. The schema-v2 generator intentionally rejects that legacy config, so the
+v1 directory is a data-only historical record rather than a fixture accepted by the current
+`check-risc0-zkgas-model` command. The v2 fixture copies its sample rows and changes only the
+versioned schema and operating-policy config.
+
+The v2 sample rows were collected with proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`.
+That identity predates the proposal ELF rebuilt by #242 and differs from the v0.6.0 release guest.
+The runtime does not compare these identities: a release selecting `estimated` explicitly accepts
+any resulting cycle-estimate drift, while `evaluated` remains the exact-cycle option.
 
 The generator deterministically refits M2 from the Hoodi fit rows and requires every concrete
 collected observation admitted by the global cap to remain within the 10% absolute-error budget

@@ -153,12 +153,34 @@ predictions were below actual cycles; the largest underquote was 108.59 mcycles,
 Nineteen of 20 absolute errors were within ten percent; the remaining sample was a 21.94-percent
 overquote. Applying the scaled-integer coefficients and final ceiling used by production gives 19
 underquotes, 5.8422 percent MAPE, a maximum 108-mcycle or 5.7234-percent underquote, and a
-547-mcycle or 21.9679-percent overquote for the isolated sample. The accepted operational target is
-no observed underquote beyond ten percent and at least 95 percent of absolute errors within ten
-percent. A new untouched holdout and the original zero-underquote gate are not prerequisites for
-this explicitly enabled strategy, and the design does not claim that they passed. The production
-global `500_000_000` zkGas cap excludes the isolated overquote, so all 19 admitted Mainnet
-evaluation samples are within the ten-percent absolute-error budget.
+547-mcycle or 21.9679-percent overquote for the isolated sample. The current publication gate is
+empirical: every concrete fit, calibration, or evaluation observation admitted by the production
+policy must be within ten-percent absolute error. The global `500_000_000` zkGas cap excludes the
+isolated overquote, so all 19 admitted Mainnet evaluation samples pass that gate. A new untouched
+holdout and the original zero-underquote gate are not prerequisites for this explicitly enabled
+strategy, and the design does not claim that they passed.
+
+### Accepted Approximation Contract
+
+`Estimated` intentionally returns a coarse pricing input rather than the exact local-execution cycle
+count. Selecting it accepts both underquotes and overquotes, including mismatches for network and
+block-count combinations outside the collected sample rectangles. The ten-percent gate above is a
+model publication and refresh check over concrete collected observations; it is not a mathematical
+bound or per-request runtime guarantee for every future input admitted by the mechanical policy.
+
+An admitted request does not execute the guest locally before quoting, so raiko2 cannot know that
+request's actual error or fall back merely because its unknown error might exceed ten percent. The
+runtime intentionally estimates every exact-Unzen request satisfying the documented
+`execution_po2`, non-zero zkGas, checked-total, and numeric guards. Operators that require an exact
+cycle count must select `evaluated`.
+
+Implementation review should therefore treat the absence of a per-request ten-percent proof,
+zero-underquote guarantee, untouched holdout, or per-network/per-block observed envelope as this
+design's accepted product trade-off, not as a defect. Actionable blockers are a violation of the
+mechanical admission or fallback contract, unsafe arithmetic, or a concrete newly collected
+in-policy observation outside the publication error budget. The latter requires re-evaluating the
+model, cap, or strategy before publishing that refresh; it does not retroactively turn historical
+sample rectangles into runtime availability rules.
 
 The estimate is used directly; no calibration margin, 1,000-mcycle bucket, or 2,000-mcycle floor is
 applied. This is an explicit cost/latency trade-off: `with_cycles` is not a cryptographic execution
@@ -207,7 +229,7 @@ Network name and block count do not gate proposal estimation. Block count remain
 the M2 formula. Every witness must have non-zero zkGas, the checked total must be no more than the
 global cap, and the input must contain at least one witness. Inputs above the cap fall back to local
 execution. The committed Hoodi and Mainnet rows remain calibration and diagnostic evidence; they do
-not define runtime min/max rectangles.
+not define runtime min/max rectangles or a per-request accuracy guarantee.
 
 Before estimating, a private `proposal_estimation_available(&GuestInput)` helper in
 `boundless/estimation.rs` inspects every witness's `chain_spec.hard_forks` at that witness block's

@@ -29,6 +29,15 @@ Keep collection, policy review, and packaging separate.
    policy. These are review gates, not a second coefficient source. Run the focused prover tests
    after updating them.
 
+Review against the accepted approximation contract: an implementation is eligible when it matches
+the documented mechanical admission and fallback rules. The product accepts estimated/local cycle
+mismatch, underquotes, overquotes, and in-cap network or block-count combinations outside collected
+sample rectangles. The ten-percent budget gates concrete collected observations during model
+publication or refresh; it is not a proof of per-request accuracy. A concrete newly collected
+in-policy observation beyond that budget requires re-evaluating the model, cap, or strategy. A
+theoretical future mismatch, lack of an untouched holdout, or lack of observed rectangles does not
+change runtime availability. Use `evaluated` when exact local cycles are required.
+
 The legacy `risc0-zkgas-m2-v1` ID has exactly one compatibility exception: its initial
 packaging-only metadata transition retained the ID because quote semantics did not change. Any later
 artifact or calibration change must use the generated content-addressed ID. This workflow updates

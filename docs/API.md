@@ -1249,15 +1249,19 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
   from the typed guest input and estimates cycles without executing the guest locally. The
   estimation step itself does not submit a proof; the normal Boundless request still proves the
-  original guest program and input. It has an operational target of approximately ten-percent quote
-  error. When the proposal is outside the model policy, raiko2 emits a warning and performs exactly
-  one local execution, using that actual cycle count and journal. Structural input errors still fail
-  directly.
+  original guest program and input. Its approximately ten-percent target is an empirical model
+  publication gate over collected observations, not a hard accuracy guarantee for each future
+  request. An in-policy request is not locally executed first, so its actual underquote or overquote
+  is unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
+  local cycle count is required. When the proposal is outside the model policy, raiko2 emits a
+  warning and performs exactly one local execution, using that actual cycle count and journal.
+  Structural input errors still fail directly.
 - The current proposal model admits any non-empty exact-Unzen input when `execution_po2 >= 20`,
   every witness has non-zero zkGas in `block.header.difficulty`, and their checked sum is at most
   `500000000`. Network names and block counts do not gate estimation; block count remains an M2
-  formula input. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic
-  overflow inputs use the warning-plus-local fallback.
+  formula input, and combinations outside the collected sample rectangles are deliberately admitted
+  without a per-request error proof. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas,
+  over-cap, and arithmetic overflow inputs use the warning-plus-local fallback.
 - Estimated aggregation is currently fail-closed to local evaluation for every child count. The
   committed current-image calibration set is empty because the calibration guest, built with
   `disable-dev-mode`, rejected development receipts before valid cycle measurements could be

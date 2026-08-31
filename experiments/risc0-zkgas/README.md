@@ -144,12 +144,15 @@ The prior `2026-08-28-m2-v1/` fixture remains byte-for-byte unchanged as the aud
 schema-v1 domain policy. The v2 fixture copies its sample rows and changes only the versioned schema
 and operating-policy config.
 
-The generator deterministically refits M2 from the Hoodi fit rows, validates the global cap and the
-admitted 10% error budget, and writes `crates/prover/models/risc0-zkgas.json`.
+The generator deterministically refits M2 from the Hoodi fit rows and requires every concrete
+collected observation admitted by the global cap to remain within the 10% absolute-error budget
+before publishing a refresh. This empirical gate is not a per-request guarantee for future
+unobserved network or block-count combinations. The generator writes
+`crates/prover/models/risc0-zkgas.json`.
 Its `raw_input_rows_sha256` is SHA-256 over the canonical `hoodi-fit.jsonl` bytes followed by the
 canonical `validation.jsonl` bytes, so a refresh never requires copying a hash by hand. The artifact
 also records a canonical generator-config hash; the reviewed config pins every collector build hash,
-the per-network chain-spec hash, and the fixed 10% acceptance policy.
+the per-network chain-spec hash, and the fixed empirical 10% publication policy.
 Check or refresh it with an existing Python 3.11+ virtual environment. The check recipe accepts an
 explicit fixture and model path so a newly generated version can be verified before it becomes the
 repository default:

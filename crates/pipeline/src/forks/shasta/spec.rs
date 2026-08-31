@@ -3728,7 +3728,7 @@ mod tests {
     #[test]
     fn extract_block_range_accepts_unzen_max_blocks_for_configured_environment() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_011;
+        ctx.request.l2_chain_id = 167_001;
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
             end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
@@ -3768,7 +3768,7 @@ mod tests {
     #[test]
     fn extract_block_range_rejects_more_than_unzen_max_blocks() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_011;
+        ctx.request.l2_chain_id = 167_001;
         let max_blocks =
             u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
@@ -3837,17 +3837,6 @@ mod tests {
         );
         assert_eq!(
             super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
-            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-        );
-
-        ctx.request.l2_chain_id = 167_011;
-        let masaya = super::chain_spec_from_context(&ctx).expect("chain spec");
-        assert_eq!(
-            masaya.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
-            Some(&ForkCondition::Timestamp(0))
-        );
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 0),
             super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
     }

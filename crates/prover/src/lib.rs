@@ -674,6 +674,30 @@ pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], Str
 /// aggregation admission contract.
 pub fn validate_external_aggregate_proofs(
     pipeline_key: raiko2_pipeline::PipelineKey,
+    expected_chain_id: u64,
+    proofs: &[Proof],
+) -> Result<(), RaikoError> {
+    validate_external_aggregate_proof_metadata(pipeline_key, proofs)?;
+
+    for (index, proof) in proofs.iter().enumerate() {
+        let carry = require_external_aggregate_proof_carry(index, proof)?;
+        if carry.chain_id != expected_chain_id {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "proof {index} carry chain_id mismatch: expected {expected_chain_id}, got {}",
+                carry.chain_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns an error when the supplied proofs do not contain the route-specific metadata needed
+/// to materialize an aggregate input artifact.
+pub fn validate_external_aggregate_proof_metadata(
+    pipeline_key: raiko2_pipeline::PipelineKey,
     proofs: &[Proof],
 ) -> Result<(), RaikoError> {
     for (index, proof) in proofs.iter().enumerate() {
@@ -721,22 +745,27 @@ pub fn validate_external_aggregate_proofs(
                         "proof {index} is missing Boundless aggregation metadata"
                     )));
                 }
-                proof_carry_from_proof(proof)
-                    .map_err(|err| {
-                        RaikoError::InvalidRequestConfig(format!(
-                            "proof {index} invalid shasta carry data: {err}"
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        RaikoError::InvalidRequestConfig(format!(
-                            "proof {index} missing shasta carry data"
-                        ))
-                    })?;
+                require_external_aggregate_proof_carry(index, proof)?;
             }
         }
     }
 
     Ok(())
+}
+
+fn require_external_aggregate_proof_carry(
+    index: usize,
+    proof: &Proof,
+) -> Result<ProofCarryData, RaikoError> {
+    proof_carry_from_proof(proof)
+        .map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!(
+                "proof {index} invalid shasta carry data: {err}"
+            ))
+        })?
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
+        })
 }
 
 /// Common prover trait for all proving backends.
@@ -1056,6 +1085,7 @@ mod tests {
         assert!(
             validate_external_aggregate_proofs(
                 PipelineKey::ShastaNative,
+                0,
                 &[aggregate_proof_fixture()]
             )
             .is_ok()
@@ -1067,6 +1097,7 @@ mod tests {
         assert!(
             validate_external_aggregate_proofs(
                 PipelineKey::ShastaSgx,
+                0,
                 &[aggregate_proof_fixture()]
             )
             .is_ok()
@@ -1078,7 +1109,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.proof = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSgx, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSgx, 0, &[proof])
             .expect_err("missing proof bytes");
         assert!(
             err.to_string()
@@ -1091,7 +1122,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.uuid = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, 0, &[proof])
             .expect_err("missing uuid");
         assert!(
             err.to_string()
@@ -1105,7 +1136,7 @@ mod tests {
         proof.proof = None;
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaSp1, 0, &[proof])
             .expect_err("missing proof data");
         assert!(
             err.to_string()
@@ -1118,7 +1149,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0, 0, &[proof])
             .expect_err("missing receipt");
         assert!(
             err.to_string()
@@ -1131,7 +1162,7 @@ mod tests {
         let mut proof = aggregate_proof_fixture();
         proof.quote = None;
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, 0, &[proof])
             .expect_err("missing receipt");
         assert!(
             err.to_string()
@@ -1150,7 +1181,7 @@ mod tests {
             extra_data: None,
         };
 
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof])
+        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, 0, &[proof])
             .expect_err("missing carry");
         assert!(
             err.to_string()
@@ -1172,7 +1203,8 @@ mod tests {
         };
 
         assert!(
-            validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, &[proof]).is_ok()
+            validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, 0, &[proof])
+                .is_ok()
         );
     }
 

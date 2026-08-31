@@ -1403,14 +1403,22 @@ Operator notes:
   the guest locally to obtain the journal, but quotes the configured count. `estimated` derives the
   expected journal and quote from the typed input without local guest execution. The estimation step
   itself does not submit a proof; the normal Boundless request still proves the original guest and
-  input. It is an explicit auction-cost/timeout optimization with an approximately ten-percent
-  operational error target, not a proof-validity shortcut.
-- Proposal estimation currently supports exact-Unzen inputs with `execution_po2 = 20` within two
-  separate operating domains: Hoodi admits `155..=192` blocks and
-  `369558586..=459162040` total zkGas; Mainnet admits `184..=192` blocks and
-  `216314230..=310638954` total zkGas. Pre-Unzen, later-fork, other-chain, and out-of-domain inputs
-  emit a warning and perform exactly one local evaluation. A malformed or structurally invalid input
-  fails directly rather than falling back.
+  input. It is an explicit auction-cost/timeout optimization. Its approximately ten-percent target
+  is an empirical publication gate over collected observations, not a per-request runtime guarantee.
+  Since an in-policy request is not locally executed first, its actual underquote or overquote is
+  unknown and that mismatch is accepted. Select `evaluated` when exact local cycles are required.
+- Proposal estimation currently supports any non-empty exact-Unzen input with
+  `execution_po2 >= 20`, non-zero zkGas in every witness, and checked total zkGas at or below
+  `500000000`. It does not gate on network name or block count; block count remains an M2 formula
+  input. Combinations outside the collected sample rectangles are deliberately admitted without a
+  per-request error proof. Size that acceptance concretely: the collected rectangles are
+  `block_count` 155-192 and `total_zkgas` 216314230-562107601, and 192 is the pre-Unzen
+  derivation-source block limit. Unzen raises that protocol limit to 768, and estimation only runs
+  on exact-Unzen input, so an admitted proposal can carry up to four times the calibrated block
+  count with the global zkGas cap as the only remaining bound. Pre-Unzen, later-fork,
+  lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic-overflow inputs emit a warning and
+  perform exactly one local evaluation. A malformed
+  or structurally invalid input fails directly rather than falling back.
 - Estimated aggregation currently performs that warning-plus-local fallback for every child count.
   Its committed calibrated-count set is empty: the current aggregation guest has
   `disable-dev-mode`, so it rejected development receipts before valid current-image cycle
@@ -1425,6 +1433,12 @@ Operator notes:
   review, but the request path does not compare those values with the running binary. The release
   owner decides whether a new guest/runtime remains compatible: retain `estimated` only after that
   review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
+- That review is currently outstanding. The committed artifact pins proposal ELF SHA-256
+  `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the proposal
+  guest rebuilt by raiko2 #242; the shipped `crates/guests/elf/risc0_shasta_proposal.elf` no longer
+  hashes to that value. The calibration therefore describes a guest that is not the one being
+  proved. Treat `estimated` as unavailable for the proposal stage until the model is recalibrated
+  against the deployed guest, or the drift has been reviewed and explicitly accepted.
 - `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.

@@ -24,6 +24,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       guest_artifacts: ${{ steps.filter.outputs.guest_artifacts }}
+      zkgas_model: ${{ steps.filter.outputs.zkgas_model }}
       workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,10 +51,50 @@ jobs:
               - 'docker/**'
               - 'test.json'
               - 'justfile'
+              # `boundless::estimation` include_str!s the zkGas validation fixture and pins its
+              # SHA-256, so a fixture-only edit must still run the prover tests.
+              - 'tests/fixtures/risc0-zkgas/**'
             guest_artifacts:
               - 'crates/guests/elf/**'
+            zkgas_model:
+              - 'scripts/modeling/**'
+              - 'experiments/risc0-zkgas/**'
+              - 'tests/fixtures/risc0-zkgas/**'
+              - 'crates/prover/models/**'
+              - 'justfile'
             workflow:
               - '.github/workflows/ci.yml'
+
+  zkgas-model:
+    needs: changes
+    if: needs.changes.outputs.zkgas_model == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+
+      # The generator is stdlib-only by design; no dependency install step is needed.
+      - name: test zkGas model tooling
+        run: |
+          python -m unittest discover -s scripts/modeling/tests
+          python -m unittest discover -s experiments/risc0-zkgas/tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+
+      # Proves the committed runtime artifact is still exactly what the fixture regenerates.
+      # Both paths are left at the generator's defaults so this lane never becomes another
+      # hardcoded fixture-path copy to update at the next model promotion.
+      - name: check committed zkGas model artifact
+        run: python scripts/modeling/risc0_zkgas_model.py check
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
 
   rust-fmt:
     needs: changes

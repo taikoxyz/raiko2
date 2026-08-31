@@ -15,7 +15,7 @@ FIXTURE_PATH = (
     / "tests"
     / "fixtures"
     / "risc0-zkgas"
-    / "2026-08-28-m2-v1"
+    / "2026-08-31-m2-global-cap-v2"
     / "validation.jsonl"
 )
 FIXTURE_SHA256 = "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767"

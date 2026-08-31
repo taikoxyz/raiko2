@@ -134,18 +134,32 @@ only by `scripts/modeling/risc0_zkgas_model.py` through the stable `just` recipe
 
 ## Committed validation fixture
 
-`tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/` contains the compact, reviewable production inputs:
+`tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/` contains the current compact, reviewable
+production inputs:
 80 Hoodi fit rows in `hoodi-fit.jsonl`, the 40 Hoodi calibration plus 20 Mainnet evaluation rows in
-`validation.jsonl`, and manual provenance/domain policy in `config.json`. Every row retains only the
-network, split, proposal ID, block count, total zkGas, and actual mcycles. Mainnet rows are labeled
-`evaluation` because Mainnet influenced the production model choice.
+`validation.jsonl`, and manual provenance/global-cap policy in `config.json`. Every row retains only
+the network, split, proposal ID, block count, total zkGas, and actual mcycles. Mainnet rows are
+labeled `evaluation` because Mainnet influenced the production model choice.
+The prior `2026-08-28-m2-v1/` fixture remains byte-for-byte unchanged as the audit record for the
+schema-v1 domain policy. The schema-v2 generator intentionally rejects that legacy config, so the
+v1 directory is a data-only historical record rather than a fixture accepted by the current
+`check-risc0-zkgas-model` command. The v2 fixture copies its sample rows and changes only the
+versioned schema and operating-policy config.
 
-The generator deterministically refits M2 from the Hoodi fit rows, validates explicit domain
-endpoints and the admitted 10% error budget, and writes `crates/prover/models/risc0-zkgas.json`.
+The v2 sample rows were collected with proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`.
+That identity predates the proposal ELF rebuilt by #242 and differs from the v0.6.0 release guest.
+The runtime does not compare these identities: a release selecting `estimated` explicitly accepts
+any resulting cycle-estimate drift, while `evaluated` remains the exact-cycle option.
+
+The generator deterministically refits M2 from the Hoodi fit rows and requires every concrete
+collected observation admitted by the global cap to remain within the 10% absolute-error budget
+before publishing a refresh. This empirical gate is not a per-request guarantee for future
+unobserved network or block-count combinations. The generator writes
+`crates/prover/models/risc0-zkgas.json`.
 Its `raw_input_rows_sha256` is SHA-256 over the canonical `hoodi-fit.jsonl` bytes followed by the
 canonical `validation.jsonl` bytes, so a refresh never requires copying a hash by hand. The artifact
 also records a canonical generator-config hash; the reviewed config pins every collector build hash,
-the per-network chain-spec hash, and the fixed 10% acceptance policy.
+the per-network chain-spec hash, and the fixed empirical 10% publication policy.
 Check or refresh it with an existing Python 3.11+ virtual environment. The check recipe accepts an
 explicit fixture and model path so a newly generated version can be verified before it becomes the
 repository default:
@@ -156,8 +170,8 @@ PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model \
   tests/fixtures/risc0-zkgas/<new-version> \
   crates/prover/models/risc0-zkgas.json
 PYTHON_BIN=/path/to/venv/bin/python just update-risc0-zkgas-model \
-  tests/fixtures/risc0-zkgas/2026-08-28-m2-v1 \
-  tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/config.json \
+  tests/fixtures/risc0-zkgas/<new-version> \
+  /path/to/new-model-config.json \
   /path/to/hoodi/samples.jsonl \
   /path/to/mainnet/samples.jsonl
 ```
@@ -166,15 +180,16 @@ The generator projects successful Hoodi `fit`/`calibration` rows and normalizes 
 `holdout` rows to the committed `evaluation` split. It rejects mixed collector cohorts and requires
 their source revision, guest image, RISC0 version, execution parameters, and artifact hashes to match
 the reviewed config. It re-derives mcycles from each successful row's authoritative RISC0 user-cycle
-count and validates the collector identity fields. An exact rebuild may retain the current legacy
-model ID. The initial packaging-only metadata transition retained the pre-content-addressed
-`risc0-zkgas-m2-v1` identity as a one-time compatibility exception because quote semantics did not
-change. Any later artifact change requires a generated content-addressed ID. For a changed calibration,
+count and validates the collector identity fields. An exact rebuild retains its configured model
+ID. The schema-v1 `risc0-zkgas-m2-v1` identity once carried a one-time packaging-only compatibility
+exception; that exception is gone with schema v2, and both the generator and the runtime parser now
+reject the ID outright. Every artifact change requires a generated content-addressed ID. For a changed calibration,
 start from a new fixture directory and set the input config's
 model ID to `risc0-zkgas-m2-auto`; the generator writes a content-addressed ID into both the fixture
 config and runtime artifact. Reusing that ID for different coefficients, inputs, or provenance is
 rejected even when the output paths differ.
-The runtime artifact remains the single source for coefficients and operating domains.
+The runtime artifact remains the single source for coefficients and the proposal operating policy,
+including the calibrated minimum `execution_po2` and global total-zkGas cap.
 
 ## Unit tests
 

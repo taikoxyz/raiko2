@@ -32,7 +32,7 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - `guests/`: standalone guest program sources for `risc0` and `sp1`; not part of the workspace.
 - `crates/guests/elf`: built guest ELF assets consumed by the host. Never hand-edit generated ELF files.
 - `crates/prover/models`: generated prover model artifacts. Regenerate them through the documented
-  model tooling; do not hand-edit coefficients, domains, diagnostics, or provenance.
+  model tooling; do not hand-edit coefficients, operating policy, diagnostics, or provenance.
 
 ## Change Routing
 

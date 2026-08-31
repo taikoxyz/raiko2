@@ -15,7 +15,6 @@ const EMBEDDED_MODEL: &str = include_str!(concat!(
     "/models/risc0-zkgas.json"
 ));
 const MODEL_ID_PREFIX: &str = "risc0-zkgas-m2-";
-const LEGACY_MODEL_ID: &str = "risc0-zkgas-m2-v1";
 const CONTENT_ID_HEX_LENGTH: usize = 16;
 
 static ESTIMATION_MODEL: OnceLock<Result<EstimationModel, String>> = OnceLock::new();
@@ -46,8 +45,10 @@ pub fn validate_estimation_model() -> Result<(), String> {
 pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
-    Chain,
-    Domain,
+    /// Proposal total zkGas exceeded the artifact's `max_total_zkgas` operating cap.
+    TotalZkGasCap,
+    /// Aggregation child count is outside the artifact's calibrated set.
+    ChildCount,
     ZeroZkGas,
     Numeric,
 }
@@ -63,11 +64,11 @@ pub(crate) fn estimate_proposal(
     input: &GuestInput,
     execution_po2: u32,
 ) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
-    let first_witness = input.witnesses.first().ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
+    if input.witnesses.is_empty() {
+        return Err(RaikoError::InvalidRequestConfig(
             "cannot estimate Boundless proposal without witnesses".to_string(),
-        )
-    })?;
+        ));
+    }
     let journal = validated_shasta_proposal_input(&input.proof_carry_data)?
         .as_slice()
         .to_vec();
@@ -76,28 +77,12 @@ pub(crate) fn estimate_proposal(
     })?;
     let proposal = &model.0.proposal;
 
-    if execution_po2 != proposal.provenance.execution_po2 {
+    if execution_po2 < proposal.provenance.min_execution_po2 {
         return Ok(Err(EstimateUnavailable::ExecutionPo2));
     }
     if !proposal_estimation_available(input) {
         return Ok(Err(EstimateUnavailable::Fork));
     }
-
-    let network = first_witness.chain_spec.name.as_str();
-    if input
-        .witnesses
-        .iter()
-        .any(|witness| witness.chain_spec.name != network)
-    {
-        return Ok(Err(EstimateUnavailable::Chain));
-    }
-    let Some(domain) = proposal
-        .domains
-        .iter()
-        .find(|domain| domain.network == network)
-    else {
-        return Ok(Err(EstimateUnavailable::Chain));
-    };
 
     let block_count =
         u128::try_from(input.witnesses.len()).map_err(|_| EstimateUnavailable::Numeric);
@@ -121,8 +106,8 @@ pub(crate) fn estimate_proposal(
     if total_zkgas == 0 {
         return Ok(Err(EstimateUnavailable::ZeroZkGas));
     }
-    if !domain.block_count.contains(block_count) || !domain.total_zkgas.contains(total_zkgas) {
-        return Ok(Err(EstimateUnavailable::Domain));
+    if total_zkgas > u128::from(proposal.max_total_zkgas) {
+        return Ok(Err(EstimateUnavailable::TotalZkGasCap));
     }
 
     let mcycles = match estimate_mcycles(&proposal.coefficients.scaled, total_zkgas, block_count) {
@@ -176,7 +161,7 @@ fn estimate_aggregation_with_model(
 
     let aggregation = &model.0.aggregation;
     if !aggregation.calibrated_counts.contains(&child_count) {
-        return Ok(Err(EstimateUnavailable::Domain));
+        return Ok(Err(EstimateUnavailable::ChildCount));
     }
     let Some(mcycles) = aggregation
         .per_child_mcycles
@@ -220,12 +205,6 @@ fn estimate_mcycles(
         return Err(EstimateUnavailable::Numeric);
     }
     Ok(mcycles)
-}
-
-impl InclusiveRange {
-    fn contains(&self, value: u128) -> bool {
-        (u128::from(self.minimum)..=u128::from(self.maximum)).contains(&value)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -281,13 +260,11 @@ fn parse_model(input: &str) -> Result<EstimationModel, String> {
 }
 
 fn validate_artifact(artifact: &ValidatedModelArtifact) -> Result<(), String> {
-    if artifact.schema_version != 1 {
+    if artifact.schema_version != 2 {
         return Err("unsupported estimation model schema_version".to_string());
     }
     let content_id = artifact.model_id.strip_prefix(MODEL_ID_PREFIX);
-    if artifact.model_id != LEGACY_MODEL_ID
-        && !content_id.is_some_and(|suffix| is_hex(suffix, CONTENT_ID_HEX_LENGTH))
-    {
+    if !content_id.is_some_and(|suffix| is_hex(suffix, CONTENT_ID_HEX_LENGTH)) {
         return Err("unsupported estimation model_id family".to_string());
     }
     if artifact.originating_experiment_model != "M2" {
@@ -324,7 +301,9 @@ fn validate_artifact(artifact: &ValidatedModelArtifact) -> Result<(), String> {
         return Err("decimal proposal coefficients must be present".to_string());
     }
 
-    validate_domains(&artifact.proposal.domains)?;
+    if artifact.proposal.max_total_zkgas == 0 {
+        return Err("proposal max_total_zkgas must be non-zero".to_string());
+    }
     validate_cohorts(&artifact.proposal.cohorts)?;
     validate_aggregation(&artifact.aggregation)?;
     Ok(())
@@ -341,37 +320,8 @@ fn validate_release_provenance(provenance: &ReleaseProvenance, label: &str) -> R
     if !is_semver_triplet(&provenance.risc0_version) {
         return Err(format!("{label} risc0_version must be a semantic version"));
     }
-    if provenance.execution_po2 == 0 {
-        return Err(format!("{label} execution_po2 must be non-zero"));
-    }
-    Ok(())
-}
-
-fn validate_domains(domains: &[Domain]) -> Result<(), String> {
-    if domains.len() != 2 {
-        return Err("proposal domains must contain Hoodi and Mainnet exactly once".to_string());
-    }
-
-    let mut networks = HashSet::new();
-    for domain in domains {
-        if !matches!(domain.network.as_str(), "taiko_hoodi" | "taiko_mainnet") {
-            return Err(format!("unsupported proposal domain {}", domain.network));
-        }
-        if !networks.insert(domain.network.as_str()) {
-            return Err(format!("duplicate proposal domain {}", domain.network));
-        }
-        validate_range(&domain.block_count, "block_count")?;
-        validate_range(&domain.total_zkgas, "total_zkgas")?;
-    }
-    if networks.len() != 2 {
-        return Err("proposal domains must contain Hoodi and Mainnet".to_string());
-    }
-    Ok(())
-}
-
-fn validate_range(range: &InclusiveRange, label: &str) -> Result<(), String> {
-    if range.minimum == 0 || range.minimum > range.maximum {
-        return Err(format!("invalid {label} domain range"));
+    if provenance.min_execution_po2 == 0 {
+        return Err(format!("{label} min_execution_po2 must be non-zero"));
     }
     Ok(())
 }
@@ -583,7 +533,7 @@ struct Proposal {
     raw_input_rows_sha256: String,
     validation_fixture_sha256: String,
     coefficients: ProposalCoefficients,
-    domains: Vec<Domain>,
+    max_total_zkgas: u64,
     cohorts: Cohorts,
 }
 
@@ -594,7 +544,7 @@ struct ReleaseProvenance {
     image_id: String,
     elf_sha256: String,
     risc0_version: String,
-    execution_po2: u32,
+    min_execution_po2: u32,
 }
 
 #[derive(Deserialize)]
@@ -619,21 +569,6 @@ struct ScaledCoefficients {
     intercept: u64,
     total_zkgas: u64,
     block_count: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Domain {
-    network: String,
-    block_count: InclusiveRange,
-    total_zkgas: InclusiveRange,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InclusiveRange {
-    minimum: u64,
-    maximum: u64,
 }
 
 #[derive(Deserialize)]
@@ -888,8 +823,8 @@ mod tests {
 
     fn valid_artifact() -> Value {
         json!({
-            "schema_version": 1,
-            "model_id": "risc0-zkgas-m2-v1",
+            "schema_version": 2,
+            "model_id": "risc0-zkgas-m2-0123456789abcdef",
             "originating_experiment_model": "M2",
             "proposal": {
                 "provenance": {
@@ -897,7 +832,7 @@ mod tests {
                     "image_id": "0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10",
                     "elf_sha256": "d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35",
                     "risc0_version": "3.0.5",
-                    "execution_po2": 20
+                    "min_execution_po2": 20
                 },
                 "generator_config_sha256": "51d680db2dd5f63c86b29f8558f7f0bfda586525805ad45fa15ad91a817f4bce",
                 "raw_input_rows_sha256": "0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328",
@@ -906,10 +841,7 @@ mod tests {
                     "decimal": {"intercept": "511.8367085993759", "total_zkgas": "0.000003714503729246405", "block_count": "2.2737130481392764"},
                     "scaled": {"scale": 1_000_000_000_000_u64, "intercept": 511_836_708_599_376_u64, "total_zkgas": 3_714_504_u64, "block_count": 2_273_713_048_139_u64}
                 },
-                "domains": [
-                    {"network": "taiko_hoodi", "block_count": {"minimum": 155, "maximum": 192}, "total_zkgas": {"minimum": 369_558_586, "maximum": 459_162_040}},
-                    {"network": "taiko_mainnet", "block_count": {"minimum": 184, "maximum": 192}, "total_zkgas": {"minimum": 216_314_230, "maximum": 310_638_954}}
-                ],
+                "max_total_zkgas": 500_000_000,
                 "cohorts": {
                     "hoodi": {"fit_count": 80, "calibration_count": 40, "continuous": {"underquote_count": 17, "mape_percent": "0.094557", "max_absolute_error_percent": "0.279512", "max_underquote_percent": "0.279512", "over_ten_percent_count": 0}, "scaled_integer": {"underquote_count": 12, "mape_percent": "0.093492", "max_absolute_error_percent": "0.264550", "max_underquote_percent": "0.264550", "over_ten_percent_count": 0}},
                     "mainnet": {"evaluation_count": 20, "influenced_model_selection": true, "untouched_holdout": false, "continuous": {"underquote_count": 19, "mape_percent": "5.87", "max_underquote_percent": "5.75", "overquote_over_ten_percent_count": 1, "max_overquote_percent": "21.94"}, "scaled_integer": {"underquote_count": 19, "mape_percent": "5.8422", "max_underquote_percent": "5.7234", "overquote_over_ten_percent_count": 1, "max_overquote_percent": "21.9679"}}
@@ -956,7 +888,7 @@ mod tests {
     #[test]
     fn model_rejects_wrong_schema_or_unsupported_model_id_family() {
         let mut artifact = valid_artifact();
-        artifact["schema_version"] = json!(2);
+        artifact["schema_version"] = json!(1);
         assert!(parse(artifact).is_err());
         let mut artifact = valid_artifact();
         artifact["model_id"] = json!("");
@@ -973,6 +905,25 @@ mod tests {
         let mut artifact = valid_artifact();
         artifact["model_id"] = json!("risc0-zkgas-m2-0123456789abcdef");
         assert!(parse(artifact).is_ok());
+    }
+
+    #[test]
+    fn model_schema_v2_rejects_the_legacy_v1_identity() {
+        let mut artifact = valid_artifact();
+        artifact["model_id"] = json!("risc0-zkgas-m2-v1");
+
+        assert!(parse(artifact).is_err());
+    }
+
+    #[test]
+    fn model_rejects_zero_min_execution_po2() {
+        let mut artifact = valid_artifact();
+        artifact["proposal"]["provenance"]["min_execution_po2"] = json!(0);
+
+        let Err(error) = parse(artifact) else {
+            panic!("zero minimum execution po2 must be rejected");
+        };
+        assert_eq!(error, "proposal min_execution_po2 must be non-zero");
     }
 
     #[test]
@@ -1005,9 +956,9 @@ mod tests {
     }
 
     #[test]
-    fn model_rejects_inverted_domains() {
+    fn model_rejects_zero_global_zkgas_cap() {
         let mut artifact = valid_artifact();
-        artifact["proposal"]["domains"][0]["block_count"]["minimum"] = json!(193);
+        artifact["proposal"]["max_total_zkgas"] = json!(0);
         assert!(parse(artifact).is_err());
     }
 
@@ -1263,70 +1214,47 @@ mod tests {
 
         assert_eq!(estimate.journal.len(), 32);
         assert_eq!(estimate.journal, expected.as_slice());
-        assert_eq!(estimate.model_id, "risc0-zkgas-m2-v1");
+        assert_eq!(estimate.mcycles, 2_237);
+        assert_eq!(estimate.model_id, "risc0-zkgas-m2-5adefe56336d7238");
     }
 
     #[test]
-    fn proposal_hoodi_domain_accepts_its_lower_and_upper_boundaries() {
-        let lower = proposal_input("taiko_hoodi", 155, 369_558_586);
-        let upper = proposal_input("taiko_hoodi", 192, 459_162_040);
+    fn proposal_estimation_ignores_network_and_observed_block_ranges() {
+        let unknown_network = proposal_input("taiko_unknown", 1, 1);
+        let mut mixed_networks = proposal_input("taiko_mainnet", 2, 2);
+        mixed_networks.witnesses[1].chain_spec.name = "taiko_hoodi".to_string();
 
-        assert_eq!(proposal_result(&lower).unwrap().mcycles, 2_237);
-        assert!(proposal_result(&upper).is_ok());
+        assert!(proposal_result(&unknown_network).is_ok());
+        assert!(proposal_result(&mixed_networks).is_ok());
     }
 
     #[test]
-    fn proposal_mainnet_domain_accepts_its_lower_and_upper_boundaries() {
-        let lower = proposal_input("taiko_mainnet", 184, 216_314_230);
-        let upper = proposal_input("taiko_mainnet", 192, 310_638_954);
+    fn proposal_estimation_accepts_the_global_zkgas_cap() {
+        let input = proposal_input("taiko_mainnet", 200, 500_000_000);
 
-        assert!(proposal_result(&lower).is_ok());
-        assert!(proposal_result(&upper).is_ok());
+        assert!(proposal_result(&input).is_ok());
     }
 
     #[test]
-    fn proposal_chain_domains_do_not_admit_the_other_chain_rectangle() {
-        let hoodi_with_mainnet_zkgas = proposal_input("taiko_hoodi", 155, 216_314_230);
-        let mainnet_with_hoodi_zkgas = proposal_input("taiko_mainnet", 184, 369_558_586);
+    fn proposal_estimation_rejects_zkgas_above_the_global_cap() {
+        let input = proposal_input("taiko_mainnet", 200, 500_000_001);
 
         assert_eq!(
-            proposal_result(&hoodi_with_mainnet_zkgas),
-            Err(EstimateUnavailable::Domain)
-        );
-        assert_eq!(
-            proposal_result(&mainnet_with_hoodi_zkgas),
-            Err(EstimateUnavailable::Domain)
+            proposal_result(&input),
+            Err(EstimateUnavailable::TotalZkGasCap)
         );
     }
 
     #[test]
-    fn proposal_mainnet_isolated_high_zkgas_sample_is_unavailable() {
-        let input = proposal_input("taiko_mainnet", 192, 562_107_601);
-
-        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::Domain));
-    }
-
-    #[test]
-    fn proposal_unknown_or_inconsistent_chain_is_unavailable() {
-        let unknown = proposal_input("taiko_unknown", 184, 216_314_230);
-        let mut inconsistent = proposal_input("taiko_mainnet", 184, 216_314_230);
-        inconsistent.witnesses[183].chain_spec.name = "taiko_hoodi".to_string();
-
-        assert_eq!(proposal_result(&unknown), Err(EstimateUnavailable::Chain));
-        assert_eq!(
-            proposal_result(&inconsistent),
-            Err(EstimateUnavailable::Chain)
-        );
-    }
-
-    #[test]
-    fn proposal_execution_po2_must_match_the_artifact() {
+    fn proposal_execution_po2_must_meet_the_calibrated_minimum() {
         let input = proposal_input("taiko_hoodi", 155, 369_558_586);
 
         assert_eq!(
             estimate_proposal(&input, 19).unwrap(),
             Err(EstimateUnavailable::ExecutionPo2)
         );
+        assert!(estimate_proposal(&input, 20).unwrap().is_ok());
+        assert!(estimate_proposal(&input, 21).unwrap().is_ok());
     }
 
     #[test]
@@ -1530,7 +1458,7 @@ mod tests {
         assert_eq!(estimate.journal, expected.as_slice());
         assert_eq!(estimate.journal.len(), 32);
         assert_eq!(estimate.mcycles, 360);
-        assert_eq!(estimate.model_id, "risc0-zkgas-m2-v1");
+        assert_eq!(estimate.model_id, "risc0-zkgas-m2-0123456789abcdef");
     }
 
     #[test]
@@ -1544,7 +1472,7 @@ mod tests {
 
         assert_eq!(
             estimate_aggregation(&encoded).expect("structurally valid aggregation"),
-            Err(EstimateUnavailable::Domain)
+            Err(EstimateUnavailable::ChildCount)
         );
     }
 
@@ -1561,7 +1489,7 @@ mod tests {
         assert_eq!(
             estimate_aggregation_with_model(&encoded, &model)
                 .expect("structurally valid aggregation"),
-            Err(EstimateUnavailable::Domain)
+            Err(EstimateUnavailable::ChildCount)
         );
     }
 
@@ -1691,7 +1619,7 @@ mod tests {
 
     const VALIDATION_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/risc0-zkgas/2026-08-28-m2-v1/validation.jsonl"
+        "/../../tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/validation.jsonl"
     ));
 
     #[derive(Debug, Deserialize)]

@@ -96,6 +96,7 @@ enabled = true
 runner = "network"
 snark = true
 mock = false
+# Proposal estimation is calibrated at 20 and accepts this value or any larger segment limit.
 execution_po2 = 20
 
 [prover.sp1]
@@ -192,7 +193,10 @@ order_stream_url = "https://base-mainnet.boundless.network"
 # `raiko_agent` value is rejected. Use `evaluated` for the exact local count, `estimated` to opt in
 # to the embedded proposal model and its warning-plus-local fallback, or `fixed` to pin the quote.
 # `fixed` still executes locally for the journal. Estimated aggregation currently falls back for
-# every child count because its calibrated-count set is empty.
+# every child count because its calibrated-count set is empty. Proposal estimates require exact
+# Unzen, execution_po2 >= 20, non-zero per-block zkGas, and total zkGas <= 500000000; network and
+# block count do not gate availability. Raiko2 does not compare model provenance with the running
+# guest ELF; selecting `estimated` accepts any release-pairing cycle drift.
 [prover.risc0.boundless.batch_quote]
 strategy = "evaluated"
 # strategy = "estimated"

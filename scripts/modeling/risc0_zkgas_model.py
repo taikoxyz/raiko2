@@ -17,12 +17,14 @@ from typing import Any, Iterable, Mapping, Sequence
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_FIXTURE_DIR = (
-    ROOT / "tests" / "fixtures" / "risc0-zkgas" / "2026-08-28-m2-v1"
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "risc0-zkgas"
+    / "2026-08-31-m2-global-cap-v2"
 )
 DEFAULT_MODEL = ROOT / "crates" / "prover" / "models" / "risc0-zkgas.json"
 MODEL_ID_PREFIX = "risc0-zkgas-m2-"
-LEGACY_MODEL_ID = "risc0-zkgas-m2-v1"
-LEGACY_CONTENT_SHA256 = "b605227454337a5ed429c2e328dd1a86dc70246101cbf0fce5926340d7a24f2d"
 AUTO_MODEL_ID = f"{MODEL_ID_PREFIX}auto"
 CONTENT_ID_HEX_LENGTH = 16
 MAX_DIAGNOSTIC_DECIMAL_PLACES = 18
@@ -132,7 +134,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "model config",
     )
     schema_version = rust_uint(config.get("schema_version"), 32, "schema_version")
-    if schema_version != 1:
+    if schema_version != 2:
         raise ModelError("unsupported schema_version")
     model_id = config.get("model_id")
     if (
@@ -141,7 +143,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         or len(model_id) == len(MODEL_ID_PREFIX)
     ):
         raise ModelError("unsupported model_id family")
-    if model_id not in {LEGACY_MODEL_ID, AUTO_MODEL_ID} and not is_lower_hex(
+    if model_id != AUTO_MODEL_ID and not is_lower_hex(
         model_id[len(MODEL_ID_PREFIX) :], CONTENT_ID_HEX_LENGTH
     ):
         raise ModelError(
@@ -156,7 +158,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
             "provenance",
             "collector_artifact_hashes",
             "coefficients",
-            "domains",
+            "max_total_zkgas",
             "cohorts",
             "error_budget_percent",
         },
@@ -169,7 +171,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
             "image_id",
             "elf_sha256",
             "risc0_version",
-            "execution_po2",
+            "min_execution_po2",
         },
         "proposal provenance",
     )
@@ -195,9 +197,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
     ):
         raise ModelError("proposal risc0_version must be a semantic version")
     rust_uint(
-        provenance.get("execution_po2"),
+        provenance.get("min_execution_po2"),
         32,
-        "proposal execution_po2",
+        "proposal min_execution_po2",
         nonzero=True,
     )
 
@@ -229,19 +231,12 @@ def validate_config(config: Mapping[str, Any]) -> None:
         proposal["coefficients"], {"scale"}, "proposal coefficient config"
     )
     rust_uint(coefficients["scale"], 64, "coefficient scale", nonzero=True)
-    domains = proposal["domains"]
-    if not isinstance(domains, list):
-        raise ModelError("proposal domains must be a list")
-    for domain in domains:
-        require_keys(
-            domain,
-            {"network", "block_count", "total_zkgas"},
-            "proposal domain",
-        )
-        for feature in ("block_count", "total_zkgas"):
-            require_keys(
-                domain[feature], {"minimum", "maximum"}, f"{feature} domain"
-            )
+    rust_uint(
+        proposal.get("max_total_zkgas"),
+        64,
+        "proposal max_total_zkgas",
+        nonzero=True,
+    )
 
     cohorts = require_keys(
         proposal["cohorts"], {"hoodi", "mainnet"}, "proposal cohorts"
@@ -511,9 +506,11 @@ def validate_collector_cohort(
             raise ModelError(f"{label} artifact_hashes.{field} must be a SHA-256 digest")
 
     provenance = config["proposal"]["provenance"]
-    for field in ("source_revision", "image_id", "risc0_version", "execution_po2"):
+    for field in ("source_revision", "image_id", "risc0_version"):
         if cohort[field] != provenance[field]:
             raise ModelError(f"{label} {field} does not match config provenance")
+    if cohort["execution_po2"] != provenance["min_execution_po2"]:
+        raise ModelError(f"{label} execution_po2 does not match config provenance")
     if cohort["risc0_image_id"] != provenance["image_id"]:
         raise ModelError(f"{label} risc0_image_id does not match config provenance")
     if artifact_hashes["proposal_elf_sha256"] != provenance["elf_sha256"]:
@@ -612,12 +609,7 @@ def resolve_model_id(artifact: dict[str, Any], configured_model_id: str) -> None
     identity.pop("model_id")
     digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
     expected = f"{MODEL_ID_PREFIX}{digest[:CONTENT_ID_HEX_LENGTH]}"
-    if configured_model_id == LEGACY_MODEL_ID:
-        if digest != LEGACY_CONTENT_SHA256:
-            raise ModelError(
-                "legacy model_id is reserved for the approved v1 content"
-            )
-    elif configured_model_id == AUTO_MODEL_ID:
+    if configured_model_id == AUTO_MODEL_ID:
         artifact["model_id"] = expected
     elif configured_model_id != expected:
         raise ModelError(
@@ -794,65 +786,35 @@ def require_count(rows: Sequence[Any], expected: int, label: str) -> None:
         raise ModelError(f"expected {expected} {label} rows, found {len(rows)}")
 
 
-def validate_domains(
-    domains: Sequence[Mapping[str, Any]],
+def validate_operating_policy(
+    max_total_zkgas: int,
     observations: Sequence[Mapping[str, Any]],
     scaled: Mapping[str, int],
     error_budget: Decimal,
 ) -> None:
-    if len(domains) != 2 or {
-        domain.get("network") for domain in domains
-    } != {
-        "taiko_hoodi",
-        "taiko_mainnet",
-    }:
-        raise ModelError("domains must configure Hoodi and Mainnet exactly once")
-    for domain in domains:
-        network = domain["network"]
-        rows = [row for row in observations if row["network"] == network]
-        for feature in ("block_count", "total_zkgas"):
-            values = {row[feature] for row in rows}
-            bounds = domain[feature]
-            minimum = rust_uint(
-                bounds.get("minimum"),
-                64,
-                f"{network} {feature} minimum",
-                nonzero=True,
+    admitted = [
+        row for row in observations if row["total_zkgas"] <= max_total_zkgas
+    ]
+    if not admitted:
+        raise ModelError("proposal max_total_zkgas admits no observations")
+    # The per-network domains this replaced each required an admitted observation, so a cap could
+    # never silently exclude a whole cohort. Keep that guarantee: the fit cohort in particular must
+    # still contribute evidence to the budget check.
+    admitted_networks = {row["network"] for row in admitted}
+    for network in sorted({row["network"] for row in observations}):
+        if network not in admitted_networks:
+            raise ModelError(
+                f"proposal max_total_zkgas admits no {network} observations"
             )
-            maximum = rust_uint(
-                bounds.get("maximum"),
-                64,
-                f"{network} {feature} maximum",
-                nonzero=True,
+    admitted_errors = errors(
+        admitted, lambda item: integer_prediction(scaled, item)
+    )
+    for row, error in zip(admitted, admitted_errors):
+        if abs(error) > error_budget:
+            raise ModelError(
+                f"{row['network']} proposal {row['proposal_id']} exceeds the configured "
+                f"{formatted(error_budget, 0)}% error budget ({formatted(abs(error), 4)}%)"
             )
-            if minimum > maximum:
-                raise ModelError(f"{network} {feature} domain is inverted")
-            for label, value in (("minimum", minimum), ("maximum", maximum)):
-                if value not in values:
-                    raise ModelError(
-                        f"{network} {feature} {label} must equal an observed value; got {value}"
-                    )
-        admitted = [
-            row
-            for row in rows
-            if domain["block_count"]["minimum"]
-            <= row["block_count"]
-            <= domain["block_count"]["maximum"]
-            and domain["total_zkgas"]["minimum"]
-            <= row["total_zkgas"]
-            <= domain["total_zkgas"]["maximum"]
-        ]
-        if not admitted:
-            raise ModelError(f"{network} domain admits no observations")
-        admitted_errors = errors(
-            admitted, lambda item: integer_prediction(scaled, item)
-        )
-        for row, error in zip(admitted, admitted_errors):
-            if abs(error) > error_budget:
-                raise ModelError(
-                    f"{network} proposal {row['proposal_id']} exceeds the configured "
-                    f"{formatted(error_budget, 0)}% error budget ({formatted(abs(error), 4)}%)"
-                )
 
 
 def generate_artifact(
@@ -912,8 +874,8 @@ def generate_artifact(
     decimal = fit_m2(hoodi_fit)
     scaled = scaled_coefficients(config, decimal)
     error_budget = Decimal(str(proposal_config["error_budget_percent"]))
-    validate_domains(
-        proposal_config["domains"],
+    validate_operating_policy(
+        proposal_config["max_total_zkgas"],
         [*hoodi_fit, *hoodi_calibration, *mainnet],
         scaled,
         error_budget,
@@ -950,7 +912,7 @@ def generate_artifact(
                 },
                 "scaled": scaled,
             },
-            "domains": proposal_config["domains"],
+            "max_total_zkgas": proposal_config["max_total_zkgas"],
             "cohorts": {
                 "hoodi": {
                     "fit_count": cohort_config["hoodi"]["fit_count"],

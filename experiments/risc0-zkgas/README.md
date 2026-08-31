@@ -181,9 +181,9 @@ The generator projects successful Hoodi `fit`/`calibration` rows and normalizes 
 their source revision, guest image, RISC0 version, execution parameters, and artifact hashes to match
 the reviewed config. It re-derives mcycles from each successful row's authoritative RISC0 user-cycle
 count and validates the collector identity fields. An exact rebuild retains its configured model
-ID. The initial packaging-only metadata transition retained the pre-content-addressed
-`risc0-zkgas-m2-v1` identity as a one-time compatibility exception because quote semantics did not
-change. Any later artifact change requires a generated content-addressed ID. For a changed calibration,
+ID. The schema-v1 `risc0-zkgas-m2-v1` identity once carried a one-time packaging-only compatibility
+exception; that exception is gone with schema v2, and both the generator and the runtime parser now
+reject the ID outright. Every artifact change requires a generated content-addressed ID. For a changed calibration,
 start from a new fixture directory and set the input config's
 model ID to `risc0-zkgas-m2-auto`; the generator writes a content-addressed ID into both the fixture
 config and runtime artifact. Reusing that ID for different coefficients, inputs, or provenance is

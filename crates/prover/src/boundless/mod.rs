@@ -7408,7 +7408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quote_context_estimated_in_domain_skips_local_execution() {
+    async fn quote_context_estimated_available_skips_local_execution() {
         let calls = Arc::new(AtomicUsize::new(0));
         let execution_calls = calls.clone();
         let journal = B256::repeat_byte(0x11).to_vec();
@@ -7424,7 +7424,7 @@ mod tests {
             move || execution_result(&execution_calls, 9_999, vec![]),
         )
         .await
-        .expect("in-domain estimate prepares a quote");
+        .expect("available estimate prepares a quote");
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -7450,7 +7450,7 @@ mod tests {
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
             &crate::boundless_config::QuoteSizing::Estimated,
-            Some(Err(super::estimation::EstimateUnavailable::Domain)),
+            Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
             move || execution_result(&execution_calls, 1_455, journal),
         )
         .await
@@ -7611,7 +7611,7 @@ mod tests {
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
             &crate::boundless_config::QuoteSizing::Estimated,
-            Some(Err(super::estimation::EstimateUnavailable::Domain)),
+            Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
             move || execution_result(&observed_calls, 1_000, B256::repeat_byte(0x52).to_vec()),
         )
         .await

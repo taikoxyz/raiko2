@@ -172,8 +172,8 @@ git commit -m "refactor(boundless): require explicit quote strategies"
 pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
-    Chain,
-    Domain,
+    TotalZkGasCap,
+    ChildCount,
     ZeroZkGas,
     Numeric,
 }
@@ -190,7 +190,7 @@ pub(crate) fn estimate_proposal(
 ) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>>;
 ```
 
-Structural validation returns the outer `RaikoResult::Err`; domain/numeric rejection returns the inner `Err(EstimateUnavailable)` for local fallback.
+Structural validation returns the outer `RaikoResult::Err`; operating-policy and numeric rejection returns the inner `Err(EstimateUnavailable)` for local fallback.
 
 **Step 1: Write failing proposal tests**
 

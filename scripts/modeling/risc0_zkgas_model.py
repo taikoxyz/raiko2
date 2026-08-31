@@ -797,6 +797,15 @@ def validate_operating_policy(
     ]
     if not admitted:
         raise ModelError("proposal max_total_zkgas admits no observations")
+    # The per-network domains this replaced each required an admitted observation, so a cap could
+    # never silently exclude a whole cohort. Keep that guarantee: the fit cohort in particular must
+    # still contribute evidence to the budget check.
+    admitted_networks = {row["network"] for row in admitted}
+    for network in sorted({row["network"] for row in observations}):
+        if network not in admitted_networks:
+            raise ModelError(
+                f"proposal max_total_zkgas admits no {network} observations"
+            )
     admitted_errors = errors(
         admitted, lambda item: integer_prediction(scaled, item)
     )

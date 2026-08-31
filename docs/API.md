@@ -1250,8 +1250,8 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   from the typed guest input and estimates cycles without executing the guest locally. The
   estimation step itself does not submit a proof; the normal Boundless request still proves the
   original guest program and input. Its approximately ten-percent target is an empirical model
-  publication gate over collected observations, not a hard accuracy guarantee for each future
-  request. An in-policy request is not locally executed first, so its actual underquote or overquote
+  publication gate over the collected observations admitted by the global cap, not a hard accuracy
+  guarantee for each future request. An in-policy request is not locally executed first, so its actual underquote or overquote
   is unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
   local cycle count is required. When the proposal is outside the model policy, raiko2 emits a
   warning and performs exactly one local execution, using that actual cycle count and journal.
@@ -1260,7 +1260,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   every witness has non-zero zkGas in `block.header.difficulty`, and their checked sum is at most
   `500000000`. Network names and block counts do not gate estimation; block count remains an M2
   formula input, and combinations outside the collected sample rectangles are deliberately admitted
-  without a per-request error proof. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas,
+  without a per-request error proof. The collected rectangles are `block_count` 155-192 and
+  `total_zkgas` 216314230-562107601; 192 is the pre-Unzen derivation-source block limit while the
+  Unzen limit is 768, so an admitted proposal can carry up to four times the calibrated block count
+  and the cap is the only remaining bound. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas,
   over-cap, and arithmetic overflow inputs use the warning-plus-local fallback.
 - Estimated aggregation is currently fail-closed to local evaluation for every child count. The
   committed current-image calibration set is empty because the calibration guest, built with
@@ -1269,7 +1272,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   measurements are committed.
 - Selecting `estimated` is the release owner's assertion that the deployed guest and RISC0 runtime
   remain compatible with the committed calibration. Raiko2 does not runtime-check the ELF hash,
-  image ID, source revision, or RISC0 SDK version. There is no user-visible `skip_preflight` option:
+  image ID, source revision, or RISC0 SDK version. The committed proposal calibration currently
+  predates the guest rebuilt by raiko2 #242 and does not describe the shipped
+  `risc0_shasta_proposal.elf`, so that assertion is not satisfied today. There is no user-visible `skip_preflight` option:
   the Estimated path internally uses an isolated SDK request builder and does not mutate the shared
   preflight cache. `evaluated` uses the exact local dry-run count; `fixed` pins the quoted count but
   still executes locally to obtain and validate the journal.

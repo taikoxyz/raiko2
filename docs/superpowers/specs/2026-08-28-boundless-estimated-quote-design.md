@@ -107,9 +107,9 @@ Removing `raiko_agent` is an intentional breaking configuration cleanup. Before 
 with this change, every enabled Boundless environment must explicitly select `estimated`,
 `evaluated`, or `fixed` for both stages. The Mainnet and Hoodi deployment configurations inspected
 during this design select `evaluated`, but their deployment repositories remain the source of truth
-and must be rechecked immediately before rollout. Known Masaya and legacy `raiko2-k8s`
-Hoodi/Tolba/Masaya configurations that still name `raiko_agent` must move to `evaluated` before they
-consume the new binary.
+and must be rechecked immediately before rollout. Legacy `raiko2-k8s` Hoodi/Tolba configurations
+that still name `raiko_agent` must move to `evaluated` before they consume the new binary. The
+Masaya configurations this design also listed are moot since raiko2 #242 removed Masaya support.
 
 For each later guest or RISC0 runtime release, the release owner must decide explicitly whether the
 existing calibration is still applicable. Keeping `estimated` means accepting that compatibility;

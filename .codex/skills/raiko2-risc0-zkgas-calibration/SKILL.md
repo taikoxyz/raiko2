@@ -27,8 +27,9 @@ Keep collection, policy review, and packaging separate.
 6. When promoting a new model, update every explicit audit pin in the Python and Rust fixture tests;
    the default fixture directory in the generator and `justfile`; `config.example.toml`;
    `docs/API.md`; `docs/operations.md`; `experiments/risc0-zkgas/README.md`; the Boundless estimated
-   quote design and implementation-plan documents; and this skill plus the zkGas guidance in
-   `AGENTS.md`. These are review gates, not a second coefficient source. Run the focused prover
+   quote design and implementation-plan documents; the zkGas cycle-estimation experiment plan under
+   `docs/plans/`; the new fixture directory's own `README.md` recording its calibration scope; and
+   this skill plus the zkGas guidance in `AGENTS.md`. These are review gates, not a second coefficient source. Run the focused prover
    tests after updating them.
 
 Review against the accepted approximation contract: an implementation is eligible when it matches

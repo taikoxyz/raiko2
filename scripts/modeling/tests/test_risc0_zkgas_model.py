@@ -1133,6 +1133,143 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exceeds the configured 10% error budget", result.stderr)
 
+    def test_check_rejects_a_cap_that_excludes_a_whole_cohort(self):
+        # 369_558_585 is one below the lowest Hoodi total_zkgas, so every admitted row is Mainnet
+        # and the 120-row cohort M2 is fitted on contributes no evidence to the budget check.
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            config = json.loads((FIXTURE_DIR / "config.json").read_text())
+            config["proposal"]["max_total_zkgas"] = 369_558_585
+            config_path = temporary / "config.json"
+            config_path.write_text(json.dumps(config))
+
+            result = self.run_cli(
+                "check",
+                "--config",
+                config_path,
+                "--model",
+                MODEL,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "proposal max_total_zkgas admits no taiko_hoodi observations", result.stderr
+        )
+
+    def test_update_rejects_a_collector_cohort_po2_that_differs_from_the_minimum(self):
+        # `min_execution_po2` names a runtime floor, but every collected observation must have been
+        # measured at exactly that po2 -- a lower or higher cohort is not the calibrated cohort.
+        for cohort_po2 in (19, 21):
+            with self.subTest(cohort_po2=cohort_po2):
+                with tempfile.TemporaryDirectory() as directory:
+                    temporary = pathlib.Path(directory)
+                    hoodi, mainnet = self.write_collectors(temporary)
+                    rows = [
+                        json.loads(line) for line in hoodi.read_text().splitlines()
+                    ]
+                    for row in rows:
+                        row["execution_po2"] = cohort_po2
+                    hoodi.write_text(
+                        "".join(
+                            json.dumps(row, separators=(",", ":")) + "\n"
+                            for row in rows
+                        )
+                    )
+
+                    result = self.run_cli(
+                        "update",
+                        "--config",
+                        FIXTURE_DIR / "config.json",
+                        "--hoodi-samples",
+                        hoodi,
+                        "--mainnet-samples",
+                        mainnet,
+                        "--fixture-dir",
+                        temporary / "fixture-output",
+                        "--model",
+                        temporary / "risc0-zkgas.json",
+                    )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "execution_po2 does not match config provenance", result.stderr
+                )
+
+    def test_check_rejects_a_cap_that_admits_no_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            config = json.loads((FIXTURE_DIR / "config.json").read_text())
+            config["proposal"]["max_total_zkgas"] = 216_314_229
+            config_path = temporary / "config.json"
+            config_path.write_text(json.dumps(config))
+
+            result = self.run_cli(
+                "check",
+                "--config",
+                config_path,
+                "--model",
+                MODEL,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "proposal max_total_zkgas admits no observations", result.stderr
+        )
+
+    def test_update_rejects_collector_rows_built_from_another_proposal_elf(self):
+        # `validate_collector_cohort` is the only automated binding between packaged samples and a
+        # guest ELF identity: the runtime deliberately does not compare model provenance with the
+        # running binary, so a cohort measured on another ELF must never package silently.
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            hoodi, mainnet = self.write_collectors(temporary)
+            rows = [json.loads(line) for line in hoodi.read_text().splitlines()]
+            for row in rows:
+                row["artifact_hashes"]["proposal_elf_sha256"] = "a" * 64
+            hoodi.write_text(
+                "".join(
+                    json.dumps(row, separators=(",", ":")) + "\n" for row in rows
+                )
+            )
+
+            result = self.run_cli(
+                "update",
+                "--config",
+                FIXTURE_DIR / "config.json",
+                "--hoodi-samples",
+                hoodi,
+                "--mainnet-samples",
+                mainnet,
+                "--fixture-dir",
+                temporary / "fixture-output",
+                "--model",
+                temporary / "risc0-zkgas.json",
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proposal ELF does not match config provenance", result.stderr)
+
+    def test_check_rejects_a_config_whose_collector_elf_differs_from_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            config = json.loads((FIXTURE_DIR / "config.json").read_text())
+            config["proposal"]["provenance"]["elf_sha256"] = "a" * 64
+            config_path = temporary / "config.json"
+            config_path.write_text(json.dumps(config))
+
+            result = self.run_cli(
+                "check",
+                "--config",
+                config_path,
+                "--model",
+                MODEL,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "collector proposal ELF must match proposal provenance", result.stderr
+        )
+
     def test_check_rejects_unsupported_model_id_family(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)

@@ -45,7 +45,10 @@ pub fn validate_estimation_model() -> Result<(), String> {
 pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
-    Domain,
+    /// Proposal total zkGas exceeded the artifact's `max_total_zkgas` operating cap.
+    TotalZkGasCap,
+    /// Aggregation child count is outside the artifact's calibrated set.
+    ChildCount,
     ZeroZkGas,
     Numeric,
 }
@@ -61,11 +64,11 @@ pub(crate) fn estimate_proposal(
     input: &GuestInput,
     execution_po2: u32,
 ) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
-    input.witnesses.first().ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
+    if input.witnesses.is_empty() {
+        return Err(RaikoError::InvalidRequestConfig(
             "cannot estimate Boundless proposal without witnesses".to_string(),
-        )
-    })?;
+        ));
+    }
     let journal = validated_shasta_proposal_input(&input.proof_carry_data)?
         .as_slice()
         .to_vec();
@@ -104,7 +107,7 @@ pub(crate) fn estimate_proposal(
         return Ok(Err(EstimateUnavailable::ZeroZkGas));
     }
     if total_zkgas > u128::from(proposal.max_total_zkgas) {
-        return Ok(Err(EstimateUnavailable::Domain));
+        return Ok(Err(EstimateUnavailable::TotalZkGasCap));
     }
 
     let mcycles = match estimate_mcycles(&proposal.coefficients.scaled, total_zkgas, block_count) {
@@ -158,7 +161,7 @@ fn estimate_aggregation_with_model(
 
     let aggregation = &model.0.aggregation;
     if !aggregation.calibrated_counts.contains(&child_count) {
-        return Ok(Err(EstimateUnavailable::Domain));
+        return Ok(Err(EstimateUnavailable::ChildCount));
     }
     let Some(mcycles) = aggregation
         .per_child_mcycles
@@ -1236,7 +1239,10 @@ mod tests {
     fn proposal_estimation_rejects_zkgas_above_the_global_cap() {
         let input = proposal_input("taiko_mainnet", 200, 500_000_001);
 
-        assert_eq!(proposal_result(&input), Err(EstimateUnavailable::Domain));
+        assert_eq!(
+            proposal_result(&input),
+            Err(EstimateUnavailable::TotalZkGasCap)
+        );
     }
 
     #[test]
@@ -1466,7 +1472,7 @@ mod tests {
 
         assert_eq!(
             estimate_aggregation(&encoded).expect("structurally valid aggregation"),
-            Err(EstimateUnavailable::Domain)
+            Err(EstimateUnavailable::ChildCount)
         );
     }
 
@@ -1483,7 +1489,7 @@ mod tests {
         assert_eq!(
             estimate_aggregation_with_model(&encoded, &model)
                 .expect("structurally valid aggregation"),
-            Err(EstimateUnavailable::Domain)
+            Err(EstimateUnavailable::ChildCount)
         );
     }
 

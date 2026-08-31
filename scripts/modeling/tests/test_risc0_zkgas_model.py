@@ -230,6 +230,35 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         with self.assertRaisesRegex(MODEL_TOOL.ModelError, "prediction must fit u64"):
             MODEL_TOOL.validate_aggregation(aggregation)
 
+    def test_aggregation_u32_limit_applies_only_to_enabled_measurements(self):
+        per_child_mcycles = (1 << 32) + 1
+        aggregation = copy.deepcopy(
+            json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
+        )
+        aggregation["per_child_mcycles"] = per_child_mcycles
+        aggregation["provenance"]["image_id"] = "0x" + "1" * 64
+        aggregation["measurements"] = [
+            {
+                "child_count": count,
+                "actual_mcycles": per_child_mcycles * count * 2,
+                "predicted_mcycles": per_child_mcycles * count,
+                "enabled": False,
+            }
+            for count in range(1, 6)
+        ]
+        MODEL_TOOL.validate_aggregation(aggregation)
+
+        for measurement in aggregation["measurements"]:
+            measurement["actual_mcycles"] = measurement["predicted_mcycles"]
+            measurement["enabled"] = True
+        aggregation["calibrated_counts"] = list(range(1, 6))
+
+        with self.assertRaisesRegex(
+            MODEL_TOOL.ModelError,
+            "enabled aggregation prediction must fit u32",
+        ):
+            MODEL_TOOL.validate_aggregation(aggregation)
+
     def test_validation_rejects_unbounded_diagnostic_precision_without_traceback(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)
@@ -321,6 +350,92 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertEqual(model.read_bytes(), MODEL.read_bytes())
             self.assertTrue((fixture / "validation.jsonl").is_file())
+
+    def test_update_self_heals_a_complete_noncanonical_existing_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            fixture = temporary / "fixture"
+            shutil.copytree(FIXTURE_DIR, fixture)
+            fit_path = fixture / "hoodi-fit.jsonl"
+            fit_path.write_bytes(b" " + fit_path.read_bytes())
+            validation_path = fixture / "validation.jsonl"
+            validation_rows = [
+                json.loads(line) for line in validation_path.read_text().splitlines()
+            ]
+            validation_rows[0]["legacy_junk"] = True
+            validation_path.write_text(
+                "".join(
+                    json.dumps(row, separators=(",", ":")) + "\n"
+                    for row in validation_rows
+                )
+            )
+            hoodi, mainnet = self.write_collectors(temporary)
+            model = temporary / "risc0-zkgas.json"
+
+            result = self.run_cli(
+                "update",
+                "--config",
+                fixture / "config.json",
+                "--hoodi-samples",
+                hoodi,
+                "--mainnet-samples",
+                mainnet,
+                "--fixture-dir",
+                fixture,
+                "--model",
+                model,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertEqual(
+                fit_path.read_bytes(),
+                (FIXTURE_DIR / "hoodi-fit.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                validation_path.read_bytes(),
+                (FIXTURE_DIR / "validation.jsonl").read_bytes(),
+            )
+            self.assertEqual(model.read_bytes(), MODEL.read_bytes())
+
+    def test_update_rejects_existing_data_without_config_before_writing(self):
+        data_sets = (
+            ("fit only", ("hoodi-fit.jsonl",)),
+            ("validation only", ("validation.jsonl",)),
+            ("both", ("hoodi-fit.jsonl", "validation.jsonl")),
+        )
+        for label, names in data_sets:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                temporary = pathlib.Path(directory)
+                fixture = temporary / "fixture"
+                fixture.mkdir()
+                original = {}
+                for name in names:
+                    payload = (FIXTURE_DIR / name).read_bytes()
+                    (fixture / name).write_bytes(payload)
+                    original[name] = payload
+                hoodi, mainnet = self.write_collectors(temporary)
+                model = temporary / "risc0-zkgas.json"
+
+                result = self.run_cli(
+                    "update",
+                    "--config",
+                    FIXTURE_DIR / "config.json",
+                    "--hoodi-samples",
+                    hoodi,
+                    "--mainnet-samples",
+                    mainnet,
+                    "--fixture-dir",
+                    fixture,
+                    "--model",
+                    model,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("existing fixture data requires config.json", result.stderr)
+                self.assertFalse((fixture / "config.json").exists())
+                self.assertFalse(model.exists())
+                for name, payload in original.items():
+                    self.assertEqual((fixture / name).read_bytes(), payload)
 
     def test_interrupted_atomic_write_preserves_the_existing_target(self):
         with tempfile.TemporaryDirectory() as directory:

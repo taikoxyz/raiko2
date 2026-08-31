@@ -390,6 +390,8 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
         enabled = measurement.get("enabled")
         if not isinstance(enabled, bool):
             raise ModelError("aggregation enabled must be a boolean")
+        if enabled and expected_prediction > (1 << 32) - 1:
+            raise ModelError("enabled aggregation prediction must fit u32")
         accepted = abs(actual - predicted) * 100 <= actual * 10
         if enabled != accepted:
             raise ModelError(
@@ -1043,15 +1045,19 @@ def existing_fixture_artifact(fixture_dir: pathlib.Path) -> Mapping[str, Any] | 
     data_paths = (fit_path, validation_path)
     if not any(path.exists() for path in data_paths):
         return None
-    if not config_path.exists() or not all(path.exists() for path in data_paths):
+    if not config_path.exists():
+        raise ModelError(
+            f"existing fixture data requires config.json in {fixture_dir}"
+        )
+    if not all(path.exists() for path in data_paths):
         return None
     config = read_json(config_path)
-    fit_payload = fit_path.read_bytes()
     fit_rows = project_rows(read_jsonl(fit_path), "existing fit fixture")
-    validation_payload = validation_path.read_bytes()
     validation_rows = project_rows(
         read_jsonl(validation_path), "existing validation fixture"
     )
+    fit_payload = jsonl_bytes(fit_rows)
+    validation_payload = jsonl_bytes(validation_rows)
     return generate_artifact(
         config, fit_rows, validation_rows, fit_payload, validation_payload
     )

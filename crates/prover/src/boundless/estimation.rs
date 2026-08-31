@@ -479,6 +479,9 @@ fn validate_aggregation(aggregation: &Aggregation) -> Result<(), String> {
             );
         }
         if measurement.enabled {
+            if u32::try_from(runtime_prediction).is_err() {
+                return Err("enabled aggregation runtime prediction must fit u32".to_string());
+            }
             enabled_counts.insert(measurement.child_count);
         }
     }
@@ -1100,6 +1103,7 @@ mod tests {
             json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
         artifact["aggregation"]["measurements"] = Value::Array(
             (1..=5)
+                .rev()
                 .map(|child_count| {
                     json!({
                         "child_count": child_count,
@@ -1115,6 +1119,42 @@ mod tests {
         match parse(artifact) {
             Err(error) => assert_eq!(error, "aggregation runtime prediction overflows u64"),
             Ok(_) => panic!("overflowing aggregation calibration must be rejected"),
+        }
+    }
+
+    #[test]
+    fn aggregation_calibration_u32_limit_applies_only_to_enabled_rows() {
+        let per_child_mcycles = u64::from(u32::MAX) + 1;
+        let mut artifact = valid_artifact();
+        artifact["aggregation"]["per_child_mcycles"] = json!(per_child_mcycles);
+        artifact["aggregation"]["provenance"]["image_id"] =
+            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
+        artifact["aggregation"]["measurements"] = Value::Array(
+            (1_u32..=5)
+                .map(|child_count| {
+                    let predicted_mcycles = per_child_mcycles * u64::from(child_count);
+                    json!({
+                        "child_count": child_count,
+                        "actual_mcycles": predicted_mcycles * 2,
+                        "predicted_mcycles": predicted_mcycles,
+                        "enabled": false
+                    })
+                })
+                .collect(),
+        );
+        parse(artifact.clone()).expect("disabled u64 calibration rows remain auditable");
+
+        for measurement in artifact["aggregation"]["measurements"]
+            .as_array_mut()
+            .expect("aggregation measurement array")
+        {
+            measurement["actual_mcycles"] = measurement["predicted_mcycles"].clone();
+            measurement["enabled"] = json!(true);
+        }
+        artifact["aggregation"]["calibrated_counts"] = json!([1, 2, 3, 4, 5]);
+        match parse(artifact) {
+            Err(error) => assert_eq!(error, "enabled aggregation runtime prediction must fit u32"),
+            Ok(_) => panic!("enabled aggregation calibration must fit runtime u32 output"),
         }
     }
 
@@ -1551,7 +1591,8 @@ mod tests {
             [0; 8],
             Address::ZERO,
         );
-        let model = aggregation_model(&[2], u64::from(u32::MAX));
+        let mut model = aggregation_model(&[2], 180);
+        model.0.aggregation.per_child_mcycles = u64::from(u32::MAX);
 
         assert_eq!(
             estimate_aggregation_with_model(&encoded, &model)

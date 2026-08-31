@@ -23,8 +23,9 @@ Keep collection, policy review, and packaging separate.
    interpreter. A domain endpoint without an observation or an admitted observation beyond the 10%
    error budget must stop the refresh.
 6. When promoting a new model, update every explicit audit pin in the Python and Rust fixture tests,
-   the default fixture directory in the generator, and the documented API domain ranges. These are
-   review gates, not a second coefficient source. Run the focused prover tests after updating them.
+   the default fixture directory in the generator and `justfile`, and the documented API domain
+   ranges. These are review gates, not a second coefficient source. Run the focused prover tests
+   after updating them.
 
 The current `risc0-zkgas-m2-v1` ID has exactly one compatibility exception: its initial
 packaging-only metadata transition retained the ID because quote semantics did not change. Any later

@@ -149,9 +149,9 @@ pub enum TimeoutPolicy {
 // Fail closed on stale/renamed offer-level keys (matching the bin-level config posture). The
 // hard cutover deleted several offer fields; without this, a config that leaves e.g.
 // `dynamic_pricing_timeout_modifier` at its old offer level — instead of inside `[timeouts]` —
-// would boot clean with the value silently ignored. NOTE: this does not reach inside the
-// internally-tagged `timeouts`/`*_quote` enums, which serde cannot deny unknown fields on; stale
-// keys nested in those tables are still dropped silently (see the migration notes in docs/API.md).
+// would boot clean with the value silently ignored. `QuoteSizing` independently rejects unknown
+// quote keys; the tagged `timeouts` enum remains permissive for nested stale keys (see the migration
+// notes in docs/API.md).
 #[serde(deny_unknown_fields)]
 pub struct BoundlessOfferParams {
     #[serde(default)]
@@ -192,9 +192,12 @@ pub struct DeploymentConfig {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "strategy", rename_all = "snake_case")]
+#[serde(tag = "strategy", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QuoteSizing {
-    Estimated,
+    Estimated {
+        #[serde(default)]
+        mcycles_offset: u32,
+    },
     #[default]
     Evaluated,
     Fixed {
@@ -485,7 +488,23 @@ mod tests {
         }))
         .expect("estimated quote sizing should deserialize");
 
-        assert_eq!(quote, QuoteSizing::Estimated);
+        assert_eq!(quote, QuoteSizing::Estimated { mcycles_offset: 0 });
+    }
+
+    #[test]
+    fn quote_sizing_deserializes_estimated_offset() {
+        let quote: QuoteSizing = serde_json::from_value(serde_json::json!({
+            "strategy": "estimated",
+            "mcycles_offset": 1300
+        }))
+        .expect("estimated quote sizing with an offset should deserialize");
+
+        assert_eq!(
+            quote,
+            QuoteSizing::Estimated {
+                mcycles_offset: 1_300
+            }
+        );
     }
 
     #[test]

@@ -196,16 +196,22 @@ order_stream_url = "https://base-mainnet.boundless.network"
 # every child count because its calibrated-count set is empty. Proposal estimates require exact
 # Unzen, execution_po2 >= 20, non-zero per-block zkGas, and total zkGas <= 500000000; network and
 # block count do not gate availability. Raiko2 does not compare model provenance with the running
-# guest ELF; selecting `estimated` accepts any release-pairing cycle drift.
+# guest ELF; selecting `estimated` accepts any release-pairing cycle drift. An estimated strategy
+# may temporarily set `mcycles_offset` to compensate for measured release-pairing drift before a
+# new calibration; it defaults to 0 and is applied only when estimation succeeds. Remove or reset
+# the offset after calibration. The example 1300 mcycle offset matches the legacy guest pairing,
+# not a general safety margin.
 [prover.risc0.boundless.batch_quote]
 strategy = "evaluated"
 # strategy = "estimated"
+# mcycles_offset = 1300
 # strategy = "fixed"
 # mcycles = 6000
 
 [prover.risc0.boundless.aggregation_quote]
 strategy = "evaluated"
 # strategy = "estimated"
+# mcycles_offset = 0
 # strategy = "fixed"
 # mcycles = 200
 

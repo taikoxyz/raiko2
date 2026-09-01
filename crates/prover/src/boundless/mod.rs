@@ -2025,7 +2025,7 @@ where
             )));
         }
     }
-    let estimate = if matches!(quote_sizing, QuoteSizing::Estimated) {
+    let estimate = if matches!(quote_sizing, QuoteSizing::Estimated { .. }) {
         Some(match stage_input {
             BoundlessStageInput::Proposal(input) => {
                 estimation::estimate_proposal(input, execution_po2)?
@@ -2133,9 +2133,17 @@ where
         journal,
         isolated_builder,
     ) = match quote_sizing {
-        QuoteSizing::Estimated => match estimate.ok_or_else(|| {
-            RaikoError::Guest("missing Boundless quote estimate result".to_string())
-        })? {
+        QuoteSizing::Estimated { mcycles_offset } => match estimate
+            .ok_or_else(|| {
+                RaikoError::Guest("missing Boundless quote estimate result".to_string())
+            })?
+            .and_then(|mut estimate| {
+                estimate.mcycles = estimate
+                    .mcycles
+                    .checked_add(*mcycles_offset)
+                    .ok_or(estimation::EstimateUnavailable::Numeric)?;
+                Ok(estimate)
+            }) {
             Ok(estimate) => (
                 estimate.mcycles,
                 None,
@@ -7505,7 +7513,9 @@ mod tests {
 
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated {
+                mcycles_offset: 1_300,
+            },
             Some(Ok(EstimatedRequestMetadata {
                 model_id: "risc0-zkgas-m2-v1".to_string(),
                 mcycles: 1_234,
@@ -7520,7 +7530,7 @@ mod tests {
         assert_eq!(
             context,
             QuoteContext {
-                quoted_mcycles_count: 1_234,
+                quoted_mcycles_count: 2_534,
                 evaluated_mcycles_count: None,
                 strategy: Some(BoundlessQuoteStrategy::Estimated),
                 model_id: Some("risc0-zkgas-m2-v1".to_string()),
@@ -7539,7 +7549,9 @@ mod tests {
 
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated {
+                mcycles_offset: 1_300,
+            },
             Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
             move || execution_result(&execution_calls, 1_455, journal),
         )
@@ -7551,6 +7563,34 @@ mod tests {
         assert_eq!(context.evaluated_mcycles_count, Some(1_455));
         assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
         assert_eq!(context.model_id, None);
+        assert!(context.isolated_builder);
+    }
+
+    #[tokio::test]
+    async fn quote_context_estimated_offset_overflow_executes_once_without_model() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = calls.clone();
+        let journal = B256::repeat_byte(0x23).to_vec();
+
+        let context = prepare_quote_context_from_estimate(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 1 },
+            Some(Ok(EstimatedRequestMetadata {
+                model_id: "risc0-zkgas-m2-v1".to_string(),
+                mcycles: u32::MAX,
+                journal: B256::repeat_byte(0xff).to_vec(),
+            })),
+            move || execution_result(&execution_calls, 1_456, journal),
+        )
+        .await
+        .expect("overflowing estimate offset falls back to evaluation");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(context.quoted_mcycles_count, 1_456);
+        assert_eq!(context.evaluated_mcycles_count, Some(1_456));
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
+        assert_eq!(context.model_id, None);
+        assert_eq!(context.journal, B256::repeat_byte(0x23).to_vec());
         assert!(context.isolated_builder);
     }
 
@@ -7600,7 +7640,7 @@ mod tests {
     async fn isolated_request_builder_estimated_build_avoids_shared_sdk_side_effects() {
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
             Some(Ok(EstimatedRequestMetadata {
                 model_id: "risc0-zkgas-m2-v1".to_string(),
                 mcycles: 1_000,
@@ -7700,7 +7740,7 @@ mod tests {
         let observed_calls = execution_calls.clone();
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
             Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
             move || execution_result(&observed_calls, 1_000, B256::repeat_byte(0x52).to_vec()),
         )
@@ -8185,7 +8225,7 @@ mod tests {
 
         let error = prepare_quote_context(
             ElfType::Batch,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
             &BoundlessStageInput::Proposal(Box::new(input)),
             &encoded,
             20,
@@ -8229,7 +8269,7 @@ mod tests {
 
         let context = prepare_quote_context(
             ElfType::Batch,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
             &BoundlessStageInput::Proposal(Box::new(input)),
             &encoded,
             20,
@@ -8257,7 +8297,7 @@ mod tests {
 
         let error = prepare_quote_context(
             ElfType::Aggregation,
-            &crate::boundless_config::QuoteSizing::Estimated,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
             &BoundlessStageInput::Aggregation(input),
             &encoded,
             20,

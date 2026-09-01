@@ -203,8 +203,8 @@ where
             .boundless
             .apply_pair_override(&pair.boundless)
             .with_context(|| format!("Boundless configuration error for rpc pair {}", pair.key))?;
-        if matches!(&effective.batch_quote, QuoteSizing::Estimated)
-            || matches!(&effective.aggregation_quote, QuoteSizing::Estimated)
+        if matches!(&effective.batch_quote, QuoteSizing::Estimated { .. })
+            || matches!(&effective.aggregation_quote, QuoteSizing::Estimated { .. })
         {
             validate_model()
                 .map_err(anyhow::Error::msg)
@@ -1016,7 +1016,7 @@ mod tests {
         let mut config = Config::default();
         config.prover.risc0.boundless.offchain = true;
         let mut pair = preflight_cache_test_pair();
-        pair.boundless.batch_quote = Some(QuoteSizing::Estimated);
+        pair.boundless.batch_quote = Some(QuoteSizing::Estimated { mcycles_offset: 0 });
         let pipelines = [PipelineRegistration {
             pipeline_key: PipelineKey::ShastaRisc0Network,
             proof_type: ProofType::Risc0,

@@ -1244,8 +1244,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   Boundless configuration must contain both tables. Each table accepts exactly one of
   `strategy = "estimated"`, `"evaluated"`, or `"fixed"`; `fixed` also requires a positive
   `mcycles` value. `estimated` additionally accepts a non-negative `mcycles_offset` in millions of
-  cycles; omitting it defaults to `0`, preserving existing configurations. The removed
-  `raiko_agent` value is rejected and must be migrated explicitly.
+  cycles; omitting it defaults to `0`, preserving existing configurations. The batch and aggregation
+  tables own independent offsets: the current legacy proposal pairing uses
+  `batch_quote.mcycles_offset = 1300` (1.3 billion cycles) while
+  `aggregation_quote.mcycles_offset = 0`. The removed `raiko_agent` value is rejected and must be
+  migrated explicitly.
   `rpc.pairs[*].boundless` may override either table for one `(network, l1_network)` pair; an omitted
   pair field inherits the corresponding required global table.
 - `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
@@ -1373,9 +1376,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   duration in seconds (previously `ramp_up_period_blocks`, scaled by a per-deployment block time).
 - Boundless offer tables reject unknown keys, so a stale offer-level field left over from the
   pre-cutover schema — for example `dynamic_pricing_timeout_modifier` at the offer level instead of
-  inside `timeouts` — fails to boot rather than being silently ignored. Keys nested one level
-  deeper, inside the tagged `timeouts` / `*_quote` tables, are **not** rejected (a serde limitation
-  on internally-tagged enums), so double-check those tables by hand during migration.
+  inside `timeouts` — fails to boot rather than being silently ignored. Tagged `*_quote` tables also
+  reject unknown or strategy-incompatible keys, so misspelled `mcycles_offset` fields and stale
+  `mcycles` fields under `strategy = "estimated"` fail startup. The tagged `timeouts` table remains
+  permissive for nested stale keys, so double-check timeout-policy tables by hand during migration.
 - Expired Boundless requests are resubmitted automatically up to the shared
   `prover.risc0.boundless.rebid_max_attempts` budget, each resubmission escalating the max price by
   `prover.risc0.boundless.rebid_price_step_bps` (compounded), clamped to

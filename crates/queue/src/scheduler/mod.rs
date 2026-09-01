@@ -17,7 +17,9 @@ use tokio::sync::Notify;
 
 pub struct Scheduler<P, O: Clone, Id> {
     store: Arc<dyn TaskStore<P, O, Id>>,
-    notify: Arc<Notify>,
+    ready_notify: Arc<Notify>,
+    // A lease transition can affect any active task watcher, so producers always broadcast here.
+    lease_notify: Arc<Notify>,
     config: SchedulerConfig,
     _phantom: core::marker::PhantomData<fn(P, O)>,
 }
@@ -26,7 +28,8 @@ impl<P, O: Clone, Id> Clone for Scheduler<P, O, Id> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
-            notify: Arc::clone(&self.notify),
+            ready_notify: Arc::clone(&self.ready_notify),
+            lease_notify: Arc::clone(&self.lease_notify),
             config: self.config.clone(),
             _phantom: core::marker::PhantomData,
         }
@@ -85,15 +88,23 @@ where
     ) -> Self {
         Self {
             store,
-            notify: Arc::new(Notify::new()),
+            ready_notify: Arc::new(Notify::new()),
+            lease_notify: Arc::new(Notify::new()),
             config,
             _phantom: core::marker::PhantomData,
         }
     }
 
+    /// Returns the notifier reserved for waking idle workers when ready work may exist.
     #[must_use]
     pub fn notifier(&self) -> Arc<Notify> {
-        self.notify.clone()
+        Arc::clone(&self.ready_notify)
+    }
+
+    /// Returns the notifier broadcast after a running lease may have changed or disappeared.
+    #[must_use]
+    pub fn lease_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.lease_notify)
     }
 
     #[must_use]
@@ -123,7 +134,7 @@ where
     {
         let outcome = self.store.attach_graph(owner, graph.nodes).await?;
         if outcome == AttachOutcome::Attached {
-            self.notify.notify_one();
+            self.ready_notify.notify_one();
         }
         Ok(outcome)
     }
@@ -140,7 +151,7 @@ where
     ) -> Result<DetachOutcome<Id>, TaskStoreError> {
         let outcome = self.store.detach_owner(owner, mode).await?;
         if outcome.detached {
-            self.notify.notify_waiters();
+            self.lease_notify.notify_waiters();
         }
         Ok(outcome)
     }
@@ -200,7 +211,7 @@ where
             .await?;
         if inserted && let Some(priority) = self.store.try_mark_ready(&id).await? {
             self.store.push_ready(priority, id.clone()).await?;
-            self.notify.notify_one();
+            self.ready_notify.notify_one();
         }
 
         Ok(id)
@@ -284,11 +295,11 @@ where
             .complete_success_and_release_dependents_if_running(&id, &lease_token, attempt, output)
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
 
-        self.notify.notify_one();
+        self.ready_notify.notify_one();
+        self.lease_notify.notify_waiters();
 
         Ok(true)
     }
@@ -331,10 +342,10 @@ where
             )
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
-        self.notify.notify_one();
+        self.ready_notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(true)
     }
 
@@ -356,10 +367,9 @@ where
             )
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(true)
     }
 
@@ -379,10 +389,9 @@ where
             )
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(true)
     }
 
@@ -424,7 +433,7 @@ where
         self.store
             .cancel_and_fail_dependents(&id, "dependency cancelled".to_string())
             .await?;
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
 
         Ok(())
     }
@@ -434,7 +443,7 @@ where
     /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn remove(&self, id: TaskId<Id>) -> Result<(), TaskStoreError> {
         let _ = self.store.remove_task(&id).await?;
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(())
     }
 
@@ -527,7 +536,8 @@ where
             .await?;
         let moved = moved_scheduled + moved_leases;
         if moved > 0 {
-            self.notify.notify_one();
+            self.ready_notify.notify_one();
+            self.lease_notify.notify_waiters();
         }
         Ok(moved)
     }
@@ -1971,5 +1981,59 @@ mod tests {
         };
 
         assert_eq!(policy.retry_delay(1_000), Some(Duration::from_millis(250)));
+    }
+
+    #[tokio::test]
+    async fn cancel_broadcasts_lease_change_without_waking_ready_workers() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
+        for value in [1, 2] {
+            sched
+                .submit(
+                    test_id(value),
+                    NewTask {
+                        priority: Priority::Medium,
+                        payload: "task",
+                    },
+                    vec![],
+                )
+                .await?;
+        }
+        sched.notifier().notified().await;
+        let first = sched
+            .next_ready("first")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first lease"))?;
+        let _second = sched
+            .next_ready("second")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second lease"))?;
+
+        let lease_notify = sched.lease_notifier();
+        let first_watcher = lease_notify.notified();
+        let second_watcher = lease_notify.notified();
+        tokio::pin!(first_watcher);
+        tokio::pin!(second_watcher);
+        first_watcher.as_mut().enable();
+        second_watcher.as_mut().enable();
+        let ready_notify = sched.notifier();
+        let ready_worker = ready_notify.notified();
+        tokio::pin!(ready_worker);
+        ready_worker.as_mut().enable();
+
+        sched.cancel(first.id).await?;
+
+        tokio::time::timeout(Duration::from_millis(100), &mut first_watcher)
+            .await
+            .map_err(|_| TaskStoreError::corrupt_msg("first lease watcher was not notified"))?;
+        tokio::time::timeout(Duration::from_millis(100), &mut second_watcher)
+            .await
+            .map_err(|_| TaskStoreError::corrupt_msg("second lease watcher was not notified"))?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut ready_worker)
+                .await
+                .is_err(),
+            "cancellation must not wake an idle worker"
+        );
+        Ok(())
     }
 }

@@ -1459,7 +1459,7 @@ where
         lease_token: &str,
         attempt: u32,
     ) -> Result<LeaseInterruption, TaskStoreError> {
-        let notifier = self.inner.scheduler.notifier();
+        let notifier = self.inner.scheduler.lease_notifier();
         loop {
             let notification = notifier.notified();
             tokio::pin!(notification);
@@ -2400,6 +2400,87 @@ mod tests {
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Ok(Proof::default())
+        }
+    }
+
+    struct SignalledSlowProver {
+        started: tokio::sync::mpsc::UnboundedSender<u64>,
+    }
+
+    impl GuestInputCodec<GuestInput> for SignalledSlowProver {
+        fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+            Ok(Bytes::from(input.taiko.proposal_id.to_le_bytes().to_vec()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Prover<TestBackend> for SignalledSlowProver {
+        type GuestInput = GuestInput;
+
+        fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+            GuestInputCodec::encode(self, input, config)
+        }
+
+        async fn prove_encoded(
+            &self,
+            input: Bytes,
+            _config: &ProverConfig,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            let proposal_id = u64::from_le_bytes(
+                input
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| RaikoError::Guest("invalid proposal id fixture".to_string()))?,
+            );
+            self.started
+                .send(proposal_id)
+                .map_err(|_| RaikoError::Guest("start observer dropped".to_string()))?;
+            std::future::pending().await
+        }
+
+        async fn aggregate(
+            &self,
+            _input: AggregationGuestInput,
+            _config: &ProverConfig,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            Ok(Proof::default())
+        }
+    }
+
+    #[derive(Clone)]
+    struct IdleObservedEngine {
+        engine: Engine<TestSpec<SignalledSlowProver>>,
+        idle: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::worker::Runnable for IdleObservedEngine {
+        async fn run_one(&self, worker_id: &str) -> Result<bool, String> {
+            let worked = self
+                .engine
+                .run_one(worker_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !worked {
+                let _ = self.idle.send(());
+            }
+            Ok(worked)
+        }
+
+        async fn maintenance_tick(&self) -> Result<(), String> {
+            self.engine
+                .inner
+                .scheduler
+                .maintenance_tick()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+
+        fn notifier(&self) -> Arc<tokio::sync::Notify> {
+            self.engine.inner.scheduler.notifier()
         }
     }
 
@@ -3380,6 +3461,64 @@ mod tests {
             TaskState::Failed { .. }
         ));
         assert_eq!(proof_runs.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_ready_work_wakes_idle_worker_without_interrupting_active_lease_watcher()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(SignalledSlowProver {
+                started: started_tx,
+            }),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::None,
+            },
+        );
+        let worker_config = crate::worker::WorkerConfig {
+            concurrency: 1,
+            maintenance_interval: Duration::from_secs(60),
+            ..crate::worker::WorkerConfig::default()
+        };
+
+        let (_first_owner, _first_id) =
+            attach_proposal!(engine, "notifier-first", proposal_request(1));
+        let active_group = crate::worker::spawn_workers(engine.clone(), &worker_config);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .map_err(|_| std::io::Error::other("first proof did not start"))?,
+            Some(1)
+        );
+
+        let (idle_tx, mut idle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let idle_group = crate::worker::spawn_workers(
+            IdleObservedEngine {
+                engine: engine.clone(),
+                idle: idle_tx,
+            },
+            &worker_config,
+        );
+        tokio::time::timeout(Duration::from_secs(2), idle_rx.recv())
+            .await
+            .map_err(|_| std::io::Error::other("second worker did not reach idle wait"))?
+            .ok_or_else(|| std::io::Error::other("idle observer closed"))?;
+
+        let (_second_owner, _second_id) =
+            attach_proposal!(engine, "notifier-second", proposal_request(2));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+                .await
+                .map_err(|_| std::io::Error::other("ready-work notification was lost"))?,
+            Some(2)
+        );
+
+        idle_group.shutdown().await;
+        active_group.shutdown().await;
         Ok(())
     }
 

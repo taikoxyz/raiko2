@@ -42,7 +42,7 @@ pub trait Runnable: Clone + Send + Sync + 'static {
     async fn maintenance_tick(&self) -> Result<(), String>;
 
     /// Get notifier for new work availability.
-    fn notifier(&self) -> Arc<Notify>;
+    fn ready_notifier(&self) -> Arc<Notify>;
 }
 
 /// Lifecycle handle for a supervised worker pool.
@@ -92,7 +92,7 @@ impl Drop for WorkerGroup {
 
 /// Spawn supervised workers for the given runnable.
 pub fn spawn_workers<R: Runnable>(runnable: R, config: &WorkerConfig) -> WorkerGroup {
-    let notify = runnable.notifier();
+    let notify = runnable.ready_notifier();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut handles = Vec::with_capacity(config.concurrency + 1);
 
@@ -267,7 +267,7 @@ mod tests {
             Ok(())
         }
 
-        fn notifier(&self) -> Arc<Notify> {
+        fn ready_notifier(&self) -> Arc<Notify> {
             Arc::clone(&self.notify)
         }
     }

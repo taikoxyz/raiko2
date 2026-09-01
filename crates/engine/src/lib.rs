@@ -1463,6 +1463,7 @@ where
         loop {
             let notification = notifier.notified();
             tokio::pin!(notification);
+            // Register before reading state because `notify_waiters()` stores no permit.
             notification.as_mut().enable();
             let Some(view) = self.inner.scheduler.get(id.clone()).await? else {
                 return Ok(LeaseInterruption::Lost);
@@ -1910,8 +1911,8 @@ where
         Ok(())
     }
 
-    fn notifier(&self) -> Arc<tokio::sync::Notify> {
-        self.inner.scheduler.notifier()
+    fn ready_notifier(&self) -> Arc<tokio::sync::Notify> {
+        self.inner.scheduler.ready_notifier()
     }
 }
 
@@ -2479,8 +2480,8 @@ mod tests {
                 .map_err(|error| error.to_string())
         }
 
-        fn notifier(&self) -> Arc<tokio::sync::Notify> {
-            self.engine.inner.scheduler.notifier()
+        fn ready_notifier(&self) -> Arc<tokio::sync::Notify> {
+            self.engine.inner.scheduler.ready_notifier()
         }
     }
 

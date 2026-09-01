@@ -1946,6 +1946,7 @@ impl BoundlessStageInput {
 fn log_boundless_task_mapping(identity: &BoundlessTaskLogIdentity, submission: &Submission) {
     match identity {
         BoundlessTaskLogIdentity::Proposal { proposal_id } => tracing::info!(
+            task_kind = "proposal",
             proposal_id = *proposal_id,
             provider_request_id = %submission.provider_request_id,
             boundless_request_id = %submission.provider_request_id,
@@ -7468,6 +7469,7 @@ mod tests {
     #[test]
     fn proposal_log_identity_uses_the_guest_request_proposal_id() {
         let mut input = GuestInput::default();
+        // The 77/88 mismatch is a synthetic fixture proving which proposal source wins.
         input.taiko.proposal_id = 77;
         input.proof_carry_data.transition_input.proposal_id = 88;
 

@@ -721,6 +721,34 @@ mod tests {
     }
 
     #[test]
+    fn global_estimated_quote_rejects_misspelled_offset_key() {
+        let mut value = toml::Value::try_from(ProverConfig::default())
+            .expect("serialize default prover config");
+        let boundless = value
+            .get_mut("risc0")
+            .and_then(toml::Value::as_table_mut)
+            .expect("RISC0 config table")
+            .get_mut("boundless")
+            .and_then(toml::Value::as_table_mut)
+            .expect("Boundless config table");
+        let misspelled_quote = toml::from_str(
+            r#"
+strategy = "estimated"
+mcycle_offset = 1300
+"#,
+        )
+        .expect("misspelled quote fixture should be valid TOML");
+        boundless.insert("batch_quote".to_string(), misspelled_quote);
+
+        let serialized = toml::to_string(&value).expect("serialize mutated prover config");
+        let error = toml::from_str::<ProverConfig>(&serialized)
+            .expect_err("misspelled global estimated offset must fail closed");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
+        assert!(error.to_string().contains("mcycle_offset"), "{error}");
+    }
+
+    #[test]
     fn omitted_inactive_boundless_table_defaults_to_evaluated_quotes() {
         let config: ProverConfig = toml::from_str(
             r#"
@@ -762,6 +790,55 @@ enabled = false
             effective.aggregation_quote,
             raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 200 }
         );
+    }
+
+    #[test]
+    fn pair_estimated_quote_override_keeps_stage_offsets_independent() {
+        let config = boundless_network_config();
+        let pair: BoundlessPairConfig = toml::from_str(
+            r#"
+[batch_quote]
+strategy = "estimated"
+mcycles_offset = 1300
+
+[aggregation_quote]
+strategy = "estimated"
+mcycles_offset = 0
+"#,
+        )
+        .expect("stage-specific estimated quote offsets should deserialize");
+
+        let effective = config
+            .risc0
+            .boundless
+            .apply_pair_override(&pair)
+            .expect("pair estimated quote offset should apply");
+
+        assert_eq!(
+            effective.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Estimated {
+                mcycles_offset: 1_300
+            }
+        );
+        assert_eq!(
+            effective.aggregation_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 }
+        );
+    }
+
+    #[test]
+    fn pair_estimated_quote_rejects_stale_fixed_mcycles_key() {
+        let error = toml::from_str::<BoundlessPairConfig>(
+            r#"
+[aggregation_quote]
+strategy = "estimated"
+mcycles = 1300
+"#,
+        )
+        .expect_err("stale pair-specific estimated quote key must fail closed");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
+        assert!(error.to_string().contains("mcycles"), "{error}");
     }
 
     #[test]

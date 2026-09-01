@@ -1243,7 +1243,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   proposal and aggregation quote cycles are sized for `risc0/network`. An explicitly supplied
   Boundless configuration must contain both tables. Each table accepts exactly one of
   `strategy = "estimated"`, `"evaluated"`, or `"fixed"`; `fixed` also requires a positive
-  `mcycles` value. The removed `raiko_agent` value is rejected and must be migrated explicitly.
+  `mcycles` value. `estimated` additionally accepts a non-negative `mcycles_offset` in millions of
+  cycles; omitting it defaults to `0`, preserving existing configurations. The batch and aggregation
+  tables own independent offsets: the current legacy proposal pairing uses
+  `batch_quote.mcycles_offset = 1300` (1.3 billion cycles) while
+  `aggregation_quote.mcycles_offset = 0`. The removed `raiko_agent` value is rejected and must be
+  migrated explicitly.
   `rpc.pairs[*].boundless` may override either table for one `(network, l1_network)` pair; an omitted
   pair field inherits the corresponding required global table.
 - `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
@@ -1255,7 +1260,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   is unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
   local cycle count is required. When the proposal is outside the model policy, raiko2 emits a
   warning and performs exactly one local execution, using that actual cycle count and journal.
-  Structural input errors still fail directly.
+  Structural input errors still fail directly. A non-zero `mcycles_offset` is a temporary
+  release-pairing correction for measured guest/model cycle drift before recalibration. Raiko2 adds
+  it only to a successful model estimate, before price/timeout sizing and quote persistence. It is
+  not added to `evaluated`, `fixed`, or estimate-unavailable local fallback results. If the addition
+  overflows, the estimate is unavailable and the same warning-plus-single-local-execution fallback
+  applies. Remove or reset the offset to `0` after publishing a matching calibration.
 - The current proposal model admits any non-empty exact-Unzen input when `execution_po2 >= 20`,
   every witness has non-zero zkGas in `block.header.difficulty`, and their checked sum is at most
   `500000000`. Network names and block counts do not gate estimation; block count remains an M2
@@ -1279,7 +1289,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   validity. There is no user-visible `skip_preflight` option:
   the Estimated path internally uses an isolated SDK request builder and does not mutate the shared
   preflight cache. `evaluated` uses the exact local dry-run count; `fixed` pins the quoted count but
-  still executes locally to obtain and validate the journal.
+  still executes locally to obtain and validate the journal. The persisted
+  `quoted_mcycles_count` includes any successful-estimate offset, so resume and same-request-ID
+  rebids retain that adjusted quote even if the active configuration later changes.
 - `prover.risc0.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It must be at least `1000` ms and is separate from the overall
@@ -1364,9 +1376,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   duration in seconds (previously `ramp_up_period_blocks`, scaled by a per-deployment block time).
 - Boundless offer tables reject unknown keys, so a stale offer-level field left over from the
   pre-cutover schema — for example `dynamic_pricing_timeout_modifier` at the offer level instead of
-  inside `timeouts` — fails to boot rather than being silently ignored. Keys nested one level
-  deeper, inside the tagged `timeouts` / `*_quote` tables, are **not** rejected (a serde limitation
-  on internally-tagged enums), so double-check those tables by hand during migration.
+  inside `timeouts` — fails to boot rather than being silently ignored. Tagged `*_quote` tables also
+  reject unknown or strategy-incompatible keys, so misspelled `mcycles_offset` fields and stale
+  `mcycles` fields under `strategy = "estimated"` fail startup. The tagged `timeouts` table remains
+  permissive for nested stale keys, so double-check timeout-policy tables by hand during migration.
 - Expired Boundless requests are resubmitted automatically up to the shared
   `prover.risc0.boundless.rebid_max_attempts` budget, each resubmission escalating the max price by
   `prover.risc0.boundless.rebid_price_step_bps` (compounded), clamped to

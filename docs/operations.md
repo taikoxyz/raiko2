@@ -1407,6 +1407,13 @@ Operator notes:
   is an empirical publication gate over collected observations, not a per-request runtime guarantee.
   Since an in-policy request is not locally executed first, its actual underquote or overquote is
   unknown and that mismatch is accepted. Select `evaluated` when exact local cycles are required.
+- Each `estimated` stage table independently accepts `mcycles_offset`, measured in millions of
+  cycles. For the current legacy proposal pairing, set `batch_quote.mcycles_offset = 1300` (1.3
+  billion cycles) and `aggregation_quote.mcycles_offset = 0`; a batch offset never changes aggregate
+  sizing. The offset is added only after a successful estimate, before price/timeout sizing and quote
+  persistence. Estimate-unavailable and arithmetic-overflow cases perform the existing single local
+  evaluation without the offset. Remove or reset the stage offset after publishing matching
+  calibration data.
 - Proposal estimation currently supports any non-empty exact-Unzen input with
   `execution_po2 >= 20`, non-zero zkGas in every witness, and checked total zkGas at or below
   `500000000`. It does not gate on network name or block count; block count remains an M2 formula

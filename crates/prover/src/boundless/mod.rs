@@ -1821,6 +1821,7 @@ struct FreshSubmissionContext<'a> {
     image_ref: &'a str,
     deployment: &'a str,
     observer: Option<&'a Arc<dyn ProverProgressObserver>>,
+    task_log_identity: &'a BoundlessTaskLogIdentity,
     attempt: u64,
     // Per-proof input-upload cache. Uploaded once (first attempt) and reused across rebids; a fresh
     // presigned URL is minted only when the cached one nears expiry (see `ensure_input_uploaded`).
@@ -1917,6 +1918,54 @@ enum BoundlessStageInput {
     Proposal(Box<GuestInput>),
     #[allow(dead_code)]
     Aggregation(raiko2_primitives_shasta::ShastaRisc0AggregationGuestInput),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BoundlessTaskLogIdentity {
+    Proposal { proposal_id: u64 },
+    Aggregation { proposal_ids: Vec<u64> },
+}
+
+impl BoundlessStageInput {
+    fn log_identity(&self) -> BoundlessTaskLogIdentity {
+        match self {
+            Self::Proposal(input) => BoundlessTaskLogIdentity::Proposal {
+                proposal_id: input.taiko.proposal_id,
+            },
+            Self::Aggregation(input) => BoundlessTaskLogIdentity::Aggregation {
+                proposal_ids: input
+                    .proof_carry_data_vec
+                    .iter()
+                    .map(|carry| carry.transition_input.proposal_id)
+                    .collect(),
+            },
+        }
+    }
+}
+
+fn log_boundless_task_mapping(identity: &BoundlessTaskLogIdentity, submission: &Submission) {
+    match identity {
+        BoundlessTaskLogIdentity::Proposal { proposal_id } => tracing::info!(
+            proposal_id = *proposal_id,
+            provider_request_id = %submission.provider_request_id,
+            boundless_request_id = %submission.provider_request_id,
+            expires_at = submission.expires_at,
+            attempt = submission.attempt,
+            max_price_multiplier = submission.max_price_multiplier,
+            "Mapped proposal to Boundless market request"
+        ),
+        BoundlessTaskLogIdentity::Aggregation { proposal_ids } => tracing::info!(
+            task_kind = "aggregation",
+            proposal_count = proposal_ids.len(),
+            proposal_ids = ?proposal_ids,
+            provider_request_id = %submission.provider_request_id,
+            boundless_request_id = %submission.provider_request_id,
+            expires_at = submission.expires_at,
+            attempt = submission.attempt,
+            max_price_multiplier = submission.max_price_multiplier,
+            "Mapped aggregation task to Boundless market request"
+        ),
+    }
 }
 
 fn prepare_quote_journal_context(
@@ -2434,6 +2483,7 @@ async fn dispatch_offchain_after_checkpoint<F, Fut>(
     image_ref: &str,
     deployment: &str,
     quote: &QuoteContext,
+    task_log_identity: &BoundlessTaskLogIdentity,
     dispatch: F,
 ) -> RaikoResult<Submission>
 where
@@ -2450,6 +2500,7 @@ where
         quote,
     )
     .await?;
+    log_boundless_task_mapping(task_log_identity, &submission);
     drop(permit);
 
     match dispatch().await {
@@ -3714,6 +3765,7 @@ impl BoundlessProver {
         image_ref: &str,
         deployment: &str,
         quote: &QuoteContext,
+        task_log_identity: &BoundlessTaskLogIdentity,
         attempt: u64,
     ) -> RaikoResult<Submission> {
         let submission = self.make_submission(request, attempt, false)?;
@@ -3724,6 +3776,7 @@ impl BoundlessProver {
             image_ref,
             deployment,
             quote,
+            task_log_identity,
             || async {
                 client
                     .submit_request_offchain(request)
@@ -4437,6 +4490,7 @@ impl BoundlessProver {
         image_ref: &str,
         deployment: &str,
         quote: &QuoteContext,
+        task_log_identity: &BoundlessTaskLogIdentity,
         attempt: u64,
         request_id_has_confirmed_submission: bool,
         reuse_search_from_block: Option<u64>,
@@ -4527,6 +4581,7 @@ impl BoundlessProver {
             BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT,
         )
         .await?;
+        log_boundless_task_mapping(task_log_identity, &submission);
         // Only after preparation and durable checkpointing do we reserve the local nonce and
         // funding. The first broadcast follows without another fallible preparation await.
         let (nonce, resolution, retain_checkpoint) = reserve_boundless_funding_before_dispatch(
@@ -4612,6 +4667,7 @@ impl BoundlessProver {
                     context.image_ref,
                     context.deployment,
                     context.quote,
+                    context.task_log_identity,
                     context.attempt,
                 )
                 .await;
@@ -4624,6 +4680,7 @@ impl BoundlessProver {
             context.image_ref,
             context.deployment,
             context.quote,
+            context.task_log_identity,
             context.attempt,
             context.request_reuse.has_confirmed_submission,
             context.request_reuse.search_from_block,
@@ -5021,6 +5078,7 @@ impl BoundlessProver {
             BoundlessStageInput::Proposal(input) => Some(&input.proof_carry_data),
             BoundlessStageInput::Aggregation(_) => None,
         };
+        let task_log_identity = stage_input.log_identity();
 
         let mut resume_submission = resume_record
             .map(|resume| {
@@ -5055,6 +5113,7 @@ impl BoundlessProver {
                     .map(|provenance| quote_context_with_provenance(&quote_journal, provenance));
                 attempt = attempt.max(submission.attempt);
                 submission.attempt = attempt;
+                log_boundless_task_mapping(&task_log_identity, &submission);
                 let resumed_without_transaction_hash = submission.remote_tx_hash.is_none();
                 let missing_event_action = confirm_boundless_resume_before_market_poll(
                     &mut submission,
@@ -5170,6 +5229,7 @@ impl BoundlessProver {
                     image_ref: &image_ref,
                     deployment: &deployment,
                     observer: observer.as_ref(),
+                    task_log_identity: &task_log_identity,
                     attempt,
                     input_cache: &mut input_cache,
                     request_reuse: request_reuse.clone(),
@@ -5187,13 +5247,6 @@ impl BoundlessProver {
                 proposal_carry_data,
             };
 
-            tracing::info!(
-                provider_request_id = %submission.provider_request_id,
-                expires_at = submission.expires_at,
-                attempt,
-                max_price_multiplier = submission.max_price_multiplier,
-                "Using Boundless market submission"
-            );
             let no_lock_timeout = no_lock_timeout_for_attempt(
                 attempt,
                 self.config.rebid_timeout_ms,
@@ -5658,13 +5711,13 @@ mod tests {
         BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS, BoundlessAttemptError, BoundlessClient,
         BoundlessConfig, BoundlessFundingState, BoundlessPollSubmission, BoundlessPricingMode,
         BoundlessProver, BoundlessStageInput, BoundlessStatusSource, BoundlessStorageDownloader,
-        BoundlessSubmissionMetadata, BoundlessSubmissionState, BoundlessTerminalOutcome,
-        BoundlessTimeoutAction, BoundlessTxFees, BoundlessTxReceiptObservation, DeploymentConfig,
-        DeploymentType, ElfType, JsonRpcError, JsonRpcResponse, MILLION_CYCLES,
-        MIN_REBID_TIMEOUT_MS, MissingResumeEventAction, NoLockTimeout, PrivateKeySigner,
-        QuoteContext, QuoteJournalContext, Submission, TimeoutPolicy, UploadedProgram,
-        boundless_poll_error_statuses, boundless_single_poll_error_status,
-        boundless_terminal_outcome, classify_boundless_status,
+        BoundlessSubmissionMetadata, BoundlessSubmissionState, BoundlessTaskLogIdentity,
+        BoundlessTerminalOutcome, BoundlessTimeoutAction, BoundlessTxFees,
+        BoundlessTxReceiptObservation, DeploymentConfig, DeploymentType, ElfType, JsonRpcError,
+        JsonRpcResponse, MILLION_CYCLES, MIN_REBID_TIMEOUT_MS, MissingResumeEventAction,
+        NoLockTimeout, PrivateKeySigner, QuoteContext, QuoteJournalContext, Submission,
+        TimeoutPolicy, UploadedProgram, boundless_poll_error_statuses,
+        boundless_single_poll_error_status, boundless_terminal_outcome, classify_boundless_status,
         confirm_boundless_resume_before_market_poll, dispatch_offchain_after_checkpoint,
         ensure_boundless_broadcast_deadline, escalate_and_cap_market_prices,
         exact_boundless_submission_digest, exact_boundless_submission_event,
@@ -5727,6 +5780,8 @@ mod tests {
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
     const TEST_REBID_PRICE_STEP_BPS: u32 = 5000;
     const TEST_REBID_MAX_ATTEMPTS: u32 = 4;
+    const TEST_TASK_LOG_IDENTITY: BoundlessTaskLogIdentity =
+        BoundlessTaskLogIdentity::Proposal { proposal_id: 1 };
 
     struct FlakyProgressObserver {
         remaining_failures: AtomicUsize,
@@ -7080,6 +7135,7 @@ mod tests {
             "image",
             "deployment",
             &test_quote_context(),
+            &TEST_TASK_LOG_IDENTITY,
             move || async move {
                 assert!(persisted_for_call.load(Ordering::SeqCst));
                 assert!(permit_released_for_call.load(Ordering::SeqCst));
@@ -7111,6 +7167,7 @@ mod tests {
             "image",
             "deployment",
             &test_quote_context(),
+            &TEST_TASK_LOG_IDENTITY,
             move || async move {
                 dispatched_for_call.fetch_add(1, Ordering::SeqCst);
                 Ok(U256::from(1))
@@ -7136,6 +7193,7 @@ mod tests {
             "image",
             "deployment",
             &test_quote_context(),
+            &TEST_TASK_LOG_IDENTITY,
             move || async move {
                 dispatched_for_call.fetch_add(1, Ordering::SeqCst);
                 Err(RaikoError::Guest("uncertain transport failure".to_string()))
@@ -7159,6 +7217,7 @@ mod tests {
             "image",
             "deployment",
             &test_quote_context(),
+            &TEST_TASK_LOG_IDENTITY,
             || async { Ok(U256::from(2)) },
         )
         .await
@@ -7396,6 +7455,37 @@ mod tests {
         assert_eq!(ElfType::Aggregation.stage_name(), "aggregation");
         assert!(ElfType::Batch.is_proposal());
         assert!(!ElfType::Aggregation.is_proposal());
+    }
+
+    #[test]
+    fn proposal_log_identity_uses_the_guest_request_proposal_id() {
+        let mut input = GuestInput::default();
+        input.taiko.proposal_id = 77;
+        input.proof_carry_data.transition_input.proposal_id = 88;
+
+        assert_eq!(
+            BoundlessStageInput::Proposal(Box::new(input)).log_identity(),
+            BoundlessTaskLogIdentity::Proposal { proposal_id: 77 }
+        );
+    }
+
+    #[test]
+    fn aggregation_log_identity_has_no_scalar_proposal_id() {
+        let mut first = raiko2_protocol_shasta::shasta::ProofCarryData::default();
+        first.transition_input.proposal_id = 91;
+        let mut second = raiko2_protocol_shasta::shasta::ProofCarryData::default();
+        second.transition_input.proposal_id = 17;
+        let input = ShastaRisc0AggregationGuestInput {
+            proof_carry_data_vec: vec![first, second],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            BoundlessStageInput::Aggregation(input).log_identity(),
+            BoundlessTaskLogIdentity::Aggregation {
+                proposal_ids: vec![91, 17]
+            }
+        );
     }
 
     fn execution_result(

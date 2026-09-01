@@ -17,7 +17,9 @@ use tokio::sync::Notify;
 
 pub struct Scheduler<P, O: Clone, Id> {
     store: Arc<dyn TaskStore<P, O, Id>>,
-    notify: Arc<Notify>,
+    ready_notify: Arc<Notify>,
+    // A lease transition can affect any active task watcher, so producers always broadcast here.
+    lease_notify: Arc<Notify>,
     config: SchedulerConfig,
     _phantom: core::marker::PhantomData<fn(P, O)>,
 }
@@ -26,7 +28,8 @@ impl<P, O: Clone, Id> Clone for Scheduler<P, O, Id> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
-            notify: Arc::clone(&self.notify),
+            ready_notify: Arc::clone(&self.ready_notify),
+            lease_notify: Arc::clone(&self.lease_notify),
             config: self.config.clone(),
             _phantom: core::marker::PhantomData,
         }
@@ -85,20 +88,35 @@ where
     ) -> Self {
         Self {
             store,
-            notify: Arc::new(Notify::new()),
+            ready_notify: Arc::new(Notify::new()),
+            lease_notify: Arc::new(Notify::new()),
             config,
             _phantom: core::marker::PhantomData,
         }
     }
 
+    /// Returns the notifier reserved for waking idle workers when ready work may exist.
     #[must_use]
-    pub fn notifier(&self) -> Arc<Notify> {
-        self.notify.clone()
+    pub fn ready_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.ready_notify)
+    }
+
+    /// Returns the notifier broadcast after a running lease may have changed or disappeared.
+    #[must_use]
+    pub fn lease_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.lease_notify)
     }
 
     #[must_use]
     pub const fn config(&self) -> &SchedulerConfig {
         &self.config
+    }
+
+    fn notify_ready_workers(&self) {
+        // Order is load-bearing: wake every registered worker first, then retain one permit for
+        // the gap between `run_one` observing an empty queue and awaiting `notified()`.
+        self.ready_notify.notify_waiters();
+        self.ready_notify.notify_one();
     }
 }
 
@@ -123,7 +141,7 @@ where
     {
         let outcome = self.store.attach_graph(owner, graph.nodes).await?;
         if outcome == AttachOutcome::Attached {
-            self.notify.notify_one();
+            self.notify_ready_workers();
         }
         Ok(outcome)
     }
@@ -140,7 +158,7 @@ where
     ) -> Result<DetachOutcome<Id>, TaskStoreError> {
         let outcome = self.store.detach_owner(owner, mode).await?;
         if outcome.detached {
-            self.notify.notify_waiters();
+            self.lease_notify.notify_waiters();
         }
         Ok(outcome)
     }
@@ -200,7 +218,7 @@ where
             .await?;
         if inserted && let Some(priority) = self.store.try_mark_ready(&id).await? {
             self.store.push_ready(priority, id.clone()).await?;
-            self.notify.notify_one();
+            self.notify_ready_workers();
         }
 
         Ok(id)
@@ -284,11 +302,11 @@ where
             .complete_success_and_release_dependents_if_running(&id, &lease_token, attempt, output)
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
 
-        self.notify.notify_one();
+        self.notify_ready_workers();
+        self.lease_notify.notify_waiters();
 
         Ok(true)
     }
@@ -331,10 +349,10 @@ where
             )
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
-        self.notify.notify_one();
+        self.notify_ready_workers();
+        self.lease_notify.notify_waiters();
         Ok(true)
     }
 
@@ -356,10 +374,9 @@ where
             )
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(true)
     }
 
@@ -379,10 +396,9 @@ where
             )
             .await?;
         if !updated {
-            self.notify.notify_one();
             return Ok(false);
         }
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(true)
     }
 
@@ -424,7 +440,7 @@ where
         self.store
             .cancel_and_fail_dependents(&id, "dependency cancelled".to_string())
             .await?;
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
 
         Ok(())
     }
@@ -434,7 +450,7 @@ where
     /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn remove(&self, id: TaskId<Id>) -> Result<(), TaskStoreError> {
         let _ = self.store.remove_task(&id).await?;
-        self.notify.notify_one();
+        self.lease_notify.notify_waiters();
         Ok(())
     }
 
@@ -527,7 +543,10 @@ where
             .await?;
         let moved = moved_scheduled + moved_leases;
         if moved > 0 {
-            self.notify.notify_one();
+            self.notify_ready_workers();
+        }
+        if moved_leases > 0 {
+            self.lease_notify.notify_waiters();
         }
         Ok(moved)
     }
@@ -1971,5 +1990,228 @@ mod tests {
         };
 
         assert_eq!(policy.retry_delay(1_000), Some(Duration::from_millis(250)));
+    }
+
+    #[tokio::test]
+    async fn attach_wakes_every_parked_consumer_and_retains_a_ready_permit() -> StoreResult<()> {
+        const CONSUMER_COUNT: usize = 3;
+
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
+        let ready_notify = sched.ready_notifier();
+        let parked = std::sync::Arc::new(tokio::sync::Barrier::new(CONSUMER_COUNT + 1));
+        let mut consumers = tokio::task::JoinSet::new();
+
+        for worker in 0..CONSUMER_COUNT {
+            let sched = sched.clone();
+            let ready_notify = ready_notify.clone();
+            let parked = parked.clone();
+            consumers.spawn(async move {
+                let notified = ready_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                parked.wait().await;
+                notified.await;
+                sched
+                    .next_ready(&format!("consumer-{worker}"))
+                    .await
+                    .expect("consumer should read the ready queue")
+                    .expect("a woken consumer should acquire one task")
+                    .id
+            });
+        }
+
+        parked.wait().await;
+        let graph = ExecutionGraph::new(
+            (0..CONSUMER_COUNT)
+                .map(|index| ExecutionNode {
+                    id: test_id(u64::try_from(index + 1).expect("small fixture id")),
+                    task: NewTask {
+                        priority: Priority::Medium,
+                        payload: "independent",
+                    },
+                    dependencies: Vec::new(),
+                    execution_policy: sched.config().execution_policy(),
+                })
+                .collect(),
+        );
+        assert_eq!(
+            sched
+                .attach(RootOwner::new("fan-out", uuid::Uuid::new_v4()), graph)
+                .await?,
+            AttachOutcome::Attached
+        );
+
+        let acquired = tokio::time::timeout(Duration::from_millis(250), async {
+            let mut acquired = std::collections::HashSet::new();
+            while let Some(result) = consumers.join_next().await {
+                acquired.insert(result.expect("consumer should not panic"));
+            }
+            acquired
+        })
+        .await
+        .expect("all parked consumers should be woken by one graph attach");
+        assert_eq!(acquired.len(), CONSUMER_COUNT);
+
+        tokio::time::timeout(Duration::from_millis(100), ready_notify.notified())
+            .await
+            .expect("ready notification should retain one permit after the broadcast");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduled_promotion_does_not_broadcast_a_lease_change() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
+            MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_mins(1),
+                retry: RetryPolicy::Fixed {
+                    max_attempts: 2,
+                    delay: Duration::from_millis(1),
+                },
+            },
+        );
+        sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "retry",
+                },
+                vec![],
+            )
+            .await?;
+        let lease = sched
+            .next_ready("worker")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected initial lease"))?;
+        assert_eq!(
+            sched
+                .complete_with_disposition(lease, Err("retry later".to_string()))
+                .await?,
+            TaskCompletionDisposition::Retrying
+        );
+
+        let lease_notify = sched.lease_notifier();
+        let lease_watcher = lease_notify.notified();
+        tokio::pin!(lease_watcher);
+        lease_watcher.as_mut().enable();
+
+        assert_eq!(
+            sched
+                .maintenance_tick_at(super::now_millis().saturating_add(10_000))
+                .await?,
+            1
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut lease_watcher)
+                .await
+                .is_err(),
+            "promoting scheduled work must not wake lease watchers"
+        );
+        assert!(sched.next_ready("worker").await?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_lease_maintenance_broadcasts_a_lease_change() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
+            MemoryStore::with_lease(Duration::from_millis(1)),
+            SchedulerConfig {
+                lease_duration: Duration::from_millis(1),
+                ..SchedulerConfig::default()
+            },
+        );
+        sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "lease",
+                },
+                vec![],
+            )
+            .await?;
+        let _lease = sched
+            .next_ready("worker")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected initial lease"))?;
+
+        let lease_notify = sched.lease_notifier();
+        let lease_watcher = lease_notify.notified();
+        tokio::pin!(lease_watcher);
+        lease_watcher.as_mut().enable();
+
+        assert_eq!(
+            sched
+                .maintenance_tick_at(super::now_millis().saturating_add(10_000))
+                .await?,
+            1
+        );
+        tokio::time::timeout(Duration::from_millis(100), &mut lease_watcher)
+            .await
+            .expect("expired lease maintenance should wake lease watchers");
+        assert!(sched.next_ready("worker").await?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_broadcasts_lease_change_without_waking_ready_workers() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
+        for value in [1, 2] {
+            sched
+                .submit(
+                    test_id(value),
+                    NewTask {
+                        priority: Priority::Medium,
+                        payload: "task",
+                    },
+                    vec![],
+                )
+                .await?;
+        }
+        // The ready notifications from the submissions coalesce into one stored permit; drain it
+        // before registering the idle worker below so cancellation is the only possible wakeup.
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            sched.ready_notifier().notified(),
+        )
+        .await
+        .map_err(|_| TaskStoreError::corrupt_msg("stored ready permit was missing"))?;
+        let first = sched
+            .next_ready("first")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first lease"))?;
+        let _second = sched
+            .next_ready("second")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second lease"))?;
+
+        let lease_notify = sched.lease_notifier();
+        let first_watcher = lease_notify.notified();
+        let second_watcher = lease_notify.notified();
+        tokio::pin!(first_watcher);
+        tokio::pin!(second_watcher);
+        first_watcher.as_mut().enable();
+        second_watcher.as_mut().enable();
+        let ready_notify = sched.ready_notifier();
+        let ready_worker = ready_notify.notified();
+        tokio::pin!(ready_worker);
+        ready_worker.as_mut().enable();
+
+        sched.cancel(first.id).await?;
+
+        tokio::time::timeout(Duration::from_millis(100), &mut first_watcher)
+            .await
+            .map_err(|_| TaskStoreError::corrupt_msg("first lease watcher was not notified"))?;
+        tokio::time::timeout(Duration::from_millis(100), &mut second_watcher)
+            .await
+            .map_err(|_| TaskStoreError::corrupt_msg("second lease watcher was not notified"))?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut ready_worker)
+                .await
+                .is_err(),
+            "cancellation must not wake an idle worker"
+        );
+        Ok(())
     }
 }

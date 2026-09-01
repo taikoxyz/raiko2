@@ -194,7 +194,10 @@ pub struct DeploymentConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
 pub enum QuoteSizing {
-    Estimated,
+    Estimated {
+        #[serde(default)]
+        mcycles_offset: u32,
+    },
     #[default]
     Evaluated,
     Fixed {
@@ -485,7 +488,23 @@ mod tests {
         }))
         .expect("estimated quote sizing should deserialize");
 
-        assert_eq!(quote, QuoteSizing::Estimated);
+        assert_eq!(quote, QuoteSizing::Estimated { mcycles_offset: 0 });
+    }
+
+    #[test]
+    fn quote_sizing_deserializes_estimated_offset() {
+        let quote: QuoteSizing = serde_json::from_value(serde_json::json!({
+            "strategy": "estimated",
+            "mcycles_offset": 1300
+        }))
+        .expect("estimated quote sizing with an offset should deserialize");
+
+        assert_eq!(
+            quote,
+            QuoteSizing::Estimated {
+                mcycles_offset: 1_300
+            }
+        );
     }
 
     #[test]

@@ -765,6 +765,32 @@ enabled = false
     }
 
     #[test]
+    fn pair_estimated_quote_override_preserves_mcycles_offset() {
+        let config = boundless_network_config();
+        let pair: BoundlessPairConfig = toml::from_str(
+            r#"
+[batch_quote]
+strategy = "estimated"
+mcycles_offset = 1300
+"#,
+        )
+        .expect("pair estimated quote offset should deserialize");
+
+        let effective = config
+            .risc0
+            .boundless
+            .apply_pair_override(&pair)
+            .expect("pair estimated quote offset should apply");
+
+        assert_eq!(
+            effective.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Estimated {
+                mcycles_offset: 1_300
+            }
+        );
+    }
+
+    #[test]
     fn self_contained_prover_tables_derive_routes() {
         let config: ProverConfig = toml::from_str(
             r#"

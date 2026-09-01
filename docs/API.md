@@ -1243,7 +1243,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   proposal and aggregation quote cycles are sized for `risc0/network`. An explicitly supplied
   Boundless configuration must contain both tables. Each table accepts exactly one of
   `strategy = "estimated"`, `"evaluated"`, or `"fixed"`; `fixed` also requires a positive
-  `mcycles` value. The removed `raiko_agent` value is rejected and must be migrated explicitly.
+  `mcycles` value. `estimated` additionally accepts a non-negative `mcycles_offset` in millions of
+  cycles; omitting it defaults to `0`, preserving existing configurations. The removed
+  `raiko_agent` value is rejected and must be migrated explicitly.
   `rpc.pairs[*].boundless` may override either table for one `(network, l1_network)` pair; an omitted
   pair field inherits the corresponding required global table.
 - `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
@@ -1255,7 +1257,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   is unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
   local cycle count is required. When the proposal is outside the model policy, raiko2 emits a
   warning and performs exactly one local execution, using that actual cycle count and journal.
-  Structural input errors still fail directly.
+  Structural input errors still fail directly. A non-zero `mcycles_offset` is a temporary
+  release-pairing correction for measured guest/model cycle drift before recalibration. Raiko2 adds
+  it only to a successful model estimate, before price/timeout sizing and quote persistence. It is
+  not added to `evaluated`, `fixed`, or estimate-unavailable local fallback results. If the addition
+  overflows, the estimate is unavailable and the same warning-plus-single-local-execution fallback
+  applies. Remove or reset the offset to `0` after publishing a matching calibration.
 - The current proposal model admits any non-empty exact-Unzen input when `execution_po2 >= 20`,
   every witness has non-zero zkGas in `block.header.difficulty`, and their checked sum is at most
   `500000000`. Network names and block counts do not gate estimation; block count remains an M2
@@ -1279,7 +1286,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   validity. There is no user-visible `skip_preflight` option:
   the Estimated path internally uses an isolated SDK request builder and does not mutate the shared
   preflight cache. `evaluated` uses the exact local dry-run count; `fixed` pins the quoted count but
-  still executes locally to obtain and validate the journal.
+  still executes locally to obtain and validate the journal. The persisted
+  `quoted_mcycles_count` includes any successful-estimate offset, so resume and same-request-ID
+  rebids retain that adjusted quote even if the active configuration later changes.
 - `prover.risc0.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It must be at least `1000` ms and is separate from the overall

@@ -1,7 +1,5 @@
 {
   "aggregation": {
-    "calibrated_counts": [],
-    "measurements": [],
     "per_child_mcycles": 180,
     "provenance": {
       "elf_sha256": "fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924",
@@ -9,7 +7,7 @@
       "image_id": null
     }
   },
-  "model_id": "risc0-zkgas-m2-5adefe56336d7238",
+  "model_id": "risc0-zkgas-m2-c71d7a4ff237c10d",
   "originating_experiment_model": "M2",
   "proposal": {
     "coefficients": {
@@ -64,7 +62,7 @@
         "untouched_holdout": false
       }
     },
-    "generator_config_sha256": "9e03c7017eb0326f4764cb124018dde18b0fb0820f89e462dc65965b325b7cad",
+    "generator_config_sha256": "f1fd959acc83a9c4fe2bc7d0d039c3195bcf24a6e8b499504b306940f11a26a2",
     "max_total_zkgas": 500000000,
     "provenance": {
       "elf_sha256": "d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35",
@@ -76,5 +74,5 @@
     "raw_input_rows_sha256": "0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328",
     "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767"
   },
-  "schema_version": 2
+  "schema_version": 3
 }

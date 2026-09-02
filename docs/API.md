@@ -1275,11 +1275,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   Unzen limit is 768, so an admitted proposal can carry up to four times the calibrated block count
   and the cap is the only remaining bound. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas,
   over-cap, and arithmetic overflow inputs use the warning-plus-local fallback.
-- Estimated aggregation is currently fail-closed to local evaluation for every child count. The
-  committed current-image calibration set is empty because the calibration guest, built with
-  `disable-dev-mode`, rejected development receipts before valid cycle measurements could be
-  collected. Do not treat child counts one through five as enabled until valid current-image
-  measurements are committed.
+- Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
+  every structurally valid, non-empty input. Child count and historical observations do not gate
+  runtime availability. Checked multiplication or final `u32` conversion overflow emits the normal
+  warning and performs one local evaluation; malformed input remains a direct error.
 - Selecting `estimated` is the release owner's assertion that the deployed guest and RISC0 runtime
   remain compatible with the committed calibration. Raiko2 does not runtime-check the ELF hash,
   image ID, source revision, or RISC0 SDK version. The committed proposal calibration currently

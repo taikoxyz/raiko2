@@ -23,7 +23,7 @@ FIXTURE_DIR = (
     / "tests"
     / "fixtures"
     / "risc0-zkgas"
-    / "2026-08-31-m2-global-cap-v2"
+    / "2026-09-02-m2-aggregation-direct-v3"
 )
 MODEL = ROOT / "crates" / "prover" / "models" / "risc0-zkgas.json"
 MODULE_SPEC = importlib.util.spec_from_file_location("risc0_zkgas_model", SCRIPT)
@@ -193,75 +193,17 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr or result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_aggregation_prediction_must_equal_checked_linear_formula(self):
-        aggregation = copy.deepcopy(
-            json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
-        )
-        aggregation["provenance"]["image_id"] = "0x" + "1" * 64
-        aggregation["measurements"] = [
-            {
-                "child_count": count,
-                "actual_mcycles": 180 * count,
-                "predicted_mcycles": 180 * count,
-                "enabled": True,
-            }
-            for count in range(1, 6)
-        ]
-        aggregation["calibrated_counts"] = list(range(1, 6))
-        MODEL_TOOL.validate_aggregation(aggregation)
+    def test_aggregation_rejects_legacy_runtime_calibration_gates(self):
+        current = json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
 
-        aggregation["measurements"][2]["predicted_mcycles"] += 1
-        with self.assertRaisesRegex(
-            MODEL_TOOL.ModelError, "predicted_mcycles must equal"
-        ):
-            MODEL_TOOL.validate_aggregation(aggregation)
-
-    def test_aggregation_prediction_multiplication_rejects_u64_overflow(self):
-        aggregation = copy.deepcopy(
-            json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
-        )
-        aggregation["per_child_mcycles"] = 1 << 63
-        aggregation["provenance"]["image_id"] = "0x" + "1" * 64
-        aggregation["measurements"] = [
-            {
-                "child_count": 2,
-                "actual_mcycles": 1,
-                "predicted_mcycles": 1,
-                "enabled": False,
-            }
-        ]
-
-        with self.assertRaisesRegex(MODEL_TOOL.ModelError, "prediction must fit u64"):
-            MODEL_TOOL.validate_aggregation(aggregation)
-
-    def test_aggregation_u32_limit_applies_only_to_enabled_measurements(self):
-        per_child_mcycles = (1 << 32) + 1
-        aggregation = copy.deepcopy(
-            json.loads((FIXTURE_DIR / "config.json").read_text())["aggregation"]
-        )
-        aggregation["per_child_mcycles"] = per_child_mcycles
-        aggregation["provenance"]["image_id"] = "0x" + "1" * 64
-        aggregation["measurements"] = [
-            {
-                "child_count": count,
-                "actual_mcycles": per_child_mcycles * count * 2,
-                "predicted_mcycles": per_child_mcycles * count,
-                "enabled": False,
-            }
-            for count in range(1, 6)
-        ]
-        MODEL_TOOL.validate_aggregation(aggregation)
-
-        for measurement in aggregation["measurements"]:
-            measurement["actual_mcycles"] = measurement["predicted_mcycles"]
-            measurement["enabled"] = True
-        aggregation["calibrated_counts"] = list(range(1, 6))
-
-        with self.assertRaisesRegex(
-            MODEL_TOOL.ModelError,
-            "enabled aggregation prediction must fit u32",
-        ):
-            MODEL_TOOL.validate_aggregation(aggregation)
+        for field in ("measurements", "calibrated_counts"):
+            with self.subTest(field=field):
+                aggregation = copy.deepcopy(current)
+                aggregation[field] = []
+                with self.assertRaisesRegex(
+                    MODEL_TOOL.ModelError, "aggregation config has an unsupported schema"
+                ):
+                    MODEL_TOOL.validate_aggregation(aggregation)
 
     def test_validation_rejects_unbounded_diagnostic_precision_without_traceback(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1060,7 +1002,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
         config = json.loads((FIXTURE_DIR / "config.json").read_text())
 
         MODEL_TOOL.validate_config(config)
-        self.assertEqual(config["schema_version"], 2)
+        self.assertEqual(config["schema_version"], 3)
         self.assertEqual(config["proposal"]["max_total_zkgas"], 500_000_000)
         self.assertNotIn("domains", config["proposal"])
         self.assertEqual(
@@ -1085,7 +1027,7 @@ class Risc0ZkGasModelCliTests(unittest.TestCase):
                 },
             )
 
-    def test_schema_v2_rejects_the_legacy_v1_model_id(self):
+    def test_schema_v3_rejects_the_legacy_v1_model_id(self):
         config = json.loads((FIXTURE_DIR / "config.json").read_text())
         config["model_id"] = "risc0-zkgas-m2-v1"
 

@@ -191,12 +191,13 @@ order_stream_url = "https://base-mainnet.boundless.network"
 # Quote sizing per stage. Both tables are required in an explicit Boundless configuration.
 # Supported strategies are exactly `estimated`, `evaluated`, and `fixed`; the removed
 # `raiko_agent` value is rejected. Use `evaluated` for the exact local count, `estimated` to opt in
-# to the embedded proposal model and its warning-plus-local fallback, or `fixed` to pin the quote.
-# `fixed` still executes locally for the journal. Estimated aggregation currently falls back for
-# every child count because its calibrated-count set is empty. Proposal estimates require exact
-# Unzen, execution_po2 >= 20, non-zero per-block zkGas, and total zkGas <= 500000000; network and
-# block count do not gate availability. Raiko2 does not compare model provenance with the running
-# guest ELF; selecting `estimated` accepts any release-pairing cycle drift. An estimated strategy
+# to the embedded stage model and its warning-plus-local fallback, or `fixed` to pin the quote.
+# `fixed` still executes locally for the journal. Estimated aggregation directly uses 180 mcycles
+# per child for every structurally valid, non-empty input; child count is not a calibration gate.
+# Proposal estimates require exact Unzen, execution_po2 >= 20, non-zero per-block zkGas, and total
+# zkGas <= 500000000; network and block count do not gate availability. Raiko2 does not compare
+# model provenance with the running guest ELF; selecting `estimated` accepts any release-pairing
+# cycle drift. An estimated strategy
 # may temporarily set `mcycles_offset` to compensate for measured release-pairing drift before a
 # new calibration; it defaults to 0 and is applied only when estimation succeeds. Remove or reset
 # the offset after calibration. The example 1300 mcycle offset matches the legacy guest pairing,

@@ -1426,12 +1426,10 @@ Operator notes:
   lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic-overflow inputs emit a warning and
   perform exactly one local evaluation. A malformed
   or structurally invalid input fails directly rather than falling back.
-- Estimated aggregation currently performs that warning-plus-local fallback for every child count.
-  Its committed calibrated-count set is empty: the current aggregation guest has
-  `disable-dev-mode`, so it rejected development receipts before valid current-image cycle
-  measurements could be collected. Counts one through five are calibration targets, not enabled
-  estimates. Keep aggregation on `evaluated` unless the local fallback behavior is explicitly
-  acceptable; enable direct estimates only after valid current-image measurements are committed.
+- Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
+  every structurally valid, non-empty input. Historical child-count observations are audit data,
+  never a runtime allowlist. Checked multiplication or final `u32` conversion overflow emits a
+  warning and performs one local evaluation; malformed input fails directly.
 - `estimated` does not expose a `skip_preflight` configuration flag. It internally builds through a
   request-scoped SDK builder with an independent preflight layer, so the successful estimate and its
   local fallback do not download the uploaded input or read or modify the shared executor cache.

@@ -41,7 +41,12 @@ in-policy observation beyond that budget requires re-evaluating the model, cap, 
 theoretical future mismatch, lack of an untouched holdout, or lack of observed rectangles does not
 change runtime availability. Use `evaluated` when exact local cycles are required.
 
-The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record and is rejected by the current
-schema-v2 generator and runtime parser. Every schema-v2 artifact or calibration change must use the
-generated content-addressed ID. This workflow updates repository artifacts only. Do not deploy,
+The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record. The current schema-v3 generator
+and runtime parser reject schema-v1 and schema-v2 artifacts. Every schema-v3 artifact or calibration
+change must use the generated content-addressed ID. This workflow updates repository artifacts only. Do not deploy,
 roll out, or change quote strategy.
+
+Aggregation does not use proposal zkGas calibration or a child-count activation set. Its artifact
+contains a direct `per_child_mcycles` scalar, applied to every structurally valid, non-empty
+aggregation input. Aggregation observations may justify a deliberate scalar update, but they must
+never add `enabled`, `calibrated_counts`, or an equivalent runtime allowlist.

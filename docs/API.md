@@ -1254,10 +1254,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
   from the typed guest input and estimates cycles without executing the guest locally. The
   estimation step itself does not submit a proof; the normal Boundless request still proves the
-  original guest program and input. Its approximately ten-percent target is an empirical model
-  publication gate over the collected observations admitted by the global cap, not a hard accuracy
-  guarantee for each future request. An in-policy request is not locally executed first, so its actual underquote or overquote
-  is unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
+  original guest program and input. For proposals only, the approximately ten-percent target is an
+  empirical model-publication gate over collected observations admitted by the global cap, not a
+  hard accuracy guarantee for each future request. Aggregation has no corresponding error-budget
+  gate. An in-policy request is not locally executed first, so its actual underquote or overquote is
+  unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
   local cycle count is required. When the proposal is outside the model policy, raiko2 emits a
   warning and performs exactly one local execution, using that actual cycle count and journal.
   Structural input errors still fail directly. A non-zero `mcycles_offset` is a temporary
@@ -1277,8 +1278,27 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   over-cap, and arithmetic overflow inputs use the warning-plus-local fallback.
 - Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
   every structurally valid, non-empty input. Child count and historical observations do not gate
-  runtime availability. Checked multiplication or final `u32` conversion overflow emits the normal
-  warning and performs one local evaluation; malformed input remains a direct error.
+  runtime availability. The current v4 API admits 1-1024 proposals, so this deliberately
+  extrapolates from the largest historical observation (five children) up to a `184,320`-mcycle
+  quote, roughly 205 times the five-child quote.
+  That older release cohort measured about 175 mcycles at one child and 817-818 at five children:
+  the five-child quote is 10.02-10.16% high, and extending the observed 1-to-5 trend would approach
+  roughly 12% overquote at larger counts. Those observations do not measure the shipped aggregation
+  guest. The artifact pins its ELF SHA-256 as
+  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
+  `disable-dev-mode` build prevents the development-receipt probe and the artifact has no aggregation
+  image ID. Error direction for the running guest is therefore unknown. With the
+  committed scalar and v4 limit, the estimator's multiplication/conversion overflow fallback is
+  unreachable; the separately configured `mcycles_offset` can still trigger the generic fallback if
+  its addition overflows. With the documented aggregation offset of zero, valid aggregation input
+  therefore has no estimate-unavailable local evaluation. Malformed input remains a direct error.
+  The estimator also does not locally verify child receipt bytes, so an invalid receipt may enter
+  the auction and fail only when the remote guest executes it.
+- Upgrade note: an existing `aggregation_quote.strategy = "estimated"` configuration previously
+  fell back to one local execution because the calibrated-count set was empty. After this change the
+  same configuration skips local execution, quotes `180 * child_count`, and records
+  `evaluated_mcycles_count = None`; no configuration change or startup rejection announces the
+  transition. Select `evaluated` before upgrading if that behavior is not intended.
 - Selecting `estimated` is the release owner's assertion that the deployed guest and RISC0 runtime
   remain compatible with the committed calibration. Raiko2 does not runtime-check the ELF hash,
   image ID, source revision, or RISC0 SDK version. The committed proposal calibration currently

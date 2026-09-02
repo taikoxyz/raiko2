@@ -6,8 +6,18 @@ removes aggregation child-count calibration as a runtime availability gate.
 
 Estimated aggregation uses the configured `180` mcycles per child for every structurally valid,
 non-empty aggregation input. The aggregation provenance in `config.json` is audit metadata only; it
-does not select child counts or compare the running guest image. Arithmetic overflow is the only
-aggregation-estimator condition that falls back to local execution.
+does not select child counts or compare the running guest image. The shipped aggregation ELF has not
+been measured successfully. Its SHA-256 is
+`fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
+`disable-dev-mode` build rejects the development receipts used by the observation probe, and its
+artifact provenance therefore has `image_id: null`. Historical
+different-cohort observations are about 175 mcycles at one child and 817-818 at five children, so
+the five-child 900-mcycle quote overestimates them by 10.02-10.16%; extending that trend would
+approach roughly 12% overquote at larger counts, but does not establish the running guest's error
+direction. The current v4 API admits 1-1024 proposals. At the committed scalar, checked numeric
+overflow is unreachable within that range, so the estimator itself has no numeric fallback for a
+valid v4 input. Quote preparation can still fall back if a separately configured `mcycles_offset`
+addition overflows; the documented aggregation offset is zero.
 
 The proposal measurements predate the proposal ELF rebuilt by raiko2 #242 and do not use the v0.6.0
 release guest. The model identity records what was measured; it is intentionally not a runtime ELF

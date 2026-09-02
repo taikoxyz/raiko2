@@ -169,11 +169,12 @@ strategy, and the design does not claim that they passed.
 
 ### Accepted Approximation Contract
 
-`Estimated` intentionally returns a coarse pricing input rather than the exact local-execution cycle
-count. Selecting it accepts both underquotes and overquotes, including mismatches for network and
-block-count combinations outside the collected sample rectangles. The ten-percent gate above is a
-model publication and refresh check over concrete collected observations; it is not a mathematical
-bound or per-request runtime guarantee for every future input admitted by the mechanical policy.
+This subsection describes the proposal M2 model. `Estimated` intentionally returns a coarse pricing
+input rather than the exact local-execution cycle count. Selecting it accepts both underquotes and
+overquotes, including mismatches for network and block-count combinations outside the collected
+sample rectangles. The ten-percent proposal gate above is a model publication and refresh check over
+concrete collected observations; it is not a mathematical bound or per-request runtime guarantee
+for every future input admitted by the mechanical policy.
 
 An admitted request does not execute the guest locally before quoting, so raiko2 cannot know that
 request's actual error or fall back merely because its unknown error might exceed ten percent. The
@@ -283,14 +284,24 @@ puts a one-child aggregation near 175 mcycles. The available Mainnet runtime sna
 five-child aggregations at 817 or 818 mcycles, for which the estimate is 900 mcycles. The snapshot's
 deployed proposal image differs from the experiment proposal image, so these aggregation samples are
 from a different release cohort. They are supporting evidence only; they do not calibrate the
-current worktree aggregation ELF or prove a zero intercept.
+current worktree aggregation ELF or prove a zero intercept. The five-child estimate overquotes that
+snapshot by 10.02-10.16%. If the observed one-to-five trend were extrapolated, the overquote would
+approach roughly 12% at larger counts; this is an extrapolation warning, not a validation result.
+The current aggregation ELF cannot be measured with the development-receipt probe because it is
+built with `disable-dev-mode`, so the running guest's error direction remains unknown.
 
 Apply `180 * child_receipt_count` to every structurally valid, non-empty aggregation input. Child
 count and historical observations are not runtime availability gates. As with proposal estimation,
 any recorded image ID is audit provenance and is not compared at runtime. The release owner accepts
 quote-price and timeout drift when selecting `Estimated` with a materially changed aggregation
 guest. The input must contain at least one receipt, and receipt and carry-data counts must match.
-Multiplication and conversion are checked; numeric overflow alone selects local fallback.
+Multiplication and conversion are checked. The current v4 API admits at most 1024 children, for a
+maximum `184,320`-mcycle quote; with `per_child_mcycles = 180`, numeric overflow is unreachable in this
+path. The arithmetic fallback remains defensive for other callers or a future artifact/input limit;
+the quote layer can also fall back if a configured `mcycles_offset` addition overflows. At the
+documented aggregation offset of zero, valid v4 input has no estimate-unavailable local evaluation.
+The host estimator does not verify receipt bytes, so invalid child receipts may be rejected only
+during remote guest execution.
 
 ## Deterministic Journals
 

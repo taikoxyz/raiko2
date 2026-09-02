@@ -1403,10 +1403,11 @@ Operator notes:
   the guest locally to obtain the journal, but quotes the configured count. `estimated` derives the
   expected journal and quote from the typed input without local guest execution. The estimation step
   itself does not submit a proof; the normal Boundless request still proves the original guest and
-  input. It is an explicit auction-cost/timeout optimization. Its approximately ten-percent target
-  is an empirical publication gate over collected observations, not a per-request runtime guarantee.
-  Since an in-policy request is not locally executed first, its actual underquote or overquote is
-  unknown and that mismatch is accepted. Select `evaluated` when exact local cycles are required.
+  input. It is an explicit auction-cost/timeout optimization. For proposals only, the approximately
+  ten-percent target is an empirical publication gate over collected observations, not a per-request
+  runtime guarantee. Aggregation has no error-budget gate. Since an in-policy request is not locally
+  executed first, its actual underquote or overquote is unknown and that mismatch is accepted.
+  Select `evaluated` when exact local cycles are required.
 - Each `estimated` stage table independently accepts `mcycles_offset`, measured in millions of
   cycles. For the current legacy proposal pairing, set `batch_quote.mcycles_offset = 1300` (1.3
   billion cycles) and `aggregation_quote.mcycles_offset = 0`; a batch offset never changes aggregate
@@ -1426,12 +1427,32 @@ Operator notes:
   lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic-overflow inputs emit a warning and
   perform exactly one local evaluation. A malformed
   or structurally invalid input fails directly rather than falling back.
-- Estimated aggregation currently performs that warning-plus-local fallback for every child count.
-  Its committed calibrated-count set is empty: the current aggregation guest has
-  `disable-dev-mode`, so it rejected development receipts before valid current-image cycle
-  measurements could be collected. Counts one through five are calibration targets, not enabled
-  estimates. Keep aggregation on `evaluated` unless the local fallback behavior is explicitly
-  acceptable; enable direct estimates only after valid current-image measurements are committed.
+- Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
+  every structurally valid, non-empty input. Historical child-count observations are audit data,
+  never a runtime allowlist. The v4 API accepts 1-1024 proposals, so the quote ranges from 180 to
+  `184,320` mcycles—roughly 205 times the five-child quote—even though the largest historical
+  observation has five children. That older cohort measured about 175 mcycles at one child and
+  817-818 at five: 900 mcycles is 10.02-10.16% high at five, and extrapolating the observed trend
+  approaches roughly 12% overquote at larger counts. The shipped aggregation guest has not been
+  measured successfully. Its artifact ELF SHA-256 is
+  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
+  `disable-dev-mode` build rejects the development-receipt probe and the artifact image ID is null;
+  its actual error direction is unknown. With the committed scalar and v4 limit,
+  multiplication/conversion overflow cannot occur. A configured
+  `mcycles_offset` addition can still overflow and use the generic local-evaluation fallback, but at
+  the documented aggregation offset of zero valid input has no estimate-unavailable local
+  evaluation. The host path also does not verify child receipt bytes; a bad receipt can enter the
+  auction and fail only during remote guest execution. Malformed input fails directly.
+- With the example aggregation per-mcycle timeout policy, a 1024-child estimate produces a
+  `552,960`-second lock timeout and a `1,105,920`-second fulfillment timeout. Market pricing also has no
+  absolute price cap unless `absolute_max_price_per_mcycle` is configured, so rebids may escalate
+  until the attempt limit. This is accepted extrapolation, not evidence that a 1024-child guest
+  execution was measured.
+- Upgrade note: a deployment already using `aggregation_quote.strategy = "estimated"` previously
+  performed one local evaluation because the committed calibrated-count set was empty. The same
+  configuration now skips execution, quotes `180 * child_count`, and persists
+  `evaluated_mcycles_count = None` without a startup warning. Switch aggregation to `evaluated`
+  before upgrading if exact pre-execution must remain in place.
 - `estimated` does not expose a `skip_preflight` configuration flag. It internally builds through a
   request-scoped SDK builder with an independent preflight layer, so the successful estimate and its
   local fallback do not download the uploaded input or read or modify the shared executor cache.

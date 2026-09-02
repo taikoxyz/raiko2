@@ -21,7 +21,7 @@ DEFAULT_FIXTURE_DIR = (
     / "tests"
     / "fixtures"
     / "risc0-zkgas"
-    / "2026-08-31-m2-global-cap-v2"
+    / "2026-09-02-m2-aggregation-direct-v3"
 )
 DEFAULT_MODEL = ROOT / "crates" / "prover" / "models" / "risc0-zkgas.json"
 MODEL_ID_PREFIX = "risc0-zkgas-m2-"
@@ -134,7 +134,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "model config",
     )
     schema_version = rust_uint(config.get("schema_version"), 32, "schema_version")
-    if schema_version != 2:
+    if schema_version != 3:
         raise ModelError("unsupported schema_version")
     model_id = config.get("model_id")
     if (
@@ -300,8 +300,6 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
         {
             "per_child_mcycles",
             "provenance",
-            "measurements",
-            "calibrated_counts",
         },
         "aggregation config",
     )
@@ -312,24 +310,13 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
         "aggregation per_child_mcycles",
         nonzero=True,
     )
-    measurements = aggregation["measurements"]
-    calibrated_counts = aggregation["calibrated_counts"]
-    if not isinstance(measurements, list) or not isinstance(calibrated_counts, list):
-        raise ModelError("aggregation measurements and calibrated_counts must be lists")
-
     provenance = require_keys(
         aggregation["provenance"],
         {"image_id", "elf_sha256", "execution_po2"},
         "aggregation provenance",
     )
     image_id = provenance["image_id"]
-    is_uncalibrated = not measurements and not calibrated_counts
-    if image_id is None:
-        if not is_uncalibrated:
-            raise ModelError(
-                "aggregation image_id is required once calibration measurements exist"
-            )
-    elif not (
+    if image_id is not None and not (
         isinstance(image_id, str)
         and image_id.startswith("0x")
         and is_lower_hex(image_id[2:], 64)
@@ -343,74 +330,6 @@ def validate_aggregation(aggregation: Mapping[str, Any]) -> None:
         "aggregation execution_po2",
         nonzero=True,
     )
-
-    measured_counts: set[int] = set()
-    enabled_counts: set[int] = set()
-    for measurement in measurements:
-        measurement = require_keys(
-            measurement,
-            {"child_count", "actual_mcycles", "predicted_mcycles", "enabled"},
-            "aggregation measurement",
-        )
-        child_count = rust_uint(
-            measurement.get("child_count"),
-            32,
-            "aggregation child_count",
-            nonzero=True,
-        )
-        if child_count > 5:
-            raise ModelError("aggregation child_count must be in 1..=5")
-        if child_count in measured_counts:
-            raise ModelError("duplicate aggregation child_count")
-        measured_counts.add(child_count)
-        actual = rust_uint(
-            measurement.get("actual_mcycles"),
-            64,
-            "aggregation actual_mcycles",
-            nonzero=True,
-        )
-        predicted = rust_uint(
-            measurement.get("predicted_mcycles"),
-            64,
-            "aggregation predicted_mcycles",
-            nonzero=True,
-        )
-        expected_prediction = per_child_mcycles * child_count
-        if expected_prediction > (1 << 64) - 1:
-            raise ModelError("aggregation prediction must fit u64")
-        if predicted != expected_prediction:
-            raise ModelError(
-                "aggregation predicted_mcycles must equal per_child_mcycles * child_count"
-            )
-        enabled = measurement.get("enabled")
-        if not isinstance(enabled, bool):
-            raise ModelError("aggregation enabled must be a boolean")
-        if enabled and expected_prediction > (1 << 32) - 1:
-            raise ModelError("enabled aggregation prediction must fit u32")
-        accepted = abs(actual - predicted) * 100 <= actual * 10
-        if enabled != accepted:
-            raise ModelError(
-                "aggregation measurement enabled state must match the accepted error budget"
-            )
-        if enabled:
-            enabled_counts.add(child_count)
-    if measurements and measured_counts != {1, 2, 3, 4, 5}:
-        raise ModelError(
-            "aggregation measurements must exactly cover child counts 1..=5"
-        )
-
-    calibrated_set: set[int] = set()
-    for value in calibrated_counts:
-        count = rust_uint(
-            value, 32, "aggregation calibrated count", nonzero=True
-        )
-        if count > 5 or count in calibrated_set:
-            raise ModelError("invalid or duplicate aggregation calibrated count")
-        calibrated_set.add(count)
-    if calibrated_set != enabled_counts:
-        raise ModelError(
-            "aggregation calibrated counts must exactly match enabled measurements"
-        )
 
 
 def successful_rows(

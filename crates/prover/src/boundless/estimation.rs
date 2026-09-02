@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use raiko2_primitives::{
@@ -47,8 +46,6 @@ pub(crate) enum EstimateUnavailable {
     Fork,
     /// Proposal total zkGas exceeded the artifact's `max_total_zkgas` operating cap.
     TotalZkGasCap,
-    /// Aggregation child count is outside the artifact's calibrated set.
-    ChildCount,
     ZeroZkGas,
     Numeric,
 }
@@ -160,9 +157,6 @@ fn estimate_aggregation_with_model(
     .to_vec();
 
     let aggregation = &model.0.aggregation;
-    if !aggregation.calibrated_counts.contains(&child_count) {
-        return Ok(Err(EstimateUnavailable::ChildCount));
-    }
     let Some(mcycles) = aggregation
         .per_child_mcycles
         .checked_mul(u64::from(child_count))
@@ -260,7 +254,7 @@ fn parse_model(input: &str) -> Result<EstimationModel, String> {
 }
 
 fn validate_artifact(artifact: &ValidatedModelArtifact) -> Result<(), String> {
-    if artifact.schema_version != 2 {
+    if artifact.schema_version != 3 {
         return Err("unsupported estimation model schema_version".to_string());
     }
     let content_id = artifact.model_id.strip_prefix(MODEL_ID_PREFIX);
@@ -394,85 +388,13 @@ fn validate_aggregation(aggregation: &Aggregation) -> Result<(), String> {
     if aggregation.per_child_mcycles == 0 {
         return Err("aggregation per_child_mcycles must be non-zero".to_string());
     }
-    validate_aggregation_provenance(
-        &aggregation.provenance,
-        aggregation.measurements.is_empty() && aggregation.calibrated_counts.is_empty(),
-    )?;
-
-    let mut rows = HashSet::new();
-    let mut enabled_counts = HashSet::new();
-    for measurement in &aggregation.measurements {
-        if !(1..=5).contains(&measurement.child_count) {
-            return Err("aggregation child_count must be in 1..=5".to_string());
-        }
-        if !rows.insert(measurement.child_count) {
-            return Err("duplicate aggregation child_count".to_string());
-        }
-        if measurement.actual_mcycles == 0 || measurement.predicted_mcycles == 0 {
-            return Err("aggregation measured mcycles must be non-zero".to_string());
-        }
-        let runtime_prediction = aggregation
-            .per_child_mcycles
-            .checked_mul(u64::from(measurement.child_count))
-            .ok_or_else(|| "aggregation runtime prediction overflows u64".to_string())?;
-        if measurement.predicted_mcycles != runtime_prediction {
-            return Err(
-                "aggregation predicted_mcycles must equal per_child_mcycles * child_count"
-                    .to_string(),
-            );
-        }
-        let accepted = aggregation_measurement_is_accepted(measurement);
-        if measurement.enabled != accepted {
-            return Err(
-                "aggregation measurement enabled state must match the accepted error budget"
-                    .to_string(),
-            );
-        }
-        if measurement.enabled {
-            if u32::try_from(runtime_prediction).is_err() {
-                return Err("enabled aggregation runtime prediction must fit u32".to_string());
-            }
-            enabled_counts.insert(measurement.child_count);
-        }
-    }
-    if !aggregation.measurements.is_empty() && rows != HashSet::from([1, 2, 3, 4, 5]) {
-        return Err("aggregation measurements must exactly cover child counts 1..=5".to_string());
-    }
-
-    let mut calibrated_counts = HashSet::new();
-    for &count in &aggregation.calibrated_counts {
-        if !(1..=5).contains(&count) || !calibrated_counts.insert(count) {
-            return Err("invalid or duplicate aggregation calibrated count".to_string());
-        }
-    }
-    if calibrated_counts != enabled_counts {
-        return Err(
-            "aggregation calibrated counts must exactly match enabled measurements".to_string(),
-        );
-    }
+    validate_aggregation_provenance(&aggregation.provenance)?;
     Ok(())
 }
 
-fn aggregation_measurement_is_accepted(measurement: &AggregationMeasurement) -> bool {
-    let actual = u128::from(measurement.actual_mcycles);
-    let predicted = u128::from(measurement.predicted_mcycles);
-    let absolute_error = actual.abs_diff(predicted);
-    let underquote = actual.saturating_sub(predicted);
-    absolute_error * 100 <= actual * 10 && underquote * 100 <= actual * 10
-}
-
-fn validate_aggregation_provenance(
-    provenance: &AggregationProvenance,
-    is_uncalibrated: bool,
-) -> Result<(), String> {
-    match &provenance.image_id {
-        Some(image_id) => validate_image_id(image_id, "aggregation")?,
-        None if is_uncalibrated => {}
-        None => {
-            return Err(
-                "aggregation image_id is required once calibration measurements exist".to_string(),
-            );
-        }
+fn validate_aggregation_provenance(provenance: &AggregationProvenance) -> Result<(), String> {
+    if let Some(image_id) = &provenance.image_id {
+        validate_image_id(image_id, "aggregation")?;
     }
     validate_sha256(&provenance.elf_sha256, "aggregation ELF")?;
     if provenance.execution_po2 == 0 {
@@ -622,8 +544,6 @@ struct MainnetDiagnostics {
 struct Aggregation {
     per_child_mcycles: u64,
     provenance: AggregationProvenance,
-    measurements: Vec<AggregationMeasurement>,
-    calibrated_counts: Vec<u32>,
 }
 
 #[derive(Deserialize)]
@@ -634,20 +554,11 @@ struct AggregationProvenance {
     execution_po2: u32,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AggregationMeasurement {
-    child_count: u32,
-    actual_mcycles: u64,
-    predicted_mcycles: u64,
-    enabled: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, str::FromStr};
 
-    use alloy_primitives::{Address, B256, U256, Uint, address, b256};
+    use alloy_primitives::{Address, B256, U256, Uint, address};
     use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
     use raiko2_primitives::{
         ChainSpec, StatelessInput,
@@ -714,62 +625,43 @@ mod tests {
         estimate_proposal(input, 20).expect("structurally valid proposal input")
     }
 
+    fn aggregation_carries_with_count(count: usize) -> Vec<ProofCarryData> {
+        let mut carries = Vec::with_capacity(count);
+        let mut parent_proposal_hash = B256::ZERO;
+        let mut parent_block_hash = B256::repeat_byte(0x40);
+
+        for index in 0..count {
+            let ordinal = u8::try_from(index + 1).expect("test child count fits u8");
+            let proposal_hash = B256::repeat_byte(ordinal);
+            let checkpoint_block_hash = B256::repeat_byte(0x80 + ordinal);
+            carries.push(ProofCarryData {
+                chain_id: 167_000,
+                verifier: address!("00000000000000000000000000000000000000aa"),
+                transition_input: TransitionInputData {
+                    proposal_id: u64::from(ordinal),
+                    proposal_hash,
+                    parent_proposal_hash,
+                    parent_block_hash,
+                    actual_prover: address!("00000000000000000000000000000000000000bb"),
+                    transition: ShastaTransitionInput {
+                        proposer: Address::ZERO,
+                        timestamp: 100 + u64::from(ordinal),
+                    },
+                    checkpoint: Checkpoint {
+                        blockNumber: Uint::from(10 + u64::from(ordinal)),
+                        blockHash: checkpoint_block_hash,
+                        stateRoot: B256::repeat_byte(0xa0 + ordinal),
+                    },
+                },
+            });
+            parent_proposal_hash = proposal_hash;
+            parent_block_hash = checkpoint_block_hash;
+        }
+        carries
+    }
+
     fn aggregation_carries() -> Vec<ProofCarryData> {
-        let first_hash = b256!("1111111111111111111111111111111111111111111111111111111111111111");
-        let first_checkpoint_hash =
-            b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        vec![
-            ProofCarryData {
-                chain_id: 167_000,
-                verifier: address!("00000000000000000000000000000000000000aa"),
-                transition_input: TransitionInputData {
-                    proposal_id: 1,
-                    proposal_hash: first_hash,
-                    parent_proposal_hash: B256::ZERO,
-                    parent_block_hash: b256!(
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    ),
-                    actual_prover: address!("00000000000000000000000000000000000000bb"),
-                    transition: ShastaTransitionInput {
-                        proposer: Address::ZERO,
-                        timestamp: 101,
-                    },
-                    checkpoint: Checkpoint {
-                        blockNumber: Uint::from(10_u64),
-                        blockHash: first_checkpoint_hash,
-                        stateRoot: b256!(
-                            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                        ),
-                    },
-                },
-            },
-            ProofCarryData {
-                chain_id: 167_000,
-                verifier: address!("00000000000000000000000000000000000000aa"),
-                transition_input: TransitionInputData {
-                    proposal_id: 2,
-                    proposal_hash: b256!(
-                        "2222222222222222222222222222222222222222222222222222222222222222"
-                    ),
-                    parent_proposal_hash: first_hash,
-                    parent_block_hash: first_checkpoint_hash,
-                    actual_prover: address!("00000000000000000000000000000000000000bb"),
-                    transition: ShastaTransitionInput {
-                        proposer: Address::ZERO,
-                        timestamp: 102,
-                    },
-                    checkpoint: Checkpoint {
-                        blockNumber: Uint::from(11_u64),
-                        blockHash: b256!(
-                            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                        ),
-                        stateRoot: b256!(
-                            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-                        ),
-                    },
-                },
-            },
-        ]
+        aggregation_carries_with_count(2)
     }
 
     fn encoded_aggregation(
@@ -787,43 +679,15 @@ mod tests {
         .expect("encode aggregation fixture")
     }
 
-    fn aggregation_model(
-        calibrated_counts: &[u32],
-        per_child_mcycles: u64,
-    ) -> super::EstimationModel {
+    fn aggregation_model(per_child_mcycles: u64) -> super::EstimationModel {
         let mut artifact = valid_artifact();
         artifact["aggregation"]["per_child_mcycles"] = json!(per_child_mcycles);
-        artifact["aggregation"]["provenance"]["image_id"] =
-            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
-        artifact["aggregation"]["measurements"] = Value::Array(
-            (1..=5)
-                .map(|child_count| {
-                    let enabled = calibrated_counts.contains(&child_count);
-                    let predicted_mcycles = per_child_mcycles
-                        .checked_mul(u64::from(child_count))
-                        .expect("aggregation model fixture prediction");
-                    json!({
-                        "child_count": child_count,
-                        "actual_mcycles": if enabled {
-                            predicted_mcycles
-                        } else {
-                            predicted_mcycles
-                                .checked_mul(2)
-                                .expect("aggregation model fixture rejected measurement")
-                        },
-                        "predicted_mcycles": predicted_mcycles,
-                        "enabled": enabled
-                    })
-                })
-                .collect(),
-        );
-        artifact["aggregation"]["calibrated_counts"] = json!(calibrated_counts);
-        parse(artifact).expect("valid calibrated aggregation model")
+        parse(artifact).expect("valid aggregation model")
     }
 
     fn valid_artifact() -> Value {
         json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "model_id": "risc0-zkgas-m2-0123456789abcdef",
             "originating_experiment_model": "M2",
             "proposal": {
@@ -849,9 +713,7 @@ mod tests {
             },
             "aggregation": {
                 "per_child_mcycles": 180,
-                "provenance": {"image_id": null, "elf_sha256": "fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924", "execution_po2": 20},
-                "measurements": [],
-                "calibrated_counts": []
+                "provenance": {"image_id": null, "elf_sha256": "fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924", "execution_po2": 20}
             }
         })
     }
@@ -891,6 +753,9 @@ mod tests {
         artifact["schema_version"] = json!(1);
         assert!(parse(artifact).is_err());
         let mut artifact = valid_artifact();
+        artifact["schema_version"] = json!(2);
+        assert!(parse(artifact).is_err());
+        let mut artifact = valid_artifact();
         artifact["model_id"] = json!("");
         assert!(parse(artifact).is_err());
         let mut artifact = valid_artifact();
@@ -908,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn model_schema_v2_rejects_the_legacy_v1_identity() {
+    fn model_schema_v3_rejects_the_legacy_v1_identity() {
         let mut artifact = valid_artifact();
         artifact["model_id"] = json!("risc0-zkgas-m2-v1");
 
@@ -970,152 +835,15 @@ mod tests {
     }
 
     #[test]
-    fn model_rejects_inconsistent_aggregation_calibration_rows() {
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["measurements"] = json!([
-            {"child_count": 1, "actual_mcycles": 180, "predicted_mcycles": 180, "enabled": true}
-        ]);
-        assert!(parse(artifact).is_err());
-    }
-
-    #[test]
-    fn aggregation_calibration_rejects_incomplete_rows() {
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["provenance"]["image_id"] =
-            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
-        artifact["aggregation"]["measurements"] = json!([
-            {"child_count": 1, "actual_mcycles": 400, "predicted_mcycles": 180, "enabled": false},
-            {"child_count": 2, "actual_mcycles": 800, "predicted_mcycles": 360, "enabled": false},
-            {"child_count": 3, "actual_mcycles": 1200, "predicted_mcycles": 540, "enabled": false},
-            {"child_count": 4, "actual_mcycles": 1600, "predicted_mcycles": 720, "enabled": false}
-        ]);
-        match parse(artifact) {
-            Err(error) => assert_eq!(
-                error,
-                "aggregation measurements must exactly cover child counts 1..=5"
-            ),
-            Ok(_) => panic!("incomplete aggregation calibration must be rejected"),
+    fn model_rejects_legacy_aggregation_calibration_gates() {
+        for field in ["measurements", "calibrated_counts"] {
+            let mut artifact = valid_artifact();
+            artifact["aggregation"][field] = json!([]);
+            assert!(
+                parse(artifact).is_err(),
+                "legacy field {field} must be rejected"
+            );
         }
-    }
-
-    #[test]
-    fn aggregation_calibration_rejects_passing_row_left_disabled() {
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["provenance"]["image_id"] =
-            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
-        artifact["aggregation"]["measurements"] = Value::Array(
-            (1..=5)
-                .map(|child_count| {
-                    json!({
-                        "child_count": child_count,
-                        "actual_mcycles": 180 * child_count,
-                        "predicted_mcycles": 180 * child_count,
-                        "enabled": false
-                    })
-                })
-                .collect(),
-        );
-        assert!(parse(artifact).is_err());
-    }
-
-    #[test]
-    fn aggregation_calibration_rejects_predictions_unrelated_to_runtime_formula() {
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["provenance"]["image_id"] =
-            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
-        artifact["aggregation"]["measurements"] = Value::Array(
-            (1..=5)
-                .map(|child_count| {
-                    json!({
-                        "child_count": child_count,
-                        "actual_mcycles": 400 * child_count,
-                        "predicted_mcycles": 400 * child_count,
-                        "enabled": true
-                    })
-                })
-                .collect(),
-        );
-        artifact["aggregation"]["calibrated_counts"] = json!([1, 2, 3, 4, 5]);
-
-        match parse(artifact) {
-            Err(error) => assert_eq!(
-                error,
-                "aggregation predicted_mcycles must equal per_child_mcycles * child_count"
-            ),
-            Ok(_) => panic!("calibration must use the same prediction as the runtime quote"),
-        }
-    }
-
-    #[test]
-    fn aggregation_calibration_rejects_runtime_prediction_overflow() {
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["per_child_mcycles"] = json!(u64::MAX);
-        artifact["aggregation"]["provenance"]["image_id"] =
-            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
-        artifact["aggregation"]["measurements"] = Value::Array(
-            (1..=5)
-                .rev()
-                .map(|child_count| {
-                    json!({
-                        "child_count": child_count,
-                        "actual_mcycles": u64::MAX,
-                        "predicted_mcycles": u64::MAX,
-                        "enabled": true
-                    })
-                })
-                .collect(),
-        );
-        artifact["aggregation"]["calibrated_counts"] = json!([1, 2, 3, 4, 5]);
-
-        match parse(artifact) {
-            Err(error) => assert_eq!(error, "aggregation runtime prediction overflows u64"),
-            Ok(_) => panic!("overflowing aggregation calibration must be rejected"),
-        }
-    }
-
-    #[test]
-    fn aggregation_calibration_u32_limit_applies_only_to_enabled_rows() {
-        let per_child_mcycles = u64::from(u32::MAX) + 1;
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["per_child_mcycles"] = json!(per_child_mcycles);
-        artifact["aggregation"]["provenance"]["image_id"] =
-            json!("0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10");
-        artifact["aggregation"]["measurements"] = Value::Array(
-            (1_u32..=5)
-                .map(|child_count| {
-                    let predicted_mcycles = per_child_mcycles * u64::from(child_count);
-                    json!({
-                        "child_count": child_count,
-                        "actual_mcycles": predicted_mcycles * 2,
-                        "predicted_mcycles": predicted_mcycles,
-                        "enabled": false
-                    })
-                })
-                .collect(),
-        );
-        parse(artifact.clone()).expect("disabled u64 calibration rows remain auditable");
-
-        for measurement in artifact["aggregation"]["measurements"]
-            .as_array_mut()
-            .expect("aggregation measurement array")
-        {
-            measurement["actual_mcycles"] = measurement["predicted_mcycles"].clone();
-            measurement["enabled"] = json!(true);
-        }
-        artifact["aggregation"]["calibrated_counts"] = json!([1, 2, 3, 4, 5]);
-        match parse(artifact) {
-            Err(error) => assert_eq!(error, "enabled aggregation runtime prediction must fit u32"),
-            Ok(_) => panic!("enabled aggregation calibration must fit runtime u32 output"),
-        }
-    }
-
-    #[test]
-    fn model_requires_an_aggregation_image_id_once_measurements_exist() {
-        let mut artifact = valid_artifact();
-        artifact["aggregation"]["measurements"] = json!([
-            {"child_count": 1, "actual_mcycles": 180, "predicted_mcycles": 180, "enabled": false}
-        ]);
-        assert!(parse(artifact).is_err());
     }
 
     #[test]
@@ -1144,55 +872,6 @@ mod tests {
     }
 
     #[test]
-    fn aggregation_calibration_rows_and_runtime_set_follow_the_fixed_acceptance_rule() {
-        let artifact = fixture_artifact();
-        let aggregation = &artifact.aggregation;
-        if aggregation.measurements.is_empty() {
-            assert!(aggregation.calibrated_counts.is_empty());
-            assert!(aggregation.provenance.image_id.is_none());
-            return;
-        }
-        let mut row_counts = HashSet::new();
-        let mut derived_counts = Vec::new();
-
-        assert_eq!(aggregation.measurements.len(), 5);
-        for row in &aggregation.measurements {
-            assert!(row_counts.insert(row.child_count));
-            assert_eq!(
-                row.predicted_mcycles,
-                aggregation
-                    .per_child_mcycles
-                    .checked_mul(u64::from(row.child_count))
-                    .expect("validated aggregation prediction")
-            );
-
-            let actual = u128::from(row.actual_mcycles);
-            let predicted = u128::from(row.predicted_mcycles);
-            let accepted = actual.abs_diff(predicted) * 100 <= actual * 10
-                && actual.saturating_sub(predicted) * 100 <= actual * 10;
-            assert_eq!(row.enabled, accepted);
-            if accepted {
-                derived_counts.push(row.child_count);
-            }
-        }
-        assert_eq!(row_counts, HashSet::from([1, 2, 3, 4, 5]));
-
-        derived_counts.sort_unstable();
-        let mut artifact_counts = aggregation.calibrated_counts.clone();
-        artifact_counts.sort_unstable();
-        assert_eq!(artifact_counts, derived_counts);
-
-        let mut runtime_counts = super::estimation_model()
-            .expect("runtime embedded model")
-            .0
-            .aggregation
-            .calibrated_counts
-            .clone();
-        runtime_counts.sort_unstable();
-        assert_eq!(runtime_counts, derived_counts);
-    }
-
-    #[test]
     fn proposal_empty_witnesses_are_a_direct_error() {
         assert!(estimate_proposal(&GuestInput::default(), 20).is_err());
     }
@@ -1215,7 +894,7 @@ mod tests {
         assert_eq!(estimate.journal.len(), 32);
         assert_eq!(estimate.journal, expected.as_slice());
         assert_eq!(estimate.mcycles, 2_237);
-        assert_eq!(estimate.model_id, "risc0-zkgas-m2-5adefe56336d7238");
+        assert_eq!(estimate.model_id, "risc0-zkgas-m2-c71d7a4ff237c10d");
     }
 
     #[test]
@@ -1449,11 +1128,11 @@ mod tests {
             image_id,
             Address::ZERO,
         );
-        let model = aggregation_model(&[2], 180);
+        let model = aggregation_model(180);
 
         let estimate = estimate_aggregation_with_model(&encoded, &model)
             .expect("structurally valid aggregation")
-            .expect("calibrated aggregation count");
+            .expect("aggregation estimate");
 
         assert_eq!(estimate.journal, expected.as_slice());
         assert_eq!(estimate.journal.len(), 32);
@@ -1462,35 +1141,19 @@ mod tests {
     }
 
     #[test]
-    fn aggregation_embedded_empty_calibrated_set_fails_closed() {
+    fn aggregation_five_children_estimates_without_calibration_rows() {
         let encoded = encoded_aggregation(
-            vec![aggregation_carries().remove(0)],
-            vec![vec![0xff]],
+            aggregation_carries_with_count(5),
+            vec![vec![0xff]; 5],
             [0; 8],
             Address::ZERO,
         );
 
-        assert_eq!(
-            estimate_aggregation(&encoded).expect("structurally valid aggregation"),
-            Err(EstimateUnavailable::ChildCount)
-        );
-    }
+        let estimate = estimate_aggregation(&encoded)
+            .expect("structurally valid aggregation")
+            .expect("aggregation estimate is independent of calibration rows");
 
-    #[test]
-    fn aggregation_uncalibrated_count_is_unavailable() {
-        let encoded = encoded_aggregation(
-            aggregation_carries(),
-            vec![vec![0xff], vec![0xfe]],
-            [0; 8],
-            Address::ZERO,
-        );
-        let model = aggregation_model(&[1], 180);
-
-        assert_eq!(
-            estimate_aggregation_with_model(&encoded, &model)
-                .expect("structurally valid aggregation"),
-            Err(EstimateUnavailable::ChildCount)
-        );
+        assert_eq!(estimate.mcycles, 900);
     }
 
     #[test]
@@ -1501,7 +1164,7 @@ mod tests {
             [0; 8],
             Address::ZERO,
         );
-        let mut model = aggregation_model(&[2], 180);
+        let mut model = aggregation_model(180);
         model.0.aggregation.per_child_mcycles = u64::MAX;
 
         assert_eq!(
@@ -1519,7 +1182,7 @@ mod tests {
             [0; 8],
             Address::ZERO,
         );
-        let mut model = aggregation_model(&[2], 180);
+        let mut model = aggregation_model(180);
         model.0.aggregation.per_child_mcycles = u64::from(u32::MAX);
 
         assert_eq!(
@@ -1619,7 +1282,7 @@ mod tests {
 
     const VALIDATION_FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/validation.jsonl"
+        "/../../tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3/validation.jsonl"
     ));
 
     #[derive(Debug, Deserialize)]

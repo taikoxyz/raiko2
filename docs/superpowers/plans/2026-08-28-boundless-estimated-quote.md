@@ -4,7 +4,7 @@
 
 **Goal:** Add an opt-in Boundless `estimated` quote strategy that derives the RISC0 journal and cycle quote without local proposal/aggregation execution when the input satisfies the committed operating policy, while preserving one-execution local fallback and durable quote provenance.
 
-**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, operating-policy selection, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration continues to choose the strategy per stage; the embedded JSON is the only runtime source for coefficients, the global zkGas cap, model identity, and calibrated aggregation counts.
+**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, operating-policy selection, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration continues to choose the strategy per stage; the embedded JSON is the only runtime source for coefficients, the global zkGas cap, model identity, and aggregation per-child scalar.
 
 **Tech Stack:** Rust 2024 workspace, serde/serde_json, bincode, RISC Zero 3.0.5, boundless-market 2.0.0, Tokio, TOML configuration, Python 3.11 experiment venv for fixture diagnostics.
 
@@ -14,7 +14,7 @@
 
 - Do not change guest source or generated ELFs.
 - Do not add a public preflight flag, runtime ELF/image/version gate, or network-specific coefficient.
-- Treat malformed stage input and invalid carry linkage as direct request errors. Treat operating-policy, execution-configuration, fork, zero/overflow, and uncalibrated-count failures as warning-plus-one-local-execution fallback.
+- Treat malformed stage input and invalid carry linkage as direct request errors. Treat proposal operating-policy, execution-configuration, fork, zero/overflow, and aggregation numeric-overflow failures as warning-plus-one-local-execution fallback.
 - Use `apply_patch` for repository edits. Run Python through an existing virtual environment.
 - Preserve unrelated worktree changes. Commit each coherent task only after its focused red/green checks pass.
 - Before completion, run independent adversarial review and independent behavioral verification because journal equality, request pricing, and durable rebid state are cross-crate behavior.
@@ -49,19 +49,19 @@ include_str!(concat!(
 
 The artifact schema contains:
 
-- `schema_version = 2`, content-addressed model ID `risc0-zkgas-m2-5adefe56336d7238`, and originating experiment model `M2`;
+- `schema_version = 3`, a content-addressed model ID, and originating experiment model `M2`;
 - provenance: source revision `4f8300497aba75605b9b8568b1955faa1f7f04bc`, proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`, proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, RISC0 `3.0.5`, and `min_execution_po2 = 20`;
 - generated config SHA-256, compact input-row SHA-256 `0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328`, and validation fixture SHA-256 `dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767`;
 - decimal proposal coefficients and scaled integer coefficients with scale `1_000_000_000_000`;
 - global proposal operating cap `max_total_zkgas = 500_000_000`; network and block count are not availability gates;
 - exact cohort counts and documented diagnostics for Hoodi calibration and Mainnet evaluation;
-- aggregation formula `per_child_mcycles = 180`, current aggregation image provenance, and the measured child-count rows produced in Task 7. The runtime calibrated set is derived only from rows with both absolute error and underquote within 10 percent.
+- aggregation formula `per_child_mcycles = 180` and audit-only aggregation image provenance. No child-count observation controls runtime availability.
 
-Validation rejects unknown fields, wrong schema/model IDs, zero scale/coefficient/minimum-po2/cap values, diagnostics/count inconsistencies, invalid SHA-256/image formats, duplicated aggregation child counts, aggregation rows outside `1..=5`, and aggregation rows marked enabled outside the accepted error rule. Release provenance is validated for shape only and is not compared with the running binary.
+Validation rejects unknown fields, wrong schema/model IDs, zero scale/coefficient/minimum-po2/cap values, diagnostics/count inconsistencies, and invalid SHA-256/image formats. Legacy aggregation `measurements` and `calibrated_counts` fields are unknown and rejected. Release provenance is validated for shape only and is not compared with the running binary.
 
 **Step 1: Write failing schema tests**
 
-Add unit tests in `estimation.rs` that parse a valid minimal artifact string and reject malformed JSON, missing fields, unknown fields, wrong model/schema IDs, invalid hashes, zero operating-policy values, and inconsistent aggregation calibration rows. Add a test proving production parameters are read from the parsed artifact rather than Rust constants.
+Add unit tests in `estimation.rs` that parse a valid minimal artifact string and reject malformed JSON, missing fields, unknown fields, wrong model/schema IDs, invalid hashes, zero operating-policy values, and legacy aggregation activation fields. Add a test proving production parameters are read from the parsed artifact rather than Rust constants.
 
 Run:
 
@@ -73,11 +73,11 @@ Expected: FAIL because the module, schema, and artifact do not exist.
 
 **Step 2: Implement the private serde schema and validation**
 
-Use private `#[serde(deny_unknown_fields)]` structs. Store decimal coefficients as strings for auditability and parse them only in fixture-regression tests; runtime arithmetic reads only the scaled integer fields from the artifact. Keep all coefficient/operating-policy/calibrated-count values out of Rust constants.
+Use private `#[serde(deny_unknown_fields)]` structs. Store decimal coefficients as strings for auditability and parse them only in fixture-regression tests; runtime arithmetic reads only the scaled integer fields from the artifact. Keep all coefficient, operating-policy, and aggregation scalar values out of Rust constants.
 
-**Step 3: Add the artifact with proposal data and an initially empty aggregation calibration list**
+**Step 3: Add the artifact with proposal data and the direct aggregation scalar**
 
-The empty list means aggregation `Estimated` cannot estimate until Task 7 records current-image rows; it does not fall through to historical counts. Task 7 updates this same artifact before the full feature is considered ready.
+The artifact contains `per_child_mcycles = 180`; it contains no aggregation child-count activation list. Every structurally valid, non-empty aggregation input uses the direct formula.
 
 **Step 4: Run the focused tests**
 
@@ -173,7 +173,6 @@ pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
     TotalZkGasCap,
-    ChildCount,
     ZeroZkGas,
     Numeric,
 }
@@ -243,7 +242,7 @@ git commit -m "feat(boundless): estimate proposal quote metadata"
 
 **Step 1: Write failing regression tests**
 
-Rust tests load the artifact plus `tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/validation.jsonl`, require its SHA-256, six-field row schema, unique `(network, proposal_id)` keys, and exact 40 Hoodi calibration/20 Mainnet evaluation rows. Recompute both continuous and integer predictions and assert the artifact diagnostics with tight tolerances:
+Rust tests load the artifact plus `tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3/validation.jsonl`, require its SHA-256, six-field row schema, unique `(network, proposal_id)` keys, and exact 40 Hoodi calibration/20 Mainnet evaluation rows. Recompute both continuous and integer predictions and assert the artifact diagnostics with tight tolerances:
 
 - Hoodi continuous: 17 underquotes, MAPE 0.094557%, maximum absolute/underquote 0.279512%, zero rows over 10%;
 - Hoodi integer: 12 underquotes, MAPE 0.093492%, maximum absolute/underquote 0.264550%, zero rows over 10%;
@@ -301,8 +300,8 @@ Cover:
 - valid input derives each child input from the carry and computes exactly the same journal as `aggregate_shasta_zk_with_verifier` using a no-op verifier;
 - proposal image words use `words_to_bytes_le`, matching the RISC0 guest;
 - receipt bytes are not deserialized or verified by the host journal path;
-- only child counts present in the artifact's accepted calibrated set estimate `180 * count`;
-- uncalibrated count and checked multiplication/conversion overflow are unavailable.
+- every structurally valid, non-empty child count estimates `180 * count`;
+- checked multiplication/conversion overflow is unavailable.
 
 Run:
 
@@ -316,9 +315,11 @@ Expected: FAIL because aggregation estimation is absent.
 
 Construct `ShastaZkAggregationGuestInput` from carry-derived child hashes, then call `aggregate_shasta_zk_with_verifier(..., |_index, _input| Ok(()))`. This preserves one bounds/linkage source of truth and avoids receipt verification on the host.
 
-**Step 3: Implement artifact-calibrated count selection and checked multiplication**
+**Step 3: Implement direct checked multiplication**
 
-Do not admit counts from the historical five-child snapshot. An empty calibrated set always selects local fallback.
+Read `per_child_mcycles` from the artifact and apply it to every structurally valid, non-empty
+aggregation input. Historical child-count observations are not an admission policy. Only checked
+multiplication or final conversion overflow selects local fallback.
 
 **Step 4: Re-run focused tests**
 
@@ -409,50 +410,38 @@ git add crates/prover/src/boundless/mod.rs crates/prover/src/lib.rs
 git commit -m "feat(boundless): prepare estimated quote context"
 ```
 
-### Task 7: Measure the current aggregation image at one through five children
+### Task 7: Record non-authoritative aggregation observations
 
 **Files:**
 
 - Create: `crates/prover/examples/boundless_aggregation_calibration.rs`
-- Modify: `crates/prover/models/risc0-zkgas.json`
-- Modify: `crates/prover/src/boundless/estimation.rs`
 
-**Step 1: Implement a reproducible local calibration example**
+**Step 1: Implement a reproducible local observation example**
 
-The example loads the current fixed-path RISC0 Shasta aggregation ELF through `raiko2-guests`, computes its image ID, creates a structurally valid linked carry sequence and receipt-backed aggregation input for counts `1..=5`, executes only the aggregation guest with `execution_po2 = 20`, and prints stable JSON rows containing image ID, child count, actual user mcycles, predicted mcycles, signed error, absolute-error percent, and underquote percent.
+The example loads the current fixed-path RISC0 Shasta aggregation ELF through `raiko2-guests`, computes its image ID, creates a structurally valid linked carry sequence and receipt-backed aggregation input for counts `1..=5`, executes only the aggregation guest with `execution_po2 = 20`, and prints stable observation rows containing image ID, child count, actual user mcycles, predicted mcycles, signed error, absolute-error percent, and underquote percent. The output is diagnostic data only and cannot enable or disable runtime child counts.
 
 Use RISC0 dev-mode assumption receipts whose claims contain the exact carry-derived 32-byte journals. This exercises the guest receipt-verification syscall/assumption path during execution; the example must reject a receipt whose claim or image ID does not match. It does not prove or submit anything to Boundless.
 
-**Step 2: Run the calibration twice and compare exact cycles**
+**Step 2: Run the observation probe twice and compare exact cycles**
 
 ```bash
 RISC0_DEV_MODE=1 cargo run -p raiko2-prover --example boundless_aggregation_calibration --features boundless
 RISC0_DEV_MODE=1 cargo run -p raiko2-prover --example boundless_aggregation_calibration --features boundless
 ```
 
-Expected: both runs report identical image ID and exact mcycle results for every count. If they differ, aggregation Estimated remains disabled by leaving `calibrated_counts` empty and the discrepancy is reported before proceeding.
+Expected: both runs report identical image ID and exact mcycle results for every count, or record the discrepancy for operator review. Either result leaves the direct runtime formula unchanged.
 
-**Step 3: Apply the fixed acceptance rule**
+**Step 3: Keep observations outside the runtime artifact**
 
-For each deterministic count, enable it only when `abs(predicted - actual) / actual <= 10%` and `max(actual - predicted, 0) / actual <= 10%`. Record all five measured rows and the aggregation image ID in the artifact; populate `calibrated_counts` with exactly the passing counts. Do not adjust `180` from these rows without a separate design revision.
+Do not add `enabled`, `calibrated_counts`, or any equivalent child-count allowlist. Changing the
+`180` scalar remains a separate explicit model update, while the current runtime always applies the
+configured scalar to every structurally valid, non-empty aggregation input.
 
-**Step 4: Lock calibration regression tests**
-
-Add tests that the artifact rows are unique and exactly cover `1..=5`, recompute each error, derive the calibrated set, and prove that the runtime set equals that derivation. The example output and artifact must use user mcycles with the same ceiling conversion as `evaluate_guest`.
-
-Run:
+**Step 4: Commit**
 
 ```bash
-cargo test -p raiko2-prover --features boundless boundless::estimation::tests::aggregation_calibration_
-```
-
-Expected: PASS. If no count passes, proposal Estimated remains implementable but aggregation Estimated always falls back; document that limitation rather than admitting unsupported counts.
-
-**Step 5: Commit**
-
-```bash
-git add crates/prover/examples/boundless_aggregation_calibration.rs crates/prover/src/boundless/estimation.rs crates/prover/models/risc0-zkgas.json
-git commit -m "test(boundless): calibrate aggregation cycle estimate"
+git add crates/prover/examples/boundless_aggregation_calibration.rs
+git commit -m "test(boundless): record aggregation cycle observations"
 ```
 
 ### Task 8: Isolate the Boundless SDK builder for estimated and fallback requests
@@ -587,7 +576,11 @@ git commit -m "fix(boundless): persist rebid quote provenance"
 
 **Step 1: Update the canonical documentation**
 
-Document exactly three strategies, both required explicit stage tables, per-pair inheritance, Estimated's no-local-execution fast path, warning-plus-local fallback, the empirical 10% publication gate, current proposal operating policy, current aggregation calibrated set from Task 7, release-owner compatibility responsibility, optional progress/resume fields, and intentional rejection of `raiko_agent`.
+Document exactly three strategies, both required explicit stage tables, per-pair inheritance,
+Estimated's no-local-execution fast path, warning-plus-local fallback, the proposal model's empirical
+10% publication gate, current proposal operating policy, the direct aggregation scalar, release-owner
+compatibility responsibility, optional progress/resume fields, and intentional rejection of
+`raiko_agent`.
 
 State explicitly that Estimated does not expose `skip_preflight`, does not submit a proof during estimation, and does not runtime-check ELF/image/revision/RISC0 version.
 
@@ -651,7 +644,10 @@ Give the reviewer the original approved spec and complete diff. Require review o
 
 **Step 5: Request independent behavioral verification**
 
-Have a tester independently run the focused model/config/prover/runtime suites and exercise available proposal estimation, operating-policy one-execution fallback, calibrated/unconfigured aggregation counts, serialization compatibility, and builder isolation. Fix confirmed failures and ask the tester to rerun affected checks.
+Have a tester independently run the focused model/config/prover/runtime suites and exercise available
+proposal estimation, operating-policy one-execution fallback, direct aggregation estimates across
+child counts, aggregation numeric overflow, serialization compatibility, and builder isolation. Fix
+confirmed failures and ask the tester to rerun affected checks.
 
 **Step 6: Final readiness check**
 

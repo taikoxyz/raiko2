@@ -20,7 +20,7 @@ const PER_CHILD_MCYCLES: u64 = 180;
 const BLOCKER: &str = "the current aggregation guest rejects claim-correct development receipts before an assumption syscall can be established";
 
 #[derive(Serialize)]
-struct CalibrationOutput {
+struct ObservationOutput {
     aggregation_image_id: String,
     aggregation_elf_sha256: String,
     proposal_image_id: String,
@@ -28,8 +28,7 @@ struct CalibrationOutput {
     binding_checks: BindingChecks,
     execution_capability: ExecutionCapability,
     blocker: Option<&'static str>,
-    rows: Vec<CalibrationRow>,
-    calibrated_counts: Vec<u32>,
+    observations: Vec<ObservationRow>,
 }
 
 #[derive(Serialize)]
@@ -46,7 +45,7 @@ struct ExecutionCapability {
 }
 
 #[derive(Serialize)]
-struct CalibrationRow {
+struct ObservationRow {
     aggregation_image_id: String,
     child_count: u32,
     actual_user_mcycles: u64,
@@ -54,7 +53,6 @@ struct CalibrationRow {
     signed_error_mcycles: i64,
     absolute_error_percent: String,
     underquote_percent: String,
-    enabled: bool,
 }
 
 struct DevelopmentReceipts {
@@ -168,19 +166,17 @@ fn percent(numerator: u128, denominator: u128) -> String {
     format!("{}.{:06}", scaled / 1_000_000, scaled % 1_000_000)
 }
 
-fn calibration_row(
+fn observation_row(
     aggregation_image_id: &str,
     child_count: u32,
     session: &SessionInfo,
-) -> CalibrationRow {
+) -> ObservationRow {
     let actual = session.cycles().div_ceil(MILLION_CYCLES);
     let predicted = PER_CHILD_MCYCLES * u64::from(child_count);
     let absolute_error = actual.abs_diff(predicted);
     let underquote = actual.saturating_sub(predicted);
-    let enabled = u128::from(absolute_error) * 100 <= u128::from(actual) * 10
-        && u128::from(underquote) * 100 <= u128::from(actual) * 10;
 
-    CalibrationRow {
+    ObservationRow {
         aggregation_image_id: aggregation_image_id.to_string(),
         child_count,
         actual_user_mcycles: actual,
@@ -189,7 +185,6 @@ fn calibration_row(
             .expect("calibration error fits i64"),
         absolute_error_percent: percent(u128::from(absolute_error), u128::from(actual)),
         underquote_percent: percent(u128::from(underquote), u128::from(actual)),
-        enabled,
     }
 }
 
@@ -231,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .is_ok_and(has_unresolved_assumption_syscall);
 
-    let mut rows = Vec::new();
+    let mut observations = Vec::new();
     let blocker = if claim_correct_execution_succeeded && assumption_syscall_established {
         for child_count in 1..=5 {
             let carries = carry_sequence(child_count as usize);
@@ -244,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
-            rows.push(calibration_row(
+            observations.push(observation_row(
                 &aggregation_image_id_hex,
                 child_count,
                 &session,
@@ -255,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(BLOCKER)
     };
 
-    let output = CalibrationOutput {
+    let output = ObservationOutput {
         aggregation_image_id: aggregation_image_id_hex,
         aggregation_elf_sha256,
         proposal_image_id: proposal_image_id_hex,
@@ -270,11 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assumption_syscall_established,
         },
         blocker,
-        calibrated_counts: rows
-            .iter()
-            .filter_map(|row| row.enabled.then_some(row.child_count))
-            .collect(),
-        rows,
+        observations,
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())

@@ -7507,6 +7507,31 @@ mod tests {
         std::future::ready(Ok((mcycles, journal)))
     }
 
+    fn linked_aggregation_input(child_count: usize) -> ShastaRisc0AggregationGuestInput {
+        let mut carries = Vec::with_capacity(child_count);
+        let mut parent_proposal_hash = B256::ZERO;
+        let mut parent_block_hash = B256::repeat_byte(0x40);
+        for index in 0..child_count {
+            let ordinal = u8::try_from(index + 1).expect("test child count fits u8");
+            let proposal_hash = B256::repeat_byte(ordinal);
+            let checkpoint_block_hash = B256::repeat_byte(0x80 + ordinal);
+            let mut carry = raiko2_protocol_shasta::shasta::ProofCarryData::default();
+            carry.transition_input.proposal_id = u64::from(ordinal);
+            carry.transition_input.proposal_hash = proposal_hash;
+            carry.transition_input.parent_proposal_hash = parent_proposal_hash;
+            carry.transition_input.parent_block_hash = parent_block_hash;
+            carry.transition_input.checkpoint.blockHash = checkpoint_block_hash;
+            carries.push(carry);
+            parent_proposal_hash = proposal_hash;
+            parent_block_hash = checkpoint_block_hash;
+        }
+        ShastaRisc0AggregationGuestInput {
+            proof_carry_data_vec: carries,
+            receipts: vec![vec![0xff]; child_count],
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn quote_context_estimated_available_skips_local_execution() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -7541,6 +7566,36 @@ mod tests {
                 isolated_builder: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn quote_context_estimated_aggregation_has_no_child_count_gate() {
+        for (child_count, expected_mcycles) in [(1, 180), (5, 900), (6, 1_080)] {
+            let input = linked_aggregation_input(child_count);
+            let encoded = bincode::serialize(&input).expect("encode aggregation fixture");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let execution_calls = Arc::clone(&calls);
+
+            let context = prepare_quote_context(
+                ElfType::Aggregation,
+                &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
+                &BoundlessStageInput::Aggregation(input),
+                &encoded,
+                20,
+                move || execution_result(&execution_calls, 818, B256::repeat_byte(0xff).to_vec()),
+            )
+            .await
+            .expect("valid aggregation estimate prepares a quote");
+
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(context.quoted_mcycles_count, expected_mcycles);
+            assert_eq!(context.evaluated_mcycles_count, None);
+            assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
+            assert_eq!(
+                context.model_id.as_deref(),
+                Some("risc0-zkgas-m2-c71d7a4ff237c10d")
+            );
+        }
     }
 
     #[tokio::test]

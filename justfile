@@ -29,7 +29,7 @@ build-sp1-toolchain-image tag="raiko2-sp1-toolchain:local" *args:
 bench-guest backend="sp1" *args:
     cargo run -r -p xtask -- bench-guest {{backend}} {{args}}
 
-check-risc0-zkgas-model fixture_dir="tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2" model="crates/prover/models/risc0-zkgas.json":
+check-risc0-zkgas-model fixture_dir="tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3" model="crates/prover/models/risc0-zkgas.json":
     PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN:?set PYTHON_BIN to an existing virtualenv Python}" scripts/modeling/risc0_zkgas_model.py check --fixture-dir "{{fixture_dir}}" --model "{{model}}"
 
 test-risc0-zkgas-model:

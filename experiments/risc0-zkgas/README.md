@@ -134,17 +134,16 @@ only by `scripts/modeling/risc0_zkgas_model.py` through the stable `just` recipe
 
 ## Committed validation fixture
 
-`tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/` contains the current compact, reviewable
+`tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3/` contains the current compact, reviewable
 production inputs:
 80 Hoodi fit rows in `hoodi-fit.jsonl`, the 40 Hoodi calibration plus 20 Mainnet evaluation rows in
 `validation.jsonl`, and manual provenance/global-cap policy in `config.json`. Every row retains only
 the network, split, proposal ID, block count, total zkGas, and actual mcycles. Mainnet rows are
 labeled `evaluation` because Mainnet influenced the production model choice.
-The prior `2026-08-28-m2-v1/` fixture remains byte-for-byte unchanged as the audit record for the
-schema-v1 domain policy. The schema-v2 generator intentionally rejects that legacy config, so the
-v1 directory is a data-only historical record rather than a fixture accepted by the current
-`check-risc0-zkgas-model` command. The v2 fixture copies its sample rows and changes only the
-versioned schema and operating-policy config.
+The prior fixture directories remain unchanged as audit records. The schema-v3 generator rejects
+the historical schema-v1 and schema-v2 configs. The current fixture keeps the v2 proposal rows and
+global-cap policy while removing aggregation child-count calibration as a runtime gate; the
+aggregation artifact now contains only the direct per-child scalar and audit provenance.
 
 The v2 sample rows were collected with proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`.
 That identity predates the proposal ELF rebuilt by #242 and differs from the v0.6.0 release guest.
@@ -182,8 +181,8 @@ their source revision, guest image, RISC0 version, execution parameters, and art
 the reviewed config. It re-derives mcycles from each successful row's authoritative RISC0 user-cycle
 count and validates the collector identity fields. An exact rebuild retains its configured model
 ID. The schema-v1 `risc0-zkgas-m2-v1` identity once carried a one-time packaging-only compatibility
-exception; that exception is gone with schema v2, and both the generator and the runtime parser now
-reject the ID outright. Every artifact change requires a generated content-addressed ID. For a changed calibration,
+exception; that exception is gone, and the schema-v3 generator and runtime parser reject the ID
+outright. Every artifact change requires a generated content-addressed ID. For a changed calibration,
 start from a new fixture directory and set the input config's
 model ID to `risc0-zkgas-m2-auto`; the generator writes a content-addressed ID into both the fixture
 config and runtime artifact. Reusing that ID for different coefficients, inputs, or provenance is

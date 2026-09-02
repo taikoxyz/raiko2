@@ -280,6 +280,16 @@ deterministic host path and test it independently.
 Aggregation has no proposal zkGas mapping and remains on its current fixed, evaluated, or separately
 calibrated path.
 
+### Production amendment (2026-09-02)
+
+The later Boundless implementation keeps proposal and aggregation estimation independent. Proposal
+estimation uses the packaged zkGas model and its proposal-only ten-percent publication budget.
+Aggregation instead applies the artifact's direct `180 * child_count` scalar to every structurally
+valid, non-empty input, without a child-count calibration allowlist or an aggregation error-budget
+gate. The current v4 API admits 1-1024 children; this is deliberate extrapolation beyond the largest
+historical five-child observation, not a result of this proposal-cycle experiment. Use aggregation
+`evaluated` when exact cycles or local child-receipt validation are required.
+
 ## Deliverables
 
 The offline experiment should produce:

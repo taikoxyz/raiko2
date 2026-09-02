@@ -22,8 +22,8 @@ Keep collection, policy review, and packaging separate.
    provenance drift; never combine different guest or build cohorts.
 5. Inspect the compact fixture/config diff, then run `just test-risc0-zkgas-model` and
    `just check-risc0-zkgas-model <new-fixture-dir> crates/prover/models/risc0-zkgas.json` with the same
-   interpreter. An observation admitted by the configured global cap that exceeds the 10% error
-   budget must stop the refresh.
+   interpreter. A proposal observation admitted by the configured global cap that exceeds the 10%
+   error budget must stop the refresh.
 6. When promoting a new model, update every explicit audit pin in the Python and Rust fixture tests;
    the default fixture directory in the generator and `justfile`; `config.example.toml`;
    `docs/API.md`; `docs/operations.md`; `experiments/risc0-zkgas/README.md`; the Boundless estimated
@@ -32,16 +32,24 @@ Keep collection, policy review, and packaging separate.
    this skill plus the zkGas guidance in `AGENTS.md`. These are review gates, not a second coefficient source. Run the focused prover
    tests after updating them.
 
-Review against the accepted approximation contract: an implementation is eligible when it matches
-the documented mechanical admission and fallback rules. The product accepts estimated/local cycle
-mismatch, underquotes, overquotes, and in-cap network or block-count combinations outside collected
-sample rectangles. The ten-percent budget gates concrete collected observations during model
-publication or refresh; it is not a proof of per-request accuracy. A concrete newly collected
-in-policy observation beyond that budget requires re-evaluating the model, cap, or strategy. A
-theoretical future mismatch, lack of an untouched holdout, or lack of observed rectangles does not
-change runtime availability. Use `evaluated` when exact local cycles are required.
+Review proposal estimation against the accepted approximation contract: an implementation is
+eligible when it matches the documented mechanical admission and fallback rules. The product
+accepts estimated/local cycle mismatch, underquotes, overquotes, and in-cap network or block-count
+combinations outside collected sample rectangles. The ten-percent budget gates concrete proposal
+observations during model publication or refresh; it is not a proof of per-request accuracy. A
+concrete newly collected in-policy proposal observation beyond that budget requires re-evaluating
+the model, cap, or strategy. A theoretical future mismatch, lack of an untouched holdout, or lack
+of observed rectangles does not change runtime availability. Use `evaluated` when exact local
+cycles are required.
 
-The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record and is rejected by the current
-schema-v2 generator and runtime parser. Every schema-v2 artifact or calibration change must use the
-generated content-addressed ID. This workflow updates repository artifacts only. Do not deploy,
+The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record. The current schema-v3 generator
+and runtime parser reject schema-v1 and schema-v2 artifacts. Every schema-v3 artifact or calibration
+change must use the generated content-addressed ID. This workflow updates repository artifacts only. Do not deploy,
 roll out, or change quote strategy.
+
+Aggregation does not use proposal zkGas calibration or a child-count activation set. Its artifact
+contains a direct `per_child_mcycles` scalar, applied to every structurally valid, non-empty
+aggregation input. Aggregation observations may justify a deliberate scalar update, but they must
+never add `enabled`, `calibrated_counts`, or another membership allowlist. A future explicit global
+child-count cap is a separate product-policy change; do not infer or generate one from observation
+coverage.

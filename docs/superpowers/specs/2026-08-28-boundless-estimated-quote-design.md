@@ -49,8 +49,8 @@ Add `crates/prover/src/boundless/estimation.rs` as the evaluator and determinist
 It compile-time embeds `crates/prover/models/risc0-zkgas.json` with `include_str!`,
 deserializes and validates it once when an `Estimated` strategy is configured, and exposes typed
 estimation results to `boundless/mod.rs`. The JSON artifact is the single source of truth for model
-IDs, calibration provenance, coefficients, execution configuration, operating policy, and
-calibrated aggregation counts. `estimation.rs` contains no duplicated constants for those values;
+IDs, calibration provenance, coefficients, execution configuration, operating policy, and the
+aggregation per-child scalar. `estimation.rs` contains no duplicated constants for those values;
 it owns only schema validation, checked arithmetic, policy checks, and journal derivation. An
 invalid embedded artifact is a build/configuration defect and rejects `Estimated` during startup
 rather than falling back at request time. Artifact validation checks its internal schema and values;
@@ -116,7 +116,7 @@ existing calibration is still applicable. Keeping `estimated` means accepting th
 switching the affected stage to `evaluated` is the safe rollout choice while measurements are being
 refreshed. Raiko2 does not make this release decision from embedded ELF or dependency identifiers.
 
-The schema-v2 artifact introduced by this change intentionally retains the measured pre-#242
+The current schema-v3 artifact intentionally retains the measured pre-#242
 proposal ELF `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`. It was not
 recalibrated against the post-#242 `main` ELF or the v0.6.0 release guest. Enabling `estimated` with
 either different ELF therefore accepts unmeasured cycle drift for quote price and timeout sizing;
@@ -169,11 +169,12 @@ strategy, and the design does not claim that they passed.
 
 ### Accepted Approximation Contract
 
-`Estimated` intentionally returns a coarse pricing input rather than the exact local-execution cycle
-count. Selecting it accepts both underquotes and overquotes, including mismatches for network and
-block-count combinations outside the collected sample rectangles. The ten-percent gate above is a
-model publication and refresh check over concrete collected observations; it is not a mathematical
-bound or per-request runtime guarantee for every future input admitted by the mechanical policy.
+This subsection describes the proposal M2 model. `Estimated` intentionally returns a coarse pricing
+input rather than the exact local-execution cycle count. Selecting it accepts both underquotes and
+overquotes, including mismatches for network and block-count combinations outside the collected
+sample rectangles. The ten-percent proposal gate above is a model publication and refresh check over
+concrete collected observations; it is not a mathematical bound or per-request runtime guarantee
+for every future input admitted by the mechanical policy.
 
 An admitted request does not execute the guest locally before quoting, so raiko2 cannot know that
 request's actual error or fall back merely because its unknown error might exceed ten percent. The
@@ -211,10 +212,10 @@ checked, and the final value must fit a positive `u32` mcycle count.
 
 Commit a compact, reviewable runtime artifact at `crates/prover/models/risc0-zkgas.json`. It is
 generated from the versioned fixture and policy under
-`tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/` and records at least:
+`tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3/` and records at least:
 
 - content-addressed model ID and the originating experiment model ID;
-- artifact schema version 2;
+- artifact schema version 3; schema v3 removes the schema-v2 aggregation activation fields;
 - proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`;
 - RISC0 version `3.0.5`, calibrated `min_execution_po2 = 20`, source revision, ELF hash,
   generator-config hash,
@@ -253,7 +254,7 @@ of those release identities is reviewed when the deployment selects `estimated`.
 
 ### Validation Fixture
 
-Commit `tests/fixtures/risc0-zkgas/2026-08-31-m2-global-cap-v2/validation.jsonl` with the 40 successful Hoodi
+Commit `tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3/validation.jsonl` with the 40 successful Hoodi
 calibration rows and 20 successful Mainnet evaluation rows. The same versioned directory also keeps
 the 80 Hoodi fit rows and explicit policy/provenance config used by the deterministic generator.
 Each compact row contains
@@ -283,17 +284,24 @@ puts a one-child aggregation near 175 mcycles. The available Mainnet runtime sna
 five-child aggregations at 817 or 818 mcycles, for which the estimate is 900 mcycles. The snapshot's
 deployed proposal image differs from the experiment proposal image, so these aggregation samples are
 from a different release cohort. They are supporting evidence only; they do not calibrate the
-current worktree aggregation ELF or prove a zero intercept.
+current worktree aggregation ELF or prove a zero intercept. The five-child estimate overquotes that
+snapshot by 10.02-10.16%. If the observed one-to-five trend were extrapolated, the overquote would
+approach roughly 12% at larger counts; this is an extrapolation warning, not a validation result.
+The current aggregation ELF cannot be measured with the development-receipt probe because it is
+built with `disable-dev-mode`, so the running guest's error direction remains unknown.
 
-Before enabling estimated aggregation, execute the current aggregation image locally with valid
-receipt-backed inputs at child counts one through five and commit the image ID and results to the
-model artifact. Enable `180 * child_receipt_count` only for counts whose measured absolute error and
-underquote are within the accepted ten-percent budget. Counts outside the artifact's calibrated
-set, including every count above five initially, fall back to local execution. As with proposal
-estimation, the image ID is calibration provenance and is not compared at runtime. The release owner
-must keep aggregation on `Evaluated` after a materially changed aggregation guest until the measured
-counts have been checked or refreshed. The input must contain at least one receipt, and receipt and
-carry-data counts must match. Multiplication and conversion are checked.
+Apply `180 * child_receipt_count` to every structurally valid, non-empty aggregation input. Child
+count and historical observations are not runtime availability gates. As with proposal estimation,
+any recorded image ID is audit provenance and is not compared at runtime. The release owner accepts
+quote-price and timeout drift when selecting `Estimated` with a materially changed aggregation
+guest. The input must contain at least one receipt, and receipt and carry-data counts must match.
+Multiplication and conversion are checked. The current v4 API admits at most 1024 children, for a
+maximum `184,320`-mcycle quote; with `per_child_mcycles = 180`, numeric overflow is unreachable in this
+path. The arithmetic fallback remains defensive for other callers or a future artifact/input limit;
+the quote layer can also fall back if a configured `mcycles_offset` addition overflows. At the
+documented aggregation offset of zero, valid v4 input has no estimate-unavailable local evaluation.
+The host estimator does not verify receipt bytes, so invalid child receipts may be rejected only
+during remote guest execution.
 
 ## Deterministic Journals
 
@@ -341,7 +349,6 @@ path:
 - any proposal witness has zero or unrepresentable zkGas, the checked total exceeds `500_000_000`,
   or the checked sum overflows;
 - a scaled model term or the final proposal estimate overflows;
-- aggregation child count is outside the calibrated set;
 - aggregation child-count multiplication or final conversion overflows.
 
 If local execution also fails, its error is returned. A successful fallback uses the actual local
@@ -386,9 +393,8 @@ Focused regression coverage must establish:
 - empty input and malformed structure fail directly;
 - zero/oversized zkGas and arithmetic overflow select the local fallback;
 - proposal journal derivation matches the RISC0 guest journal for a valid fixture;
-- aggregation calibration records executions at child counts one through five before those counts
-  are enabled, while counts outside the calibrated set fall back;
-- aggregation estimation scales with calibrated child count and rejects zero/mismatched vectors;
+- aggregation estimation returns `180 * child_count` for valid inputs without a child-count
+  allowlist and rejects zero/mismatched vectors;
 - aggregation journal derivation matches the RISC0 guest journal for valid receipt-backed input;
 - estimated progress omits `evaluated_mcycles_count`, while evaluated and fallback progress retain it;
 - resumed submissions and same-ID rebids retain their persisted quote counts, strategy, and model

@@ -79,183 +79,125 @@ class InventoryRow:
     manifest_case: str | None = None
 
 
-UZEN_OPCODE_ENTRIES = {
-    0x00: ("stop", 0),
-    0x01: ("add", 12),
-    0x02: ("mul", 21),
-    0x03: ("sub", 13),
-    0x04: ("div", 110),
-    0x05: ("sdiv", 93),
-    0x06: ("mod", 95),
-    0x07: ("smod", 29),
-    0x08: ("addmod", 71),
-    0x09: ("mulmod", 152),
-    0x0A: ("exp", 33),
-    0x0B: ("signextend", 21),
-    0x10: ("lt", 11),
-    0x11: ("gt", 10),
-    0x12: ("slt", 14),
-    0x13: ("sgt", 14),
-    0x14: ("eq", 35),
-    0x15: ("iszero", 8),
-    0x16: ("and", 8),
-    0x17: ("or", 9),
-    0x18: ("xor", 9),
-    0x19: ("not", 6),
-    0x1A: ("byte", 9),
-    0x1B: ("shl", 20),
-    0x1C: ("shr", 19),
-    0x1D: ("sar", 29),
-    0x20: ("keccak256", 85),
-    0x30: ("address", 22),
-    0x31: ("balance", 6),
-    0x32: ("origin", 21),
-    0x33: ("caller", 21),
-    0x34: ("callvalue", 13),
-    0x35: ("calldataload", 20),
-    0x36: ("calldatasize", 11),
-    0x37: ("calldatacopy", 12),
-    0x38: ("codesize", 11),
-    0x39: ("codecopy", 13),
-    0x3A: ("gasprice", 14),
-    0x3B: ("extcodesize", 6),
-    0x3C: ("extcodecopy", 6),
-    0x3D: ("returndatasize", 10),
-    0x3E: ("returndatacopy", 9),
-    0x3F: ("extcodehash", 8),
-    0x40: ("blockhash", 7),
-    0x41: ("coinbase", 21),
-    0x42: ("timestamp", 11),
-    0x43: ("number", 11),
-    0x44: ("prevrandao", 28),
-    0x45: ("gaslimit", 11),
-    0x46: ("chainid", 11),
-    0x47: ("selfbalance", 85),
-    0x48: ("basefee", 11),
-    0x49: ("blobhash", 10),
-    0x4A: ("blobbasefee", 15),
-    0x50: ("pop", 5),
-    0x51: ("mload", 20),
-    0x52: ("mstore", 22),
-    0x53: ("mstore8", 9),
-    0x54: ("sload", 5),
-    0x55: ("sstore", 13),
-    0x56: ("jump", 3),
-    0x57: ("jumpi", 5),
-    0x58: ("pc", 12),
-    0x59: ("msize", 11),
-    0x5A: ("gas", 11),
-    0x5B: ("jumpdest", 9),
-    0x5C: ("tload", 1),
-    0x5D: ("tstore", 6),
-    0x5E: ("mcopy", 5),
-    0x5F: ("push0", 10),
-    0x60: ("push1", 5),
-    0x61: ("push2", 5),
-    0x62: ("push3", 6),
-    0x63: ("push4", 8),
-    0x64: ("push5", 6),
-    0x65: ("push6", 8),
-    0x66: ("push7", 7),
-    0x67: ("push8", 7),
-    0x68: ("push9", 9),
-    0x69: ("push10", 10),
-    0x6A: ("push11", 8),
-    0x6B: ("push12", 9),
-    0x6C: ("push13", 7),
-    0x6D: ("push14", 12),
-    0x6E: ("push15", 10),
-    0x6F: ("push16", 11),
-    0x70: ("push17", 13),
-    0x71: ("push18", 11),
-    0x72: ("push19", 11),
-    0x73: ("push20", 13),
-    0x74: ("push21", 14),
-    0x75: ("push22", 16),
-    0x76: ("push23", 12),
-    0x77: ("push24", 16),
-    0x78: ("push25", 13),
-    0x79: ("push26", 14),
-    0x7A: ("push27", 15),
-    0x7B: ("push28", 17),
-    0x7C: ("push29", 17),
-    0x7D: ("push30", 12),
-    0x7E: ("push31", 18),
-    0x7F: ("push32", 17),
-    0x80: ("dup1", 6),
-    0x81: ("dup2", 5),
-    0x82: ("dup3", 6),
-    0x83: ("dup4", 6),
-    0x84: ("dup5", 6),
-    0x85: ("dup6", 6),
-    0x86: ("dup7", 5),
-    0x87: ("dup8", 6),
-    0x88: ("dup9", 7),
-    0x89: ("dup10", 5),
-    0x8A: ("dup11", 6),
-    0x8B: ("dup12", 8),
-    0x8C: ("dup13", 6),
-    0x8D: ("dup14", 7),
-    0x8E: ("dup15", 8),
-    0x8F: ("dup16", 6),
-    0x90: ("swap1", 16),
-    0x91: ("swap2", 18),
-    0x92: ("swap3", 18),
-    0x93: ("swap4", 19),
-    0x94: ("swap5", 16),
-    0x95: ("swap6", 17),
-    0x96: ("swap7", 17),
-    0x97: ("swap8", 15),
-    0x98: ("swap9", 18),
-    0x99: ("swap10", 17),
-    0x9A: ("swap11", 18),
-    0x9B: ("swap12", 19),
-    0x9C: ("swap13", 19),
-    0x9D: ("swap14", 18),
-    0x9E: ("swap15", 17),
-    0x9F: ("swap16", 18),
-    0xA0: ("log0", 6),
-    0xA1: ("log1", 7),
-    0xA2: ("log2", 4),
-    0xA3: ("log3", 5),
-    0xA4: ("log4", 5),
-    0xF0: ("create", 1),
-    0xF1: ("call", 25),
-    0xF2: ("callcode", 24),
-    0xF3: ("return", 0),
-    0xF4: ("delegatecall", 21),
-    0xF5: ("create2", 1),
-    0xFA: ("staticcall", 24),
-    0xFD: ("revert", 0),
-    0xFE: ("invalid", 0),
-    0xFF: ("selfdestruct", 0),
+@dataclass(frozen=True)
+class UnzenSchedule:
+    opcode_multipliers: dict[int, int]
+    precompile_multipliers: dict[int, int]
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+UZEN_OPCODE_NAMES = {
+    0x00: "stop",
+    0x01: "add",
+    0x02: "mul",
+    0x03: "sub",
+    0x04: "div",
+    0x05: "sdiv",
+    0x06: "mod",
+    0x07: "smod",
+    0x08: "addmod",
+    0x09: "mulmod",
+    0x0A: "exp",
+    0x0B: "signextend",
+    0x10: "lt",
+    0x11: "gt",
+    0x12: "slt",
+    0x13: "sgt",
+    0x14: "eq",
+    0x15: "iszero",
+    0x16: "and",
+    0x17: "or",
+    0x18: "xor",
+    0x19: "not",
+    0x1A: "byte",
+    0x1B: "shl",
+    0x1C: "shr",
+    0x1D: "sar",
+    0x1E: "clz",
+    0x20: "keccak256",
+    0x30: "address",
+    0x31: "balance",
+    0x32: "origin",
+    0x33: "caller",
+    0x34: "callvalue",
+    0x35: "calldataload",
+    0x36: "calldatasize",
+    0x37: "calldatacopy",
+    0x38: "codesize",
+    0x39: "codecopy",
+    0x3A: "gasprice",
+    0x3B: "extcodesize",
+    0x3C: "extcodecopy",
+    0x3D: "returndatasize",
+    0x3E: "returndatacopy",
+    0x3F: "extcodehash",
+    0x40: "blockhash",
+    0x41: "coinbase",
+    0x42: "timestamp",
+    0x43: "number",
+    0x44: "prevrandao",
+    0x45: "gaslimit",
+    0x46: "chainid",
+    0x47: "selfbalance",
+    0x48: "basefee",
+    0x49: "blobhash",
+    0x4A: "blobbasefee",
+    0x50: "pop",
+    0x51: "mload",
+    0x52: "mstore",
+    0x53: "mstore8",
+    0x54: "sload",
+    0x55: "sstore",
+    0x56: "jump",
+    0x57: "jumpi",
+    0x58: "pc",
+    0x59: "msize",
+    0x5A: "gas",
+    0x5B: "jumpdest",
+    0x5C: "tload",
+    0x5D: "tstore",
+    0x5E: "mcopy",
+    0x5F: "push0",
+    **{opcode: f"push{opcode - 0x5F}" for opcode in range(0x60, 0x80)},
+    **{opcode: f"dup{opcode - 0x7F}" for opcode in range(0x80, 0x90)},
+    **{opcode: f"swap{opcode - 0x8F}" for opcode in range(0x90, 0xA0)},
+    0xA0: "log0",
+    0xA1: "log1",
+    0xA2: "log2",
+    0xA3: "log3",
+    0xA4: "log4",
+    0xF0: "create",
+    0xF1: "call",
+    0xF2: "callcode",
+    0xF3: "return",
+    0xF4: "delegatecall",
+    0xF5: "create2",
+    0xFA: "staticcall",
+    0xFD: "revert",
+    0xFE: "invalid",
+    0xFF: "selfdestruct",
 }
 
-UZEN_PRECOMPILE_ENTRIES = {
-    0x01: ("ecrecover", 81),
-    0x02: ("sha256", 10),
-    0x03: ("ripemd160", 3),
-    0x04: ("identity", 2),
-    0x05: ("modexp", 1363),
-    0x06: ("bn128_add", 38),
-    0x07: ("bn128_mul", 87),
-    0x08: ("bn128_pairing", 82),
-    0x09: ("blake2f", 243),
-    0x0A: ("point_evaluation", 398),
-    0x0B: ("bls12_g1add", 112),
-    0x0C: ("bls12_g1msm", 52),
-    0x0D: ("bls12_g2add", 111),
-    0x0E: ("bls12_g2msm", 39),
-    0x0F: ("bls12_pairing", 134),
-    0x10: ("bls12_map_fp_to_g1", 159),
-    0x11: ("bls12_map_fp2_to_g2", 112),
-}
-
-UZEN_OPCODE_MULTIPLIERS = {
-    opcode: multiplier for opcode, (_, multiplier) in UZEN_OPCODE_ENTRIES.items()
-}
-UZEN_PRECOMPILE_MULTIPLIERS = {
-    address: multiplier for address, (_, multiplier) in UZEN_PRECOMPILE_ENTRIES.items()
+UZEN_PRECOMPILE_NAMES = {
+    0x01: "ecrecover",
+    0x02: "sha256",
+    0x03: "ripemd160",
+    0x04: "identity",
+    0x05: "modexp",
+    0x06: "bn128_add",
+    0x07: "bn128_mul",
+    0x08: "bn128_pairing",
+    0x09: "blake2f",
+    0x0A: "point_evaluation",
+    0x0B: "bls12_g1add",
+    0x0C: "bls12_g1msm",
+    0x0D: "bls12_g2add",
+    0x0E: "bls12_g2msm",
+    0x0F: "bls12_pairing",
+    0x10: "bls12_map_fp_to_g1",
+    0x11: "bls12_map_fp2_to_g2",
+    0x100: "p256verify",
 }
 
 SPAWN_WRAPPER_OPCODES = {0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA}
@@ -298,10 +240,6 @@ STATE_OR_REVM_OPCODES = {
     0xA3,
     0xA4,
 }
-PLANNED_PURE_OPCODE_OPCODES = set(UZEN_OPCODE_ENTRIES) - (
-    SPAWN_WRAPPER_OPCODES | ZERO_OR_HALTING_OPCODES | STATE_OR_REVM_OPCODES
-)
-
 PURE_OPCODE_DEFAULTS = {
     0x01: ("arithmetic", "stack_binary", 3),
     0x02: ("arithmetic", "stack_binary", 5),
@@ -370,8 +308,84 @@ PRECOMPILE_BODY_DEFAULTS = {
     0x11: ("precompile_bls12_map_fp2_to_g2_zero", 128, 23_800),
 }
 
+PLANNED_PURE_OPCODE_OPCODES = set(PURE_OPCODE_DEFAULTS)
+_CURRENT_UZEN_SCHEDULE: UnzenSchedule | None = None
 
-def load_manifest(path: pathlib.Path) -> Manifest:
+
+def load_current_uzen_schedule() -> UnzenSchedule:
+    command = [
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "xtask",
+        "--no-default-features",
+        "--",
+        "export-unzen-zk-gas-schedule",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.strip() if exc.stderr and exc.stderr.strip() else str(exc)
+        raise RuntimeError(f"Unzen schedule exporter failed:\n{detail}") from exc
+    data = json.loads(completed.stdout)
+    return UnzenSchedule(
+        opcode_multipliers=_parse_schedule_rows(
+            data,
+            rows_key="opcodes",
+            identifier_key="opcode",
+            max_identifier=0xFF,
+        ),
+        precompile_multipliers=_parse_schedule_rows(
+            data,
+            rows_key="precompiles",
+            identifier_key="address",
+            max_identifier=(1 << 160) - 1,
+        ),
+    )
+
+
+def _parse_schedule_rows(
+    data: Any,
+    *,
+    rows_key: str,
+    identifier_key: str,
+    max_identifier: int,
+) -> dict[int, int]:
+    if not isinstance(data, dict) or not isinstance(data.get(rows_key), list):
+        raise ValueError(f"Unzen schedule export is missing {rows_key}")
+
+    result = {}
+    for row in data[rows_key]:
+        if not isinstance(row, dict) or identifier_key not in row or "multiplier" not in row:
+            raise ValueError(f"invalid Unzen schedule {rows_key} row")
+        identifier = parse_opcode(row[identifier_key])
+        multiplier = row["multiplier"]
+        if not 0 <= identifier <= max_identifier:
+            raise ValueError(f"invalid Unzen schedule {identifier_key}: {identifier}")
+        if isinstance(multiplier, bool) or not isinstance(multiplier, int) or multiplier < 0:
+            raise ValueError(f"invalid Unzen schedule multiplier for {row[identifier_key]}")
+        if identifier in result:
+            raise ValueError(f"duplicate Unzen schedule {identifier_key}: {row[identifier_key]}")
+        result[identifier] = multiplier
+    return result
+
+
+def current_uzen_schedule() -> UnzenSchedule:
+    global _CURRENT_UZEN_SCHEDULE
+    if _CURRENT_UZEN_SCHEDULE is None:
+        _CURRENT_UZEN_SCHEDULE = load_current_uzen_schedule()
+    return _CURRENT_UZEN_SCHEDULE
+
+
+def load_manifest(path: pathlib.Path, schedule: UnzenSchedule | None = None) -> Manifest:
     data = tomllib.loads(path.read_text())
     cases = [
         CaseSpec(
@@ -386,10 +400,15 @@ def load_manifest(path: pathlib.Path) -> Manifest:
         )
         for item in data.get("cases", [])
     ]
+    include_uzen_pure_opcodes = bool(data.get("include_uzen_pure_opcodes", False))
+    include_uzen_precompile_bodies = bool(data.get("include_uzen_precompile_bodies", False))
+    if schedule is None and (include_uzen_pure_opcodes or include_uzen_precompile_bodies):
+        schedule = current_uzen_schedule()
     cases = expand_manifest_cases(
         cases,
-        include_uzen_pure_opcodes=bool(data.get("include_uzen_pure_opcodes", False)),
-        include_uzen_precompile_bodies=bool(data.get("include_uzen_precompile_bodies", False)),
+        schedule=schedule,
+        include_uzen_pure_opcodes=include_uzen_pure_opcodes,
+        include_uzen_precompile_bodies=include_uzen_precompile_bodies,
     )
     return Manifest(
         name=data["name"],
@@ -402,6 +421,7 @@ def load_manifest(path: pathlib.Path) -> Manifest:
 def expand_manifest_cases(
     cases: list[CaseSpec],
     *,
+    schedule: UnzenSchedule | None,
     include_uzen_pure_opcodes: bool,
     include_uzen_precompile_bodies: bool,
 ) -> list[CaseSpec]:
@@ -414,16 +434,22 @@ def expand_manifest_cases(
     }
 
     if include_uzen_pure_opcodes:
-        for opcode in sorted(PLANNED_PURE_OPCODE_OPCODES - measured_opcodes):
+        if schedule is None:
+            raise ValueError("Unzen schedule is required to expand opcode cases")
+        active_pure_opcodes = set(schedule.opcode_multipliers) & PLANNED_PURE_OPCODE_OPCODES
+        for opcode in sorted(active_pure_opcodes - measured_opcodes):
             expanded.append(default_opcode_case(opcode))
     if include_uzen_precompile_bodies:
-        for address in sorted(set(UZEN_PRECOMPILE_ENTRIES) - measured_precompiles):
+        if schedule is None:
+            raise ValueError("Unzen schedule is required to expand precompile cases")
+        active_precompiles = set(schedule.precompile_multipliers) & set(PRECOMPILE_BODY_DEFAULTS)
+        for address in sorted(active_precompiles - measured_precompiles):
             expanded.append(default_precompile_case(address))
     return expanded
 
 
 def default_opcode_case(opcode: int) -> CaseSpec:
-    name, _ = UZEN_OPCODE_ENTRIES[opcode]
+    name = UZEN_OPCODE_NAMES[opcode]
     try:
         scenario, template, target_raw_gas = PURE_OPCODE_DEFAULTS[opcode]
     except KeyError as exc:
@@ -438,7 +464,7 @@ def default_opcode_case(opcode: int) -> CaseSpec:
 
 
 def default_precompile_case(address: int) -> CaseSpec:
-    name, _ = UZEN_PRECOMPILE_ENTRIES[address]
+    name = UZEN_PRECOMPILE_NAMES[address]
     try:
         template, input_size, target_raw_gas = PRECOMPILE_BODY_DEFAULTS[address]
     except KeyError as exc:
@@ -1102,25 +1128,29 @@ def compute_damage_result(
     )
 
 
-def current_uzen_multiplier(case: CaseSpec) -> int:
+def current_uzen_multiplier(case: CaseSpec, schedule: UnzenSchedule | None = None) -> int:
+    schedule = schedule or current_uzen_schedule()
     if case.kind == "opcode":
         if case.opcode is None:
             raise ValueError(f"opcode case {case.name} is missing opcode")
         try:
-            return UZEN_OPCODE_MULTIPLIERS[case.opcode]
+            return schedule.opcode_multipliers[case.opcode]
         except KeyError as exc:
-            raise ValueError(f"no current-Uzen opcode multiplier for {case.name}") from exc
+            raise ValueError(f"no current-Unzen opcode multiplier for {case.name}") from exc
     if case.kind == "precompile":
         if case.address is None:
             raise ValueError(f"precompile case {case.name} is missing address")
         try:
-            return UZEN_PRECOMPILE_MULTIPLIERS[case.address]
+            return schedule.precompile_multipliers[case.address]
         except KeyError as exc:
-            raise ValueError(f"no current-Uzen precompile multiplier for {case.name}") from exc
+            raise ValueError(f"no current-Unzen precompile multiplier for {case.name}") from exc
     raise ValueError(f"unknown case kind: {case.kind}")
 
 
-def build_inventory(manifest: Manifest) -> list[InventoryRow]:
+def build_inventory(
+    manifest: Manifest, schedule: UnzenSchedule | None = None
+) -> list[InventoryRow]:
+    schedule = schedule or current_uzen_schedule()
     measured_opcodes = {
         case.opcode: case.name
         for case in manifest.cases
@@ -1133,27 +1163,33 @@ def build_inventory(manifest: Manifest) -> list[InventoryRow]:
     }
 
     rows = []
-    for opcode, (name, multiplier) in sorted(UZEN_OPCODE_ENTRIES.items()):
+    for opcode, multiplier in sorted(schedule.opcode_multipliers.items()):
         manifest_case = measured_opcodes.get(opcode)
         rows.append(
             InventoryRow(
                 kind="opcode",
                 identifier=f"0x{opcode:02x}",
-                name=name,
+                name=UZEN_OPCODE_NAMES.get(opcode, f"opcode_0x{opcode:02x}"),
                 multiplier=multiplier,
                 status=manifest_case and "measured" or classify_opcode_status(opcode),
                 manifest_case=manifest_case,
             )
         )
-    for address, (name, multiplier) in sorted(UZEN_PRECOMPILE_ENTRIES.items()):
+    for address, multiplier in sorted(schedule.precompile_multipliers.items()):
         manifest_case = measured_precompiles.get(address)
         rows.append(
             InventoryRow(
                 kind="precompile",
                 identifier=f"0x{address:02x}",
-                name=name,
+                name=UZEN_PRECOMPILE_NAMES.get(address, f"precompile_0x{address:x}"),
                 multiplier=multiplier,
-                status=manifest_case and "measured" or "needs_precompile_body",
+                status=(
+                    "measured"
+                    if manifest_case
+                    else "needs_precompile_body"
+                    if address in PRECOMPILE_BODY_DEFAULTS
+                    else "unsupported_by_experiment"
+                ),
                 manifest_case=manifest_case,
             )
         )
@@ -1169,12 +1205,13 @@ def classify_opcode_status(opcode: int) -> str:
         return "needs_state_or_revm"
     if opcode in PLANNED_PURE_OPCODE_OPCODES:
         return "planned_pure_opcode"
-    return "needs_state_or_revm"
+    return "unsupported_by_experiment"
 
 
 def inventory_report(manifest_path: pathlib.Path, out_dir: pathlib.Path) -> list[InventoryRow]:
-    manifest = load_manifest(manifest_path)
-    rows = build_inventory(manifest)
+    schedule = current_uzen_schedule()
+    manifest = load_manifest(manifest_path, schedule=schedule)
+    rows = build_inventory(manifest, schedule=schedule)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "inventory.json").write_text(
         json.dumps([asdict(row) for row in rows], indent=2, sort_keys=True) + "\n"
@@ -1191,7 +1228,8 @@ def damage_report(
     zk_gas_limit: int,
     out_dir: pathlib.Path,
 ) -> list[DamageResult]:
-    manifest = load_manifest(manifest_path)
+    schedule = current_uzen_schedule()
+    manifest = load_manifest(manifest_path, schedule=schedule)
     case_by_name = {case.name: case for case in manifest.cases}
     fit_rows = json.loads(fit_path.read_text())
     workload_metric = str(fit_rows[0].get("metric", "prover_gas")) if fit_rows else "prover_gas"
@@ -1208,7 +1246,7 @@ def damage_report(
                 workload_metric=workload_metric,
                 eth_gas_per_unit=case.target_raw_gas,
                 measured_workload_per_unit=float(row["slope_per_operation"]),
-                zkgas_multiplier=current_uzen_multiplier(case),
+                zkgas_multiplier=current_uzen_multiplier(case, schedule),
                 eth_gas_limit=eth_gas_limit,
                 zk_gas_limit=zk_gas_limit,
                 r2=float(row["r2"]),
@@ -1251,7 +1289,7 @@ def write_markdown_report(
     metric: str = "prover_gas",
 ) -> None:
     lines = [
-        "# Uzen Vs Fitted Workload Metric",
+        "# Unzen Vs Fitted Workload Metric",
         "",
         f"- Workload metric: `{metric}`",
         "",
@@ -1280,7 +1318,7 @@ def write_damage_markdown_report(
         f"- Eth gas limit: `{eth_gas_limit}`",
         f"- ZK gas limit: `{zk_gas_limit}`",
         f"- Workload metric: `{workload_metric}`",
-        "- Candidate table: current Uzen smoke multipliers",
+        "- Candidate table: current Unzen multipliers",
         "- Realistic workload impact: pending real block/app contribution accounting",
         "",
         "## Metric Meaning",
@@ -1290,7 +1328,7 @@ def write_damage_markdown_report(
         "- `R2`: linear-fit quality for the smoke variants. Low R2 means template noise or too few counts; do not use that slope as a coefficient without a better sweep.",
         "- `Eth-only units`: max target executions under the ETH gas limit only.",
         "- `Eth-only damage`: `Eth-only units * Workload/unit`, before any zkgas accounting.",
-        "- `ZK gas/unit`: `Eth gas/unit * current-Uzen multiplier`.",
+        "- `ZK gas/unit`: `Eth gas/unit * current-Unzen multiplier`.",
         "- `Candidate units`: max target executions after applying both ETH gas and zkgas limits.",
         "- `Candidate damage`: `Candidate units * Workload/unit`, the workload still reachable under current zkgas accounting.",
         "- `Attack reduction`: reduction from eth-only damage after applying the current zkgas limit.",
@@ -1312,7 +1350,7 @@ def write_damage_markdown_report(
     lines.extend(
         [
             "",
-            "## Current-Uzen Containment",
+            "## Current-Unzen Containment",
             "",
             "| Case | Multiplier | ZK gas/unit | Candidate units | Candidate damage | "
             "Attack reduction | Binding resource | R2 |",
@@ -1421,7 +1459,7 @@ def build_parser() -> argparse.ArgumentParser:
     damage.add_argument("--out", type=pathlib.Path, required=True)
     damage.set_defaults(func=cmd_damage)
 
-    inventory = subcommands.add_parser("inventory", help="report Uzen coverage inventory")
+    inventory = subcommands.add_parser("inventory", help="report Unzen coverage inventory")
     inventory.add_argument("--manifest", type=pathlib.Path, required=True)
     inventory.add_argument("--out", type=pathlib.Path, required=True)
     inventory.set_defaults(func=cmd_inventory)

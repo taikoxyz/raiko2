@@ -119,29 +119,29 @@ class FitTests(unittest.TestCase):
         self.assertIn("| add | opcode | 3 | 90 | 30 | 0.98 |", report)
         self.assertIn("| add | 12 | 36 | 2 | 180 | 80.00% | zkgas | 0.98 |", report)
 
-    def test_current_uzen_multiplier_covers_expanded_smoke_stack_binary_cases(self):
-        expected = {
-            "sub": (0x03, 13),
-            "div": (0x04, 110),
-            "mod": (0x06, 95),
-            "lt": (0x10, 11),
-            "gt": (0x11, 10),
-            "eq": (0x14, 35),
-            "and": (0x16, 8),
-            "or": (0x17, 9),
-            "xor": (0x18, 9),
-        }
+    def test_current_uzen_multiplier_reads_injected_schedule(self):
+        schedule = opcode_gas.UnzenSchedule(
+            opcode_multipliers={0x03: 7},
+            precompile_multipliers={0x04: 9},
+        )
+        opcode_case = opcode_gas.CaseSpec(
+            name="sub",
+            opcode=0x03,
+            scenario="stack",
+            template="stack_binary",
+            target_raw_gas=3,
+        )
+        precompile_case = opcode_gas.CaseSpec(
+            name="identity",
+            scenario="precompile",
+            template="precompile_fixed_32",
+            target_raw_gas=18,
+            kind="precompile",
+            address=0x04,
+        )
 
-        for name, (opcode, multiplier) in expected.items():
-            with self.subTest(name=name):
-                case = opcode_gas.CaseSpec(
-                    name=name,
-                    opcode=opcode,
-                    scenario="stack",
-                    template="stack_binary",
-                    target_raw_gas=3,
-                )
-                self.assertEqual(opcode_gas.current_uzen_multiplier(case), multiplier)
+        self.assertEqual(opcode_gas.current_uzen_multiplier(opcode_case, schedule), 7)
+        self.assertEqual(opcode_gas.current_uzen_multiplier(precompile_case, schedule), 9)
 
 
 if __name__ == "__main__":

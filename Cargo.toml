@@ -93,6 +93,7 @@ alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev
 alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false, features = [
     "full",
 ] }
+alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false }
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6c4d19979ca632a169627c8463c7452c4b82214c", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)

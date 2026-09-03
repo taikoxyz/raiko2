@@ -28,7 +28,7 @@ class ManifestTests(unittest.TestCase):
             if case.kind == "precompile" and case.address is not None
         }
         self.assertFalse(opcode_gas.PLANNED_PURE_OPCODE_OPCODES - measured_opcodes)
-        self.assertEqual(measured_precompiles, set(opcode_gas.UZEN_PRECOMPILE_ENTRIES))
+        self.assertEqual(measured_precompiles, set(opcode_gas.PRECOMPILE_BODY_DEFAULTS))
         self.assertGreaterEqual(
             {case.name for case in manifest.cases},
             {

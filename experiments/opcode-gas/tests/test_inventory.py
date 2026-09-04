@@ -82,6 +82,40 @@ class InventoryTests(unittest.TestCase):
                     ):
                         opcode_gas.load_current_uzen_schedule()
 
+    def test_load_uzen_schedule_wraps_malformed_export_data(self):
+        malformed_exports = (
+            ({"precompiles": []}, "missing opcodes"),
+            (
+                {
+                    "opcodes": [{"opcode": "not-an-opcode", "multiplier": 1}],
+                    "precompiles": [],
+                },
+                "invalid literal",
+            ),
+            (
+                {
+                    "opcodes": [{"opcode": None, "multiplier": 1}],
+                    "precompiles": [],
+                },
+                "invalid Unzen schedule opcode",
+            ),
+        )
+        for payload, expected_detail in malformed_exports:
+            with self.subTest(payload=payload):
+                with mock.patch.object(
+                    opcode_gas.subprocess,
+                    "run",
+                    return_value=mock.Mock(stdout=opcode_gas.json.dumps(payload)),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "invalid Unzen schedule export",
+                    ) as raised:
+                        opcode_gas.load_current_uzen_schedule()
+
+                self.assertIsInstance(raised.exception.__cause__, ValueError)
+                self.assertIn(expected_detail, str(raised.exception))
+
     def test_current_uzen_schedule_is_cached(self):
         self.addCleanup(opcode_gas.current_uzen_schedule.cache_clear)
         opcode_gas.current_uzen_schedule.cache_clear()

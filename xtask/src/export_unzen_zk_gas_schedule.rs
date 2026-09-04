@@ -61,7 +61,7 @@ pub(crate) fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{fs, str::FromStr};
 
     use alloy::primitives::Address;
 
@@ -77,6 +77,11 @@ mod tests {
             .opcodes
             .iter()
             .map(|entry| {
+                assert!(
+                    entry.opcode.starts_with("0x"),
+                    "opcode identifier must start with 0x: {}",
+                    entry.opcode
+                );
                 (
                     usize::from_str_radix(entry.opcode.trim_start_matches("0x"), 16).unwrap(),
                     entry.multiplier,
@@ -95,7 +100,20 @@ mod tests {
         let exported_precompiles = output
             .precompiles
             .iter()
-            .map(|entry| (Address::from_str(&entry.address).unwrap(), entry.multiplier))
+            .map(|entry| {
+                assert!(
+                    entry.address.starts_with("0x"),
+                    "precompile address must start with 0x: {}",
+                    entry.address
+                );
+                assert_eq!(
+                    entry.address.len(),
+                    42,
+                    "precompile address must be a 20-byte hex string: {}",
+                    entry.address
+                );
+                (Address::from_str(&entry.address).unwrap(), entry.multiplier)
+            })
             .collect::<Vec<_>>();
         let expected_precompiles = UNZEN_ZK_GAS_SCHEDULE
             .precompile_multipliers
@@ -103,5 +121,25 @@ mod tests {
             .map(|(address, multiplier)| (*address, *multiplier))
             .collect::<Vec<_>>();
         assert_eq!(exported_precompiles, expected_precompiles);
+    }
+
+    #[test]
+    fn exporter_alethia_rev_matches_workspace() {
+        let root = crate::util::repo_root();
+        let workspace: toml::Value =
+            toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+        let xtask: toml::Value =
+            toml::from_str(&fs::read_to_string(root.join("xtask/Cargo.toml")).unwrap()).unwrap();
+        let workspace_rev = workspace["workspace"]["dependencies"]["alethia-reth-chainspec"]["rev"]
+            .as_str()
+            .expect("workspace must pin an alethia-reth revision");
+        let xtask_rev = xtask["dependencies"]["alethia-reth-evm"]["rev"]
+            .as_str()
+            .expect("xtask must pin an alethia-reth revision");
+
+        assert_eq!(
+            xtask_rev, workspace_rev,
+            "xtask alethia-reth rev must match workspace"
+        );
     }
 }

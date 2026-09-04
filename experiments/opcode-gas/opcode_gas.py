@@ -349,23 +349,24 @@ def load_current_uzen_schedule() -> UnzenSchedule:
         raise RuntimeError(
             f"Unzen schedule exporter did not return valid JSON: {detail}"
         ) from exc
+    try:
+        opcode_multipliers = _parse_schedule_rows(
+            data,
+            rows_key="opcodes",
+            identifier_key="opcode",
+            max_identifier=0xFF,
+        )
+        precompile_multipliers = _parse_schedule_rows(
+            data,
+            rows_key="precompiles",
+            identifier_key="address",
+            max_identifier=(1 << 160) - 1,
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"invalid Unzen schedule export: {exc}") from exc
     return UnzenSchedule(
-        opcode_multipliers=MappingProxyType(
-            _parse_schedule_rows(
-                data,
-                rows_key="opcodes",
-                identifier_key="opcode",
-                max_identifier=0xFF,
-            )
-        ),
-        precompile_multipliers=MappingProxyType(
-            _parse_schedule_rows(
-                data,
-                rows_key="precompiles",
-                identifier_key="address",
-                max_identifier=(1 << 160) - 1,
-            )
-        ),
+        opcode_multipliers=MappingProxyType(opcode_multipliers),
+        precompile_multipliers=MappingProxyType(precompile_multipliers),
     )
 
 
@@ -383,7 +384,12 @@ def _parse_schedule_rows(
     for row in data[rows_key]:
         if not isinstance(row, dict) or identifier_key not in row or "multiplier" not in row:
             raise ValueError(f"invalid Unzen schedule {rows_key} row")
-        identifier = parse_opcode(row[identifier_key])
+        raw_identifier = row[identifier_key]
+        if isinstance(raw_identifier, bool) or not isinstance(raw_identifier, (int, str)):
+            raise ValueError(
+                f"invalid Unzen schedule {identifier_key}: {raw_identifier!r}"
+            )
+        identifier = parse_opcode(raw_identifier)
         multiplier = row["multiplier"]
         if not 0 <= identifier <= max_identifier:
             raise ValueError(f"invalid Unzen schedule {identifier_key}: {identifier}")

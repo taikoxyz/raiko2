@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import pathlib
 import statistics
 import subprocess
 import tomllib
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -81,8 +83,8 @@ class InventoryRow:
 
 @dataclass(frozen=True)
 class UnzenSchedule:
-    opcode_multipliers: dict[int, int]
-    precompile_multipliers: dict[int, int]
+    opcode_multipliers: Mapping[int, int]
+    precompile_multipliers: Mapping[int, int]
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -309,7 +311,6 @@ PRECOMPILE_BODY_DEFAULTS = {
 }
 
 PLANNED_PURE_OPCODE_OPCODES = set(PURE_OPCODE_DEFAULTS)
-_CURRENT_UZEN_SCHEDULE: UnzenSchedule | None = None
 
 
 def load_current_uzen_schedule() -> UnzenSchedule:
@@ -335,19 +336,35 @@ def load_current_uzen_schedule() -> UnzenSchedule:
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() if exc.stderr and exc.stderr.strip() else str(exc)
         raise RuntimeError(f"Unzen schedule exporter failed:\n{detail}") from exc
-    data = json.loads(completed.stdout)
+    except OSError as exc:
+        raise RuntimeError(f"failed to run Unzen schedule exporter: {exc}") from exc
+    try:
+        data = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        detail = (
+            "empty output"
+            if not completed.stdout.strip()
+            else f"{exc}; stdout={completed.stdout[:200]!r}"
+        )
+        raise RuntimeError(
+            f"Unzen schedule exporter did not return valid JSON: {detail}"
+        ) from exc
     return UnzenSchedule(
-        opcode_multipliers=_parse_schedule_rows(
-            data,
-            rows_key="opcodes",
-            identifier_key="opcode",
-            max_identifier=0xFF,
+        opcode_multipliers=MappingProxyType(
+            _parse_schedule_rows(
+                data,
+                rows_key="opcodes",
+                identifier_key="opcode",
+                max_identifier=0xFF,
+            )
         ),
-        precompile_multipliers=_parse_schedule_rows(
-            data,
-            rows_key="precompiles",
-            identifier_key="address",
-            max_identifier=(1 << 160) - 1,
+        precompile_multipliers=MappingProxyType(
+            _parse_schedule_rows(
+                data,
+                rows_key="precompiles",
+                identifier_key="address",
+                max_identifier=(1 << 160) - 1,
+            )
         ),
     )
 
@@ -378,11 +395,9 @@ def _parse_schedule_rows(
     return result
 
 
+@functools.cache
 def current_uzen_schedule() -> UnzenSchedule:
-    global _CURRENT_UZEN_SCHEDULE
-    if _CURRENT_UZEN_SCHEDULE is None:
-        _CURRENT_UZEN_SCHEDULE = load_current_uzen_schedule()
-    return _CURRENT_UZEN_SCHEDULE
+    return load_current_uzen_schedule()
 
 
 def load_manifest(path: pathlib.Path, schedule: UnzenSchedule | None = None) -> Manifest:
@@ -449,7 +464,7 @@ def expand_manifest_cases(
 
 
 def default_opcode_case(opcode: int) -> CaseSpec:
-    name = UZEN_OPCODE_NAMES[opcode]
+    name = UZEN_OPCODE_NAMES.get(opcode, f"opcode_0x{opcode:02x}")
     try:
         scenario, template, target_raw_gas = PURE_OPCODE_DEFAULTS[opcode]
     except KeyError as exc:
@@ -464,7 +479,7 @@ def default_opcode_case(opcode: int) -> CaseSpec:
 
 
 def default_precompile_case(address: int) -> CaseSpec:
-    name = UZEN_PRECOMPILE_NAMES[address]
+    name = UZEN_PRECOMPILE_NAMES.get(address, f"precompile_0x{address:x}")
     try:
         template, input_size, target_raw_gas = PRECOMPILE_BODY_DEFAULTS[address]
     except KeyError as exc:

@@ -8,10 +8,18 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 import opcode_gas
 
 
+def fixture_schedule():
+    return opcode_gas.UnzenSchedule(
+        opcode_multipliers={opcode: 1 for opcode in opcode_gas.UZEN_OPCODE_NAMES},
+        precompile_multipliers={address: 1 for address in opcode_gas.UZEN_PRECOMPILE_NAMES},
+    )
+
+
 class ManifestTests(unittest.TestCase):
     def test_load_manifest_parses_smoke_cases(self):
         manifest = opcode_gas.load_manifest(
-            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml"
+            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml",
+            schedule=fixture_schedule(),
         )
 
         self.assertEqual(manifest.name, "sp1-smoke")
@@ -97,6 +105,21 @@ class ManifestTests(unittest.TestCase):
             {case.name: case.kind for case in manifest.cases}["identity"],
             "precompile",
         )
+
+    def test_pure_opcode_defaults_do_not_overlap_excluded_categories(self):
+        excluded = (
+            opcode_gas.STATE_OR_REVM_OPCODES
+            | opcode_gas.SPAWN_WRAPPER_OPCODES
+            | opcode_gas.ZERO_OR_HALTING_OPCODES
+        )
+
+        self.assertFalse(opcode_gas.PLANNED_PURE_OPCODE_OPCODES & excluded)
+
+    def test_unknown_default_entries_raise_value_error(self):
+        with self.assertRaisesRegex(ValueError, "no pure opcode default"):
+            opcode_gas.default_opcode_case(0xAA)
+        with self.assertRaisesRegex(ValueError, "no precompile body default"):
+            opcode_gas.default_precompile_case(0x101)
 
 
 if __name__ == "__main__":

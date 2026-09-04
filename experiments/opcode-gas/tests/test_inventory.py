@@ -1,4 +1,6 @@
+import os
 import pathlib
+import shutil
 import sys
 import unittest
 from unittest import mock
@@ -9,13 +11,25 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 import opcode_gas
 
 
+def fixture_schedule():
+    return opcode_gas.UnzenSchedule(
+        opcode_multipliers={opcode: 1 for opcode in opcode_gas.UZEN_OPCODE_NAMES},
+        precompile_multipliers={address: 1 for address in opcode_gas.UZEN_PRECOMPILE_NAMES},
+    )
+
+
 class InventoryTests(unittest.TestCase):
     def test_load_uzen_schedule_invokes_xtask_exporter(self):
         completed = mock.Mock(
             stdout=opcode_gas.json.dumps(
                 {
                     "opcodes": [{"opcode": "0x01", "multiplier": 7}],
-                    "precompiles": [{"address": "0x0100", "multiplier": 9}],
+                    "precompiles": [
+                        {
+                            "address": "0x0000000000000000000000000000000000000100",
+                            "multiplier": 9,
+                        }
+                    ],
                 }
             )
         )
@@ -42,6 +56,59 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertEqual(schedule.opcode_multipliers, {0x01: 7})
         self.assertEqual(schedule.precompile_multipliers, {0x100: 9})
+        with self.assertRaises(TypeError):
+            schedule.opcode_multipliers[0x02] = 11
+
+    def test_load_uzen_schedule_reports_missing_cargo(self):
+        with mock.patch.object(
+            opcode_gas.subprocess,
+            "run",
+            side_effect=FileNotFoundError("cargo executable not found"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cargo executable not found"):
+                opcode_gas.load_current_uzen_schedule()
+
+    def test_load_uzen_schedule_reports_empty_or_invalid_json(self):
+        for output, expected_detail in (("", "empty output"), ("not json", "not json")):
+            with self.subTest(output=output):
+                with mock.patch.object(
+                    opcode_gas.subprocess,
+                    "run",
+                    return_value=mock.Mock(stdout=output),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        f"valid JSON.*{expected_detail}",
+                    ):
+                        opcode_gas.load_current_uzen_schedule()
+
+    def test_current_uzen_schedule_is_cached(self):
+        self.addCleanup(opcode_gas.current_uzen_schedule.cache_clear)
+        opcode_gas.current_uzen_schedule.cache_clear()
+        schedule = fixture_schedule()
+        with mock.patch.object(
+            opcode_gas,
+            "load_current_uzen_schedule",
+            return_value=schedule,
+        ) as load:
+            first = opcode_gas.current_uzen_schedule()
+            second = opcode_gas.current_uzen_schedule()
+
+        self.assertIs(first, second)
+        load.assert_called_once_with()
+
+    @unittest.skipUnless(
+        os.environ.get("RAIKO2_TEST_UNZEN_SCHEDULE_ROUNDTRIP") == "1",
+        "set RAIKO2_TEST_UNZEN_SCHEDULE_ROUNDTRIP=1 to run the Rust exporter",
+    )
+    @unittest.skipUnless(shutil.which("cargo"), "cargo is not available")
+    def test_rust_exporter_round_trips_through_python_loader(self):
+        schedule = opcode_gas.load_current_uzen_schedule()
+
+        self.assertTrue(schedule.opcode_multipliers)
+        self.assertTrue(schedule.precompile_multipliers)
+        self.assertIn(0x1E, schedule.opcode_multipliers)
+        self.assertIn(0x100, schedule.precompile_multipliers)
 
     def test_load_uzen_schedule_surfaces_exporter_stderr(self):
         failure = opcode_gas.subprocess.CalledProcessError(
@@ -79,10 +146,11 @@ class InventoryTests(unittest.TestCase):
 
     def test_inventory_marks_manifest_cases_as_measured(self):
         manifest = opcode_gas.load_manifest(
-            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml"
+            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml",
+            schedule=fixture_schedule(),
         )
 
-        rows = opcode_gas.build_inventory(manifest)
+        rows = opcode_gas.build_inventory(manifest, schedule=fixture_schedule())
         by_key = {(row.kind, row.identifier): row for row in rows}
 
         self.assertEqual(by_key[("opcode", "0x01")].status, "measured")
@@ -98,10 +166,11 @@ class InventoryTests(unittest.TestCase):
 
     def test_inventory_rows_are_all_classified(self):
         manifest = opcode_gas.load_manifest(
-            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml"
+            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml",
+            schedule=fixture_schedule(),
         )
 
-        rows = opcode_gas.build_inventory(manifest)
+        rows = opcode_gas.build_inventory(manifest, schedule=fixture_schedule())
 
         self.assertGreaterEqual(len(rows), 120)
         self.assertFalse([row for row in rows if not row.status])

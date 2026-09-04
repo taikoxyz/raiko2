@@ -9,10 +9,18 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 import opcode_gas
 
 
+def fixture_schedule():
+    return opcode_gas.UnzenSchedule(
+        opcode_multipliers={opcode: 1 for opcode in opcode_gas.UZEN_OPCODE_NAMES},
+        precompile_multipliers={address: 1 for address in opcode_gas.UZEN_PRECOMPILE_NAMES},
+    )
+
+
 class FixtureEmitTests(unittest.TestCase):
     def test_generate_writes_case_metadata(self):
         manifest = opcode_gas.load_manifest(
-            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml"
+            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml",
+            schedule=fixture_schedule(),
         )
 
         with tempfile.TemporaryDirectory() as tmp:

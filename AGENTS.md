@@ -12,6 +12,8 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Use `docs/API.md` for request/response contracts, config keys, and environment variables.
 - Use `config.example.toml` as the canonical config shape.
 - Use `.codex/skills/raiko2-image-release/SKILL.md` for image build-and-publish sequencing.
+- Use `.codex/skills/raiko2-risc0-zkgas-calibration/SKILL.md` for RISC0 zkGas cycle
+  recalibration and production model packaging.
 - Use `docs/solutions/` for documented solutions to past problems and workflow learnings, organized
   by category with YAML frontmatter (`module`, `tags`, `problem_type`).
 - Use `CONCEPTS.md` for shared domain vocabulary covering project-specific entities, named processes,
@@ -29,6 +31,8 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - `xtask/`: automation entrypoints, including guest build orchestration.
 - `guests/`: standalone guest program sources for `risc0` and `sp1`; not part of the workspace.
 - `crates/guests/elf`: built guest ELF assets consumed by the host. Never hand-edit generated ELF files.
+- `crates/prover/models`: generated prover model artifacts. Regenerate them through the documented
+  model tooling; do not hand-edit coefficients, operating policy, diagnostics, or provenance.
 
 ## Change Routing
 
@@ -41,6 +45,26 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Limit `bin/*` changes to CLI, config, wiring, and surface-specific behavior.
 - Do not reintroduce legacy paths or concepts from old docs such as `host/`, `lib/`, `core/`, `taskdb/`,
   or `reqpool/` unless the code in this repo actually adds them.
+
+## Deployment Model
+
+- Treat one live process per `(runtime.environment, runtime.namespace)` as a hard architecture
+  invariant. Active/active replicas, overlapping rolling replacements, and shared namespaces are
+  unsupported.
+- Namespaces are isolated persistence domains. Do not design task, artifact, checkpoint, or
+  invalidation behavior around cross-namespace data sharing.
+- A replacement must start only after the old process has stopped admissions, drained work, stopped
+  all workers, and exited. Deployment configuration must use a non-overlapping replacement strategy.
+- Runtime fencing is namespace-wide and instance-wide, never task-scoped. Once draining starts, no
+  new work or ordinary mutation may begin. A remote request admitted before the drain may persist
+  only its own request-ID checkpoint through its runtime-issued permit; inactive stops every write.
+- Do not add a distributed owner lease, owner epoch, or ownership heartbeat under this deployment
+  model. Non-overlap is enforced by the deployment strategy, not by application-level locking.
+  An immutable task-lifetime identity is allowed only to reject stale callbacks after a local task is
+  removed and recreated; it is not runtime authority and must never weaken the global lifecycle fence.
+- Keep GCS object generations for exact object-version CAS, invalidation, and conditional deletion.
+  Do not use task-lifetime identities as owner epochs or add distributed multi-writer coordination
+  unless the deployment model is explicitly changed first.
 
 ## Stable Command Entry Points
 
@@ -60,12 +84,24 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Image release:
   - `just release-image <backend> <tag>`
   - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository us-docker.pkg.dev/evmchain/images/raiko2`
+- RISC0 zkGas model:
+  - `PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model`
+  - `PYTHON_BIN=/path/to/venv/bin/python just check-risc0-zkgas-model <fixture-dir> <model.json>`
+  - `PYTHON_BIN=/path/to/venv/bin/python just test-risc0-zkgas-model`
+  - `PYTHON_BIN=/path/to/venv/bin/python just update-risc0-zkgas-model <fixture-dir> <config.json> <hoodi-samples.jsonl> <mainnet-samples.jsonl>`
+  - For a new calibration, use a new fixture directory and set the input config model ID to
+    `risc0-zkgas-m2-auto`; the generator writes the resolved content-addressed ID.
 - Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
 
 ## Project Skill Rule
 
 For image release or image publication tasks, read `.codex/skills/raiko2-image-release/SKILL.md`
 before acting.
+
+For RISC0 zkGas cycle sampling or model refresh tasks, read
+`.codex/skills/raiko2-risc0-zkgas-calibration/SKILL.md` before acting. Run Python through an
+existing Python 3.11+ virtual environment, passed as `PYTHON_BIN=/path/to/venv/bin/python`; do not
+create a new environment unless the user explicitly asks.
 
 Do not use this repository to perform Tolba or GKE rollout. Keep `release-image` scoped to guest
 ELF refresh, image build/push, digest capture, and optional `register-image` checks only.

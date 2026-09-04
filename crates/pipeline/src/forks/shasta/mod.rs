@@ -1,6 +1,7 @@
 mod backends;
 mod checkpoint_verify;
 mod manifest;
+pub mod preflight_cache;
 mod spec;
 
 use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};

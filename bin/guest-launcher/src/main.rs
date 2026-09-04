@@ -1,37 +1,30 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use alloy_primitives::{Address, B256, hex};
+use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
-use raiko2_primitives::{OpcodeLabInput, PrecompileLabInput, Proof, ProofType as RaikoProofType};
-use raiko2_primitives_shasta::build_proof_carry_data;
-use raiko2_primitives_shasta::decode_proof_carry_data;
-use raiko2_primitives_shasta::encode_proof_carry_data;
-use raiko2_primitives_shasta::instance::words_to_bytes_be;
-use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
-use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+use raiko2_primitives::{
+    AggregationGuestInput, OpcodeLabInput, PrecompileLabInput, Proof, ProofType as RaikoProofType,
+};
+use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
 use raiko2_prover::sp1::{
-    ProverMode as Sp1ProverMode, Sp1Config, Sp1FulfillmentStrategy, Sp1NetworkMode,
-    encode_sp1_aggregation_proof_payload, encode_sp1_proposal_proof_payload,
-    load_sp1_subproof_for_aggregation, sp1_image_id_words_from_uuid, sp1_vk_uuid,
+    ProverMode as Sp1ProverMode, Sp1Config, Sp1ExecutionMetadata, Sp1FulfillmentStrategy,
+    Sp1NetworkMode, Sp1Prover,
 };
 use serde::{Deserialize, Serialize};
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
-    ExecutionReport, NetworkProver, ProveRequest as _, Prover as _, ProvingKey as _, SP1Proof,
-    SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
-    blocking::{ProveRequest as _, Prover as BlockingProver, ProverClient as BlockingProverClient},
-    network::{
-        NetworkMode as Sp1SdkNetworkMode, get_default_rpc_url_for_mode, signer::NetworkSigner,
-    },
+    ExecutionReport, SP1ProvingKey, SP1Stdin,
+    blocking::{Prover as BlockingProver, ProverClient as BlockingProverClient},
 };
 
 #[derive(Parser)]
@@ -180,6 +173,8 @@ struct BenchReport {
     total_instruction_count: Option<u64>,
     total_syscall_count: Option<u64>,
     touched_memory_addresses: Option<u64>,
+    risc0_image_id: Option<String>,
+    risc0_input_bytes: Option<u64>,
     risc0_user_cycles: Option<u64>,
     risc0_padded_cycles: Option<u64>,
     risc0_segment_count: Option<u64>,
@@ -212,6 +207,8 @@ impl BenchReport {
             total_instruction_count: None,
             total_syscall_count: None,
             touched_memory_addresses: None,
+            risc0_image_id: None,
+            risc0_input_bytes: None,
             risc0_user_cycles: None,
             risc0_padded_cycles: None,
             risc0_segment_count: None,
@@ -256,16 +253,6 @@ impl ProofMode {
             ProofMode::Core => "core",
             ProofMode::Compressed => "compressed",
             ProofMode::Plonk => "plonk",
-        }
-    }
-}
-
-impl From<ProofMode> for SP1ProofMode {
-    fn from(value: ProofMode) -> Self {
-        match value {
-            ProofMode::Core => SP1ProofMode::Core,
-            ProofMode::Compressed => SP1ProofMode::Compressed,
-            ProofMode::Plonk => SP1ProofMode::Plonk,
         }
     }
 }
@@ -333,6 +320,7 @@ impl Args {
             proposal_cycle_limit: None,
             aggregation_cycle_limit: None,
             timeout_secs: self.sp1_timeout_secs,
+            network_request_max_attempts: 3,
             max_price_per_pgu: None,
             auction_timeout_secs: None,
             rpc_url: None,
@@ -342,6 +330,40 @@ impl Args {
             .validate()
             .map_err(anyhow::Error::msg)
             .map(|()| config)
+    }
+
+    fn validate_standard_guest_artifacts(&self) -> Result<()> {
+        if self.stage != Stage::Proposal || self.proof_type != ProofType::Sp1 {
+            return Ok(());
+        }
+
+        if self.elf.is_some() {
+            bail!(
+                "standard SP1 proposal and aggregation use the production guest pair; set \
+                 RAIKO2_GUEST_ELF_DIR to override both artifacts"
+            );
+        }
+
+        if self.mode == Mode::Prove {
+            let required = if self.aggregate.is_empty() {
+                ProofMode::Compressed
+            } else {
+                ProofMode::Plonk
+            };
+            if self.effective_proof_mode() != required {
+                bail!(
+                    "standard SP1 {} requires --proof-mode {}",
+                    if self.aggregate.is_empty() {
+                        "proposal"
+                    } else {
+                        "aggregation"
+                    },
+                    required.as_str()
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -372,14 +394,6 @@ impl From<CliSp1FulfillmentStrategy> for Sp1FulfillmentStrategy {
             CliSp1FulfillmentStrategy::Auction => Self::Auction,
         }
     }
-}
-
-fn count_entries(entries: impl Iterator<Item = (String, u64)>) -> Vec<BenchCountEntry> {
-    let mut entries = entries
-        .filter_map(|(label, count)| (count > 0).then_some(BenchCountEntry { label, count }))
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.label.cmp(&right.label));
-    entries
 }
 
 fn current_memory_usage_kb() -> Option<(u64, u64)> {
@@ -441,48 +455,62 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
 }
 
 fn apply_execution_metadata(report: &mut BenchReport, execution_report: &ExecutionReport) {
-    report.exit_code = Some(execution_report.exit_code);
-    let gas = execution_report.gas();
-    let total_instruction_count = execution_report.total_instruction_count();
-    let total_syscall_count = execution_report.total_syscall_count();
-    let touched_memory_addresses = execution_report.touched_memory_addresses;
-    report.gas = gas;
-    report.total_instruction_count = Some(total_instruction_count);
-    report.total_syscall_count = Some(total_syscall_count);
-    report.touched_memory_addresses = Some(touched_memory_addresses);
-    if let Some(gas) = gas {
-        report.set_primary_workload_metric("prover_gas", gas);
-    }
-    report.push_workload_metric("sp1_total_instruction_count", total_instruction_count);
-    report.push_workload_metric("sp1_total_syscall_count", total_syscall_count);
-    report.push_workload_metric("sp1_touched_memory_addresses", touched_memory_addresses);
-    report.invocation_tracker = count_entries(
-        execution_report
-            .invocation_tracker
-            .iter()
-            .map(|(label, count)| (label.clone(), *count)),
-    );
-    report.opcode_counts = count_entries(
-        execution_report
-            .opcode_counts
-            .iter()
-            .map(|(label, count)| (format!("{label:?}"), *count)),
-    );
-    report.syscall_counts = count_entries(
-        execution_report
-            .syscall_counts
-            .iter()
-            .map(|(label, count)| (format!("{label:?}"), *count)),
-    );
+    let metadata =
+        Sp1ExecutionMetadata::from_execution_report(report.public_values.clone(), execution_report);
+    apply_sp1_metadata(report, &metadata);
 }
 
-fn apply_cycle_tracker(report: &mut BenchReport, execution_report: &ExecutionReport) {
-    for (label, cycles) in &execution_report.cycle_tracker {
-        report.cycle_tracker.push(BenchCycleEntry {
-            label: label.clone(),
-            cycles: *cycles,
-        });
+fn apply_sp1_metadata(report: &mut BenchReport, metadata: &Sp1ExecutionMetadata) {
+    report.public_values = metadata.public_values.clone();
+    report.exit_code = Some(metadata.exit_code);
+    report.gas = metadata.gas;
+    report.total_instruction_count = Some(metadata.total_instruction_count);
+    report.total_syscall_count = Some(metadata.total_syscall_count);
+    report.touched_memory_addresses = Some(metadata.touched_memory_addresses);
+    if let Some(gas) = metadata.gas {
+        report.set_primary_workload_metric("prover_gas", gas);
     }
+    report.push_workload_metric(
+        "sp1_total_instruction_count",
+        metadata.total_instruction_count,
+    );
+    report.push_workload_metric("sp1_total_syscall_count", metadata.total_syscall_count);
+    report.push_workload_metric(
+        "sp1_touched_memory_addresses",
+        metadata.touched_memory_addresses,
+    );
+    report.cycle_tracker = metadata
+        .cycle_tracker
+        .iter()
+        .map(|entry| BenchCycleEntry {
+            label: entry.label.clone(),
+            cycles: entry.cycles,
+        })
+        .collect();
+    report.invocation_tracker = metadata
+        .invocation_tracker
+        .iter()
+        .map(|entry| BenchCountEntry {
+            label: entry.label.clone(),
+            count: entry.count,
+        })
+        .collect();
+    report.opcode_counts = metadata
+        .opcode_counts
+        .iter()
+        .map(|entry| BenchCountEntry {
+            label: entry.label.clone(),
+            count: entry.count,
+        })
+        .collect();
+    report.syscall_counts = metadata
+        .syscall_counts
+        .iter()
+        .map(|entry| BenchCountEntry {
+            label: entry.label.clone(),
+            count: entry.count,
+        })
+        .collect();
 }
 
 #[tokio::main]
@@ -492,6 +520,7 @@ async fn main() -> Result<()> {
     setup_logger();
 
     let args = Args::parse();
+    args.validate_standard_guest_artifacts()?;
 
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
         return run_opcode_lab(args).await;
@@ -509,7 +538,8 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
     let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut input: GuestInput = serde_json::from_str(&contents).context("parse input JSON")?;
     if !input.witnesses.is_empty() && input.proof_carry_data == ProofCarryData::default() {
-        input.proof_carry_data = build_proof_carry_data(&input, proof_type.as_raiko())?;
+        input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&input, proof_type.as_raiko())?;
     }
     Ok(input)
 }
@@ -604,7 +634,6 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
         for (label, cycles) in &execution_report.cycle_tracker {
             println!("  {label}: {cycles}");
         }
-        apply_cycle_tracker(&mut report, &execution_report);
     }
 
     if let Some(path) = &args.json_out {
@@ -647,7 +676,6 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
         apply_execution_metadata(&mut report, &run.execution_report);
-        apply_cycle_tracker(&mut report, &run.execution_report);
         println!(
             "input: {} public_values: {}",
             report.input, report.public_values
@@ -713,7 +741,6 @@ async fn run_precompile_lab(args: Args) -> Result<()> {
         for (label, cycles) in &execution_report.cycle_tracker {
             println!("  {label}: {cycles}");
         }
-        apply_cycle_tracker(&mut report, &execution_report);
     }
 
     if let Some(path) = &args.json_out {
@@ -756,7 +783,6 @@ async fn run_precompile_lab_batch(args: Args) -> Result<()> {
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
         apply_execution_metadata(&mut report, &run.execution_report);
-        apply_cycle_tracker(&mut report, &run.execution_report);
         println!(
             "input: {} public_values: {}",
             report.input, report.public_values
@@ -797,7 +823,6 @@ async fn run_aggregation(args: Args) -> Result<()> {
     if args.aggregate.is_empty() {
         anyhow::bail!("missing --aggregate proofs");
     }
-    let sp1_config = args.sp1_config()?;
     let output_path = args
         .output
         .as_ref()
@@ -810,95 +835,34 @@ async fn run_aggregation(args: Args) -> Result<()> {
         anyhow::bail!("aggregation proof output requires --proof-mode plonk");
     }
 
-    let proofs = read_proofs(&args.aggregate)?;
-    let (aggregation_input, sp1_proofs, image_id) = build_aggregation_inputs(&proofs)?;
-
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&aggregation_input);
-
+    let sp1_config = args.sp1_config()?;
     let backend = load_sp1_shasta_backend()
         .map_err(anyhow::Error::msg)
         .context("load SP1 Shasta guest ELFs")?;
-    let proposal_elf = backend
-        .elf(ProofStage::Proposal)
-        .context("load SP1 proposal ELF")?;
-    let elf = backend
-        .elf(ProofStage::Aggregation)
-        .context("load SP1 aggregation ELF")?;
+    let prover = Sp1Prover::new(sp1_config);
+    let proofs = read_proofs(&args.aggregate)?;
     let start = Instant::now();
-    let (proof, proposal_vk) = match sp1_config.prover {
-        Sp1ProverMode::Mock => {
-            let prover = BlockingProverClient::builder().mock().build();
-            let proposal_pk = setup_sp1_pk(&prover, proposal_elf, "proposal")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
-            for proof in sp1_proofs {
-                match proof {
-                    SP1Proof::Compressed(reduce_proof) => {
-                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
-                    }
-                    _ => anyhow::bail!("aggregation requires compressed proofs"),
-                }
-            }
-            (
-                prove_sp1_local(&prover, elf, stdin, proof_mode.into(), None, "aggregation")?,
-                proposal_vk,
-            )
-        }
-        Sp1ProverMode::Local => {
-            let prover = BlockingProverClient::builder().cpu().build();
-            let proposal_pk = setup_sp1_pk(&prover, proposal_elf, "proposal")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
-            for proof in sp1_proofs {
-                match proof {
-                    SP1Proof::Compressed(reduce_proof) => {
-                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
-                    }
-                    _ => anyhow::bail!("aggregation requires compressed proofs"),
-                }
-            }
-            (
-                prove_sp1_local(&prover, elf, stdin, proof_mode.into(), None, "aggregation")?,
-                proposal_vk,
-            )
-        }
-        Sp1ProverMode::Network => {
-            let prover = build_sp1_network_prover(&sp1_config).await?;
-            let proposal_pk = prover
-                .setup(proposal_elf.into())
-                .await
-                .context("setup SP1 proposal ELF")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
-            for proof in sp1_proofs {
-                match proof {
-                    SP1Proof::Compressed(reduce_proof) => {
-                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
-                    }
-                    _ => anyhow::bail!("aggregation requires compressed proofs"),
-                }
-            }
-            let pk = prover
-                .setup(elf.into())
-                .await
-                .context("setup SP1 aggregation ELF")?;
-            (
-                request_network_proof(&prover, &pk, stdin, proof_mode.into(), &sp1_config)
-                    .await
-                    .context("prove failed")?,
-                proposal_vk,
-            )
-        }
-    };
+    let proof = prover
+        .aggregate(
+            AggregationGuestInput { proofs },
+            &serde_json::Value::Null,
+            &backend,
+        )
+        .await
+        .context("SP1 aggregation failed")?;
     let mut report = BenchReport::new(
         "aggregation",
         args.mode.as_str(),
         proof_mode.as_str(),
         output_path.display().to_string(),
     );
-    report.public_values = proof.proof.public_values.raw();
+    report.public_values = proof
+        .input
+        .map(|input| format!("{input:#x}"))
+        .unwrap_or_default();
     report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let output = build_sp1_aggregation_output(&proof.proof, proof.vkey(), &proposal_vk)?;
-    write_proof_json(output_path, &output)?;
+    write_proof_json(output_path, &proof)?;
 
     println!("public_values: {}", report.public_values);
 
@@ -907,123 +871,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
         fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     }
 
-    println!("image_id: 0x{}", hex::encode(words_to_bytes_be(&image_id)));
-
     Ok(())
-}
-
-fn build_sp1_output(
-    proof: &SP1ProofWithPublicValues,
-    vk: &SP1VerifyingKey,
-    proof_payload: Option<String>,
-    carry: Option<&ProofCarryData>,
-) -> Result<Proof> {
-    let public_values = proof.public_values.as_slice();
-    if public_values.len() < 32 {
-        bail!(
-            "SP1 public values must contain at least 32 bytes, got {}",
-            public_values.len()
-        );
-    }
-    let input_hash = B256::from_slice(&public_values[..32]);
-    let extra_data = match carry {
-        Some(data) => Some(encode_proof_carry_data(data)?),
-        None => None,
-    };
-    let quote = serde_json::to_string(&proof.proof).context("serialize SP1 quote")?;
-
-    Ok(Proof {
-        proof: proof_payload,
-        input: Some(input_hash),
-        quote: Some(quote),
-        uuid: Some(sp1_vk_uuid(vk)),
-        extra_data,
-        ..Default::default()
-    })
-}
-
-fn build_sp1_proposal_output(
-    proof: &SP1ProofWithPublicValues,
-    vk: &SP1VerifyingKey,
-    carry: Option<&ProofCarryData>,
-) -> Result<Proof> {
-    build_sp1_output(
-        proof,
-        vk,
-        encode_sp1_proposal_proof_payload(proof, vk),
-        carry,
-    )
-}
-
-fn build_sp1_aggregation_output(
-    proof: &SP1ProofWithPublicValues,
-    aggregation_vk: &SP1VerifyingKey,
-    block_vk: &SP1VerifyingKey,
-) -> Result<Proof> {
-    build_sp1_output(
-        proof,
-        aggregation_vk,
-        encode_sp1_aggregation_proof_payload(proof, aggregation_vk, block_vk),
-        None,
-    )
-}
-
-#[derive(Clone)]
-struct Sp1ProofOutput {
-    proof: SP1ProofWithPublicValues,
-    vkey: SP1VerifyingKey,
-}
-
-impl Sp1ProofOutput {
-    fn vkey(&self) -> &SP1VerifyingKey {
-        &self.vkey
-    }
-}
-
-fn setup_sp1_pk<P>(prover: &P, elf: &[u8], label: &str) -> Result<SP1ProvingKey>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
-    prover
-        .setup(elf.into())
-        .map_err(|err| anyhow::anyhow!("setup SP1 {label} ELF: {err:?}"))
-}
-
-fn prove_sp1_local<P>(
-    prover: &P,
-    elf: &[u8],
-    stdin: SP1Stdin,
-    proof_mode: SP1ProofMode,
-    cycle_limit: Option<u64>,
-    label: &str,
-) -> Result<Sp1ProofOutput>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
-    let pk = setup_sp1_pk(prover, elf, label)?;
-    let vkey = pk.verifying_key().clone();
-    prove_sp1_with_pk(prover, &pk, vkey, stdin, proof_mode, cycle_limit)
-}
-
-fn prove_sp1_with_pk<P>(
-    prover: &P,
-    pk: &SP1ProvingKey,
-    vkey: SP1VerifyingKey,
-    stdin: SP1Stdin,
-    proof_mode: SP1ProofMode,
-    cycle_limit: Option<u64>,
-) -> Result<Sp1ProofOutput>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
-    let mut request = prover.prove(pk, stdin).mode(proof_mode);
-    if let Some(cycle_limit) = cycle_limit {
-        request = request.cycle_limit(cycle_limit);
-    }
-    let proof = request
-        .run()
-        .map_err(|err| anyhow::anyhow!("prove failed: {err:?}"))?;
-    Ok(Sp1ProofOutput { proof, vkey })
 }
 
 fn execute_sp1_local<P>(
@@ -1072,6 +920,8 @@ struct OpcodeLabExecution {
 struct Risc0ProposalExecution {
     public_values: String,
     wall_time_ms: u64,
+    image_id: String,
+    input_bytes: u64,
     user_cycles: u64,
     padded_cycles: u64,
     segment_count: u64,
@@ -1088,11 +938,14 @@ fn risc0_padded_cycles(po2_values: impl IntoIterator<Item = u32>) -> u64 {
 fn apply_risc0_execution_metadata(report: &mut BenchReport, execution: &Risc0ProposalExecution) {
     report.public_values = execution.public_values.clone();
     report.wall_time_ms = execution.wall_time_ms;
+    report.risc0_image_id = Some(execution.image_id.clone());
+    report.risc0_input_bytes = Some(execution.input_bytes);
     report.risc0_user_cycles = Some(execution.user_cycles);
     report.risc0_padded_cycles = Some(execution.padded_cycles);
     report.risc0_segment_count = Some(execution.segment_count);
     report.risc0_po2_counts = execution.po2_counts.clone();
     report.set_primary_workload_metric("risc0_padded_cycles", execution.padded_cycles);
+    report.push_workload_metric("risc0_input_bytes", execution.input_bytes);
     report.push_workload_metric("risc0_user_cycles", execution.user_cycles);
     report.push_workload_metric("risc0_segment_count", execution.segment_count);
 }
@@ -1104,6 +957,9 @@ async fn execute_risc0_proposal_blocking(
 ) -> Result<Risc0ProposalExecution> {
     tokio::task::spawn_blocking(move || {
         let encoded = bincode::serialize(&input).context("serialize RISC0 guest input")?;
+        let input_bytes = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
+        let image_id =
+            risc0_zkvm::compute_image_id(&elf).context("compute RISC0 proposal image ID")?;
         let mut env_builder = risc0_zkvm::ExecutorEnv::builder();
         env_builder
             .write_frame(encoded.as_slice())
@@ -1138,6 +994,8 @@ async fn execute_risc0_proposal_blocking(
         Ok(Risc0ProposalExecution {
             public_values,
             wall_time_ms,
+            image_id: hex::encode_prefixed(image_id.as_bytes()),
+            input_bytes,
             user_cycles,
             padded_cycles,
             segment_count: u64::try_from(session.segments.len()).unwrap_or(u64::MAX),
@@ -1240,61 +1098,6 @@ where
     Ok(outputs)
 }
 
-async fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
-    let private_key = std::env::var("NETWORK_PRIVATE_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .context("NETWORK_PRIVATE_KEY must be set for sp1 network proving")?;
-    let signer = NetworkSigner::local(&private_key)
-        .context("NETWORK_PRIVATE_KEY is not a valid SP1 network signer")?;
-    let network_mode = sp1_sdk_network_mode(config.network_mode);
-    let rpc_url = config
-        .rpc_url
-        .clone()
-        .unwrap_or_else(|| get_default_rpc_url_for_mode(network_mode).to_string());
-    Ok(NetworkProver::new(signer, &rpc_url, network_mode).await)
-}
-
-const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
-    match mode {
-        Sp1NetworkMode::Mainnet => Sp1SdkNetworkMode::Mainnet,
-        Sp1NetworkMode::Reserved => Sp1SdkNetworkMode::Reserved,
-    }
-}
-
-async fn request_network_proof(
-    prover: &NetworkProver,
-    pk: &SP1ProvingKey,
-    stdin: SP1Stdin,
-    proof_mode: SP1ProofMode,
-    config: &Sp1Config,
-) -> Result<Sp1ProofOutput> {
-    let timeout = Duration::from_secs(config.timeout_secs);
-    let mut request = prover
-        .prove(pk, stdin)
-        .mode(proof_mode)
-        .strategy(config.fulfillment_strategy.into())
-        .skip_simulation(config.skip_simulation)
-        .cycle_limit(config.cycle_limit)
-        .timeout(timeout);
-    if let Some(max_price_per_pgu) = config.max_price_per_pgu {
-        request = request.max_price_per_pgu(max_price_per_pgu);
-    }
-    let request_id = request
-        .request()
-        .await
-        .context("request SP1 network proof")?;
-    eprintln!("sp1 request_id: {request_id}");
-    let proof = prover
-        .wait_proof(request_id, Some(timeout), None)
-        .await
-        .context("wait for SP1 network proof")?;
-    Ok(Sp1ProofOutput {
-        proof,
-        vkey: pk.verifying_key().clone(),
-    })
-}
-
 async fn run_sp1_proposal(
     args: Args,
     input_path: PathBuf,
@@ -1302,128 +1105,48 @@ async fn run_sp1_proposal(
     mut report: BenchReport,
 ) -> Result<()> {
     let sp1_config = args.sp1_config()?;
-    let proof_mode = args.effective_proof_mode();
-    record_memory_snapshot(&mut report, "proposal:before_stdin_write");
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&input);
-    record_memory_snapshot(&mut report, "proposal:after_stdin_write");
-
-    let elf = load_sp1_proposal_elf(&args)?;
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load SP1 Shasta guest ELFs")?;
+    let prover = Sp1Prover::new(sp1_config);
     report.input = input_path.display().to_string();
-    record_memory_snapshot(&mut report, "proposal:after_load_elf");
+    record_memory_snapshot(&mut report, "proposal:before_sp1_prover");
+    let start = Instant::now();
+    let proof = prover
+        .prove(input, &serde_json::Value::Null, &backend)
+        .await
+        .context("SP1 proposal failed")?;
+    report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    record_memory_snapshot(&mut report, "proposal:after_sp1_prover");
 
-    match args.mode {
-        Mode::Execute => {
-            let start = Instant::now();
-            record_memory_snapshot(&mut report, "proposal:before_execute_run");
-            let (public_values, execution_report) =
-                execute_sp1_blocking(sp1_config.prover, elf.clone(), stdin).await?;
-            record_memory_snapshot(&mut report, "proposal:after_execute_run");
-            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            report.public_values = public_values.raw();
-            apply_execution_metadata(&mut report, &execution_report);
-            record_memory_snapshot(&mut report, "proposal:after_apply_execution_metadata");
-
-            println!("public_values: {}", report.public_values);
-            if !execution_report.cycle_tracker.is_empty() {
-                println!("cycle_tracker:");
-                for (label, cycles) in &execution_report.cycle_tracker {
-                    println!("  {label}: {cycles}");
-                }
-                apply_cycle_tracker(&mut report, &execution_report);
+    if args.mode == Mode::Execute {
+        let metadata_value = proof
+            .extra_data
+            .as_ref()
+            .and_then(|extra_data| extra_data.get("sp1"))
+            .cloned()
+            .context("SP1 execute proof is missing production metadata")?;
+        let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
+            .context("parse production SP1 execution metadata")?;
+        apply_sp1_metadata(&mut report, &metadata);
+        record_memory_snapshot(&mut report, "proposal:after_apply_execution_metadata");
+        if !report.cycle_tracker.is_empty() {
+            println!("cycle_tracker:");
+            for entry in &report.cycle_tracker {
+                println!("  {}: {}", entry.label, entry.cycles);
             }
         }
-        Mode::Prove => {
-            let start = Instant::now();
-            match sp1_config.prover {
-                Sp1ProverMode::Mock => {
-                    let prover = BlockingProverClient::builder().mock().build();
-                    record_memory_snapshot(&mut report, "proposal:before_setup");
-                    let pk = setup_sp1_pk(&prover, &elf, "proposal")?;
-                    let vkey = pk.verifying_key().clone();
-                    record_memory_snapshot(&mut report, "proposal:after_setup");
-                    let output = prove_sp1_with_pk(
-                        &prover,
-                        &pk,
-                        vkey,
-                        stdin,
-                        proof_mode.into(),
-                        Some(sp1_config.cycle_limit),
-                    )?;
-                    record_memory_snapshot(&mut report, "proposal:after_prove_run");
-                    report.wall_time_ms =
-                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    report.public_values = output.proof.public_values.raw();
-                    println!("public_values: {}", report.public_values);
-
-                    if let Some(path) = &args.output {
-                        let proof = build_sp1_proposal_output(
-                            &output.proof,
-                            output.vkey(),
-                            Some(&input.proof_carry_data),
-                        )?;
-                        write_proof_json(path, &proof)?;
-                    }
-                }
-                Sp1ProverMode::Local => {
-                    let prover = BlockingProverClient::builder().cpu().build();
-                    record_memory_snapshot(&mut report, "proposal:before_setup");
-                    let pk = setup_sp1_pk(&prover, &elf, "proposal")?;
-                    let vkey = pk.verifying_key().clone();
-                    record_memory_snapshot(&mut report, "proposal:after_setup");
-                    let output = prove_sp1_with_pk(
-                        &prover,
-                        &pk,
-                        vkey,
-                        stdin,
-                        proof_mode.into(),
-                        Some(sp1_config.cycle_limit),
-                    )?;
-                    record_memory_snapshot(&mut report, "proposal:after_prove_run");
-                    report.wall_time_ms =
-                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    report.public_values = output.proof.public_values.raw();
-                    println!("public_values: {}", report.public_values);
-
-                    if let Some(path) = &args.output {
-                        let proof = build_sp1_proposal_output(
-                            &output.proof,
-                            output.vkey(),
-                            Some(&input.proof_carry_data),
-                        )?;
-                        write_proof_json(path, &proof)?;
-                    }
-                }
-                Sp1ProverMode::Network => {
-                    let prover = build_sp1_network_prover(&sp1_config).await?;
-                    record_memory_snapshot(&mut report, "proposal:before_setup");
-                    let pk = prover
-                        .setup(elf.into())
-                        .await
-                        .context("setup SP1 proposal ELF")?;
-                    record_memory_snapshot(&mut report, "proposal:after_setup");
-                    let output =
-                        request_network_proof(&prover, &pk, stdin, proof_mode.into(), &sp1_config)
-                            .await
-                            .context("prove failed")?;
-                    record_memory_snapshot(&mut report, "proposal:after_network_proof");
-                    report.wall_time_ms =
-                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    report.public_values = output.proof.public_values.raw();
-                    println!("public_values: {}", report.public_values);
-
-                    if let Some(path) = &args.output {
-                        let output = build_sp1_proposal_output(
-                            &output.proof,
-                            output.vkey(),
-                            Some(&input.proof_carry_data),
-                        )?;
-                        write_proof_json(path, &output)?;
-                    }
-                }
-            }
+    } else {
+        report.public_values = proof
+            .input
+            .map(|input| format!("{input:#x}"))
+            .unwrap_or_default();
+        if let Some(path) = &args.output {
+            write_proof_json(path, &proof)?;
         }
     }
+
+    println!("public_values: {}", report.public_values);
 
     if let Some(path) = &args.json_out {
         let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
@@ -1431,20 +1154,6 @@ async fn run_sp1_proposal(
     }
 
     Ok(())
-}
-
-fn load_sp1_proposal_elf(args: &Args) -> Result<Vec<u8>> {
-    if let Some(path) = &args.elf {
-        return fs::read(path).with_context(|| format!("read {}", path.display()));
-    }
-
-    let backend = load_sp1_shasta_backend()
-        .map_err(anyhow::Error::msg)
-        .context("load SP1 Shasta guest ELFs")?;
-    backend
-        .elf(ProofStage::Proposal)
-        .context("load SP1 proposal ELF")
-        .map(ToOwned::to_owned)
 }
 
 async fn run_risc0_proposal(
@@ -1479,6 +1188,8 @@ async fn run_risc0_proposal(
     record_memory_snapshot(&mut report, "proposal:risc0_after_execute_run");
 
     println!("public_values: {}", report.public_values);
+    println!("risc0_image_id: {}", execution.image_id);
+    println!("risc0_input_bytes: {}", execution.input_bytes);
     println!("risc0_user_cycles: {}", execution.user_cycles);
     println!("risc0_padded_cycles: {}", execution.padded_cycles);
     println!("risc0_segment_count: {}", execution.segment_count);
@@ -1548,59 +1259,6 @@ fn read_proofs(paths: &[PathBuf]) -> Result<Vec<Proof>> {
     Ok(proofs)
 }
 
-fn build_aggregation_inputs(
-    proofs: &[Proof],
-) -> Result<(ShastaZkAggregationGuestInput, Vec<SP1Proof>, [u32; 8])> {
-    let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
-    let mut block_inputs = Vec::with_capacity(proofs.len());
-    let mut sp1_proofs = Vec::with_capacity(proofs.len());
-    let mut image_id: Option<[u32; 8]> = None;
-
-    for proof in proofs {
-        let carry_value = proof
-            .extra_data
-            .as_ref()
-            .context("missing proof extra_data")?;
-        let carry = decode_proof_carry_data(carry_value)?;
-        let expected_input = hash_shasta_subproof_input(&carry);
-        if let Some(input_hash) = proof.input
-            && input_hash != expected_input
-        {
-            anyhow::bail!("proof input hash does not match shasta carry data");
-        }
-        block_inputs.push(expected_input);
-        proof_carry_data_vec.push(carry);
-
-        let uuid = proof.uuid.as_deref().context("missing proof uuid")?;
-        let candidate_id = parse_image_id_from_uuid(uuid)?;
-        if let Some(existing) = image_id {
-            if existing != candidate_id {
-                anyhow::bail!("mismatched proof image ids");
-            }
-        } else {
-            image_id = Some(candidate_id);
-        }
-
-        let sp1_proof = load_sp1_subproof_for_aggregation(proof)
-            .map_err(|err| anyhow::anyhow!("load SP1 aggregation subproof: {err}"))?;
-        sp1_proofs.push(sp1_proof);
-    }
-
-    let image_id = image_id.context("missing proof image id")?;
-    let aggregation_input = ShastaZkAggregationGuestInput {
-        image_id,
-        block_inputs,
-        proof_carry_data_vec,
-        prover_address: Address::default(),
-    };
-
-    Ok((aggregation_input, sp1_proofs, image_id))
-}
-
-fn parse_image_id_from_uuid(uuid: &str) -> Result<[u32; 8]> {
-    sp1_image_id_words_from_uuid(uuid).map_err(anyhow::Error::msg)
-}
-
 fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
     let contents = serde_json::to_string_pretty(proof).context("serialize proof json")?;
     fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
@@ -1610,27 +1268,16 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, ProofType, Stage, load_sp1_proposal_elf, parse_image_id_from_uuid, read_input,
-        read_opcode_lab_input_list, risc0_padded_cycles,
+        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage,
+        apply_risc0_execution_metadata, apply_sp1_metadata, read_input, read_opcode_lab_input_list,
+        risc0_padded_cycles,
     };
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
     use raiko2_primitives::{ProofType as RaikoProofType, SupportedChainSpecs};
-    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
+    use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use std::fs;
-
-    #[test]
-    fn parses_image_id_from_uuid_hex() {
-        let uuid = "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-        let image_id = parse_image_id_from_uuid(uuid).expect("parse image id");
-        assert_eq!(
-            image_id,
-            [
-                0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c, 0x13121110, 0x17161514, 0x1b1a1918,
-                0x1f1e1d1c
-            ]
-        );
-    }
 
     #[test]
     fn parses_opcode_lab_stage_with_explicit_elf() {
@@ -1766,10 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn sp1_proposal_elf_uses_explicit_elf_path() {
-        let elf_path = temp_input_path("sp1-proposal-elf");
-        let expected = vec![0xde, 0xad, 0xbe, 0xef];
-        fs::write(&elf_path, &expected).expect("write elf");
+    fn standard_sp1_proposal_rejects_single_elf_override() {
         let args = Args::try_parse_from([
             "guest-launcher",
             "--stage",
@@ -1781,21 +1425,130 @@ mod tests {
             "--sp1-prover",
             "local",
             "--elf",
-            elf_path.to_str().expect("utf8 path"),
+            "/tmp/proposal.elf",
             "--input",
             "/tmp/guest-input.json",
         ])
         .expect("parse args");
 
-        let elf = load_sp1_proposal_elf(&args).expect("load explicit elf");
+        let error = args
+            .validate_standard_guest_artifacts()
+            .expect_err("single standard ELF override must be rejected");
+        assert!(error.to_string().contains("RAIKO2_GUEST_ELF_DIR"));
+    }
 
-        fs::remove_file(elf_path).expect("cleanup temp elf");
-        assert_eq!(elf, expected);
+    #[test]
+    fn standard_sp1_proposal_requires_compressed_proof() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "proposal",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "prove",
+            "--proof-mode",
+            "plonk",
+            "--input",
+            "/tmp/guest-input.json",
+        ])
+        .expect("parse args");
+
+        let error = args
+            .validate_standard_guest_artifacts()
+            .expect_err("proposal proof must be compressed");
+        assert!(error.to_string().contains("--proof-mode compressed"));
+    }
+
+    #[test]
+    fn standard_sp1_aggregation_requires_plonk_proof() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "proposal",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "prove",
+            "--proof-mode",
+            "compressed",
+            "--aggregate",
+            "/tmp/proof.json",
+            "--output",
+            "/tmp/aggregation.json",
+        ])
+        .expect("parse args");
+
+        let error = args
+            .validate_standard_guest_artifacts()
+            .expect_err("aggregation proof must be plonk");
+        assert!(error.to_string().contains("--proof-mode plonk"));
+    }
+
+    #[test]
+    fn production_sp1_metadata_preserves_benchmark_fields() {
+        let metadata = Sp1ExecutionMetadata {
+            zkvm: "sp1".to_string(),
+            mode: "execute".to_string(),
+            public_values: "0x12".to_string(),
+            exit_code: 0,
+            gas: Some(7),
+            total_instruction_count: 11,
+            total_syscall_count: 3,
+            touched_memory_addresses: 5,
+            cycle_tracker: Vec::new(),
+            invocation_tracker: Vec::new(),
+            opcode_counts: Vec::new(),
+            syscall_counts: Vec::new(),
+        };
+        let mut report = BenchReport::new(
+            "proposal",
+            "execute",
+            "compressed",
+            "input.json".to_string(),
+        );
+
+        apply_sp1_metadata(&mut report, &metadata);
+
+        assert_eq!(report.public_values, "0x12");
+        assert_eq!(report.gas, Some(7));
+        assert_eq!(report.total_instruction_count, Some(11));
     }
 
     #[test]
     fn risc0_padded_cycles_sum_segment_po2s() {
         assert_eq!(risc0_padded_cycles([10, 11, 10]), 4096);
+    }
+
+    #[test]
+    fn risc0_metadata_reports_encoded_input_bytes() {
+        let mut report = BenchReport::new(
+            "proposal",
+            "execute",
+            "compressed",
+            "input.json".to_string(),
+        );
+        let execution = Risc0ProposalExecution {
+            public_values: "0x12".to_string(),
+            wall_time_ms: 7,
+            image_id: "0xabcd".to_string(),
+            input_bytes: 123,
+            user_cycles: 456,
+            padded_cycles: 512,
+            segment_count: 1,
+            po2_counts: Vec::new(),
+        };
+
+        apply_risc0_execution_metadata(&mut report, &execution);
+
+        assert_eq!(report.risc0_image_id.as_deref(), Some("0xabcd"));
+        assert_eq!(report.risc0_input_bytes, Some(123));
+        assert!(
+            report
+                .workload_metrics
+                .iter()
+                .any(|entry| { entry.label == "risc0_input_bytes" && entry.count == 123 })
+        );
     }
 
     #[test]
@@ -1848,7 +1601,8 @@ mod tests {
         witness.block.header.state_root = B256::from([0x55; 32]);
         input.witnesses.push(witness);
         input.proof_carry_data =
-            build_proof_carry_data(&input, RaikoProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&input, RaikoProofType::Native)
+                .expect("build carry data");
         input
     }
 

@@ -16,8 +16,9 @@ use raiko2_pipeline::forks::shasta::{
     load_risc0_boundless_shasta_backend, load_risc0_shasta_backend, load_sp1_shasta_backend,
 };
 use raiko2_pipeline::{
-    NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
-    ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend, forks::shasta::load_shasta_backends,
+    NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineRoute, PipelineSpec,
+    Preflight, ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
+    forks::shasta::load_shasta_backends,
 };
 use raiko2_primitives::{
     Proof, ProofContext, ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult,
@@ -45,7 +46,7 @@ use super::app;
 use super::net;
 use super::state::{RuntimeObserver, StaticPipelineFactory};
 use crate::cli::FixtureServerArgs;
-use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
+use crate::config::{Config, NetworkPairConfig};
 
 pub(crate) type NativeFixtureSpec = FixtureSpec<NativeProver, NativeBackend>;
 pub(crate) type NativeFixtureEngine = Engine<NativeFixtureSpec>;
@@ -79,7 +80,7 @@ impl FixtureProvider {
     #[must_use]
     pub(crate) fn from_repo_shared_fixture() -> Self {
         let raw = include_str!(
-            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json"
         );
         let mut input: GuestInput =
             serde_json::from_str(raw).expect("parse shared fixture json as GuestInput");
@@ -506,8 +507,9 @@ impl Provider for FixtureProvider {
 #[must_use]
 pub(crate) fn base_config() -> Config {
     let mut config = Config::default();
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Local;
+    config
+        .prover
+        .apply_routes_override(&"risc0/local".parse().expect("valid fixture routes"));
     config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
     config.rpc.pairs = vec![NetworkPairConfig {
         network: "taiko_dev".to_string(),
@@ -531,10 +533,14 @@ const fn memory_scheduler_config() -> SchedulerConfig {
     }
 }
 
-fn engine_observer(runtime: Arc<RuntimeManager>) -> Arc<dyn EngineObserver> {
+pub(crate) fn engine_observer(
+    runtime: Arc<RuntimeManager>,
+    route: PipelineRoute,
+) -> Arc<dyn EngineObserver> {
     Arc::new(RuntimeObserver::new(
         runtime,
         "taiko_dev/ethereum".to_string(),
+        route,
     ))
 }
 
@@ -594,7 +600,7 @@ pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0Fi
 }
 
 #[cfg(test)]
-fn risc0_fixture_engine_with_observer(
+pub(crate) fn risc0_fixture_engine_with_observer(
     context_config: serde_json::Value,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
@@ -727,18 +733,26 @@ pub(crate) fn app_with_risc0_fixture_engine(config: Config, engine: Risc0Fixture
         PipelineKey::ShastaRisc0,
         engine,
     );
-    app::build_router(state)
+    app::build_router_with_legacy_v3_for_tests(state)
 }
 
 #[cfg(test)]
 pub(crate) fn app_with_observed_risc0_fixture_engine(
     config: Config,
 ) -> (Router, Risc0FixtureEngine) {
+    let (state, engine) = state_with_observed_risc0_fixture_engine(config);
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
+}
+
+#[cfg(test)]
+pub(crate) fn state_with_observed_risc0_fixture_engine(
+    config: Config,
+) -> (AppState, Risc0FixtureEngine) {
     let runtime = Arc::new(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-runtime"))
             .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let observer = engine_observer(Arc::clone(&runtime), PipelineKey::ShastaRisc0.route());
     let engine = risc0_fixture_engine_with_observer(json!({}), Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
@@ -749,7 +763,7 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router(state), engine)
+    (state, engine)
 }
 
 #[cfg(test)]
@@ -760,7 +774,7 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-sp1-runtime"))
             .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let observer = engine_observer(Arc::clone(&runtime), PipelineKey::ShastaSp1.route());
     let engine = sp1_fixture_engine_with_observer(json!({}), Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
@@ -777,7 +791,7 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
 #[cfg(test)]
 pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, Sp1FixtureEngine) {
     let (state, engine) = state_with_observed_sp1_fixture_engine(config);
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 #[cfg(test)]
@@ -788,7 +802,7 @@ pub(crate) fn app_with_observed_native_fixture_engine(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-native-runtime"))
             .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let observer = engine_observer(Arc::clone(&runtime), PipelineKey::ShastaNative.route());
     let engine = native_fixture_engine_with_observer(Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
@@ -799,7 +813,7 @@ pub(crate) fn app_with_observed_native_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 #[cfg(test)]
@@ -812,7 +826,10 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
         ))
         .expect("runtime manager"),
     );
-    let observer = engine_observer(Arc::clone(&runtime));
+    let observer = engine_observer(
+        Arc::clone(&runtime),
+        PipelineKey::ShastaRisc0Network.route(),
+    );
     let engine = risc0_fixture_engine_for_pipeline(
         json!({}),
         PipelineKey::ShastaRisc0Network,
@@ -827,7 +844,7 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 pub(crate) async fn spawn_chain_id_rpc(
@@ -870,14 +887,16 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
         "raiko2-fixture-runtime",
     ))?);
-    let observer = engine_observer(Arc::clone(&runtime));
     let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
     let workers = config.queue.workers;
     let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
 
     let mut factory = StaticPipelineFactory::default();
 
-    let native_engine = native_fixture_engine_with_observer(Some(Arc::clone(&observer)));
+    let native_engine = native_fixture_engine_with_observer(Some(engine_observer(
+        Arc::clone(&runtime),
+        PipelineKey::ShastaNative.route(),
+    )));
     native_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
     factory.insert(
         "taiko_dev/ethereum".to_string(),
@@ -888,7 +907,10 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let risc0_engine = risc0_fixture_engine_for_pipeline_with_backend(
         json!({}),
         PipelineKey::ShastaRisc0,
-        Some(Arc::clone(&observer)),
+        Some(engine_observer(
+            Arc::clone(&runtime),
+            PipelineKey::ShastaRisc0.route(),
+        )),
         shasta_backends.risc0,
     );
     risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
@@ -898,8 +920,14 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(risc0_engine),
     );
 
-    let sp1_engine =
-        sp1_fixture_engine_with_backend(json!({}), Some(observer), shasta_backends.sp1);
+    let sp1_engine = sp1_fixture_engine_with_backend(
+        json!({}),
+        Some(engine_observer(
+            Arc::clone(&runtime),
+            PipelineKey::ShastaSp1.route(),
+        )),
+        shasta_backends.sp1,
+    );
     sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
     factory.insert(
         "taiko_dev/ethereum".to_string(),
@@ -918,6 +946,11 @@ pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {
     let (l2_rpc, chain_id_handle) = spawn_chain_id_rpc(167_001).await?;
 
     let mut config = base_config();
+    config.prover.apply_routes_override(
+        &"risc0/local,sp1/local,native/local"
+            .parse()
+            .expect("valid fixture server routes"),
+    );
     config.server.host = args.host.clone();
     config.server.port = args.port;
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
@@ -933,7 +966,7 @@ pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {
         addr
     );
     info!(
-        "Try POST http://{}/v3/proof/batch/shasta with proof_type=sp1 and sp1.mode=execute",
+        "Try POST http://{}/v4/proof/proposal with proof_type=sp1",
         addr
     );
 

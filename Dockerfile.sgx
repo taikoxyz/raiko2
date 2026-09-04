@@ -1,9 +1,9 @@
 # Dedicated Gramine-based image for the raiko2 SGX proving runtime.
 
-FROM rust:1.94.0-bookworm AS builder
+FROM rust:1.95.0-bookworm AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV RUSTUP_TOOLCHAIN=1.94.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -24,12 +24,13 @@ COPY bin ./bin
 COPY config ./config
 COPY xtask ./xtask
 
-RUN cargo +1.94.0 build --release -p raiko2-sgx-prover
+RUN cargo +1.95.0 build --release -p raiko2-sgx-prover
 
 FROM gramineproject/gramine:1.8-jammy AS runtime
 
 ARG GRAMINE_LOG_LEVEL=error
 ARG GRAMINE_ENCLAVE_KEY_SHA256
+ARG SGX_EDMM_ENABLE=false
 
 ENV DEBIAN_FRONTEND=noninteractive \
     RAIKO2_SGX_CONFIG_DIR=/var/lib/raiko2/sgx/config \
@@ -71,9 +72,11 @@ RUN --mount=type=secret,id=gramine_enclave_key \
     test -s /run/secrets/gramine_enclave_key && \
     test -n "${GRAMINE_ENCLAVE_KEY_SHA256}" && \
     test "$(sha256sum /run/secrets/gramine_enclave_key | awk '{print $1}')" = "${GRAMINE_ENCLAVE_KEY_SHA256}" && \
+    case "${SGX_EDMM_ENABLE}" in true|false) ;; *) echo "SGX_EDMM_ENABLE must be literal true or false" >&2; exit 1 ;; esac && \
     cd /opt/raiko2-sgx/bin && \
     gramine-manifest \
         -Dlog_level="${GRAMINE_LOG_LEVEL}" \
+        -Dedmm_enable="${SGX_EDMM_ENABLE}" \
         -Darch_libdir=/lib/x86_64-linux-gnu \
         /opt/raiko2-sgx/docker/raiko2-sgx-prover.manifest.template \
         raiko2-sgx-prover.manifest && \

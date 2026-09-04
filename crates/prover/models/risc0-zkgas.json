@@ -1,0 +1,78 @@
+{
+  "aggregation": {
+    "per_child_mcycles": 180,
+    "provenance": {
+      "elf_sha256": "fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924",
+      "execution_po2": 20,
+      "image_id": null
+    }
+  },
+  "model_id": "risc0-zkgas-m2-c71d7a4ff237c10d",
+  "originating_experiment_model": "M2",
+  "proposal": {
+    "coefficients": {
+      "decimal": {
+        "block_count": "2.2737130481392764",
+        "intercept": "511.8367085993759",
+        "total_zkgas": "0.000003714503729246405"
+      },
+      "scaled": {
+        "block_count": 2273713048139,
+        "intercept": 511836708599376,
+        "scale": 1000000000000,
+        "total_zkgas": 3714504
+      }
+    },
+    "cohorts": {
+      "hoodi": {
+        "calibration_count": 40,
+        "continuous": {
+          "mape_percent": "0.094557",
+          "max_absolute_error_percent": "0.279512",
+          "max_underquote_percent": "0.279512",
+          "over_ten_percent_count": 0,
+          "underquote_count": 17
+        },
+        "fit_count": 80,
+        "scaled_integer": {
+          "mape_percent": "0.093492",
+          "max_absolute_error_percent": "0.264550",
+          "max_underquote_percent": "0.264550",
+          "over_ten_percent_count": 0,
+          "underquote_count": 12
+        }
+      },
+      "mainnet": {
+        "continuous": {
+          "mape_percent": "5.87",
+          "max_overquote_percent": "21.94",
+          "max_underquote_percent": "5.75",
+          "overquote_over_ten_percent_count": 1,
+          "underquote_count": 19
+        },
+        "evaluation_count": 20,
+        "influenced_model_selection": true,
+        "scaled_integer": {
+          "mape_percent": "5.8422",
+          "max_overquote_percent": "21.9679",
+          "max_underquote_percent": "5.7234",
+          "overquote_over_ten_percent_count": 1,
+          "underquote_count": 19
+        },
+        "untouched_holdout": false
+      }
+    },
+    "generator_config_sha256": "f1fd959acc83a9c4fe2bc7d0d039c3195bcf24a6e8b499504b306940f11a26a2",
+    "max_total_zkgas": 500000000,
+    "provenance": {
+      "elf_sha256": "d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35",
+      "image_id": "0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10",
+      "min_execution_po2": 20,
+      "risc0_version": "3.0.5",
+      "source_revision": "4f8300497aba75605b9b8568b1955faa1f7f04bc"
+    },
+    "raw_input_rows_sha256": "0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328",
+    "validation_fixture_sha256": "dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767"
+  },
+  "schema_version": 3
+}

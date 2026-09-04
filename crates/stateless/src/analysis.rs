@@ -1,6 +1,6 @@
 use crate::{
     sparse::SparseState,
-    trie::{StatelessTrie, StatelessTrieExt},
+    trie::StatelessTrie,
     validation::{
         compute_ancestor_hashes, decode_recovered_block, determine_pre_state_root,
         validate_block_consensus,
@@ -9,8 +9,7 @@ use crate::{
 };
 use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_chainspec::spec::TaikoChainSpec;
-use alloy_consensus::TrieAccount;
-use alloy_primitives::{B256, map::AddressMap};
+use alloy_primitives::B256;
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
@@ -41,7 +40,6 @@ impl WitnessMaterializationStats {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Analyze witness materialization costs for a single block validation run.
 ///
 /// # Errors
@@ -53,7 +51,6 @@ pub fn analyze_block_with_witness_resources(
     witness: &ExecutionWitness,
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
-    callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
 ) -> Result<WitnessMaterializationStats, StatelessValidationError> {
@@ -68,9 +65,8 @@ pub fn analyze_block_with_witness_resources(
         witness.state_indices.len()
     };
 
-    let (mut trie, bytecode) =
+    let (trie, bytecode) =
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
-    trie.append_callers(callers);
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
     let executor = evm_config.executor(db);
     let _output = executor

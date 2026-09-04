@@ -43,6 +43,7 @@ where
     T: StatelessTrie,
 {
     /// Contiguous window of ancestor block hashes used to service the `BLOCKHASH` opcode.
+    /// The window's contiguity is verified by the caller against the parent chain.
     block_hashes: AncestorHashes,
     /// Map of code hashes to bytecode.
     /// Used to fetch contract code needed during execution.
@@ -68,10 +69,12 @@ where
     ///    (e.g., using witness data and verifying against a parent block's state root).
     /// 2. The `bytecode` map contains all bytecode corresponding to code hashes present in the
     ///    account data within the `trie`.
-    /// 3. The `ancestor_hashes` map contains the block hashes for the relevant ancestor blocks (up
-    ///    to 256 including the current block number). It assumes these hashes correspond to a
-    ///    contiguous chain of blocks. The caller is responsible for verifying the contiguity and
-    ///    the block limit.
+    /// 3. The `ancestor_hashes` map contains hashes for a contiguous sequence of completed
+    ///    ancestor blocks ending at `current_block - 1`; the current block is never part of the
+    ///    set, and revm only ever observes the most recent 256 entries (see
+    ///    [`Database::block_hash`] on this type for the exact window contract). The caller is
+    ///    responsible for verifying contiguity; no 256-entry limit is enforced here, and any
+    ///    older entries are simply never queried.
     pub(super) const fn new(
         trie: &'a T,
         bytecode: B256Map<Bytecode>,
@@ -124,9 +127,17 @@ where
         })
     }
 
-    /// Get block hash by block number from the provided ancestor hashes map.
+    /// Get block hash by block number from the provided ancestor hash window.
     ///
-    /// Returns an error if the hash for the given block number is not found in the map.
+    /// The revm interpreter only consults the database for `BLOCKHASH` requests strictly within
+    /// the 256-block history window of the executing block; current-block and out-of-window
+    /// requests are answered with zero by the interpreter itself and never reach this method
+    /// (verified against the pinned `revm-interpreter` 35.0.1 `blockhash` instruction).
+    ///
+    /// A number missing here is therefore always an in-window read the host failed to
+    /// provision. Erroring makes revm halt with a fatal external error, so the block is
+    /// unprovable rather than provable with a wrong hash: keep this failing closed and never
+    /// map a miss to `Ok(B256::ZERO)`.
     fn block_hash(&mut self, block_number: u64) -> Result<B256, Self::Error> {
         self.block_hashes
             .get(block_number)

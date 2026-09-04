@@ -8,7 +8,8 @@ license.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["chain-spec-json"]
+chain-spec-json = []
 kzg-host = ["dep:c-kzg"]
 
 [dependencies]

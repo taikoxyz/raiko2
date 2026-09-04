@@ -10,7 +10,7 @@ description = "Taiko Shasta primitives for Raiko V2"
 workspace = true
 
 [dependencies]
-raiko2-primitives.workspace = true
+raiko2-primitives = { path = "../primitives", default-features = false }
 raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
 
@@ -24,4 +24,5 @@ serde_json.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+raiko2-primitives = { path = "../primitives", features = ["chain-spec-json"] }
 bincode.workspace = true

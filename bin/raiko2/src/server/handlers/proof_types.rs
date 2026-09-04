@@ -7,6 +7,7 @@ pub(crate) use v3::{AggregateProofRequest, BatchShastaRequest};
 pub(super) use v3::{BatchProofType, PublicProverArgs, ShastaProposal};
 
 use raiko2_primitives::{Proof, ShastaCheckpoint};
+use raiko2_prover::BoundlessQuoteStrategy;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
 use serde::Serialize;
 use serde_json::Value;
@@ -80,7 +81,7 @@ pub(crate) struct TaskData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) proof_path: Option<String>,
+    pub(crate) proof_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
 }
@@ -101,7 +102,7 @@ pub(crate) struct ProposalStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) proof_path: Option<String>,
+    pub(crate) proof_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,7 +120,7 @@ pub(crate) struct AggregateStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) proof_path: Option<String>,
+    pub(crate) proof_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +162,10 @@ pub(crate) struct TaskRuntime {
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
     /// Exact escalated max price bid, in wei, as a decimal string (precise where the floored
@@ -423,21 +428,26 @@ mod tests {
 
     #[test]
     fn v4_proof_request_accepts_only_explicit_proof_types() {
-        let req = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
-            "proof_type": "sp1",
-            "proposals": [
-                {
-                    "proposal_id": 10,
-                    "l1_inclusion_block_number": 12,
-                    "l2_block_number_start": 10,
-                    "l2_block_number_end": 10,
-                    "last_anchor_block_number": 9
-                }
-            ]
-        }))
-        .expect("deserialize v4 proof request");
-        assert!(matches!(req.proof_type, v4::ProofType::Sp1));
-        assert!(!req.aggregate);
+        for (proof_type, expected) in [
+            ("native", v4::ProofType::Native),
+            ("sp1", v4::ProofType::Sp1),
+        ] {
+            let req = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
+                "proof_type": proof_type,
+                "proposals": [
+                    {
+                        "proposal_id": 10,
+                        "l1_inclusion_block_number": 12,
+                        "l2_block_number_start": 10,
+                        "l2_block_number_end": 10,
+                        "last_anchor_block_number": 9
+                    }
+                ]
+            }))
+            .expect("deserialize v4 proof request");
+            assert_eq!(req.proof_type, expected);
+            assert!(!req.aggregate);
+        }
 
         let err = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
             "proof_type": "zk_any",

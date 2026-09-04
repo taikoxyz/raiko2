@@ -1,6 +1,6 @@
 use crate::{
     sparse::SparseState,
-    trie::{StatelessTrie, StatelessTrieExt},
+    trie::StatelessTrie,
     witness_db::{AncestorHashes, WitnessDatabase},
 };
 use alethia_reth_block::{
@@ -11,8 +11,8 @@ use alethia_reth_chainspec::{hardfork::TaikoHardforks, spec::TaikoChainSpec};
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
-use alloy_consensus::{BlockHeader, Header, TrieAccount, proofs, transaction::Recovered};
-use alloy_primitives::{Address, B256, U256, map::AddressMap};
+use alloy_consensus::{BlockHeader, Header, TxReceipt, proofs, transaction::Recovered};
+use alloy_primitives::{Address, B256, U256};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
@@ -36,18 +36,10 @@ use std::sync::Arc;
 pub fn validate_block(
     block: Block,
     witness: &ExecutionWitness,
-    callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError> {
-    validate_block_with_ancestor_headers(
-        block,
-        witness,
-        &witness.headers,
-        callers,
-        chain_spec,
-        config,
-    )
+    validate_block_with_ancestor_headers(block, witness, &witness.headers, chain_spec, config)
 }
 
 /// Performs stateless validation of a block using an externally supplied ancestor header window.
@@ -64,19 +56,10 @@ pub fn validate_block_with_ancestor_headers(
     block: Block,
     witness: &ExecutionWitness,
     ancestor_headers: &[WitnessHeader],
-    callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError> {
-    validate_block_with_witness_resources(
-        block,
-        witness,
-        ancestor_headers,
-        &[],
-        callers,
-        chain_spec,
-        config,
-    )
+    validate_block_with_witness_resources(block, witness, ancestor_headers, &[], chain_spec, config)
 }
 
 /// Performs stateless validation of a block using ancestor overrides and a proposal-level shared
@@ -92,7 +75,6 @@ pub fn validate_block_with_witness_resources(
     witness: &ExecutionWitness,
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
-    callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError> {
@@ -101,7 +83,6 @@ pub fn validate_block_with_witness_resources(
         witness,
         ancestor_headers,
         shared_state_nodes,
-        callers,
         chain_spec,
         config,
     )
@@ -146,6 +127,8 @@ pub fn read_parent_storage_with_witness_resources(
         .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))
 }
 
+// Compact witness headers carry host-trusted hash/timestamp metadata (see `WitnessHeader` docs);
+// every consensus path must funnel through this rejection before that metadata could be consumed.
 fn ensure_full_ancestor_headers(
     ancestor_headers: &[WitnessHeader],
 ) -> Result<(), StatelessValidationError> {
@@ -175,6 +158,25 @@ fn sealed_parent_header(
 
 fn map_block_execution_error(err: &BlockExecutionError) -> StatelessValidationError {
     StatelessValidationError::StatelessExecutionFailed(err.to_string())
+}
+
+/// Reject blocks whose first (anchor) transaction executed but reverted.
+///
+/// Prover-mode execution treats `execute_transaction` Ok as "committed" even when the
+/// EVM result is a revert (receipt status = false). A reverted anchor leaves no valid
+/// checkpoint binding; fail closed here for driver parity and defense-in-depth.
+fn ensure_anchor_receipt_success(receipts: &[Receipt]) -> Result<(), StatelessValidationError> {
+    let receipt = receipts.first().ok_or_else(|| {
+        StatelessValidationError::StatelessExecutionFailed(
+            "missing anchor transaction receipt".to_string(),
+        )
+    })?;
+    if !receipt.status() {
+        return Err(StatelessValidationError::StatelessExecutionFailed(
+            "anchor transaction execution did not succeed".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Filtered block execution artifacts returned by txlist-driven reconstruction.
@@ -249,7 +251,6 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     witness: &ExecutionWitness,
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
-    callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
 ) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError> {
@@ -260,11 +261,11 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
 
     let (mut trie, bytecode) =
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
-    trie.append_callers(callers);
 
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
     let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
         .map_err(|err| map_block_execution_error(&err))?;
+    ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
     let filtered_block = assemble_filtered_block(
         evm_config,
@@ -297,23 +298,20 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     Ok(outcome)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execute_block<T>(
     current_block: &RecoveredBlock<Block>,
     witness: &ExecutionWitness,
     shared_state_nodes: &[WitnessStateNode],
-    callers: AddressMap<TrieAccount>,
     chain_spec: &TaikoChainSpec,
     evm_config: &TaikoEvmConfig,
     ancestor_hashes: AncestorHashes,
     pre_state_root: B256,
 ) -> Result<B256, StatelessValidationError>
 where
-    T: StatelessTrieExt,
+    T: StatelessTrie,
 {
     // First verify that the pre-state reads are correct
     let (mut trie, bytecode) = T::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
-    trie.append_callers(callers);
 
     // Create an in-memory database that will use the reads to validate the block
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
@@ -323,6 +321,7 @@ where
     let output = executor
         .execute(current_block)
         .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
+    ensure_anchor_receipt_success(&output.receipts)?;
 
     // Post validation checks
     validate_block_post_execution(current_block, chain_spec, &output, None)
@@ -356,12 +355,11 @@ fn stateless_validation_with_trie<T>(
     witness: &ExecutionWitness,
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
-    callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError>
 where
-    T: StatelessTrieExt,
+    T: StatelessTrie,
 {
     let current_block = decode_recovered_block(current_block)?;
 
@@ -383,7 +381,6 @@ where
         &current_block,
         witness,
         shared_state_nodes,
-        callers,
         chain_spec.as_ref(),
         evm_config,
         ancestor_hashes,
@@ -513,8 +510,8 @@ fn compute_ancestor_hashes_for_child(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_derived_block, reconstruct_block_from_transactions_with_witness_resources,
-        validate_block,
+        build_derived_block, ensure_anchor_receipt_success,
+        reconstruct_block_from_transactions_with_witness_resources, validate_block,
     };
     use alethia_reth_block::config::TaikoEvmConfig;
     use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
@@ -685,8 +682,7 @@ mod tests {
             ..Default::default()
         };
 
-        let callers = Default::default();
-        let result = validate_block(block, &witness, callers, &chain_spec, &evm_config);
+        let result = validate_block(block, &witness, &chain_spec, &evm_config);
 
         // Shasta requires timestamps to strictly increase.
         assert!(matches!(
@@ -715,8 +711,7 @@ mod tests {
             ..Default::default()
         };
 
-        let callers = Default::default();
-        let result = validate_block(block, &witness, callers, &chain_spec, &evm_config);
+        let result = validate_block(block, &witness, &chain_spec, &evm_config);
 
         match result {
             Err(StatelessValidationError::ConsensusValidationFailed(
@@ -743,13 +738,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_block(
-            block,
-            &witness,
-            Default::default(),
-            &chain_spec,
-            &evm_config,
-        );
+        let result = validate_block(block, &witness, &chain_spec, &evm_config);
 
         assert!(matches!(
             result,
@@ -820,7 +809,6 @@ mod tests {
             &witness,
             &witness.headers,
             &[],
-            Default::default(),
             &chain_spec,
             &evm_config,
         )
@@ -890,7 +878,6 @@ mod tests {
             &witness,
             &witness.headers,
             &[],
-            Default::default(),
             &chain_spec,
             &evm_config,
         )
@@ -947,7 +934,6 @@ mod tests {
             &witness,
             &witness.headers,
             &[],
-            Default::default(),
             &chain_spec,
             &evm_config,
         );
@@ -974,17 +960,42 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_block(
-            block,
-            &witness,
-            Default::default(),
-            &chain_spec,
-            &evm_config,
-        );
+        let result = validate_block(block, &witness, &chain_spec, &evm_config);
 
         assert!(matches!(
             result,
             Err(StatelessValidationError::MissingAncestorHeader)
         ));
+    }
+
+    #[test]
+    fn ensure_anchor_receipt_success_rejects_missing_and_reverted_receipts() {
+        use reth_ethereum_primitives::Receipt;
+
+        assert!(matches!(
+            ensure_anchor_receipt_success(&[]),
+            Err(StatelessValidationError::StatelessExecutionFailed(msg))
+                if msg.contains("missing anchor transaction receipt")
+        ));
+
+        let reverted = Receipt {
+            tx_type: Default::default(),
+            cumulative_gas_used: 21_000,
+            logs: vec![],
+            success: false,
+        };
+        assert!(matches!(
+            ensure_anchor_receipt_success(&[reverted]),
+            Err(StatelessValidationError::StatelessExecutionFailed(msg))
+                if msg.contains("did not succeed")
+        ));
+
+        let ok = Receipt {
+            tx_type: Default::default(),
+            cumulative_gas_used: 21_000,
+            logs: vec![],
+            success: true,
+        };
+        assert!(ensure_anchor_receipt_success(&[ok]).is_ok());
     }
 }

@@ -1,0 +1,80 @@
+name: Release - TEE provider images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and push, for example v0.7.0-rc2"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-sign-push:
+    runs-on: [taiko-runner]
+    environment: sgx-release-signing
+    concurrency:
+      group: release-tee-providers
+      queue: max
+      cancel-in-progress: false
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+        with:
+          toolchain: "1.95.0"
+
+      - name: Validate dispatch inputs
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Release signing workflow must be dispatched from refs/heads/main" >&2
+            exit 1
+          fi
+          [[ "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,122}$ ]] || {
+            echo "Invalid release tag: $INPUT_TAG" >&2
+            exit 1
+          }
+          if [[ "$INPUT_TAG" == *-edmm ]]; then
+            echo "Invalid release tag: $INPUT_TAG uses the reserved local SGX EDMM suffix" >&2
+            exit 1
+          fi
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_ENCLAVE_SIGNER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
+
+      - name: Build, sign, and push TEE provider images
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GCP_ENCLAVE_KEY_SECRET: ${{ vars.GCP_ENCLAVE_KEY_SECRET }}
+          GCP_ENCLAVE_KEY_VERSION: ${{ vars.GCP_ENCLAVE_KEY_VERSION }}
+          GCP_ENCLAVE_KEY_PROJECT: ${{ vars.GCP_ENCLAVE_KEY_PROJECT }}
+        run: |
+          set -euo pipefail
+          cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+            release-tee-providers --tag "$INPUT_TAG"
+
+      - name: Upload TEE attestation manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tee-attestation-manifest-${{ inputs.tag }}
+          path: target/releases/${{ inputs.tag }}/tee-attestation-manifest-${{ inputs.tag }}.json
+          if-no-files-found: error

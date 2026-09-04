@@ -21,6 +21,79 @@ pub const DEFAULT_REBID_PRICE_STEP_BPS: u32 = 5000;
 pub const MIN_MEANINGFUL_REBID_PRICE_STEP_BPS: u32 = 100;
 pub const DEFAULT_REBID_MAX_ATTEMPTS: u32 = 4;
 pub const REBID_MAX_ATTEMPTS_LIMIT: u32 = 31;
+pub const BOUNDLESS_TX_MIN_FEE_BUMP_BPS: u32 = 1_000;
+pub const BOUNDLESS_TX_MAX_RECEIPT_TIMEOUT_MS: u64 = 90_000;
+pub const BOUNDLESS_TX_MAX_TOTAL_ATTEMPT_MS: u64 = 600_000;
+pub const BOUNDLESS_TX_SEND_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_BOUNDLESS_TX_RECEIPT_TIMEOUT_MS: u64 = 90_000;
+const DEFAULT_BOUNDLESS_TX_FEE_BUMP_BPS: u32 = 5_000;
+const DEFAULT_BOUNDLESS_TX_MAX_REPLACEMENTS: u32 = 4;
+
+const fn default_boundless_tx_receipt_timeout_ms() -> u64 {
+    DEFAULT_BOUNDLESS_TX_RECEIPT_TIMEOUT_MS
+}
+
+const fn default_boundless_tx_fee_bump_bps() -> u32 {
+    DEFAULT_BOUNDLESS_TX_FEE_BUMP_BPS
+}
+
+const fn default_boundless_tx_max_replacements() -> u32 {
+    DEFAULT_BOUNDLESS_TX_MAX_REPLACEMENTS
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BoundlessTransactionConfig {
+    #[serde(default = "default_boundless_tx_receipt_timeout_ms")]
+    pub receipt_timeout_ms: u64,
+    #[serde(default = "default_boundless_tx_fee_bump_bps")]
+    pub fee_bump_bps: u32,
+    #[serde(default = "default_boundless_tx_max_replacements")]
+    pub max_replacements: u32,
+    pub max_fee_per_gas_wei: String,
+}
+
+impl BoundlessTransactionConfig {
+    /// Parse and validate the configured EIP-1559 fee ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a transaction timing or fee bound is zero, excessive, or malformed.
+    /// `max_replacements = 0` is valid and selects one broadcast attempt without replacements.
+    pub fn validate(&self) -> Result<u128, String> {
+        if self.receipt_timeout_ms == 0 {
+            return Err("receipt_timeout_ms must be greater than zero".to_string());
+        }
+        if self.receipt_timeout_ms > BOUNDLESS_TX_MAX_RECEIPT_TIMEOUT_MS {
+            return Err(format!(
+                "receipt_timeout_ms must be <= {BOUNDLESS_TX_MAX_RECEIPT_TIMEOUT_MS}"
+            ));
+        }
+        if self.fee_bump_bps < BOUNDLESS_TX_MIN_FEE_BUMP_BPS {
+            return Err(format!(
+                "fee_bump_bps must be >= {BOUNDLESS_TX_MIN_FEE_BUMP_BPS}"
+            ));
+        }
+        let total_attempts = u64::from(self.max_replacements).saturating_add(1);
+        let total_attempt_ms = self
+            .receipt_timeout_ms
+            .saturating_add(BOUNDLESS_TX_SEND_TIMEOUT_MS)
+            .saturating_mul(total_attempts);
+        if total_attempt_ms > BOUNDLESS_TX_MAX_TOTAL_ATTEMPT_MS {
+            return Err(format!(
+                "(max_replacements + 1) * (receipt_timeout_ms + {BOUNDLESS_TX_SEND_TIMEOUT_MS}) must be <= {BOUNDLESS_TX_MAX_TOTAL_ATTEMPT_MS}"
+            ));
+        }
+        let max_fee_per_gas = self
+            .max_fee_per_gas_wei
+            .parse::<u128>()
+            .map_err(|_| "max_fee_per_gas_wei must be a decimal u128 string".to_string())?;
+        if max_fee_per_gas == 0 {
+            return Err("max_fee_per_gas_wei must be greater than zero".to_string());
+        }
+        Ok(max_fee_per_gas)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -76,9 +149,9 @@ pub enum TimeoutPolicy {
 // Fail closed on stale/renamed offer-level keys (matching the bin-level config posture). The
 // hard cutover deleted several offer fields; without this, a config that leaves e.g.
 // `dynamic_pricing_timeout_modifier` at its old offer level — instead of inside `[timeouts]` —
-// would boot clean with the value silently ignored. NOTE: this does not reach inside the
-// internally-tagged `timeouts`/`*_quote` enums, which serde cannot deny unknown fields on; stale
-// keys nested in those tables are still dropped silently (see the migration notes in docs/API.md).
+// would boot clean with the value silently ignored. `QuoteSizing` independently rejects unknown
+// quote keys; the tagged `timeouts` enum remains permissive for nested stale keys (see the migration
+// notes in docs/API.md).
 #[serde(deny_unknown_fields)]
 pub struct BoundlessOfferParams {
     #[serde(default)]
@@ -107,7 +180,7 @@ pub struct OfferParamsConfig {
     pub aggregation: BoundlessOfferParams,
 }
 
-// Fail closed on stale/typo'd keys inside `[prover.boundless.deployment]`. Without this, a typo
+// Fail closed on stale/typo'd keys inside `[prover.risc0.boundless.deployment]`. Without this, a typo
 // such as `deployment_typ` deserializes with `deployment_type = None`, and `get_deployment_type()`
 // silently falls back to `Base` — booting the wrong market for a Taiko/Sepolia deployment. The
 // free-form `overrides` value stays unrestricted (it deserializes into a `serde_json::Value`).
@@ -119,10 +192,13 @@ pub struct DeploymentConfig {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "strategy", rename_all = "snake_case")]
+#[serde(tag = "strategy", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QuoteSizing {
+    Estimated {
+        #[serde(default)]
+        mcycles_offset: u32,
+    },
     #[default]
-    RaikoAgent,
     Evaluated,
     Fixed {
         mcycles: u32,
@@ -153,10 +229,10 @@ pub struct BoundlessConfig {
     pub rpc_url: String,
     pub signer_key: String,
     #[serde(default)]
+    pub transaction: Option<BoundlessTransactionConfig>,
+    #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
-    #[serde(default)]
     pub batch_quote: QuoteSizing,
-    #[serde(default)]
     pub aggregation_quote: QuoteSizing,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_poll_interval_ms")]
@@ -178,6 +254,7 @@ impl Default for BoundlessConfig {
             offchain: false,
             rpc_url: "https://base-rpc.publicnode.com".to_string(),
             signer_key: String::new(),
+            transaction: None,
             deployment: Some(DeploymentConfig {
                 deployment_type: Some(DeploymentType::Base),
                 overrides: Some(serde_json::json!({
@@ -399,10 +476,64 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DEFAULT_REBID_MAX_ATTEMPTS,
-        DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType,
-        TimeoutPolicy, validate_offer_spec,
+        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, BoundlessTransactionConfig,
+        DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
+        DeploymentConfig, DeploymentType, QuoteSizing, TimeoutPolicy, validate_offer_spec,
     };
+
+    #[test]
+    fn quote_sizing_deserializes_estimated_strategy() {
+        let quote: QuoteSizing = serde_json::from_value(serde_json::json!({
+            "strategy": "estimated"
+        }))
+        .expect("estimated quote sizing should deserialize");
+
+        assert_eq!(quote, QuoteSizing::Estimated { mcycles_offset: 0 });
+    }
+
+    #[test]
+    fn quote_sizing_deserializes_estimated_offset() {
+        let quote: QuoteSizing = serde_json::from_value(serde_json::json!({
+            "strategy": "estimated",
+            "mcycles_offset": 1300
+        }))
+        .expect("estimated quote sizing with an offset should deserialize");
+
+        assert_eq!(
+            quote,
+            QuoteSizing::Estimated {
+                mcycles_offset: 1_300
+            }
+        );
+    }
+
+    #[test]
+    fn quote_sizing_rejects_removed_raiko_agent_strategy() {
+        let error = serde_json::from_value::<QuoteSizing>(serde_json::json!({
+            "strategy": "raiko_agent"
+        }))
+        .expect_err("raiko_agent must no longer be a supported quote strategy");
+
+        assert!(error.to_string().contains("estimated"), "{error}");
+        assert!(error.to_string().contains("evaluated"), "{error}");
+        assert!(error.to_string().contains("fixed"), "{error}");
+    }
+
+    #[test]
+    fn explicit_boundless_config_requires_both_quote_stages() {
+        for missing_quote in ["batch_quote", "aggregation_quote"] {
+            let mut value = serde_json::to_value(BoundlessConfig::default())
+                .expect("serialize default Boundless config");
+            value
+                .as_object_mut()
+                .expect("Boundless config object")
+                .remove(missing_quote);
+
+            let error = serde_json::from_value::<BoundlessConfig>(value)
+                .expect_err("explicit Boundless config must require both quote stages");
+            assert!(error.to_string().contains(missing_quote), "{error}");
+        }
+    }
 
     #[test]
     fn default_config_uses_base_deployment() {
@@ -412,6 +543,8 @@ mod tests {
         assert_eq!(config.rebid_timeout_ms, DEFAULT_REBID_TIMEOUT_MS);
         assert_eq!(config.rebid_price_step_bps, DEFAULT_REBID_PRICE_STEP_BPS);
         assert_eq!(config.rebid_max_attempts, DEFAULT_REBID_MAX_ATTEMPTS);
+        assert_eq!(config.batch_quote, QuoteSizing::Evaluated);
+        assert_eq!(config.aggregation_quote, QuoteSizing::Evaluated);
     }
 
     #[test]
@@ -439,7 +572,7 @@ mod tests {
 
     #[test]
     fn deployment_config_rejects_unknown_key() {
-        // A typo'd key inside [prover.boundless.deployment] (here `deployment_typ`) must fail
+        // A typo'd key inside [prover.risc0.boundless.deployment] (here `deployment_typ`) must fail
         // closed rather than deserialize with `deployment_type = None` and silently fall back to
         // the Base deployment.
         let err = serde_json::from_value::<DeploymentConfig>(serde_json::json!({
@@ -719,5 +852,63 @@ mod tests {
 
         let err = validate_offer_spec(&offer).expect_err("zero absolute ceiling");
         assert!(err.contains("absolute_max_price_per_mcycle must be positive"));
+    }
+
+    #[test]
+    fn transaction_config_validates_all_bounds() {
+        let valid = BoundlessTransactionConfig {
+            receipt_timeout_ms: 90_000,
+            fee_bump_bps: 5_000,
+            max_replacements: 4,
+            max_fee_per_gas_wei: "1000000000".to_string(),
+        };
+        assert_eq!(
+            valid.validate().expect("valid transaction config"),
+            1_000_000_000
+        );
+
+        let mut invalid = valid.clone();
+        invalid.receipt_timeout_ms = 0;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.fee_bump_bps = 0;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.fee_bump_bps = 999;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.receipt_timeout_ms = 90_001;
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = valid.clone();
+        invalid.max_replacements = 5;
+        assert!(
+            invalid
+                .validate()
+                .expect_err("default receipt timeout permits four replacements")
+                .contains("max_replacements + 1")
+        );
+
+        let mut invalid = valid;
+        invalid.max_fee_per_gas_wei = "not-a-number".to_string();
+        assert!(invalid.validate().is_err());
+
+        invalid.max_fee_per_gas_wei = "0".to_string();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn transaction_config_defaults_bounded_retry_knobs() {
+        let config: BoundlessTransactionConfig =
+            serde_json::from_str(r#"{"max_fee_per_gas_wei":"1000000000"}"#)
+                .expect("minimal transaction policy");
+
+        assert_eq!(config.receipt_timeout_ms, 90_000);
+        assert_eq!(config.fee_bump_bps, 5_000);
+        assert_eq!(config.max_replacements, 4);
+        assert!(config.validate().is_ok());
     }
 }

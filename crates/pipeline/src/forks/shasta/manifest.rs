@@ -26,7 +26,7 @@ impl ShastaManifestBuilder {
         Self
     }
 
-    fn parse_prover_data(ctx: &ProofContext) -> RaikoResult<TaikoProverData> {
+    pub(super) fn parse_prover_data(ctx: &ProofContext) -> RaikoResult<TaikoProverData> {
         let prover_address = ctx
             .request
             .prover
@@ -99,7 +99,7 @@ impl ShastaManifestBuilder {
         Ok(ShastaEventData::default())
     }
 
-    fn resolve_blob_proof_type(ctx: &ProofContext) -> RaikoResult<BlobProofType> {
+    pub(super) fn resolve_blob_proof_type(ctx: &ProofContext) -> RaikoResult<BlobProofType> {
         let hint = ctx
             .request
             .blob_proof_type

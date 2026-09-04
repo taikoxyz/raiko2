@@ -12,10 +12,15 @@ See also:
 
 ## Run the Server
 
-Run the server with an explicit config file:
+`config.example.toml` is a combined production sample. Before running, edit the copy to keep only
+the desired per-proof-type tables enabled and fill every setting, credential, and endpoint required
+by those backends.
+
+Run the server with the edited config file:
 
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
 ./target/release/raiko2 --config config.toml
 ```
 
@@ -51,18 +56,47 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
 ```
 
 The default compose stack runs a single `raiko2` container on port `8080` with the in-process
-memory queue. Default binaries include RISC Zero local/network proving and SP1 proving.
+memory queue. Default binaries include RISC Zero local/network proving and SP1 proving. The
+operator env sample selects `risc0/local` for this one-container quickstart.
 
-To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
+To select proving routes, set `RAIKO2_PROVER_ROUTES` in `docker/.env` to a comma-separated list.
+It atomically replaces all proof-type enablement and updates the selected RISC0/SP1 execution
+selectors; it does not append to the mounted config.
+For a single local route:
 
-- `native/local`
-- `risc0/local`
-- `risc0/network`
-- `sp1/local`
-- `sp1/network`
+```dotenv
+RAIKO2_PROVER_ROUTES=risc0/local
+```
 
-Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`; Boundless
-does not need an extra feature flag in default builds.
+Do not apply the four-route production value to `docker/config.compose.toml` as-is. That file is
+the SGX compose shape: its SP1 settings select the local prover, and its Boundless signer is only a
+placeholder.
+
+For a production host serving both network ZK systems and both SGX lanes, start from the complete
+production-oriented example instead:
+
+```bash
+cp config.example.toml config.toml
+$EDITOR config.toml
+```
+
+In that edit, replace placeholder credentials, configure production RPC and runtime storage, and
+verify that each enabled backend section matches its route. In particular,
+`[prover.sp1]` must select the network prover, `[prover.risc0.boundless]` must contain real
+deployment credentials, and `[prover.sgx]` / `[prover.sgxgeth]` must point to their production
+services. The atomic override may then be passed to that completed config:
+
+```bash
+RAIKO2_PROVER_ROUTES=risc0/network,sp1/network,sgx/remote,sgxgeth/remote \
+  ./target/release/raiko2 --config ./config.toml
+```
+
+Supported pairs are `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `native/local`,
+`sgx/remote`, and `sgxgeth/remote`. Without an override, each proof-type table owns its own
+`enabled` state and execution selector. One host may explicitly enable any supported combination.
+
+The queue is always in-process. Durable task state and remote-provider checkpoints use the
+configured namespaced GCS runtime store; Boundless does not need an extra feature flag.
 
 ## Hosted Aggregate Route
 
@@ -167,7 +201,7 @@ mock instance id `0xDEAD_C0DE` when `--instance-id` is omitted.
 
 Use `GET /health` for simple liveness checks. `POST /prove/shasta` is not a lightweight signing
 smoke endpoint: `raiko2-sgx-prover` requires a complete `GuestInput` request envelope and runs the
-same Shasta guest validation path as the zk guests before signing the resulting public input.
+same guest validation path as the zk guests before signing the resulting public input.
 Use the main `raiko2` service or the regression scripts to build that request.
 
 ### Docker Compose
@@ -181,11 +215,33 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml --pro
 docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up raiko2-sgx
 ```
 
+To build the EDMM variant without replacing or confusing it with the default local image, use a
+distinct local tag and force the service build:
+
+```bash
+SGX_EDMM_ENABLE=true \
+RAIKO2_SGX_IMAGE=raiko2-sgx:local-edmm \
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml build raiko2-sgx
+
+RAIKO2_SGX_IMAGE=raiko2-sgx:local-edmm \
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml \
+  --profile init up --no-build raiko2-sgx-init
+
+RAIKO2_SGX_IMAGE=raiko2-sgx:local-edmm \
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml \
+  up --no-build raiko2-sgx
+```
+
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
-- Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Release builds fetch the
-  signing key from GCP Secret Manager through `release-tee-providers`; do not commit signing keys.
+- `Dockerfile.sgx` and the local Compose stacks default to a non-EDMM enclave for compatibility
+  with hosts that do not support EDMM. Set `SGX_EDMM_ENABLE=true` in the Compose env file to build
+  an EDMM-enabled local image explicitly.
+- Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Local builds must not
+  claim the Taiko release `mr_signer`; official Taiko-signed provider images are built by the
+  protected GitHub Actions release workflow, which fetches the signing key through Workload Identity
+  Federation and GCP Secret Manager. Do not commit signing keys.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
@@ -198,6 +254,13 @@ Operator notes:
   mounted config directory and select it with `RAIKO2_SGX_FORK`.
 - This compose file only covers the `sgx` lane. `sgxgeth` is served by external geth-backed
   remote SGX infrastructure and is not built in this repository.
+
+Migration warning: before SGX image variants were introduced, `Dockerfile.sgx` hardcoded
+`sgx.edmm_enable = true`. The unsuffixed release image and the local Compose stacks now default to
+non-EDMM.
+Operators retaining the previous EDMM behavior must select the `<release>-edmm` image or set
+`SGX_EDMM_ENABLE=true` for local builds. Changing variants changes `MRENCLAVE`; verifier
+registration and image selection must use the measurement for the selected variant.
 
 Read the baked SGX measurement from:
 
@@ -259,7 +322,7 @@ For a local `raiko2` CLI against the compose-managed SGX servers:
 
 ```bash
 RAIKO2_CONFIG=docker/config.compose.toml \
-RAIKO2_PROVER=sgx/remote \
+RAIKO2_PROVER_ROUTES=sgx/remote,sgxgeth/remote \
 RAIKO2_L1_RPC=http://127.0.0.1:8545 \
 RAIKO2_L2_RPC=http://127.0.0.1:9545 \
 RAIKO2_REMOTE_SGX_BASE_URL=http://127.0.0.1:9090 \
@@ -280,8 +343,10 @@ runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from a
 
 ## Source Releases
 
-Use this flow when cutting a versioned ZK/runtime source release such as
-`vX.Y.Z`. Keep TEE provider metadata in its separate release flow below.
+Use this flow as the ZK/runtime portion of a versioned release such as `vX.Y.Z`. The commands for
+TEE provider metadata remain separate, but the current default full release runs both flows and
+combines their manifests and release-note sections. A ZK-only release must be explicitly scoped as
+such and must not claim to contain TEE provider metadata.
 
 Release prerequisites:
 
@@ -320,15 +385,59 @@ Recommended sequence:
    git rev-parse HEAD
    ```
 
-2. Publish the runtime image:
+2. Start the official Taiko-signed TEE provider image workflow and the local runtime image
+   publication from the same release commit. These two publication paths can run in parallel after
+   `RELEASE_SHA` is frozen, but both must finish successfully before release notes, the git tag, or
+   the GitHub Release are created.
+
+   Start the TEE provider workflow:
 
    ```bash
+   gh workflow run release-tee-providers.yml \
+     --repo taikoxyz/raiko2 \
+     --ref main \
+     -f tag="${TAG}"
+   ```
+
+   In a separate clean checkout at `${RELEASE_SHA}`, publish the runtime image:
+
+   ```bash
+   git rev-parse HEAD
+   test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+   git status --short
+
    just release-image all ${TAG}
    ```
 
-   Record the immutable digest references printed by `release-image`:
+   Record the immutable runtime image digest reference printed by `release-image`:
 
    - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...`
+
+   After the TEE workflow is approved and finishes, verify it used the same release commit and
+   download the manifest:
+
+   ```bash
+   # Record TEE_RUN_ID from the Actions URL printed by the command above, wait for
+   # `sgx-release-signing` approval, then verify the workflow used the frozen release commit.
+   export TEE_RUN_ID=<run-id-from-actions-url>
+   gh run watch "${TEE_RUN_ID}" --repo taikoxyz/raiko2 --exit-status
+   test "$(gh run view "${TEE_RUN_ID}" --repo taikoxyz/raiko2 --json headSha --jq .headSha)" \
+     = "${RELEASE_SHA}"
+
+   gh run download "${TEE_RUN_ID}" \
+     --repo taikoxyz/raiko2 \
+     --name "tee-attestation-manifest-${TAG}" \
+     --dir "${RELEASE_DIR}"
+
+   export TEE_MANIFEST="${RELEASE_DIR}/tee-attestation-manifest-${TAG}/tee-attestation-manifest-${TAG}.json"
+   test -s "${TEE_MANIFEST}"
+   ```
+
+   This must produce a workflow artifact at `${TEE_MANIFEST}`. Record the immutable image digests
+   and attestation values from that manifest. The protected workflow validates both local SGX
+   variants before publishing their final tags. A local `release-tee-providers` run can validate
+   `mr_enclave` reproducibility with a disposable key, but it cannot produce the official Taiko
+   `mr_signer`.
 
 3. Export guest digests:
 
@@ -350,7 +459,9 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-5. Write release notes from the ZK source release template:
+5. Write release notes from the ZK source release template, then append the TEE Provider Release
+   Notes Template below for the default full profile. The final notes must include both reproduce
+   sections.
 
    ```bash
    cat > "${RELEASE_DIR}/release-notes-${TAG}.md" <<'EOF'
@@ -381,6 +492,7 @@ See `docs/operations.md#reproduce-zk-guest-digests`.
 
 - `release-manifest-vX.Y.Z.json`
 - `guest-digests-summary.json`
+- `tee-attestation-manifest-vX.Y.Z.json` (full profile)
 - `risc0_shasta_*.elf`
 - `sp1_shasta_*.elf`
 - `sp1_shasta_*.vk.bin`
@@ -393,12 +505,14 @@ EOF
    git tag "${TAG}" "${RELEASE_SHA}"
    git push origin "${TAG}"
 
+   # Add `--prerelease` for release candidates such as `vX.Y.Z-rcN`.
    gh release create "${TAG}" \
      --target "${RELEASE_SHA}" \
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
      "${RELEASE_DIR}/guest-digests-summary.json" \
+     "${TEE_MANIFEST}" \
      crates/guests/elf/risc0_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.vk.bin
@@ -411,7 +525,16 @@ Expected release outputs:
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
-- Shasta guest artifact assets:
+- TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
+
+The `shasta` in these guest artifact filenames is a frozen identifier, not a fork selector. These
+are the current guest ELF and VK assets, and they carry the rules for every fork they support, not
+just one. On-chain registration is keyed on the RISC0 image ID or the SP1 VK hash, each computed
+from the built bytes. A rename by itself therefore does not require re-registration; only a rebuild
+that changes those bytes does. See the `Frozen identifier` entry
+in [../CONTEXT.md](../CONTEXT.md).
+
+- Guest artifact assets:
   - `risc0_shasta_*.elf`
   - `sp1_shasta_*.elf`
   - `sp1_shasta_*.vk.bin`
@@ -436,6 +559,8 @@ export REPRO_DIR=target/releases/${TAG}/zk-digest-repro
 git fetch --tags origin "${TAG}"
 git checkout "${TAG}"
 mkdir -p "${REPRO_DIR}"
+
+just build-guest all --force
 
 cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
   --output "${REPRO_DIR}/from-source.json"
@@ -506,19 +631,345 @@ If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing;
 and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
 provenance still matches the committed repo state.
 
+### Compose A Host Image With Released Guest Artifacts
+
+Use this SOP when a selected host revision must package the complete RISC0 and SP1 artifact set from
+an existing raiko2 release. This creates a source branch whose commit records both sides of the
+composition. It publishes an image only; it does not register verifier digests, deploy the image, or
+perform a Kubernetes rollout.
+
+#### 1. Freeze The Inputs
+
+Run from a raiko2 checkout. Replace the example tag before continuing:
+
+```bash
+set -Eeuo pipefail
+
+export HOST_REF=origin/main
+export ELF_TAG=vX.Y.Z
+export IMAGE_REPOSITORY=us-docker.pkg.dev/evmchain/images/raiko2
+export AR_PROJECT=evmchain
+export AR_LOCATION=us
+export AR_REPOSITORY=images
+
+test "${ELF_TAG}" != "vX.Y.Z"
+test "${IMAGE_REPOSITORY}" = \
+  "${AR_LOCATION}-docker.pkg.dev/${AR_PROJECT}/${AR_REPOSITORY}/raiko2"
+
+export ELF_RELEASE_REF HOST_SHA ELF_SHA HOST_SHORT COMPOSE_BRANCH COMPOSE_WORKTREE IMAGE_TAG
+ELF_RELEASE_REF="refs/raiko2-release-tags/${ELF_TAG}"
+
+git fetch --no-tags origin main
+git fetch --no-tags origin \
+  "+refs/tags/${ELF_TAG}:${ELF_RELEASE_REF}"
+
+HOST_SHA=$(git rev-parse "${HOST_REF}^{commit}")
+ELF_SHA=$(git rev-parse "${ELF_RELEASE_REF}^{commit}")
+HOST_SHORT=${HOST_SHA:0:12}
+COMPOSE_BRANCH="main-${HOST_SHORT}-elf-${ELF_TAG}"
+COMPOSE_WORKTREE="../raiko2-${COMPOSE_BRANCH}"
+IMAGE_TAG="${COMPOSE_BRANCH}"
+
+test "$(gh release view "${ELF_TAG}" --repo taikoxyz/raiko2 \
+  --json isDraft --jq '.isDraft')" = "false"
+```
+
+The selected remote tag is fetched into a dedicated local ref so unrelated local tag conflicts cannot
+abort the operation. Stop if the host revision, selected release tag, or non-draft GitHub Release
+cannot be resolved. Use a new branch and image tag; do not overwrite an existing publication.
+
+#### 2. Create The Composition Branch
+
+```bash
+git worktree add -b "${COMPOSE_BRANCH}" "${COMPOSE_WORKTREE}" "${HOST_SHA}"
+cd "${COMPOSE_WORKTREE}"
+
+git restore --source="${ELF_SHA}" --staged --worktree -- crates/guests/elf
+
+# The complete directory, including provenance, must equal the release tag.
+git diff --exit-code "${ELF_SHA}" -- crates/guests/elf
+
+# Nothing outside the artifact directory may be staged.
+git diff --cached --quiet -- . ':(exclude,glob)crates/guests/elf/**'
+git diff --cached --check
+```
+
+Restore the whole directory. Do not combine one release's RISC0 ELF with another release's SP1
+ELF/VK, omit lab artifacts or provenance manifests, or regenerate provenance against old binaries.
+Provenance records the source fingerprint and artifact hashes that produced that release; raiko2
+does not consume it as a runtime trust anchor.
+
+#### 3. Verify Release Artifact Identity
+
+Derive the expected guest asset names from the release tag, require the GitHub Release to publish
+that exact set, then download and compare every byte with the tag checkout:
+
+```bash
+mkdir -p target/release-guest-verification
+export VERIFY_ROOT VERIFY_DIR EXPECTED_RELEASE_ASSETS ACTUAL_RELEASE_ASSETS
+VERIFY_ROOT=$(mktemp -d "target/release-guest-verification/${ELF_TAG}.XXXXXXXX")
+VERIFY_DIR="${VERIFY_ROOT}/downloads"
+EXPECTED_RELEASE_ASSETS="${VERIFY_ROOT}/release-assets.expected"
+ACTUAL_RELEASE_ASSETS="${VERIFY_ROOT}/release-assets.actual"
+mkdir -p "${VERIFY_DIR}"
+
+git ls-tree -r --name-only "${ELF_SHA}" -- crates/guests/elf \
+  | grep -E \
+    '^crates/guests/elf/(risc0_shasta_.*\.elf|sp1_shasta_.*\.(elf|vk\.bin))$' \
+  | sed 's#^crates/guests/elf/##' \
+  | sort > "${EXPECTED_RELEASE_ASSETS}"
+test -s "${EXPECTED_RELEASE_ASSETS}"
+
+gh release view "${ELF_TAG}" --repo taikoxyz/raiko2 \
+  --json assets --jq '.assets[].name' \
+  | grep -E '^(risc0_shasta_.*\.elf|sp1_shasta_.*\.(elf|vk\.bin))$' \
+  | sort > "${ACTUAL_RELEASE_ASSETS}"
+
+diff -u "${EXPECTED_RELEASE_ASSETS}" "${ACTUAL_RELEASE_ASSETS}"
+
+cargo run --locked -r -p xtask -- download-guest-elves \
+  --tag "${ELF_TAG}" \
+  --repo taikoxyz/raiko2 \
+  --backend all \
+  --dir "${VERIFY_DIR}"
+
+while IFS= read -r artifact; do
+  test -f "${VERIFY_DIR}/${artifact}"
+  cmp -s "${VERIFY_DIR}/${artifact}" "crates/guests/elf/${artifact}"
+done < "${EXPECTED_RELEASE_ASSETS}"
+```
+
+Any missing asset or byte mismatch is a hard stop. The GitHub Release assets, release tag, and
+composition directory must identify the same programs.
+
+#### 4. Gate Host/Guest Compatibility
+
+First validate both provenance manifests, each backend's exact inventory, every recorded artifact,
+and the SP1 ELF/VK pairs without comparing source fingerprints to the current host. This
+prevents a source mismatch from hiding an artifact, manifest, or SP1 failure:
+
+```bash
+for backend in risc0 sp1; do
+  manifest="crates/guests/elf/${backend}.provenance.json"
+  provenance_artifacts="${VERIFY_ROOT}/${backend}.provenance-artifacts"
+  disk_artifacts="${VERIFY_ROOT}/${backend}.disk-artifacts"
+
+  jq -e --arg backend "${backend}" '
+    .schema_version == 1
+    and .backend == $backend
+    and .bench == false
+    and (.source_fingerprint | test("^[0-9a-f]{64}$"))
+    and ((.artifacts | type) == "object")
+    and ((.artifacts | length) > 0)
+    and ([.artifacts[] | test("^[0-9a-f]{64}$")] | all)
+  ' "${manifest}" >/dev/null
+
+  jq -r '.artifacts | to_entries[] | "\(.value)  \(.key)"' "${manifest}" \
+    | sha256sum --check --strict -
+
+  jq -r '.artifacts | keys[]' "${manifest}" \
+    | sort > "${provenance_artifacts}"
+
+  find crates/guests/elf -maxdepth 1 -type f \
+    \( -name "${backend}_*.elf" -o -name "${backend}_*.vk.bin" \) \
+    -print \
+    | sort > "${disk_artifacts}"
+
+  diff -u "${provenance_artifacts}" "${disk_artifacts}"
+done
+
+cargo run --locked -r -p xtask-build-guest --bin guest-digests --features digests -- \
+  --output "${VERIFY_ROOT}/guest-digests-summary.json"
+```
+
+Only after the artifact-only pass succeeds, run the source-closure check:
+
+```bash
+cargo run --locked -p xtask-build-guest --bin xtask-build-guest -- all --check
+```
+
+A pass means the current host revision has the same tracked guest build inputs and artifact hashes
+as the selected release. It does not cover host-side input construction or encoding in the pipeline
+and prover crates.
+
+Every mixed host/released guest composition must record:
+
+- proposal regression on the exact old release artifacts;
+- aggregation regression on the exact old release artifacts;
+- the regression inputs and request IDs in the composition PR.
+
+A `source fingerprint mismatch` is not proof that the host and old guest are incompatible, but it
+requires the composition PR to additionally record all of:
+
+- a reviewed diff of guest-facing input types, serialization, public-input construction, manifest
+  and carry-data hashing, and proposal and aggregation behavior;
+- confirmation that the old guest contains every required soundness check and that its RISC0 image
+  IDs and SP1 verification keys remain trusted on the target network.
+
+Artifact SHA-256 equality and SP1 ELF/VK consistency establish artifact identity; they do not
+establish protocol compatibility or soundness. The proof executes the old guest constraints,
+regardless of newer host-side validation.
+
+The source-drift exception is available only after the artifact-only pass above succeeds for both
+backends. Any other provenance failure is a hard stop.
+
+#### 5. Commit The Auditable Pairing
+
+```bash
+git commit --allow-empty \
+  -m "chore(release): compose host ${HOST_SHORT} with ${ELF_TAG} guests" \
+  -m "Host-Commit: ${HOST_SHA}" \
+  -m "Guest-Release: ${ELF_TAG}" \
+  -m "Guest-Commit: ${ELF_SHA}"
+
+export COMPOSE_SHA
+COMPOSE_SHA=$(git rev-parse HEAD)
+
+test -z "$(git status --porcelain)"
+git push -u origin "${COMPOSE_BRANCH}"
+test "$(git ls-remote origin "refs/heads/${COMPOSE_BRANCH}" | cut -f1)" \
+  = "${COMPOSE_SHA}"
+```
+
+The empty-commit case is intentional: even when the host branch already contains identical guest
+bytes, the composition commit and branch still record the selected guest release explicitly. Do not
+hide changes with `assume-unchanged` or `skip-worktree`, and do not publish from an unreferenced
+detached commit.
+
+#### 6. Build And Publish Without Guest Refresh
+
+```bash
+git fetch --no-tags origin main
+test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
+
+mkdir -p target/release-image-logs
+export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG
+IMAGE_REF="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+RELEASE_LOG="target/release-image-logs/${IMAGE_TAG}.log"
+TAG_INSPECT_LOG=$(mktemp \
+  "target/release-image-logs/tag-inspect.${IMAGE_TAG}.XXXXXXXX")
+
+# The absence preflight is fail-closed against operator mistakes. The pushed digest, not the
+# mutable tag, is the release handoff. The post-push digest check below verifies the registry tag
+# resolves to the recorded digest at publication time.
+if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
+  echo "image tag already exists: ${IMAGE_REF}" >&2
+  exit 1
+fi
+
+# Accept only a registry response that conclusively means the tag is absent. Authentication,
+# authorization, connectivity, rate-limit, and server failures must stop the release.
+BLOCKING_TAG_ERROR_PATTERN='authenticat|authoriz|credential|denied|forbidden|permission|reauthentication|login|service unavailable|too many requests|timeout|timed out|deadline|request canceled|connection|temporary failure|network is unreachable|no route to host|dial tcp|i/o timeout|tls handshake|certificate|unexpected eof|500 internal server error|502 bad gateway|504 gateway timeout|(^|[[:space:]:])(429|503)([[:space:]:]|$)'
+if grep -Eqi "${BLOCKING_TAG_ERROR_PATTERN}" "${TAG_INSPECT_LOG}"; then
+  cat "${TAG_INSPECT_LOG}" >&2
+  exit 1
+fi
+
+if ! grep -Eqi \
+  'manifest unknown|no such manifest|name unknown|requested entity was not found|manifest .* not found' \
+  "${TAG_INSPECT_LOG}"; then
+  cat "${TAG_INSPECT_LOG}" >&2
+  exit 1
+fi
+
+just release-image host "${IMAGE_TAG}" "${IMAGE_REPOSITORY}" \
+  --skip-guest-refresh 2>&1 | tee "${RELEASE_LOG}"
+
+export DIGEST_REF
+DIGEST_REF=$(sed -n 's/^\[INFO\] Image pushed: //p' "${RELEASE_LOG}")
+test -n "${DIGEST_REF}"
+
+# Resolve the mutable tag's manifest directly from the registry and compare exactly.
+export TAG_MANIFEST_DIGEST
+TAG_MANIFEST_DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}" \
+  --format '{{json .Manifest}}' | jq -er '.digest')
+test "${IMAGE_REPOSITORY}@${TAG_MANIFEST_DIGEST}" = "${DIGEST_REF}"
+
+docker buildx imagetools inspect "${DIGEST_REF}"
+```
+
+`host` already skips guest refresh by default; the explicit flag documents the composition
+decision. This SOP supports the default Google Artifact Registry repository shown above. A different
+registry requires an equivalent fail-closed absence preflight and post-push tag digest
+reconciliation. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
+
+#### 7. Verify The Published Image
+
+```bash
+docker pull "${DIGEST_REF}"
+
+test "$(docker image inspect "${DIGEST_REF}" \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" \
+  = "${COMPOSE_SHA}"
+
+export IMAGE_ARTIFACT_DIR
+IMAGE_ARTIFACT_DIR=$(mktemp -d "target/image-guest-artifacts.${IMAGE_TAG}.XXXXXXXX")
+CID=$(docker create "${DIGEST_REF}")
+docker cp "${CID}:/app/crates/guests/elf/." "${IMAGE_ARTIFACT_DIR}"
+docker rm "${CID}"
+
+diff -qr crates/guests/elf "${IMAGE_ARTIFACT_DIR}"
+```
+
+Report and retain:
+
+```text
+Host commit:        <HOST_SHA>
+Guest release:      <ELF_TAG>
+Guest commit:       <ELF_SHA>
+Composition branch: <COMPOSE_BRANCH>
+Composition commit: <COMPOSE_SHA>
+Image tag:          <IMAGE_REPOSITORY>:<IMAGE_TAG>
+Image digest:       <DIGEST_REF>
+Compatibility:      proposal and aggregation regressions, plus any source-drift review
+```
+
+If tag-to-digest, revision-label, or packaged-artifact verification fails after push, mark the
+publication invalid and do not hand off its tag or digest.
+
 ## Register Guest Digests
 
 Guest builds and image releases do not update verifier trust lists automatically.
 When a checked-in guest ELF changes, register the new digests explicitly with `xtask`:
 
 ```bash
-# Built-in profiles are environment-specific. Pick the profile or explicit RPC/verifier overrides
-# that match the target verifier network.
-cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
-cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
+# Registration defaults to the chain spec's SHASTA verifier entry, which is wrong on every network
+# that has activated Unzen. Derive the UNZEN verifiers and pass them explicitly. `jq -er` exits
+# non-zero when a network has no UNZEN verifier entry, so that case fails here instead of silently
+# registering against the wrong contract.
+NETWORK=taiko_hoodi        # or taiko_mainnet
+PROFILE=hoodi-shasta       # or mainnet-shasta
+SPEC=config/chain_spec_list_default.json
+
+RISC0_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.RISC0' "$SPEC")
+SP1_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.SP1' "$SPEC")
+echo "RISC0=$RISC0_VERIFIER SP1=$SP1_VERIFIER"   # both must be 0x... before continuing
+
+# Dry run. Previews exactly what the apply below sends.
+cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER"
+
+# Apply.
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER" \
+  --apply
 ```
+
+> **Why the overrides are mandatory.** `resolve_profile` obtains both defaults from
+> `load_shasta_verifiers_from_chain_spec`, reading `/verifier_address_forks/SHASTA/<proof_type>`,
+> and `--risc0-verifier` / `--sp1-verifier` are the only things that override it
+> (`xtask/src/register_image.rs:335-347`). Running any `hoodi-shasta` or `mainnet-shasta` command
+> without them registers the guest digests against the Shasta verifier contracts. On `taiko_hoodi`
+> those are different addresses from the live Unzen ones, so the registration silently lands on the
+> obsolete contracts while the active verifiers stay unchanged. `taiko_mainnet` currently carries
+> identical addresses under both forks, so it is unaffected today, but that is incidental — the
+> `SHASTA` path is hardcoded for every profile. Fixing that hardcode is a code change tracked
+> separately.
+
 
 Current behavior:
 
@@ -555,45 +1006,131 @@ Authentication uses Google ADC from the active environment
 application-default credentials). Inline service account JSON through
 `GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
 supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
-alias, and existing S3/Pinata/File settings continue to work.
+alias. Pinata and File remain available in default builds. S3 requires a host built
+with the non-default `boundless-s3` feature; a default build rejects an explicit
+`BOUNDLESS_STORAGE_UPLOADER=s3` selection during startup. Without an explicit selector,
+GCS, Pinata, and File settings take precedence over S3 inference, so a stale `S3_BUCKET` cannot
+override one of those configured uploaders. If `S3_BUCKET` is the only implicit uploader setting,
+a default build fails startup and requires the `boundless-s3` feature. A Boundless network route
+also fails startup when no storage uploader is selected, because raiko2 always uploads both the
+program and guest input before creating a market request.
+
+## Boundless Funding Operations
+
+On-chain Boundless submissions use a process-local reservation ledger together with
+`BoundlessMarket.balanceOf(requestor)`. Operate exactly one active raiko2 writer for each Boundless
+signer. Multiple processes or namespaces sharing one signer are unsupported: their local
+reservations and nonce allocators cannot coordinate.
+
+The configured Boundless market RPC must provide a monotonic `latest` view. If the endpoint is a
+load balancer, remove nodes that lag the previously served head; a stale balance can temporarily
+understate the required top-up. Local reservations remain for 60 seconds after `lock_expires_at` so
+small local-clock and chain-time differences stay conservative.
+
+An authenticated market RPC carries its credential inside `prover.risc0.boundless.rpc_url`, as
+userinfo or as a query parameter: neither the alloy transport nor the Boundless SDK exposes a
+per-request header hook. Supply the whole URL through a `{ env = "..." }` reference so the token
+never reaches a plaintext config file. Raiko2 strips credentials, query, and fragment from every URL
+it renders into a Boundless error message or log field, so a failing request logs the endpoint but
+not the token. Its logging filter also suppresses Boundless SDK output and Alloy HTTP debug/trace
+output because those dependencies can render the provider URL before raiko2 receives and scrubs the
+error; `RUST_LOG` and `--verbose` cannot override this safety boundary. That protects raiko2's own
+output only: the credential still appears in the request line of any proxy or gateway in front of
+the endpoint, so rotate it on the same schedule as the signer key.
+
+Keep the signer wallet funded for the peak `attached_value` plus the configured transaction fee
+ceiling. Same-nonce replacements do not execute more than once, but the wallet must be able to pay
+the highest accepted replacement. Monitor the
+structured `Prepared Boundless funding decision` event (`reserved_count`, `market_balance`,
+`required_total`, and `attached_value`) and alert before the required top-up approaches available
+wallet funds. A restart does not reconstruct the exact funding amounts, but it restores a signer
+blocker for every durable unconfirmed on-chain checkpoint before workers start. New transactions
+remain blocked until exact-event recovery confirms the checkpoint, the checkpoint is explicitly
+cleared, or its lock deadline expires. The RPC pending/latest nonce check remains a second guard when
+the selected node still exposes the predecessor in its mempool.
 
 ## Release TEE Provider Metadata
 
 TEE-backed remote prover images have a separate pre-release metadata flow.
 
-Use:
+Use a disposable local signing key for smoke verification without registry publication:
 
 ```bash
-GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-GCP_ENCLAVE_KEY_VERSION=latest \
-GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
-cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
+openssl genrsa -3 -out /tmp/raiko2-local-gramine-signing-key.pem 3072
+RAIKO2_SGX_ENCLAVE_KEY_HOST=/tmp/raiko2-local-gramine-signing-key.pem \
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag release-20260514-tee-smoke --no-push
 ```
 
-for local smoke verification, and:
+for local smoke verification without registry publication. `--no-push` still builds both local SGX
+images, clones and builds each external provider, replaces local Docker tags, and writes local output
+state. Each manifest `image.digest` field contains a mutable `repository:tag` reference rather than
+an immutable registry digest, and `mr_signer` will be the disposable local signer. The resulting
+manifest must not be used as release handoff metadata.
+
+For a formal pre-release export, use the `Release - TEE provider images` GitHub Actions workflow:
 
 ```bash
-GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-GCP_ENCLAVE_KEY_VERSION=latest \
-GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
-cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
+gh workflow run release-tee-providers.yml \
+  --repo taikoxyz/raiko2 \
+  --ref main \
+  -f tag=vX.Y.Z-rc1
 ```
 
-for a formal pre-release export.
+Publishing mode checks that each destination tag is currently unpublished before push. Registry-side
+tag immutability is recommended as an operator control, but the release tooling does not require it.
+After each push, the command resolves the remote tag through the registry and verifies it matches the
+recorded digest. The generated manifest records digest references after push; use those immutable
+digests as the release handoff, not mutable tag aliases. Use `--no-push` for local smoke verification
+instead.
+
+The pushed release workflow runs from the protected `sgx-release-signing` environment with the
+release tag. It authenticates through Workload Identity Federation, fetches the enclave signing key
+from GCP Secret Manager, pushes provider images to Artifact Registry, and uploads the generated
+`tee-attestation-manifest-<tag>.json` as a workflow artifact. It may reuse the existing enclave
+signing Google service account when that account already has the required Secret Manager and
+Artifact Registry permissions, but its Workload Identity Provider or binding must be scoped to
+`taikoxyz/raiko2`, `refs/heads/main`, and this workflow file. Configure these repository variables:
+
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_ENCLAVE_SIGNER_SA`
+- `GCP_ENCLAVE_KEY_SECRET`
+- `GCP_ENCLAVE_KEY_PROJECT`
+- `GCP_ENCLAVE_KEY_VERSION` (optional; defaults to `latest` when unset)
+
+Official Taiko `mr_signer` values are only produced by this protected workflow. Do not document or
+publish a locally built image as Taiko-signed, even if the source commit and `mr_enclave` match.
 
 This flow:
 
 - reads exact external provider pins from `release/providers.toml`
-- fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
-  `GCP_ENCLAVE_KEY_SECRET` is set
-- builds the local `raiko2-sgx` provider image with the signing key passed as a Docker BuildKit
-  secret
+- fetches the `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager inside the protected
+  workflow
+- verifies destination image tags are not already published for pushed runs
+- builds two local `raiko2-sgx` provider images from the same source revision and signing key, with
+  the key passed as a Docker BuildKit secret:
+  - `<tag>` is the non-EDMM compatibility/default image
+  - `<tag>-edmm` is the explicitly EDMM-enabled image
 - clones and builds each pinned external TEE provider image
 - pushes provider images unless `--no-push` is set
-- records immutable image digests
+- records immutable image digests for pushed runs after remote tag digest reconciliation
 - reads baked attestation metadata from each image
-- emits one handoff artifact:
-  - `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+- emits one handoff artifact at
+  `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+
+In a pushed run, the two local images have distinct image digests and `mr_enclave` values, while
+their `mr_signer` values match because they use the same signing key. The manifest records them as
+separate local provider entries:
+
+- `raiko2-sgx` with `image.sgx_edmm = false`
+- `raiko2-sgx-edmm` with `image.sgx_edmm = true`
+
+The command fails closed if the local `mr_enclave` values are equal, the local `mr_signer` values
+differ, or the pushed image digests are equal. An invariant failure prevents the command from
+writing a new manifest. It does not remove a manifest already present at the same tagged output
+path, so operators must not treat that pre-existing file as output from the failed attempt.
+External TEE providers keep their existing single-image build behavior and do not emit
+`image.sgx_edmm`.
 
 Use this manifest to hand off:
 
@@ -604,9 +1141,9 @@ Use this manifest to hand off:
 
 to whoever configures the on-chain verifier allowlists.
 
-`GCP_ENCLAVE_KEY_VERSION` defaults to `latest`. Omit `GCP_ENCLAVE_KEY_PROJECT` to use the active
-`gcloud` project. Release builds must set `GCP_ENCLAVE_KEY_SECRET`. For local non-release builds
-only, `RAIKO2_SGX_ENCLAVE_KEY_HOST` can point to a local key file.
+`GCP_ENCLAVE_KEY_VERSION` defaults to `latest` in the workflow. Local non-release builds should use
+`RAIKO2_SGX_ENCLAVE_KEY_HOST` with a local or disposable key file; local output must not be treated
+as official Taiko-signed release output.
 
 ### TEE Provider Release Notes Template
 
@@ -620,13 +1157,16 @@ ZK/runtime-only release notes.
 
 ## TEE Provider Images
 
-- `raiko2-sgx`: us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `raiko2-sgx` (non-EDMM, `<release>`): us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `raiko2-sgx-edmm` (EDMM, `<release>-edmm`): us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
 - `<provider>`: <provider image digest ref>
 
 ## TEE Attestation Metadata
 
 - `raiko2-sgx` `mr_enclave`: ...
 - `raiko2-sgx` `mr_signer`: ...
+- `raiko2-sgx-edmm` `mr_enclave`: ...
+- `raiko2-sgx-edmm` `mr_signer`: ...
 - `<provider>` `mr_enclave`: ...
 - `<provider>` `mr_signer`: ...
 
@@ -641,10 +1181,9 @@ See `docs/operations.md#reproduce-tee-provider-metadata`.
 
 ### Reproduce TEE Provider Metadata
 
-Use this to regenerate TEE provider attestation metadata from the tag checkout.
-Official rebuilds need the release enclave signing key from GCP Secret Manager
-to reproduce `mr_signer`; a disposable local key can reproduce `mr_enclave` but
-will produce a different signer.
+Use this to regenerate local TEE provider attestation metadata from the tag checkout. Local
+reproduction can check source pins and `mr_enclave`, but it cannot reproduce the official Taiko
+`mr_signer`; that signer is produced only by the protected GitHub Actions workflow.
 
 ```bash
 export TAG=vX.Y.Z
@@ -653,29 +1192,31 @@ export REPRO_DIR=target/releases/${TAG}/tee-provider-repro
 git fetch --tags origin "${TAG}"
 git checkout "${TAG}"
 
-GCP_ENCLAVE_KEY_SECRET=<secret-name> \
-GCP_ENCLAVE_KEY_VERSION=latest \
-GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
-cargo run -r -p xtask -- release-tee-providers --tag "${TAG}" --no-push
-
 mkdir -p "${REPRO_DIR}"
-cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
-  "${REPRO_DIR}/from-source.json"
 
 gh release download "${TAG}" --repo taikoxyz/raiko2 \
   --pattern "tee-attestation-manifest-${TAG}.json" \
   --dir "${REPRO_DIR}" \
   --clobber
 
+openssl genrsa -3 -out "${REPRO_DIR}/local-gramine-signing-key.pem" 3072
+RAIKO2_SGX_ENCLAVE_KEY_HOST="${REPRO_DIR}/local-gramine-signing-key.pem" \
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag "${TAG}" --no-push
+
+cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
+  "${REPRO_DIR}/from-source.json"
+
 jq -S '[.providers[]
-  | {lane, provider, source, attestation}]
+  | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]
   | sort_by(.provider, .lane)' \
-  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.sorted.json"
+  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.no-signer.sorted.json"
 jq -S '[.providers[]
-  | {lane, provider, source, attestation}]
+  | {lane, provider, source, attestation: (.attestation | del(.mr_signer))}]
   | sort_by(.provider, .lane)' \
-  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.sorted.json"
-diff -u "${REPRO_DIR}/release-tee.sorted.json" "${REPRO_DIR}/source-tee.sorted.json"
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.no-signer.sorted.json"
+diff -u "${REPRO_DIR}/release-tee.no-signer.sorted.json" \
+  "${REPRO_DIR}/source-tee.no-signer.sorted.json"
 ```
 
 This command does not:
@@ -691,11 +1232,11 @@ Those steps remain part of later operator workflows.
 To use the network-backed RISC0 route, configure:
 
 ```toml
-[prover]
-guest_system = "risc0"
+[prover.risc0]
+enabled = true
 runner = "network"
 
-[prover.boundless]
+[prover.risc0.boundless]
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
@@ -705,7 +1246,11 @@ rebid_timeout_ms = 300000
 rebid_price_step_bps = 5000
 rebid_max_attempts = 4
 
-[prover.boundless.deployment]
+[prover.risc0.boundless.transaction]
+# Optional bounded knobs default to 90 seconds, +50%, and four replacements.
+max_fee_per_gas_wei = "1000000000"
+
+[prover.risc0.boundless.deployment]
 deployment_type = "base"
 ```
 
@@ -715,43 +1260,304 @@ Full deployment and offer parameter examples live in
 Operator notes:
 
 - `raiko2` uploads guest ELFs and submits Boundless requests directly.
-- Runtime state and task workdirs are stored under `./data/runtime` by default.
-- `runtime.inactive_ttl_secs` controls automatic cleanup for terminal root tasks
-  (`completed`, `failed`, `cancelled`). `0` disables cleanup; the default is `7200` seconds.
-- Proposal requests are sized by `prover.boundless.batch_quote`. The default
-  `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
-  `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`
-  value.
-- Aggregation requests are sized by `prover.boundless.aggregation_quote` (same strategies).
-- `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
+- Production runtime state, provider checkpoints, publication intents, pending proof blobs, and proof
+  manifests are stored in the configured GCS namespace. Proof bytes are immutable objects, not fields
+  in the runtime snapshot. The state and object repositories have separate semantics even when both
+  use that namespace. There are no local task workdirs.
+- Run exactly one live instance per namespace. Active/active replicas and rolling overlap are not
+  supported, even temporarily. Use a `Recreate`-equivalent deployment strategy: close admission and
+  readiness, stop new dispatch and provider submission, wait only for short repository commits and
+  pre-admitted provider checkpoint permits, then stop or abort and join every worker and maintenance
+  task. Start the replacement only after the old process exits. Do not wait for every proof task or
+  publication saga to finish; restart reconciliation resumes durable work. Namespace changes are hard
+  cuts with no cross-namespace data migration, and the in-process execution projection is rebuilt
+  from GCS rather than Redis.
+- `runtime.startup_cleanup = ["proof"]` is an exceptional namespace-wide cutover for SGX/ZK guest,
+  image, verifier, or proving-key upgrades. It deletes the sole runtime-state snapshot, including all
+  tasks, artifact records, pending publications, and durable Boundless/SP1 provider-request
+  checkpoints, before deleting active proof manifests. Existing remote requests are not cancelled;
+  client resubmission may create duplicate paid provider work. Add `"preflight"` only when derivation,
+  fork, or witness-generation rules changed; that scope deletes canonical preflight cache objects
+  and does not touch proof state. Cleanup runs after the old process exits and before
+  recovery, workers, or HTTP admission. GCS requires `storage.objects.list` and
+  `storage.objects.delete`, uses generation-protected deletion with bounded concurrency, and aborts
+  startup on failure. Immutable proof content remains for bucket lifecycle reclamation; preflight
+  objects are removed directly. Treat this as a one-shot cutover setting and remove
+  `startup_cleanup` after the
+  replacement starts successfully; otherwise every routine restart repeats the cleanup and can
+  discard fresh task state and proof manifests. Keep prefixes non-overlapping so one deployment
+  scope cannot contain another.
+- For a preflight-cache incident, set `runtime.preflight_cache = "off"` and restart using the same
+  environment and namespace. This bypasses both GCS preflight reads/writes and process-local
+  singleflight without deleting runtime state or proof manifests. Restore `"shared"` after the
+  incident is understood. This switch is not a replacement for `startup_cleanup = ["preflight"]`
+  when cached preflight data is known to be semantically stale.
+- Treat the canonical preflight `vN` prefix as a host-semantics compatibility boundary. Each complete
+  typed key maps directly to one create-only `<key-hash>.preflight.bincode` object under that prefix;
+  there is no preflight manifest. Compatibility versions using this single-object layout may coexist,
+  and an explicit finite-age `.preflight.bincode` bucket lifecycle rule may reclaim any of them.
+  Expiration is a cache miss: the compatible binary recomputes and republishes the entry. This
+  repository does not change bucket lifecycle configuration.
+- Do not enable preflight startup cleanup solely for unindexed legacy `.bin` remnants; they are not
+  active cache entries and remain until their bucket lifecycle rule reclaims them. If a namespace is
+  known to have run the transient manifest/content preflight layout, the preflight-only cleanup scope
+  can remove those manifests and typed content without touching runtime state, provider checkpoints,
+  or proof manifests.
+- Before enabling `runtime.preflight_cache = "shared"`, inspect the live bucket policy as a rollout
+  gate. Add an explicit finite-retention rule for the exact `.preflight.bincode` suffix; a `.bin`
+  suffix rule does not match it. Generic JSON age rules still must not reach authoritative runtime
+  state or active proof manifests, but preflight caching no longer creates JSON objects. Do not deploy
+  shared preflight caching until these rules are correct in the target bucket.
+- Correlate `registered shasta proof task` and `completed shasta proof task` logs by `task_id`.
+  `proof_type` is the resolved proof lane, while `requested_proof_type` on registration preserves
+  the raw request such as `zk_any`. Completion logging is at-least-once because idempotent proof
+  publication may be observed again; deduplicate accounting and SLO inputs by `task_id` plus
+  `content_hash`.
+- Before deploying this config schema, remove the former `runtime.reset_namespace_on_start` key
+  from every environment and namespace. The service intentionally rejects that removed field.
+  Configure the exact one-shot `startup_cleanup` scopes needed for the cutover, start the
+  replacement only after the previous process exits, verify recovery and admission, then remove
+  `startup_cleanup` so routine restarts do not repeat deletion.
+- Treat runtime lifecycle as one global `NamespaceFence`, not a per-task lock or a lock held across a
+  complete lifecycle operation. A process-local lifecycle transition gate serializes one short
+  active-root decision across its runtime-state CAS and in-memory queue attach or detach. `Draining` rejects new task mutations, provider submissions,
+  publication steps, artifact reclamation, reconciliation, and cleanup writes. It waits only for short
+  repository commits already admitted and request-ID checkpoints covered by permits acquired while
+  active. `Inactive` rejects every write. There is deliberately no owner lease, owner epoch, or
+  ownership heartbeat.
+- Treat `incarnation_id`, scheduler lease tokens, and GCS generations as separate stale-operation
+  domains. A `TaskLifetime` rejects callbacks for a removed and recreated runtime record; a queue
+  lease token identifies one execution attempt; a manifest generation performs exact artifact CAS.
+  Runtime-state generation, not serialized JSON byte order, is the snapshot CAS identity. None is
+  runtime authority, and runtime-state generations remain repository-internal.
+- Submission, cancellation, terminal failure, cleanup, and artifact reclamation commit runtime state first,
+  then apply owner-aware execution-projection and exact proof-object effects. A partial effect is
+  recovered by reconciliation; operators must not attempt to repair it by reverting the
+  authoritative root. If terminal-failure persistence is unavailable, the queue task remains
+  retryable rather than becoming terminal ahead of its runtime root. Recovery, destructive cleanup,
+  and replacement are conditional on the complete observed task snapshot, so stale requests do not
+  detach a reopened root or install a second successor. Unowned pending-publication records retain
+  their artifact identity until deletion succeeds and are swept during startup reconciliation. A
+  successor at the same artifact key does not inherit the predecessor incarnation's publication
+  intent.
+- Boundless finalizes a non-zero market request ID and checkpoints it before either offchain or
+  onchain dispatch. Treat that durable checkpoint as the dispatch admission boundary: cancellation
+  that commits first prevents the provider call, while a later cancellation never causes a fresh
+  request ID. An uncertain offchain response is polled under the checkpointed ID and is not sent a
+  second time. The checkpoint is also bound to the exact guest image, Boundless market deployment,
+  and submission transport. Before changing any of them, settle or explicitly abandon every
+  outstanding remote request, then start the new configuration in a new namespace. An existing
+  checkpoint fails closed rather than crossing that provider boundary.
+- SP1 checkpoints the provider-assigned request ID together with its original submission time. A
+  restart or late-joining root reprojects that exact timestamp and deadline; it never extends the
+  paid request's timeout by treating recovery as a new submission.
+- Proposal execution nodes are position-independent: batch order never creates dependencies between
+  proposals, and only aggregation depends on the proposal artifact tasks it consumes. Proof
+  activation refreshes current owners under the short local lifecycle gate; newly registered distinct
+  roots may share the result, but a replacement incarnation for a checkpointed task ID is excluded.
+  Execution owners are resolved from canonical task membership, not the artifact-reference index;
+  external aggregate inputs remain storage consumers without receiving proposal-stage callbacks.
+  Cached proposal artifacts are execution short-circuits, not graph-shape inputs, so restart and
+  failed-aggregate recovery rebuild the identical proposal and dependency graph.
+- This release requires an atomic configuration cutover. Before starting the new binary, remove
+  legacy `[queue]` keys `backend`, `namespace`, and `redis_url`, remove legacy `[runtime]` keys
+  `root` and `inactive_ttl_secs`, and add explicit `runtime.environment`, `runtime.namespace`, and
+  `[runtime.store]` settings. Apply the new ConfigMap while the old instance is drained; old and new
+  schemas are not dual-read. Keep the prior ConfigMap and GCS namespace together for rollback.
+- The runtime snapshot schema is also a hard cut: task `incarnation_id`, first-class artifact
+  identity fields, canonical proposal and aggregate requests, and publication intent owner/hash
+  fields are required. Unknown fields, missing requests, and derived identity drift fail startup and
+  are not reconstructed from older snapshots. Deploy with a new empty namespace (or explicitly
+  delete the old runtime snapshot after the old instance exits);
+  there is no compatibility migration or fail-open recovery for legacy checkpoint state.
+- Terminal root tasks (`completed`, `failed`, `cancelled`) are retained for
+  `runtime.terminal_task_ttl_secs`, which defaults to six hours. Runtime retention runs every
+  `runtime.cleanup_interval_secs` (30 seconds by default) with an independent per-lane
+  `runtime.cleanup_batch_size` bound (64 by default). Before rolling back to an image older than this
+  release, remove all three keys from the ConfigMap; older config parsers reject them as unknown and
+  fail startup. Proof artifacts and pending publication intents are reclaimed independently after
+  their last retained runtime task reference disappears. The separate seven-day orphan-management
+  pass processes at most
+  `min(runtime.cleanup_batch_size, 64)` records per pass. A persistent orphan reconciliation or
+  cancellation error intentionally blocks all later retention lanes and sets
+  `raiko2_runtime_retention_blocked{lane="orphan"}` to `1` after each blocked pass; the next successful
+  orphan pass resets it to `0`. Alert on a sustained value, then repair the external state or use
+  one-shot `runtime.startup_cleanup = ["proof"]`, accepting that it also discards provider checkpoints
+  and can cause duplicate paid work; ordinary failed proof tasks are terminal records and do not
+  trigger this fail-stop. Root retention admission preserves each task's client-visible
+  terminal status, proof URI, error, and timestamp until exact removal commits. The same terminal TTL
+  applies to failed or cancelled roots with remote submission progress; after expiry, resubmission may
+  create and pay for a new provider request even if the previous request later completes.
+  Active proof manifests must not have an age-based GCS lifecycle rule. Immutable proof content must
+  remain available until every manifest that references it is gone, then the bucket lifecycle may
+  reclaim it. Canonical preflight objects have an independent finite-age lifecycle because expiration
+  is handled as a cache miss and rebuild.
+- Proposal and aggregation requests are sized by `prover.risc0.boundless.batch_quote` and
+  `prover.risc0.boundless.aggregation_quote`. When Boundless configuration is supplied explicitly,
+  both stage tables are required. Each table accepts exactly `strategy = "estimated"`,
+  `"evaluated"`, or `"fixed"`; `fixed` also requires a positive `mcycles` value. The removed
+  `raiko_agent` value is intentionally rejected: migrate every old explicit configuration before
+  rolling out this binary. Pair-specific `rpc.pairs[*].boundless` quote fields remain optional and
+  inherit the corresponding global stage table when omitted.
+- `evaluated` performs the exact local guest dry-run and quotes its cycle count. `fixed` still runs
+  the guest locally to obtain the journal, but quotes the configured count. `estimated` derives the
+  expected journal and quote from the typed input without local guest execution. The estimation step
+  itself does not submit a proof; the normal Boundless request still proves the original guest and
+  input. It is an explicit auction-cost/timeout optimization. For proposals only, the approximately
+  ten-percent target is an empirical publication gate over collected observations, not a per-request
+  runtime guarantee. Aggregation has no error-budget gate. Since an in-policy request is not locally
+  executed first, its actual underquote or overquote is unknown and that mismatch is accepted.
+  Select `evaluated` when exact local cycles are required.
+- Each `estimated` stage table independently accepts `mcycles_offset`, measured in millions of
+  cycles. For the current legacy proposal pairing, set `batch_quote.mcycles_offset = 1300` (1.3
+  billion cycles) and `aggregation_quote.mcycles_offset = 0`; a batch offset never changes aggregate
+  sizing. The offset is added only after a successful estimate, before price/timeout sizing and quote
+  persistence. Estimate-unavailable and arithmetic-overflow cases perform the existing single local
+  evaluation without the offset. Remove or reset the stage offset after publishing matching
+  calibration data.
+- Proposal estimation currently supports any non-empty exact-Unzen input with
+  `execution_po2 >= 20`, non-zero zkGas in every witness, and checked total zkGas at or below
+  `500000000`. It does not gate on network name or block count; block count remains an M2 formula
+  input. Combinations outside the collected sample rectangles are deliberately admitted without a
+  per-request error proof. Size that acceptance concretely: the collected rectangles are
+  `block_count` 155-192 and `total_zkgas` 216314230-562107601, and 192 is the pre-Unzen
+  derivation-source block limit. Unzen raises that protocol limit to 768, and estimation only runs
+  on exact-Unzen input, so an admitted proposal can carry up to four times the calibrated block
+  count with the global zkGas cap as the only remaining bound. Pre-Unzen, later-fork,
+  lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic-overflow inputs emit a warning and
+  perform exactly one local evaluation. A malformed
+  or structurally invalid input fails directly rather than falling back.
+- Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
+  every structurally valid, non-empty input. Historical child-count observations are audit data,
+  never a runtime allowlist. The v4 API accepts 1-1024 proposals, so the quote ranges from 180 to
+  `184,320` mcycles—roughly 205 times the five-child quote—even though the largest historical
+  observation has five children. That older cohort measured about 175 mcycles at one child and
+  817-818 at five: 900 mcycles is 10.02-10.16% high at five, and extrapolating the observed trend
+  approaches roughly 12% overquote at larger counts. The shipped aggregation guest has not been
+  measured successfully. Its artifact ELF SHA-256 is
+  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
+  `disable-dev-mode` build rejects the development-receipt probe and the artifact image ID is null;
+  its actual error direction is unknown. With the committed scalar and v4 limit,
+  multiplication/conversion overflow cannot occur. A configured
+  `mcycles_offset` addition can still overflow and use the generic local-evaluation fallback, but at
+  the documented aggregation offset of zero valid input has no estimate-unavailable local
+  evaluation. The host path also does not verify child receipt bytes; a bad receipt can enter the
+  auction and fail only during remote guest execution. Malformed input fails directly.
+- With the example aggregation per-mcycle timeout policy, a 1024-child estimate produces a
+  `552,960`-second lock timeout and a `1,105,920`-second fulfillment timeout. Market pricing also has no
+  absolute price cap unless `absolute_max_price_per_mcycle` is configured, so rebids may escalate
+  until the attempt limit. This is accepted extrapolation, not evidence that a 1024-child guest
+  execution was measured.
+- Upgrade note: a deployment already using `aggregation_quote.strategy = "estimated"` previously
+  performed one local evaluation because the committed calibrated-count set was empty. The same
+  configuration now skips execution, quotes `180 * child_count`, and persists
+  `evaluated_mcycles_count = None` without a startup warning. Switch aggregation to `evaluated`
+  before upgrading if exact pre-execution must remain in place.
+- `estimated` does not expose a `skip_preflight` configuration flag. It internally builds through a
+  request-scoped SDK builder with an independent preflight layer, so the successful estimate and its
+  local fallback do not download the uploaded input or read or modify the shared executor cache.
+  `evaluated` and `fixed` retain the shared SDK preflight behavior.
+- The model artifact records ELF, image, source-revision, and RISC0-version provenance for release
+  review, but the request path does not compare those values with the running binary. The release
+  owner decides whether a new guest/runtime remains compatible: retain `estimated` only after that
+  review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
+- The committed artifact pins proposal ELF SHA-256
+  `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the proposal
+  guest rebuilt by raiko2 #242; the shipped `crates/guests/elf/risc0_shasta_proposal.elf` no longer
+  hashes to that value. The calibration therefore describes a guest that is not the one being
+  proved. This release-pairing drift is known and explicitly accepted for quote-price and timeout
+  sizing when the release selects `estimated`; it does not affect proof validity. Select
+  `evaluated` instead when the running guest's exact local cycle count is required.
+- `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.
-- `prover.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
+- `prover.risc0.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
   points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
   flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
-- `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
+- `prover.risc0.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
   no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
   maximum is `31`, and the default allows a final max price of about `5x` the base at the default
   step, unless `absolute_max_price_per_mcycle` clamps it sooner.
-- `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
+- `prover.risc0.boundless.transaction` controls the EIP-1559 transaction for each market attempt.
+  `max_fee_per_gas_wei` is required for on-chain mode. `receipt_timeout_ms` defaults to and is capped
+  at `90000`; `fee_bump_bps` defaults to `5000` and must be at least the standard `1000` txpool
+  replacement threshold; `max_replacements` defaults to `4`, and its effective maximum is derived
+  from the total-attempt budget (`4` at the default `90000` ms receipt timeout). Validation caps
+  the combined worst-case send and receipt windows across all attempts at ten minutes. The lock
+  deadline prevents every new broadcast. An already-started or ambiguously acknowledged send still
+  receives bounded known-hash and exact-event recovery after the deadline when necessary; this can
+  briefly retain the serialized signer but prevents a canonical submission from being misclassified
+  as unbroadcast. Receipt polling checks the account nonce once per round and queries replacement
+  receipts only after the nonce is mined. The gas limit is estimated
+  once and fixed across replacements so the configured cap remains the transaction's per-gas ceiling
+  rather than an input to the SDK's dynamic fee filler.
+- Market status errors fail closed after the polling budget and retain the request checkpoint. Only
+  a successful pinned chain snapshot proving the old request ID is no longer payable may authorize
+  request-ID rotation. Once fulfillment is observed, a missing fulfillment payload also retains the
+  checkpoint so an already-paid request is never replaced solely because the indexer or storage
+  backend is unavailable. Payload recovery is bounded by the remaining polling deadline. Exact
+  checkpoints search `ProofDelivered` events from their persisted request-lifecycle lower block
+  instead of relying on the SDK's recent-block default. Once an exact lower block exists, same-ID
+  rebids preserve it across later rungs. A migrated legacy checkpoint has no trustworthy lower block;
+  its first new rebid starts a fresh exact-event window at that rung's pre-broadcast head.
+- Same-nonce replacement hashes and fee rungs are process-local. Follow the non-overlapping drain
+  procedure for planned deployments. After an unplanned restart, the server leaves failed work for
+  client-driven retry. An on-chain retry may enter market polling only after the durable request-id
+  checkpoint resolves to a successful `RequestSubmitted` transaction with three confirmations. It
+  does not restart the old transaction ladder in the background. A checkpoint with no exact event
+  and no confirmed predecessor fails closed until its lock deadline, then is cleared so the next
+  client retry can make a fresh request. Legacy no-hash checkpoints without an exact digest use a
+  deterministic local blocker key and never invent a digest. They fail closed until the lock
+  deadline, then run one final market-status lifecycle so an already-paid fulfillment is recovered
+  before an unfulfilled terminal checkpoint can be replaced. Only a successful pinned status read
+  permits that replacement; RPC errors leave the checkpoint intact for a later client retry.
+  A rebid checkpoint with no exact event returns to polling
+  the same request id only when its metadata explicitly records an earlier confirmed rung. Durable
+  unconfirmed checkpoints restore signer blockers independently of the selected RPC's mempool view;
+  unknown pending signer nonces add a second guard. Completed tasks and already-expired checkpoints
+  do not restore signer blockers.
+- Enabling on-chain Boundless transaction replacement is an atomic image/config cutover. The new
+  image requires `[prover.risc0.boundless.transaction]` with `max_fee_per_gas_wei`, while an old image
+  rejects that table as unknown. Drain the old process, then switch the ConfigMap and image together;
+  rollback must likewise restore both. Runtime metadata omits the default false
+  unconfirmed-predecessor marker, which preserves previous-image readability only for records where
+  every new on-chain Boundless recovery field is absent, such as ordinary records without Boundless
+  progress and SP1-network checkpoints. Every on-chain Boundless checkpoint serializes
+  `request_digest` and `broadcast_from_block`, even when it has no confirmed predecessor, so rollback
+  across one of those records remains one-way unless the record is migrated. Never delete a paid
+  provider checkpoint to force rollback.
+- The mandatory pre-broadcast request checkpoint is bounded to ten seconds while the signer lane is
+  serialized. If the runtime store cannot persist it within that budget, the submission fails before
+  reserving a nonce or broadcasting a transaction. A store write can still commit while its caller
+  observes the bounded timeout. That ambiguous outcome leaves a durable but unbroadcast checkpoint,
+  which blocks the signer lane across restart until `lock_expires_at`. The first client retry after
+  that deadline clears the checkpoint; a subsequent retry resumes normal submission.
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
-- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
+- `prover.risc0.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
   absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
   `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
   `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
   accepted, but setting both is rejected).
 - When a Boundless request expires unfulfilled, `raiko2` resubmits it. Each resubmission escalates
-  the offer's max price by `prover.boundless.rebid_price_step_bps` (compounded) up to
-  `prover.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is set;
-  the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider and
-  then escalated by the same step.
-- `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
-  values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
+  the offer's max price by `prover.risc0.boundless.rebid_price_step_bps` (compounded) up to
+  `prover.risc0.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is
+  set; the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider
+  and then escalated by the same step.
+- `prover.risc0.boundless.deployment.deployment_type` selects the Boundless market deployment.
+  Supported values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market
+  submissions.
 - `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid
   fields (including `rebid_price_step_bps`), and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
-- The local dry-run validates guest execution and prepares the request journal.
+- Boundless progress and resume metadata optionally carries `quoted_mcycles_count`,
+  `evaluated_mcycles_count`, `quote_strategy`, and `quote_model_id` for checkpoint compatibility.
+  A successful estimate leaves `evaluated_mcycles_count` absent; evaluated, fixed, and Estimated
+  fallback requests record the actual local count. Same-request-ID rebids preserve the persisted
+  quote and provenance across restart or configuration/model changes; only request-ID rotation may
+  use the current quote strategy. A legacy checkpoint without a stored quote remains pollable but
+  fails closed before a same-ID rebid.
 
 Optional `zk_any` request sampling is configured at the server level:
 
@@ -827,14 +1633,14 @@ while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
 `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional pair
 settings for hosted SP1 network verification. They point to the verifier-chain RPC and deployed
 Succinct verifier contract used after a network proof is fulfilled. This is separate from the Taiko
-Shasta verifier address used for proof registration and chain-spec data carried in proofs.
+Proposal verifier address used for proof registration and chain-spec data carried in proofs.
 
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.
 
 ## Preflight Concurrency
 
-Shasta preflight defaults are aligned with the old raiko hosted deployment shape:
+Preflight defaults are aligned with the old raiko hosted deployment shape:
 
 - `queue.workers=6` runs up to six queue tasks in parallel, matching the old hosted proving
   concurrency.
@@ -858,8 +1664,13 @@ the proxy. If `l2_witness_rpc` is unset, the server falls back to `l2_rpc`.
 
 - `GET /health`: basic process health
 - `GET /metrics`: Prometheus text-format key service metrics
-- `GET /ready`: configured L1/L2 RPC chain-ID readiness, queue readiness, and prerequisite checks
-  for the hosted proving capabilities exposed by the endpoint
+- `GET /ready`: configured L1/L2 RPC chain-ID readiness, global runtime lifecycle and store
+  access, recent queue-maintenance success, and prerequisite checks for the hosted proving
+  capabilities exposed by the endpoint. Queue maintenance is stale after
+  `max(3 * queue.maintenance_interval_ms, 1000ms)`.
+
+The response reports separate `reth`, `runtime`, `queue`, and `prover` checks. See
+[Architecture](architecture.md#readiness) for the traffic-gating flow and lifecycle behavior.
 
 The hosted server exports a minimal Prometheus surface focused on request intake and proving-stage
 health:

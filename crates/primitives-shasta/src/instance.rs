@@ -12,7 +12,23 @@ use raiko2_protocol_shasta::libhash::{hash_commitment, hash_public_input, hash_t
 use raiko2_protocol_shasta::shasta::{Commitment, ProofCarryData, Transition};
 use serde::{Deserialize, Serialize};
 
-pub const SHASTA_PROPOSAL_ID_MAX: u64 = (1_u64 << 48) - 1;
+/// Maximum value of Solidity `uint48` used by Shasta protocol fields.
+///
+/// Guest hashing uses `u48_to_b256`, which aborts (panics) on wider `u64` values instead of
+/// silently truncating them. Callers must still reject out-of-range values before hashing so
+/// they surface as validation errors rather than proving aborts, and so sub-proof public inputs
+/// stay aligned with on-chain `uint48` packing.
+pub const SHASTA_UINT48_MAX: u64 = (1_u64 << 48) - 1;
+
+/// Alias: proposal IDs are encoded as Solidity `uint48` on-chain.
+pub const SHASTA_PROPOSAL_ID_MAX: u64 = SHASTA_UINT48_MAX;
+
+/// Returns true when `value` fits in Solidity `uint48`.
+#[must_use]
+#[inline]
+pub const fn fits_shasta_uint48(value: u64) -> bool {
+    value <= SHASTA_UINT48_MAX
+}
 
 #[must_use]
 pub fn words_to_bytes_le(words: &[u32; 8]) -> [u8; 32] {
@@ -58,10 +74,13 @@ pub(crate) fn validate_shasta_proof_carry_data_vec(
         return false;
     };
 
-    if !proof_carry_data_vec
-        .iter()
-        .all(|item| item.transition_input.proposal_id <= SHASTA_PROPOSAL_ID_MAX)
-    {
+    if !proof_carry_data_vec.iter().all(|item| {
+        let ti = &item.transition_input;
+        fits_shasta_uint48(ti.proposal_id)
+            && fits_shasta_uint48(ti.transition.timestamp)
+            // Checkpoint.blockNumber is sol `uint48`; still guard the u64 view used by hashing.
+            && fits_shasta_uint48(ti.checkpoint.blockNumber.to::<u64>())
+    }) {
         return false;
     }
 
@@ -363,6 +382,24 @@ mod tests {
         proof_carry_data_vec[1].transition_input.proposal_id = SHASTA_PROPOSAL_ID_MAX + 1;
 
         assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_timestamp_outside_uint48() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[0]
+            .transition_input
+            .transition
+            .timestamp = SHASTA_UINT48_MAX + 1;
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn fits_shasta_uint48_accepts_boundary() {
+        assert!(fits_shasta_uint48(0));
+        assert!(fits_shasta_uint48(SHASTA_UINT48_MAX));
+        assert!(!fits_shasta_uint48(SHASTA_UINT48_MAX + 1));
     }
 
     #[test]

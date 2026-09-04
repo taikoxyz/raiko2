@@ -163,7 +163,7 @@ where
 mod tests {
     use super::execution_witness;
     use alethia_reth_block::config::TaikoEvmConfig;
-    use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET, TAIKO_MASAYA};
+    use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET};
     use alloy::{
         eips::BlockNumberOrTag,
         providers::{Provider as AlloyProvider, ProviderBuilder},
@@ -198,10 +198,6 @@ mod tests {
             }
             167_001 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_DEVNET.clone()));
-                execution_witness(evm_config, &provider, block_id).await?
-            }
-            167_011 => {
-                let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_MASAYA.clone()));
                 execution_witness(evm_config, &provider, block_id).await?
             }
             167_013 => {

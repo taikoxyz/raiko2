@@ -130,7 +130,8 @@ Its release config can be hard-coded in the `xtask` command as the local TEE pro
 The primary command should be:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag <tag>
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag <tag>
 ```
 
 Recommended optional flag:
@@ -261,10 +262,12 @@ Key properties:
 
 The command must abort if any provider fails to:
 
+- confirm destination tags are absent before publishing
 - clone or check out the pinned commit
 - build
 - push
 - resolve a pushed digest
+- verify the remote tag resolves to the pushed digest
 - expose a readable attestation metadata file
 - provide non-empty `mr_enclave` / `mr_signer`
 
@@ -279,7 +282,8 @@ Implementation validation should cover two levels:
 Use:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag <tag> --no-push
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag <tag> --no-push
 ```
 
 This should verify:
@@ -293,13 +297,15 @@ This should verify:
 Use:
 
 ```bash
-cargo run -r -p xtask -- release-tee-providers --tag <tag>
+cargo run -r -p xtask --no-default-features --features tee-provider-release -- \
+  release-tee-providers --tag <tag>
 ```
 
 This should verify:
 
 - images are pushed successfully
 - immutable repo digests are captured
+- remote tags resolve to the captured digests at publication time
 - the final manifest records both digest and attestation data
 
 ## Documentation Changes

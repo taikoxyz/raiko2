@@ -18,6 +18,7 @@ pub enum Sp1ConfigError {
     ProposalCycleLimitMustBePositive,
     AggregationCycleLimitMustBePositive,
     TimeoutSecsMustBePositive,
+    NetworkRequestAttemptsMustBePositive,
     MaxPricePerPguMustBePositive,
     AuctionTimeoutSecsMustBePositive,
     RpcUrlMustNotBeEmpty,
@@ -52,6 +53,9 @@ impl std::fmt::Display for Sp1ConfigError {
             }
             Self::TimeoutSecsMustBePositive => {
                 f.write_str("sp1.timeout_secs must be greater than 0")
+            }
+            Self::NetworkRequestAttemptsMustBePositive => {
+                f.write_str("sp1.network_request_max_attempts must be greater than 0")
             }
             Self::MaxPricePerPguMustBePositive => {
                 f.write_str("sp1.max_price_per_pgu must be greater than 0")
@@ -118,7 +122,7 @@ pub struct Sp1Config {
     /// Skip local simulation before submitting a network prove request.
     #[serde(default = "default_true")]
     pub skip_simulation: bool,
-    /// Cycle limit to attach to network prove requests.
+    /// Cycle limit to attach to prove requests (network, local, and mock).
     #[serde(default = "default_cycle_limit")]
     pub cycle_limit: u64,
     /// Optional proposal-stage cycle limit. Falls back to `cycle_limit`.
@@ -130,6 +134,9 @@ pub struct Sp1Config {
     /// Timeout to use when waiting for network proofs.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Maximum number of SP1 network requests for one proof lifecycle.
+    #[serde(default = "default_network_request_max_attempts")]
+    pub network_request_max_attempts: u32,
     /// Optional max price per PGU to attach to SP1 network proof requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_price_per_pgu: Option<u64>,
@@ -160,6 +167,10 @@ const fn default_timeout_secs() -> u64 {
     7_200
 }
 
+const fn default_network_request_max_attempts() -> u32 {
+    3
+}
+
 impl Default for Sp1Config {
     fn default() -> Self {
         Self {
@@ -174,6 +185,7 @@ impl Default for Sp1Config {
             proposal_cycle_limit: None,
             aggregation_cycle_limit: None,
             timeout_secs: default_timeout_secs(),
+            network_request_max_attempts: default_network_request_max_attempts(),
             max_price_per_pgu: None,
             auction_timeout_secs: None,
             rpc_url: None,
@@ -219,6 +231,8 @@ pub struct Sp1ConfigOverrides {
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
+    pub network_request_max_attempts: Option<u32>,
+    #[serde(default)]
     pub max_price_per_pgu: Option<u64>,
     #[serde(default)]
     pub auction_timeout_secs: Option<u64>,
@@ -241,6 +255,11 @@ impl Sp1Config {
             proposal_cycle_limit: self.proposal_cycle_limit,
             aggregation_cycle_limit: self.aggregation_cycle_limit,
             timeout_secs: overrides.timeout_secs.unwrap_or(self.timeout_secs),
+            network_request_max_attempts: overrides
+                .network_request_max_attempts
+                .map_or(self.network_request_max_attempts, |requested| {
+                    requested.min(self.network_request_max_attempts)
+                }),
             max_price_per_pgu: overrides.max_price_per_pgu.or(self.max_price_per_pgu),
             auction_timeout_secs: overrides.auction_timeout_secs.or(self.auction_timeout_secs),
             rpc_url: self.rpc_url.clone(),
@@ -306,6 +325,9 @@ impl Sp1Config {
         }
         if self.timeout_secs == 0 {
             return Err(Sp1ConfigError::TimeoutSecsMustBePositive);
+        }
+        if self.network_request_max_attempts == 0 {
+            return Err(Sp1ConfigError::NetworkRequestAttemptsMustBePositive);
         }
         if self.max_price_per_pgu == Some(0) {
             return Err(Sp1ConfigError::MaxPricePerPguMustBePositive);
@@ -383,6 +405,7 @@ impl Sp1ConfigOverrides {
             || self.fulfillment_strategy.is_some()
             || self.skip_simulation.is_some()
             || self.timeout_secs.is_some()
+            || self.network_request_max_attempts.is_some()
             || self.max_price_per_pgu.is_some()
             || self.auction_timeout_secs.is_some()
     }
@@ -505,11 +528,16 @@ impl std::fmt::Display for Sp1FulfillmentStrategy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sp1NetworkSubmissionProgress {
     pub provider_request_id: String,
+    /// Time at which this exact provider request was accepted, in seconds since the UNIX epoch.
+    /// Retries and restart recovery must preserve this value so every runtime owner projects the
+    /// same durable request deadline.
+    pub submitted_at: u64,
     pub network_mode: Sp1NetworkMode,
     pub fulfillment_strategy: Sp1FulfillmentStrategy,
     pub skip_simulation: bool,
     pub cycle_limit: u64,
     pub timeout_secs: u64,
+    pub attempt: u32,
     pub max_price_per_pgu: Option<u64>,
     pub auction_timeout_secs: Option<u64>,
 }
@@ -522,6 +550,7 @@ pub struct Sp1NetworkMetadata {
     pub skip_simulation: bool,
     pub cycle_limit: u64,
     pub timeout_secs: u64,
+    pub attempt: u32,
     pub max_price_per_pgu: Option<u64>,
     pub auction_timeout_secs: Option<u64>,
 }
@@ -536,6 +565,7 @@ impl Sp1NetworkMetadata {
             skip_simulation: config.skip_simulation,
             cycle_limit: config.cycle_limit,
             timeout_secs: config.timeout_secs,
+            attempt: 1,
             max_price_per_pgu: config.max_price_per_pgu,
             auction_timeout_secs: config.auction_timeout_secs,
         }
@@ -606,5 +636,24 @@ mod tests {
         };
 
         assert!(overrides.has_network_overrides());
+    }
+
+    #[test]
+    fn request_attempt_override_cannot_exceed_operator_cap() {
+        let config = Sp1Config {
+            network_request_max_attempts: 3,
+            ..Sp1Config::default()
+        };
+        let raised = config.merged_with(&Sp1ConfigOverrides {
+            network_request_max_attempts: Some(10),
+            ..Sp1ConfigOverrides::default()
+        });
+        let lowered = config.merged_with(&Sp1ConfigOverrides {
+            network_request_max_attempts: Some(2),
+            ..Sp1ConfigOverrides::default()
+        });
+
+        assert_eq!(raised.network_request_max_attempts, 3);
+        assert_eq!(lowered.network_request_max_attempts, 2);
     }
 }

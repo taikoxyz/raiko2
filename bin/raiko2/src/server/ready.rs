@@ -1,10 +1,11 @@
-use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfig, RunnerKind};
+use crate::config::{Config, RunnerKind};
+use crate::server::state::AppState;
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
+use raiko2_primitives::ProofType;
 use raiko2_prover::sp1_config::{
-    ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config,
-    Sp1RemoteVerifyConfig, Sp1SystemConfig,
+    ExecutionMode as Sp1ExecutionMode, Sp1Config, Sp1RemoteVerifyConfig, Sp1SystemConfig,
 };
 use raiko2_provider::rpc::build_rpc_client;
 use serde::Serialize;
@@ -55,48 +56,62 @@ pub struct ReadyResponse {
     pub status: &'static str,
     /// Legacy field name retained for compatibility; this covers configured L1/L2 RPC readiness.
     pub reth: ReadyCheck,
+    pub runtime: ReadyCheck,
     pub queue: ReadyCheck,
     pub prover: ReadyCheck,
 }
 
-pub async fn evaluate_readiness(config: &Config) -> ReadyResponse {
-    let reth = match check_rpc_pairs(config).await {
+pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
+    let reth = match check_rpc_pairs(&state.config).await {
         Ok(()) => ReadyCheck::ok(),
         Err(err) => ReadyCheck::err(&err),
     };
 
-    let queue = {
-        #[cfg(feature = "redis-queue")]
-        {
-            match check_queue(config).await {
-                Ok(()) => ReadyCheck::ok(),
-                Err(err) => ReadyCheck::err(&err),
-            }
-        }
-
-        #[cfg(not(feature = "redis-queue"))]
-        {
-            match check_queue(config) {
-                Ok(()) => ReadyCheck::ok(),
-                Err(err) => ReadyCheck::err(&err),
-            }
-        }
-    };
-
-    let prover = match check_prover(config) {
+    let runtime = match state.runtime.check_readiness().await {
         Ok(()) => ReadyCheck::ok(),
         Err(err) => ReadyCheck::err(&err),
     };
 
-    let status = if reth.ok && queue.ok && prover.ok {
+    let queue_max_age = std::time::Duration::from_millis(
+        state
+            .config
+            .queue
+            .maintenance_interval_ms
+            .saturating_mul(3)
+            .max(1_000),
+    );
+    let queue = if state.pipelines.queue_maintenance_ready(queue_max_age) {
+        ReadyCheck::ok()
+    } else {
+        ReadyCheck::err(&anyhow::anyhow!(
+            "queue maintenance has not completed within {}ms",
+            queue_max_age.as_millis()
+        ))
+    };
+
+    let prover = match check_prover(&state.config) {
+        Ok(()) => ReadyCheck::ok(),
+        Err(err) => ReadyCheck::err(&err),
+    };
+
+    readiness_response(reth, runtime, queue, prover)
+}
+
+const fn readiness_response(
+    reth: ReadyCheck,
+    runtime: ReadyCheck,
+    queue: ReadyCheck,
+    prover: ReadyCheck,
+) -> ReadyResponse {
+    let status = if reth.ok && runtime.ok && queue.ok && prover.ok {
         "ok"
     } else {
         "error"
     };
-
     ReadyResponse {
         status,
         reth,
+        runtime,
         queue,
         prover,
     }
@@ -106,13 +121,6 @@ pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
     check_rpc_pairs(config)
         .await
         .context("reth readiness failed")?;
-    #[cfg(feature = "redis-queue")]
-    check_queue(config)
-        .await
-        .context("queue readiness failed")?;
-
-    #[cfg(not(feature = "redis-queue"))]
-    check_queue(config).context("queue readiness failed")?;
     check_prover(config).context("prover readiness failed")?;
     Ok(())
 }
@@ -178,32 +186,21 @@ fn check_prover(config: &Config) -> Result<()> {
         .validate()
         .context("configured proving capabilities are invalid")?;
 
-    if requires_risc0_capability_check(config) {
-        check_risc0_capability(config).context("risc0 capability is invalid")?;
+    if config.prover.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
+        check_boundless_prover(config).context("risc0 capability is invalid")?;
     }
-    if requires_sp1_capability_check(config) {
+    if config.prover.is_enabled(ProofType::Sp1) {
         check_sp1_capability(config).context("sp1 capability is invalid")?;
     }
 
     Ok(())
 }
 
-const fn requires_risc0_capability_check(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
-}
-
-fn check_risc0_capability(config: &Config) -> Result<()> {
-    match config.prover.route() {
-        PipelineRoute {
-            guest_system: GuestSystem::Risc0,
-            runner: RunnerKind::Network,
-        } => check_boundless_prover(config),
-        _ => Ok(()),
-    }
-}
-
-const fn requires_sp1_capability_check(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+const fn sp1_network_credentials_required(config: &Config) -> bool {
+    matches!(
+        config.prover.runner(ProofType::Sp1),
+        Some(RunnerKind::Network)
+    )
 }
 
 fn check_sp1_capability(config: &Config) -> Result<()> {
@@ -211,7 +208,7 @@ fn check_sp1_capability(config: &Config) -> Result<()> {
 }
 
 fn check_boundless_prover(config: &Config) -> Result<()> {
-    let boundless = &config.prover.boundless;
+    let boundless = &config.prover.risc0.boundless;
     Url::parse(&boundless.rpc_url).context("boundless rpc_url is not a valid URL")?;
     let _: PrivateKeySigner = boundless
         .signer_key
@@ -234,9 +231,8 @@ fn check_boundless_prover(config: &Config) -> Result<()> {
 
 fn check_sp1_prover(config: &Config) -> Result<()> {
     let sp1 = &config.prover.sp1;
-    sp1.validate().map_err(anyhow::Error::msg)?;
 
-    if sp1.prover == Sp1ProverMode::Network {
+    if sp1_network_credentials_required(config) {
         if matches!(sp1.mode, Sp1ExecutionMode::Prove) && sp1.verify {
             for pair in config.rpc.resolved_pairs()? {
                 if sp1_effective_pair_config(sp1, &pair)
@@ -283,48 +279,20 @@ fn sp1_effective_pair_config(
     }
 }
 
-#[cfg(feature = "redis-queue")]
-async fn check_queue(config: &Config) -> Result<()> {
-    match config.queue.backend {
-        QueueBackend::Memory => Ok(()),
-        QueueBackend::Redis => check_redis_queue(&config.queue).await,
-    }
-}
-
-#[cfg(not(feature = "redis-queue"))]
-fn check_queue(config: &Config) -> Result<()> {
-    match config.queue.backend {
-        QueueBackend::Memory => Ok(()),
-        QueueBackend::Redis => check_redis_queue(&config.queue),
-    }
-}
-
-#[cfg(feature = "redis-queue")]
-async fn check_redis_queue(config: &QueueConfig) -> Result<()> {
-    let url = config.redis_url.clone().unwrap_or_default();
-    let namespace = config.namespace.clone();
-    let _store = raiko2_queue::RedisStore::<(), (), ()>::connect(
-        &url,
-        &namespace,
-        std::time::Duration::from_secs(60),
-    )
-    .await
-    .context("failed to connect to redis queue")?;
-    Ok(())
-}
-
-#[cfg(not(feature = "redis-queue"))]
-fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
-    bail!("redis queue requires building raiko2 with `--features redis-queue`");
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Sp1RemoteVerifyConfig, check_prover, requires_sp1_capability_check,
-        sp1_effective_pair_config,
+        Sp1RemoteVerifyConfig, check_prover, format_error_chain, sp1_effective_pair_config,
+        sp1_network_credentials_required,
     };
-    use crate::config::{Config, GuestSystem, RunnerKind};
+    use crate::config::Config;
+    use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
+
+    fn set_routes(config: &mut Config, routes: &str) {
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
+    }
 
     #[test]
     fn sp1_effective_pair_config_honors_global_remote_verify() {
@@ -377,13 +345,70 @@ mod tests {
     }
 
     #[test]
-    fn remote_sgx_route_does_not_require_sp1_capability_check() {
+    fn disabled_risc0_skips_boundless_readiness() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
-        config.prover.remote_sgx.base_url = "http://127.0.0.1:9090".to_string();
+        set_routes(&mut config, "native/local");
+        config.prover.risc0.boundless.rpc_url = "not a URL".to_string();
+        config.prover.risc0.boundless.signer_key = "not a signer".to_string();
 
-        assert!(!requires_sp1_capability_check(&config));
-        assert!(check_prover(&config).is_ok());
+        check_prover(&config).expect("disabled RISC0 must skip Boundless readiness");
+    }
+
+    #[test]
+    fn combined_sgx_and_sp1_still_checks_sp1() {
+        let mut config = Config::default();
+        set_routes(&mut config, "sp1/network,sgx/remote");
+        config.prover.sgx.base_url = "http://127.0.0.1:9090".to_string();
+
+        config
+            .prover
+            .validate()
+            .expect("base prover validation must pass");
+
+        let err = check_prover(&config)
+            .expect_err("missing SP1 network verification must fail readiness");
+        assert!(
+            format_error_chain(&err)
+                .contains("sp1 network verification is not enabled for network pair")
+        );
+    }
+
+    #[test]
+    fn sp1_local_skips_network_credentials() {
+        let mut config = Config::default();
+        set_routes(&mut config, "sp1/local");
+        config.prover.sp1.prover = Sp1ProverMode::Local;
+
+        assert!(!sp1_network_credentials_required(&config));
+        check_prover(&config).expect("sp1/local must not require network credentials");
+    }
+
+    #[test]
+    fn sp1_network_credentials_follow_sp1_prover_mode() {
+        let mut config = Config::default();
+        set_routes(&mut config, "native/local");
+        config.prover.sp1.prover = Sp1ProverMode::Network;
+        assert!(!sp1_network_credentials_required(&config));
+
+        set_routes(&mut config, "sp1/local");
+        assert!(!sp1_network_credentials_required(&config));
+
+        set_routes(&mut config, "sp1/network");
+        assert!(sp1_network_credentials_required(&config));
+    }
+
+    #[test]
+    fn readiness_error_omits_credential_bearing_boundless_url() {
+        let mut config = Config::default();
+        set_routes(&mut config, "risc0/network");
+        let sensitive_url = "https://sample_user:sample_secret@[invalid";
+        config.prover.risc0.boundless.rpc_url = sensitive_url.to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+
+        let err = check_prover(&config).expect_err("invalid Boundless URL must fail readiness");
+        let message = format_error_chain(&err);
+
+        assert!(!message.contains(sensitive_url));
+        assert!(!message.contains("sample_secret"));
     }
 }

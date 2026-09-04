@@ -244,14 +244,12 @@ fn receipt_image_id(receipt: &ZkvmReceipt) -> RaikoResult<ZkvmDigest> {
 
 fn allow_fake_receipts_for_verification() -> bool {
     cfg!(debug_assertions)
-        || std::env::var("RAIKO_ALLOW_FAKE_RISC0_RECEIPTS")
-            .map(|value| {
-                value.eq_ignore_ascii_case("1")
-                    || value.eq_ignore_ascii_case("true")
-                    || value.eq_ignore_ascii_case("yes")
-                    || value.eq_ignore_ascii_case("on")
-            })
-            .unwrap_or(false)
+        || std::env::var("RAIKO_ALLOW_FAKE_RISC0_RECEIPTS").is_ok_and(|value| {
+            value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
 }
 
 fn verify_receipt_against_expected_image_id(

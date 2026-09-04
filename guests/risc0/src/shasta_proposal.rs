@@ -10,8 +10,7 @@ mod sys;
 
 use alloc::vec;
 use bincode;
-use raiko2_guest_common::prove_shasta_proposal_for_proof_type;
-use raiko2_primitives::ProofType;
+use raiko2_guest_common::prove_shasta_proposal;
 use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::guest::env;
 
@@ -26,8 +25,6 @@ pub fn main() {
     let guest_input: GuestInput =
         bincode::deserialize(&input_buf).expect("failed to deserialize proposal guest input");
 
-    let subproof_input_hash =
-        prove_shasta_proposal_for_proof_type(&guest_input, ProofType::Risc0)
-            .expect("proposal proving failed");
+    let subproof_input_hash = prove_shasta_proposal(&guest_input).expect("proposal proving failed");
     env::commit_slice(subproof_input_hash.as_slice());
 }

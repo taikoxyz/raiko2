@@ -510,7 +510,7 @@ def submit_and_watch(args: argparse.Namespace, payload: dict[str, Any]) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proposal-id", type=int, required=True)
-    parser.add_argument("--network", required=True, help="Raiko2 network name, for example taiko_masaya")
+    parser.add_argument("--network", required=True, help="Raiko2 network name, for example taiko_hoodi")
     parser.add_argument("--l1-network", required=True, help="L1 network name, for example hoodi")
     parser.add_argument("--l1-rpc-url", required=True)
     parser.add_argument("--l2-rpc-url", required=True)

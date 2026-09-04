@@ -10,10 +10,10 @@ workspace = true
 [dependencies]
 # Workspace dependencies
 raiko2-guest-common.workspace = true
-raiko2-primitives.workspace = true
+raiko2-primitives = { workspace = true, default-features = false }
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol-shasta.workspace = true
-raiko2-pipeline.workspace = true
+raiko2-pipeline = { path = "../pipeline", default-features = false }
 raiko2-remote-poller.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -25,6 +25,7 @@ reqwest.workspace = true
 tokio.workspace = true
 hex.workspace = true
 url.workspace = true
+thiserror.workspace = true
 
 # Alloy types
 alloy.workspace = true
@@ -37,21 +38,27 @@ serde_with.workspace = true
 # RISC0 dependencies (optional)
 risc0-zkvm = { workspace = true, optional = true }
 risc0-ethereum-contracts-boundless = { workspace = true, optional = true }
-boundless-market = { workspace = true, optional = true }
+# Keep this host-only feature policy outside the root manifest, which is part of guest provenance.
+boundless-market = { version = "=2.0.0", optional = true, default-features = false, features = ["gcs"] }
 
 # SP1 dependencies (optional)
 sp1-sdk = { workspace = true, optional = true }
 
 [features]
-default = ["risc0", "sp1", "boundless"]
+default = ["chain-spec-json", "risc0", "sp1", "boundless"]
+chain-spec-json = ["raiko2-primitives/chain-spec-json", "raiko2-pipeline/chain-spec-json"]
 risc0 = ["dep:risc0-zkvm", "dep:risc0-ethereum-contracts-boundless"]
 sp1 = ["dep:sp1-sdk"]
 boundless = ["risc0", "dep:boundless-market"]
+boundless-s3 = ["boundless", "boundless-market/s3"]
 [dev-dependencies]
+sha2.workspace = true
 httpmock = "0.7"
+alloy-signer = "=1.8.3"
 alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
 reth-ethereum-primitives.workspace = true
 risc0-binfmt = "=3.0.4"
 risc0-zkos-v1compat = "2.2.2"
 raiko2-guests.workspace = true
+raiko2-runtime.workspace = true

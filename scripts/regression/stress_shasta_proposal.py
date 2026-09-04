@@ -28,6 +28,7 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_CHAIN_SPEC_LIST = REPO_ROOT / "config" / "chain_spec_list_default.json"
 DEFAULT_SHASTA_IINBOX_ABI = SCRIPT_DIR / "shasta" / "IInbox.json"
 DEFAULT_SHASTA_ANCHOR_ABI = SCRIPT_DIR / "shasta" / "Anchor.json"
+DEFAULT_PROVER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 SHASTA_FORK = "SHASTA"
 
 
@@ -197,6 +198,7 @@ class BatchMonitor:
         api_key: Optional[str] = None,
         proposal_ids: Optional[list[int]] = None,
         api_version: str = "v3",
+        prover: str = DEFAULT_PROVER,
     ):
         self.network = network
         self.l1_network = l1_network
@@ -217,6 +219,7 @@ class BatchMonitor:
         self.last_block_ts_in_real_world: int = 0
         self.running_count = 0
         self.prove_type = prove_type
+        self.prover = prover
         self.watch_mode = watch_mode
         self.time_speed = time_speed
         self.anchor_abi_file = anchor_abi_file
@@ -1226,7 +1229,7 @@ class BatchMonitor:
         normalized_proposals = [self.proposal_for_request(proposal) for proposal in proposals]
         payload = {
             "proposals": normalized_proposals,
-            "prover": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "prover": self.prover,
             "proof_type": self.prove_type,
             "aggregate": aggregate,
         }
@@ -1416,10 +1419,15 @@ class BatchMonitor:
         last_anchor_block_number: int,
     ):
         """handle new proposal group"""
+        completed = False
+        response = RaikoResponse(
+            status="error",
+            message="proposal polling did not return a response",
+        )
         try:
             if self.watch_mode:
                 self.logger.info(f"Watch mode, skip processing")
-                return
+                return False
 
             start_time = datetime.now()
 
@@ -1461,18 +1469,35 @@ class BatchMonitor:
 
                 if response.data:
                     retry_count = 0  # reset retry count
-                    if response.data.get("status") == "registered":
+                    task_status = response.data.get("status")
+                    if task_status == "registered":
                         self.logger.info(
                             f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} registered"
                         )
-                    elif response.data.get("status") == "work_in_progress":
+                    elif task_status == "work_in_progress":
                         self.logger.info(
                             f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} in progress"
                         )
-                    elif proof_hex := self.response_proof_hex(response.data):
-                        self.logger.info(
-                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} completed with proof {proof_hex}"
+                    elif task_status in ("failed", "cancelled"):
+                        self.logger.error(
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} "
+                            f"ended as {task_status}: "
+                            f"{response.data.get('error', 'no diagnostic message')}"
                         )
+                        break
+                    elif task_status == "completed":
+                        proof_hex = self.response_proof_hex(response.data)
+                        completed = True
+                        if proof_hex is None:
+                            self.logger.info(
+                                f"Proposal {group.proposal_id} in L1 Block "
+                                f"{l1_inclusion_block} completed without an inline proof"
+                            )
+                        else:
+                            self.logger.info(
+                                f"Proposal {group.proposal_id} in L1 Block "
+                                f"{l1_inclusion_block} completed with proof {proof_hex}"
+                            )
                         # If aggregate mode is enabled, add completed proposal to pending list
                         if self.aggregate > 0:
                             proposal_data = {
@@ -1492,9 +1517,11 @@ class BatchMonitor:
                                 await self.submit_aggregate_to_raiko()
                         break
                     else:
-                        self.logger.warning(
-                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} unhandled status: {response}"
+                        self.logger.error(
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} "
+                            f"returned unknown status {task_status!r}"
                         )
+                        break
 
                 await asyncio.sleep(self.task_polling_interval)
 
@@ -1514,6 +1541,7 @@ class BatchMonitor:
             self.logger.info(
                 f"Proposal {group.proposal_id} in L1 {l1_inclusion_block} processed, remaining running: {self.running_count}"
             )
+        return completed
 
     async def scan_proposal_boundary(
         self,
@@ -1932,6 +1960,7 @@ class BatchMonitor:
         self.anchor_info_cache.clear()
         tasks = []
         groups_found = 0
+        resolved_ids = []
 
         for proposal_id in self.proposal_ids:
             group = await self.discover_proposal_group_by_id(proposal_id)
@@ -1955,6 +1984,7 @@ class BatchMonitor:
             last_anchor_block_number = await self.get_last_anchor_block_number(
                 group.l2_block_numbers
             )
+            resolved_ids.append(group.proposal_id)
             self.logger.info(
                 f"Processing {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)}"
             )
@@ -1984,7 +2014,17 @@ class BatchMonitor:
 
         if groups_found == 0:
             self.logger.error("No valid proposal groups found for requested proposal ids")
-            return
+            return False
+
+        missing_ids = [
+            proposal_id
+            for proposal_id in self.proposal_ids
+            if proposal_id not in resolved_ids
+        ]
+        if missing_ids:
+            self.logger.error(
+                f"Failed to resolve requested proposal ids: {missing_ids}"
+            )
 
         if self.discover_only:
             if self.proposal_out:
@@ -2000,11 +2040,21 @@ class BatchMonitor:
                         sort_keys=True,
                     )
                 )
-            return
+            return not missing_ids
 
         self.logger.info(f"Waiting for {len(tasks)} processing tasks to complete...")
+        results = []
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        failed_ids = [
+            resolved_ids[index]
+            for index, result in enumerate(results)
+            if result is not True
+        ]
+        if failed_ids:
+            self.logger.error(f"Base proof failed for proposal ids: {failed_ids}")
+        return not missing_ids and len(results) == len(resolved_ids) and not failed_ids
 
     async def run(self):
         """main loop"""
@@ -2028,7 +2078,7 @@ class BatchMonitor:
         self.logger.info(f"Config:\n{json.dumps(config_dict, indent=2, default=str)}")
         
         if self.proposal_ids:
-            await self.process_proposal_ids()
+            return await self.process_proposal_ids()
         elif self.l2_block_range is not None:
             await self.process_l2_block_range()
         else:
@@ -2195,6 +2245,12 @@ async def main():
     )
 
     parser.add_argument(
+        "--prover",
+        default=DEFAULT_PROVER,
+        help="Prover address included in the v4 request identity",
+    )
+
+    parser.add_argument(
         "-i",
         "--abi-file",
         type=lambda x: parse_none_value(x, str),
@@ -2303,9 +2359,12 @@ async def main():
         api_key=args.api_key,
         proposal_ids=proposal_ids,
         api_version=args.api_version,
+        prover=args.prover,
     )
 
-    await monitor.run()
+    succeeded = await monitor.run()
+    if succeeded is False:
+        raise SystemExit(1)
 
 
 # Example usage:

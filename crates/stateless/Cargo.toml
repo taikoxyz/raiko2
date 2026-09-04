@@ -13,7 +13,7 @@ alloy-rlp.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-trie.workspace = true
-raiko2-primitives.workspace = true
+raiko2-primitives = { path = "../primitives", default-features = false }
 
 # Reth
 reth-ethereum-primitives.workspace = true

@@ -14,6 +14,9 @@ pub struct WitnessHeader {
     /// Timestamp used by consensus validation.
     pub timestamp: u64,
     /// Precomputed block hash for the header.
+    ///
+    /// Recomputed from the header whenever a full header is present; for compact headers it is
+    /// host-trusted and must never feed consensus decisions.
     pub hash: B256,
     /// Full header, kept only when later validation needs it.
     pub header: Option<Header>,
@@ -137,6 +140,8 @@ impl From<WitnessHeaderSerde> for WitnessHeader {
 }
 
 impl From<WitnessHeaderCompactSerde> for WitnessHeader {
+    /// Host-trusted metadata: no full header is available to recompute `hash`, so consensus
+    /// paths reject compact headers via `ensure_full_ancestor_headers`.
     fn from(value: WitnessHeaderCompactSerde) -> Self {
         Self {
             number: value.number,
@@ -189,6 +194,8 @@ impl From<WitnessHeaderBincode<'_>> for WitnessHeader {
             return Self::from_header(header.into());
         }
 
+        // Compact arm: host-trusted metadata (nothing to recompute `hash` from); consensus paths
+        // reject compact headers via `ensure_full_ancestor_headers`.
         Self {
             number: value.number,
             parent_hash: value.parent_hash,

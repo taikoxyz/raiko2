@@ -57,18 +57,20 @@ bincode.workspace = true
 
 # Utilities
 dotenvy = "0.15"
+uuid.workspace = true
 
 [features]
 default = ["local-provers"]
 host = ["raiko2-prover/boundless", "raiko2-prover/sp1"]
+boundless-s3 = ["host", "raiko2-prover/boundless-s3"]
 local-provers = [
     "host",
     "raiko2-engine/local-provers",
     "raiko2-prover/risc0",
 ]
-fixture-server = ["local-provers"]
-redis-queue = ["raiko2-queue/redis"]
+fixture-server = ["local-provers", "raiko2-runtime/test-utils"]
 
 [dev-dependencies]
+raiko2-runtime = { workspace = true, features = ["test-utils"] }
 tower.workspace = true
 http-body-util = "0.1"

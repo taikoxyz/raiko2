@@ -66,7 +66,7 @@ Run one real proposal GuestInput through RISC0 execute mode and write a normaliz
 The RISC0 proposal path uses `guest-launcher --stage proposal --proof-type risc0 --mode execute`
 and records `risc0_padded_cycles` as the primary workload metric. It also records
 `risc0_user_cycles`, segment count, and segment `po2` histogram. It does not produce a proof and
-does not call Boundless/Bonsai/network proving.
+does not call Boundless or any other network prover.
 
 SP1 `prover_gas` and RISC0 cycle counts are backend-native metrics, not the same unit. The SP1
 working heuristic that a 30M Ethereum-gas block maps to roughly 10B `proverGas` must not be applied

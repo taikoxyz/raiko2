@@ -1,4 +1,9 @@
-# Shasta Regression Tool
+# Proposal Regression Tool
+
+The `shasta` in the script, config, and directory names below is a frozen identifier, not a fork
+selector. These are the current tools. The selected proposal determines which fork is exercised:
+current proposals run under Unzen, while historical proposals replay under their original fork
+rules. See the `Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
 
 ## Setup
 
@@ -30,7 +35,7 @@ python scripts/regression/shasta_regression.py \
 - Proof backend defaults to `native`; switch with `--proof-type sp1`.
 - Aggregation (`--aggregate N`) is supported only when `--proof-type sp1`.
 - `--discover-only` prints canonical proposal spans as JSON so live tests can reuse latest completed proposals instead of tip-based proposals.
-- Current `preflight` requires the full Shasta proposal tuple: proposal id, L1 inclusion block,
+- Current `preflight` requires the full proposal tuple: proposal id, L1 inclusion block,
   last anchor block number, and L2 block range. `--range` and `--count` only derive L2 spans, so
   non-discover regression runs must use `--proposal-metadata`.
 - The checked-in devnet regression config and default chain specs pin the internal devnet RPC
@@ -39,11 +44,11 @@ python scripts/regression/shasta_regression.py \
 ## Which Tool
 
 Use `stress_shasta_proposal.py` for live regression against a running `raiko2` host. It resolves
-full Shasta proposal metadata from L1/L2, submits HTTP proof requests to `--raiko-rpc`, and is the
+full proposal metadata from L1/L2, submits HTTP proof requests to `--raiko-rpc`, and is the
 right path for SGX, SGXGETH, remote-prover, queue, and API status checks.
 
 Use `shasta_regression.py` for file-based local replay. It runs `preflight` to materialize
-`GuestInput` and then runs `guest-launcher` without a `raiko2` server. For current Shasta preflight,
+`GuestInput` and then runs `guest-launcher` without a `raiko2` server. For current preflight,
 feed it metadata from `stress_shasta_proposal.py --discover-only --proposal-out`; `--range` and
 `--count` are only lightweight L2 span discovery helpers.
 
@@ -54,7 +59,7 @@ costs.
 
 ## Direct Proposal Check
 
-For a single L2 block, use the stress discovery helper to resolve the containing Shasta proposal
+For a single L2 block, use the stress discovery helper to resolve the containing proposal
 tuple without submitting work to `raiko2`:
 
 ```bash
@@ -66,7 +71,7 @@ python scripts/regression/stress_shasta_proposal.py \
   --proposal-out /tmp/proposal-7225500.discovery.json
 ```
 
-The stress helper derives the default L1 RPC, L2 RPC, and Shasta inbox contract from
+The stress helper derives the default L1 RPC, L2 RPC, and inbox contract from
 `config/chain_spec_list_default.json`. For devnet, pass the internal RPC overrides explicitly:
 
 ```bash
@@ -82,6 +87,9 @@ python scripts/regression/stress_shasta_proposal.py \
 
 For a known proposal-id range against the devnet host, discover full metadata first and then submit
 to the local `raiko2` API:
+
+For real v4 proposal plus aggregate service validation, use the repository-local
+`raiko2-service-regression` skill. The commands below show base-proof requests only.
 
 ```bash
 ids=$(seq -s, 203 302)
@@ -107,6 +115,8 @@ python3 scripts/regression/stress_shasta_proposal.py \
   --raiko-rpc http://127.0.0.1:18080 \
   --proposal-ids "$ids" \
   --prove-type sgx \
+  --api-version v4 \
+  --prover 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --polling-interval 5 \
   --log-file /tmp/devnet-sgx-203-302.log
 
@@ -118,6 +128,8 @@ python3 scripts/regression/stress_shasta_proposal.py \
   --raiko-rpc http://127.0.0.1:18080 \
   --proposal-ids "$ids" \
   --prove-type sgxgeth \
+  --api-version v4 \
+  --prover 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
   --polling-interval 5 \
   --log-file /tmp/devnet-sgxgeth-203-302.log
 ```
@@ -161,7 +173,7 @@ cargo run -r -p guest-launcher -- \
 ```
 
 For a direct `raiko2-sgx-prover` check without a `raiko2` server, convert the guest input into a
-Shasta request envelope that includes the full `GuestInput` and post it to the SGX prover:
+request envelope that includes the full `GuestInput` and post it to the SGX prover:
 
 ```bash
 cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \
@@ -176,11 +188,6 @@ curl -sS \
 
 SGX checks still require the SGX prover stack or a remote SGX prover. `preflight` only builds and
 optionally validates the `GuestInput`; it does not launch SGX by itself.
-
-For a fixed Masaya fork-boundary replay case, use the checked-in
-`taiko_masaya/shasta_unzen_transition` fixture suite. It captures proposals `25125`, `25126`,
-and `25127`, with `25127` spanning the `SHASTA -> UNZEN` transition and the first two proposals
-serving as pre-fork controls.
 
 ## Outputs
 

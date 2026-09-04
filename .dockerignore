@@ -21,3 +21,4 @@
 docker/.env
 .env
 *.log
+gha-creds-*.json

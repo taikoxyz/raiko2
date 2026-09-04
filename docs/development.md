@@ -12,8 +12,13 @@ See also:
 
 ## Local Workflow
 
+The example config enables a combined production route set. Before running locally, edit the copy
+to set `enabled = true` only for the desired proof-type tables and fill every setting, credential,
+and endpoint required by those enabled backends.
+
 ```bash
 cp config.example.toml config.toml
+$EDITOR config.toml
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
@@ -62,7 +67,7 @@ cargo run -p raiko2 --features fixture-server -- fixture-server --host 127.0.0.1
 This fixture-backed server is intended for:
 
 - API upgrade smoke tests that only need stable request/response behavior
-- local validation of `/v3/proof/batch/shasta` and `/v3/proof/report` wiring
+- local validation of `/v4/proof/proposal` and `/v4/tasks/{id}` wiring
 - development without live L1/L2 RPC or a real prover backend
 
 Do not use it as evidence for:
@@ -71,42 +76,38 @@ Do not use it as evidence for:
 - remote prover integration
 - end-to-end proposal regression on a real network window
 
-Submit an asynchronous v3 request:
+Submit an asynchronous v4 request:
 
 ```bash
-curl -X POST http://127.0.0.1:8087/v3/proof/batch/shasta \
+curl -X POST http://127.0.0.1:8087/v4/proof/proposal \
   -H 'content-type: application/json' \
   -d '{
+    "proof_type": "sp1",
+    "aggregate": false,
     "proposals": [{
       "proposal_id": 3,
+      "last_anchor_block_number": 0,
       "l1_inclusion_block_number": 1,
-      "l2_block_numbers": [3],
-      "last_anchor_block_number": 0
-    }],
-    "aggregate": false,
-    "proof_type": "sp1",
-    "network": "taiko_dev",
-    "l1_network": "ethereum",
-    "sp1": {
-      "mode": "execute",
-      "prover": "local"
-    }
+      "l2_block_number_start": 3,
+      "l2_block_number_end": 3
+    }]
   }'
 ```
 
 Query the resulting task:
 
 ```bash
-curl http://127.0.0.1:8087/v3/tasks/<task_id>
+curl http://127.0.0.1:8087/v4/tasks/<task_id>
 ```
 
-`sp1.mode=execute` completes without a zk proof and stores the execution report under
-`proposals[].extra_data.sp1`.
+The fixture engine returns deterministic task and proof data without live RPC or prover
+dependencies.
 
 ## Generate A Latest Proposal Request
 
-Use the new `xtask` helper to discover the latest onchain Shasta proposal and emit a ready-to-post
-`/v3/proof/batch/shasta` JSON body.
+Use the legacy `xtask` helper to discover the latest onchain proposal and emit a
+`/v3/proof/batch/shasta` JSON body. The default server router no longer mounts v3 routes, so prefer
+v4 request construction for active clients.
 
 Print a mainnet request to stdout:
 
@@ -144,13 +145,32 @@ CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
   cargo run -r -p xtask-build-guest --bin xtask-build-guest -- all
 ```
 
-`build-guest` updates checked-in ELF artifacts under `crates/guests/elf` when guest sources,
-toolchain inputs, or current ELF bytes change. When the fingerprint already matches, it prints a
-backend skip message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
+`build-guest` updates checked-in ELF artifacts and deterministic provenance manifests under
+`crates/guests/elf` when guest sources, transitive local dependencies, toolchain inputs, or current
+artifact bytes change. When the tracked provenance already matches, it prints a backend skip
+message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
 
 ```bash
 just build-guest sp1 --force
 ```
+
+Verify both checked-in guest families without invoking Docker:
+
+```bash
+cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check
+```
+
+Check mode exits nonzero when a source input, artifact, or provenance manifest is missing or stale.
+Refresh locally with `just build-guest <backend>` on a machine with the required guest toolchain and
+enough build storage.
+
+Check mode is a drift detector, not a reproducibility attestation: the manifest is recorded by the
+same build tooling from local state, so it catches accidental staleness rather than substituted
+artifacts. Trust in released artifacts still comes from the release process and on-chain image-id
+registration. The source closure covers each local crate's manifest, `src/` tree, and `build.rs`;
+compile-time assets included from outside `src/` (for example via `include_str!`) are not tracked.
+No such asset currently reaches guest binaries — the chain-spec JSON embedded by
+`raiko2-primitives` is behind the `chain-spec-json` feature, which guest builds disable.
 
 The host loads those files from that fixed path at process startup; they are not embedded into
 the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
@@ -212,7 +232,7 @@ time just build-guest sp1
 ```
 
 The first two commands measure guest rebuild behavior with increasingly warm Docker Cargo and
-`sccache` volumes. The third command exercises the guest fingerprint skip path and prints
+`sccache` volumes. The third command exercises the guest provenance skip path and prints
 per-backend elapsed time when the checked-in ELFs already match the current sources and build
 inputs.
 RISC0 and SP1 Docker-image rebuilds also print `sccache --show-stats` output so cache hit/miss
@@ -267,11 +287,43 @@ If a guest ELF changes and the target environment relies on onchain verifier tru
 register the new digests explicitly:
 
 ```bash
-cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
-cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
+# Registration defaults to the chain spec's SHASTA verifier entry, which is wrong on every network
+# that has activated Unzen. Derive the UNZEN verifiers and pass them explicitly. `jq -er` exits
+# non-zero when a network has no UNZEN verifier entry, so that case fails here instead of silently
+# registering against the wrong contract.
+NETWORK=taiko_hoodi        # or taiko_mainnet
+PROFILE=hoodi-shasta       # or mainnet-shasta
+SPEC=config/chain_spec_list_default.json
+
+RISC0_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.RISC0' "$SPEC")
+SP1_VERIFIER=$(jq -er --arg n "$NETWORK" \
+  '.[] | select(.name == $n) | .verifier_address_forks.UNZEN.SP1' "$SPEC")
+echo "RISC0=$RISC0_VERIFIER SP1=$SP1_VERIFIER"   # both must be 0x... before continuing
+
+# Dry run. Previews exactly what the apply below sends.
+cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER"
+
+# Apply.
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile "$PROFILE" --backend all \
+  --risc0-verifier "$RISC0_VERIFIER" \
+  --sp1-verifier "$SP1_VERIFIER" \
+  --apply
 ```
+
+> **Why the overrides are mandatory.** `resolve_profile` obtains both defaults from
+> `load_shasta_verifiers_from_chain_spec`, reading `/verifier_address_forks/SHASTA/<proof_type>`,
+> and `--risc0-verifier` / `--sp1-verifier` are the only things that override it
+> (`xtask/src/register_image.rs:335-347`). Running any `hoodi-shasta` or `mainnet-shasta` command
+> without them registers the guest digests against the Shasta verifier contracts. On `taiko_hoodi`
+> those are different addresses from the live Unzen ones, so the registration silently lands on the
+> obsolete contracts while the active verifiers stay unchanged. `taiko_mainnet` currently carries
+> identical addresses under both forks, so it is unaffected today, but that is incidental — the
+> `SHASTA` path is hardcoded for every profile. Fixing that hardcode is a code change tracked
+> separately.
+
 
 This `register-image` flow only covers zk guest digests (`risc0` image IDs and `sp1` verifier
 digests). SGX registration is separate: read `mr_enclave` from the baked
@@ -287,14 +339,14 @@ artifacts before attempting registration.
 
 `bench-guest` measures execution metadata, SP1 prover gas, cycles, and wall time for guest runs.
 The checked-in sample input lives at
-`tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json` and was
-generated from a real Shasta preflight.
+`tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` and was
+generated from a real preflight run.
 
 Run one cached `GuestInput` and write an aggregate JSON report:
 
 ```bash
 cargo run -r -p xtask -- bench-guest sp1 \
-  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json \
+  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
   --repeat 3 \
   --json-out /tmp/sp1-prover-gas.json
 ```
@@ -304,12 +356,12 @@ Reuse prebuilt ELFs after a prior `build-guest sp1 --bench`:
 ```bash
 cargo run -r -p xtask -- bench-guest sp1 \
   --skip-build-guest \
-  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json \
+  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
   --repeat 3 \
   --json-out /tmp/sp1-prover-gas.json
 ```
 
-For live Shasta proposals, first use
+For live proposals, first use
 `scripts/regression/stress_shasta_proposal.py --discover-only --proposal-out` to capture the full
 proposal tuple, then run `preflight` once and reuse the generated `GuestInput` here. Keep repeated
 `bench-guest` runs on cached inputs so prover-gas research does not depend on live RPC.
@@ -336,8 +388,8 @@ Run a suite of cached `GuestInput` files:
 {
   "cases": [
     {
-      "name": "mainnet-proposal-2222",
-      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
+      "name": "mainnet-proposal-23077",
+      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
       "proof_type": "sp1"
     }
   ]
@@ -406,7 +458,7 @@ Uzen opcode that can be isolated without state, environment, or CALL/CREATE wrap
 `sp1-revm-opcode-lab` guest runs the same generated bytecode through revm's transaction
 execution/interpreter stack and is the preferred opcode-tuning path after smoke coverage is stable.
 The `sp1-precompile-lab` guest supports direct body measurements for every Uzen precompile row
-through fixed deterministic inputs. These deliberately remove Shasta proposal/block noise and avoid
+through fixed deterministic inputs. These deliberately remove proposal/block noise and avoid
 live RPC, but they are not yet full alethia-reth/Taiko block execution.
 
 The remaining opcode-lab work is not to replace `sp1-revm-opcode-lab` with a lower-level revm
@@ -420,7 +472,11 @@ because SP1 profiling startup is much more expensive than the tiny lab execute b
 
 ## GuestInput Replay
 
-Checked-in Shasta GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.
+The `shasta` in fixture paths, script names, and `xtask` profile names below is a frozen identifier,
+not a fork selector. See the `Frozen identifier` entry in
+[../CONTEXT.md](../CONTEXT.md).
+
+Checked-in GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.
 Use `preflight` to capture a native fixture after live RPC preflight succeeds. The checked-in
 `taiko_hoodi/smoke` suite currently contains proposals `17460` and `17462`; proposal `17461`
 was skipped because public RPC witness fetching was unstable during capture.
@@ -462,14 +518,9 @@ Suites are tracked as `test/guest_inputs/shasta/<network>/suites/<name>.json`:
 }
 ```
 
-Masaya also carries a checked-in `shasta_unzen_transition` suite with proposals `25125`,
-`25126`, and `25127`. Use it as the fixed fork-transition regression case around the
-`SHASTA -> UNZEN` boundary: `25125` and `25126` are pre-fork controls, while `25127`
-spans the transition window itself.
-
 ## Regression Harness
 
-The file-based Shasta regression flow lives in
+The file-based regression flow lives in
 [scripts/regression/README.md](../scripts/regression/README.md).
 
 Setup and run:

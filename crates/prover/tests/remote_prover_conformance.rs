@@ -157,7 +157,7 @@ async fn post_fixture(base_url: &Url, path: &str, body: &str) -> Raiko2ProofResp
 
 fn shared_guest_input_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
+        "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
     )
 }
 

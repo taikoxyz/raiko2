@@ -87,7 +87,6 @@ fn build_rows(input: &GuestInput) -> Result<Vec<Row>, Box<dyn Error>> {
             &stateless_input.witness,
             &ancestor_headers,
             shared_state_nodes,
-            stateless_input.accounts.clone(),
             &chain_spec,
             &evm_config,
         )?;

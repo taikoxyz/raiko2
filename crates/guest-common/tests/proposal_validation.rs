@@ -1,18 +1,15 @@
 #![allow(missing_docs)]
 
-use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
 use alloy_primitives::{keccak256, Signature, TxKind, U256};
 use alloy_primitives::{Address, B256};
-use alloy_signer::SignerSync;
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use raiko2_guest_common::{prove_shasta_proposal, prove_shasta_proposal_with_validator};
 use raiko2_primitives::{
     ChainSpec, ExecutionWitness, ProofType, StatelessInput, SupportedChainSpecs, WitnessStateNode,
 };
 use raiko2_primitives_shasta::{
-    build_proof_carry_data, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
+    build_proof_carry_data_from_witness_spec, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
 };
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -22,6 +19,7 @@ use raiko2_protocol_shasta::shasta::{
 };
 use raiko2_protocol_shasta::TaikoManifest;
 use risc0_ethereum_trie::Trie;
+use taiko_client_protocol::FixedKSigner;
 
 const ANCHOR_BLOCK_STATE_SLOT: u64 = 256;
 const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
@@ -82,21 +80,20 @@ fn unsigned_anchor_tx(checkpoint: &AnchorV4Checkpoint, to: Address) -> TxEip1559
     }
 }
 
-fn golden_touch_signer() -> PrivateKeySigner {
-    [
-        "92954368afd3caa1f3ce3ead0069c1af",
-        "414054aefe1ef9aeacc1bf426222ce38",
-    ]
-    .concat()
-    .parse()
-    .expect("golden touch signer")
+fn canonical_golden_touch_signature(tx: &TxEip1559) -> Signature {
+    let signature_hash = tx.signature_hash();
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(signature_hash.as_slice());
+    FixedKSigner::golden_touch()
+        .expect("golden touch fixed-k signer")
+        .sign_with_predefined_k(&hash_bytes)
+        .expect("canonical golden touch signature")
+        .signature
 }
 
 fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
     let tx = unsigned_anchor_tx(checkpoint, test_anchor_address());
-    let signature = golden_touch_signer()
-        .sign_hash_sync(&tx.signature_hash())
-        .expect("golden touch anchor signature");
+    let signature = canonical_golden_touch_signature(&tx);
     tx.into_signed(signature).into()
 }
 
@@ -198,7 +195,8 @@ fn guest_input_with_single_block() -> GuestInput {
         l1_header.number.try_into().expect("fits in uint48");
     guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
     guest_input.proof_carry_data =
-        build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+            .expect("build carry data");
     guest_input
 }
 
@@ -228,27 +226,15 @@ fn canonical_inline_source_guest_input() -> GuestInput {
         .l2_contract
         .expect("shasta chain has l2 contract");
     let anchor_tx = unsigned_anchor_tx(&checkpoint, anchor_address);
-    let anchor_signature = golden_touch_signer()
-        .sign_hash_sync(&anchor_tx.signature_hash())
-        .expect("golden touch anchor signature");
+    let anchor_signature = canonical_golden_touch_signature(&anchor_tx);
     let anchor_tx: reth_ethereum_primitives::TransactionSigned =
         anchor_tx.into_signed(anchor_signature).into();
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
 
     let parent_witness_header =
         raiko2_primitives::WitnessHeader::from_header(parent_header.clone());
     guest_input.proposal_ancestor_headers = vec![parent_witness_header.clone()];
     guest_input.witnesses[0].witness.headers = vec![parent_witness_header];
     guest_input.witnesses[0].witness.state = parent_state_nodes;
-    guest_input.witnesses[0].accounts.insert(
-        anchor_signer,
-        TrieAccount {
-            nonce: 0,
-            balance: U256::ZERO,
-            storage_root: B256::ZERO,
-            code_hash: B256::ZERO,
-        },
-    );
     guest_input.witnesses[0].block.header.number = TEST_SHASTA_BLOCK_NUMBER;
     guest_input.witnesses[0].block.header.parent_hash = parent_header.hash_slow();
     guest_input.witnesses[0].block.header.timestamp = block_timestamp;
@@ -350,7 +336,7 @@ fn assert_rejected_with_message(guest_input: &GuestInput, expected: &str) {
 }
 
 #[test]
-fn rejects_witness_is_taiko_mismatch() {
+fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
     let mut guest_input = guest_input_with_single_block();
     let mut second = guest_input.witnesses[0].clone();
     second.block.header.number += 1;
@@ -358,9 +344,14 @@ fn rejects_witness_is_taiko_mismatch() {
     second.chain_spec.is_taiko = false;
     guest_input.witnesses.push(second);
     guest_input.proof_carry_data =
-        build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+            .expect("build carry data");
 
-    assert_rejected_with_message(&guest_input, "chain_spec mismatch");
+    prove_shasta_proposal_with_validator(
+        &guest_input,
+        |stateless_input, _ancestor_headers, _runtime| Ok(stateless_input.block.header.hash_slow()),
+    )
+    .expect("guest should ignore witness chain_spec.is_taiko when chain_id matches");
 }
 
 #[test]
@@ -390,6 +381,23 @@ fn rejects_taiko_proposal_id_outside_uint48() {
     guest_input.proof_carry_data.transition_input.proposal_id = guest_input.taiko.proposal_id;
 
     assert_rejected_with_message(&guest_input, "taiko.proposal_id does not fit in uint48");
+}
+
+#[test]
+fn rejects_transition_timestamp_outside_uint48() {
+    let mut guest_input = guest_input_with_single_block();
+    // proposal.timestamp is sol uint48 and cannot exceed the bound; force the carry field only
+    // so we exercise the fail-closed validation check before hashing (which aborts on overflow).
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .transition
+        .timestamp = SHASTA_PROPOSAL_ID_MAX + 1;
+
+    assert_rejected_with_message(
+        &guest_input,
+        "proof_carry_data.transition.timestamp does not fit in uint48",
+    );
 }
 
 #[test]

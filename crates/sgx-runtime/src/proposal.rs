@@ -1,7 +1,6 @@
 //! Proposal request validation and proof execution.
 
-use raiko2_guest_common::prove_shasta_proposal_for_proof_type;
-use raiko2_primitives::ProofType;
+use raiko2_guest_common::prove_shasta_proposal;
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_prover::remote_prover::protocol::{
     RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaRequest,
@@ -21,10 +20,9 @@ pub(crate) fn prove_request<P: TeeProvider>(
     let guest_input: raiko2_primitives_shasta::GuestInput =
         request.payload.guest_input.clone().into();
     validate_request(&guest_input)?;
-    let input_hash =
-        prove_shasta_proposal_for_proof_type(&guest_input, ProofType::Sgx).map_err(|err| {
-            RequestFailure::invalid_request(format!("invalid raiko2-sgx GuestInput: {err}"))
-        })?;
+    let input_hash = prove_shasta_proposal(&guest_input).map_err(|err| {
+        RequestFailure::invalid_request(format!("invalid raiko2-sgx GuestInput: {err}"))
+    })?;
     let expected_input = hash_shasta_subproof_input(&guest_input.proof_carry_data);
     if input_hash != expected_input {
         return Err(RequestFailure::invalid_request(format!(

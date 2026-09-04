@@ -6,13 +6,13 @@ mod latest_proposal_request;
 #[cfg(feature = "guest-tools")]
 mod register_image;
 mod release_image;
-#[cfg(feature = "guest-tools")]
+#[cfg(any(feature = "guest-tools", feature = "tee-provider-release"))]
 mod release_tee_manifest;
-#[cfg(feature = "guest-tools")]
+#[cfg(any(feature = "guest-tools", feature = "tee-provider-release"))]
 mod release_tee_providers;
 #[cfg(feature = "guest-tools")]
 mod replay_guest_input;
-#[cfg(feature = "guest-tools")]
+#[cfg(any(feature = "guest-tools", feature = "tee-provider-release"))]
 mod tee_provider_lock;
 #[cfg(feature = "guest-tools")]
 mod update_tee_provider_lock;
@@ -40,7 +40,7 @@ enum Cmd {
     #[cfg(feature = "guest-tools")]
     BenchGuest(Box<bench_guest::BenchGuestArgs>),
 
-    /// Build a `/v3/proof/batch/shasta` request for the latest onchain proposal.
+    /// Build a legacy `/v3/proof/batch/shasta` request for the latest onchain proposal.
     #[cfg(feature = "guest-tools")]
     LatestProposalRequest(latest_proposal_request::LatestProposalRequestArgs),
 
@@ -59,7 +59,7 @@ enum Cmd {
     RegisterImage(register_image::RegisterImageArgs),
 
     /// Build, optionally push, and export TEE provider attestation metadata.
-    #[cfg(feature = "guest-tools")]
+    #[cfg(any(feature = "guest-tools", feature = "tee-provider-release"))]
     ReleaseTeeProviders(release_tee_providers::ReleaseTeeProvidersArgs),
 
     /// Replay repo-managed Shasta GuestInput fixtures.
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         Cmd::GuestDigests(args) => xtask_build_guest::guest_digests::run(&root, args),
         #[cfg(feature = "guest-tools")]
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
-        #[cfg(feature = "guest-tools")]
+        #[cfg(any(feature = "guest-tools", feature = "tee-provider-release"))]
         Cmd::ReleaseTeeProviders(args) => release_tee_providers::run(&root, args),
         #[cfg(feature = "guest-tools")]
         Cmd::ReplayGuestInput(args) => replay_guest_input::run(&root, args),

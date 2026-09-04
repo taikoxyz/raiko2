@@ -1,6 +1,6 @@
 ---
 name: raiko2-image-release
-description: Use when building and publishing a raiko2 runtime image from this repository with just release-image or xtask release-image. Use when Codex must keep the workflow limited to guest ELF refresh, image build/push, digest capture, and optional register-image checks, without any kubectl, GKE, or rollout steps.
+description: Use when building or publishing a raiko2 runtime image, including a host-only source revision paired with guest ELF/VK artifacts from an existing release, without deployment or rollout work.
 ---
 
 # Raiko2 Image Release
@@ -58,9 +58,18 @@ Default repository:
    `[INFO] Image pushed: <repository>@sha256:...`
 5. Report the exact digest back to the user.
 
-For TEE-backed provider image attestation capture, use the dedicated `xtask` flow instead:
+For TEE-backed provider image attestation capture, use the dedicated TEE provider release flow
+instead:
 
-- `cargo run -r -p xtask -- release-tee-providers --tag <tag>`
+- Official pushed releases: dispatch `Release - TEE provider images` from `main` and use the
+  uploaded `tee-attestation-manifest-<tag>.json`.
+- Local smoke/reproduction only: `RAIKO2_SGX_ENCLAVE_KEY_HOST=<local-key> cargo run -r -p xtask --no-default-features --features tee-provider-release -- release-tee-providers --tag <tag> --no-push`
+
+Pushed TEE provider release runs fail closed unless destination tags are confirmed absent, and they
+verify after push that each remote tag resolves to the recorded digest. Registry-side immutable tags
+are recommended as an operator control, but the release handoff is the emitted digest manifest.
+Official Taiko `mr_signer` values are produced only by the protected GitHub Actions workflow; local
+`--no-push` output must not be treated as Taiko-signed release output.
 
 That flow owns:
 
@@ -87,6 +96,58 @@ artifacts before retrying.
 
 Do not bypass this by using ad-hoc `docker build`. The published image must match the selected
 source revision and the guest ELF assets expected by the deployment.
+
+## Host Image With Released Guest Artifacts
+
+Use `docs/operations.md` -> `Compose A Host Image With Released Guest Artifacts` when a new host
+revision must keep the RISC0 and SP1 programs from an existing release.
+
+Required sequence:
+
+1. Resolve the exact host commit and guest release commit.
+2. Create a named composition branch and clean worktree from the host commit. Use a traceable name
+   such as `main-<host-short-sha>-elf-<release-tag>`. Fetch only the selected remote release tag into
+   a dedicated ref; do not fetch every tag.
+3. Restore the complete release-tag `crates/guests/elf` directory. Keep ELF, SP1 VK, lab artifacts,
+   and both provenance manifests together; do not assemble a partial directory from downloads.
+4. Verify the directory against the release tag, exact expected GitHub Release Shasta asset set, and
+   every published asset byte.
+5. Before checking source closure, validate each backend's provenance manifest and exact artifact
+   inventory, every recorded artifact hash, and the Shasta SP1 ELF/VK pairs. A source mismatch must
+   not mask an artifact, manifest, or SP1 failure.
+6. Run the source-closure check. It covers tracked guest build inputs, not host-side pipeline/prover
+   input construction. Every composition therefore requires proposal and aggregation regressions on
+   the selected old artifacts. A source fingerprint mismatch additionally requires a reviewed
+   guest-facing diff and soundness assessment. The exception is source-only and is available only
+   after the artifact-only checks pass for both backends.
+7. Commit only the artifact composition, record both source commits and regression evidence in the
+   PR, push the composition branch, and require a clean worktree.
+8. Reconfirm the selected moving host ref still resolves to the frozen host commit. Fail closed
+   unless the selected image tag is conclusively absent; authentication, network, or registry errors
+   are not absence.
+9. Run `release-image host ... --skip-guest-refresh`, capture the immutable digest, prove the
+   registry tag resolves to that digest, then pull the digest and verify its OCI revision label and
+   packaged artifacts against the composition commit.
+
+Artifact hashes and SP1 ELF/VK consistency prove artifact identity, not host/guest protocol
+compatibility or guest soundness. The old guest supplies the proof constraints, so host-side
+hardening added after that release cannot replace a missing guest-side check.
+
+Stop instead of publishing when:
+
+- the release tag, GitHub Release, or artifact set cannot be resolved exactly;
+- the operation fetches every tag or the selected tag cannot be isolated in its dedicated ref;
+- artifacts come from different releases or provenance is omitted/regenerated against old binaries;
+- either backend fails artifact-only provenance, inventory, or digest validation;
+- the composition changes files outside `crates/guests/elf`;
+- proposal or aggregation regression on the selected release artifacts is missing or fails;
+- guest-facing source drift lacks the explicit compatibility and soundness approval above;
+- the worktree is dirty, the source branch is not reachable, registry-side tag immutability is not
+  confirmed, or tag absence is inconclusive;
+- post-push tag-to-digest, revision, or artifact verification fails.
+
+Never hide artifact changes with Git index flags, create only a detached unreferenced composition
+commit, or treat `--skip-guest-refresh` as a compatibility override.
 
 ## Optional Register Check
 

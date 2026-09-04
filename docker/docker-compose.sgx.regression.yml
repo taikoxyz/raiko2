@@ -6,6 +6,7 @@ x-raiko2-sgx-common: &raiko2-sgx-common
     dockerfile: Dockerfile.sgx
     args:
       GRAMINE_LOG_LEVEL: ${GRAMINE_LOG_LEVEL:-error}
+      SGX_EDMM_ENABLE: ${SGX_EDMM_ENABLE:-false}
     secrets:
       - source: gramine_enclave_key
         target: gramine_enclave_key
@@ -111,7 +112,7 @@ services:
       RAIKO2_L2_RPC: ${RAIKO2_L2_RPC}
       RAIKO2_L1_CHAIN_ID: ${RAIKO2_L1_CHAIN_ID:-1}
       RAIKO2_L2_CHAIN_ID: ${RAIKO2_L2_CHAIN_ID:-167000}
-      RAIKO2_PROVER: ${RAIKO2_PROVER:-sgx/remote}
+      RAIKO2_PROVER_ROUTES: ${RAIKO2_PROVER_ROUTES:-sgx/remote,sgxgeth/remote}
       RAIKO2_REMOTE_SGX_BASE_URL: ${RAIKO2_REMOTE_SGX_BASE_URL:-http://raiko2-sgx:8080}
       RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL: ${RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL:-http://gaiko2-sgxgeth:8080}
       RAIKO2_REMOTE_SGX_TIMEOUT_MS: ${RAIKO2_REMOTE_SGX_TIMEOUT_MS:-300000}

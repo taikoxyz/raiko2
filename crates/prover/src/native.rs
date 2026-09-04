@@ -1,11 +1,9 @@
 //! Native prover implementation (no zk proof).
 
 use alloy_primitives::{Address, B256, Bytes, address, keccak256};
-use raiko2_guest_common::{
-    aggregate_shasta_zk_with_verifier, prove_shasta_proposal_for_proof_type,
-};
+use raiko2_guest_common::{aggregate_shasta_zk_with_verifier, prove_shasta_proposal};
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{Proof, ProofType, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data,
     instance::{words_to_bytes_be, words_to_bytes_le},
@@ -62,10 +60,9 @@ where
         let proof_carry_data = input.proof_carry_data.clone();
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
-        let input_hash =
-            prove_shasta_proposal_for_proof_type(&input, ProofType::Native).map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
-            })?;
+        let input_hash = prove_shasta_proposal(&input).map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
+        })?;
         ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "native")?;
         let signature = mock_signature(input_hash);
         let sgx_instance = signer_address();
@@ -221,16 +218,20 @@ fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) 
 mod tests {
     use super::NativeProver;
     use crate::Prover;
-    use alloy_primitives::{Address, B256};
-    use raiko2_guest_common::{
-        aggregate_shasta_zk_with_verifier, prove_shasta_proposal_for_proof_type,
+    use alloy_consensus::{
+        SignableTransaction, proofs::calculate_transaction_root, transaction::SignerRecoverable,
     };
+    use alloy_primitives::{Address, B256};
+    use alloy_signer::SignerSync;
+    use alloy_signer_local::PrivateKeySigner;
+    use raiko2_guest_common::{aggregate_shasta_zk_with_verifier, prove_shasta_proposal};
     use raiko2_pipeline::NativeBackend;
     use raiko2_primitives::{
         AggregationGuestInput, Proof, ProofType, ProverConfig, RaikoError, SupportedChainSpecs,
     };
     use raiko2_primitives_shasta::{
-        GuestInput, build_proof_carry_data, encode_proof_carry_data, instance::words_to_bytes_be,
+        GuestInput, build_proof_carry_data_from_witness_spec, encode_proof_carry_data,
+        instance::words_to_bytes_be,
     };
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -255,6 +256,7 @@ mod tests {
         {
             guest_input.taiko.l1_ancestor_headers = vec![guest_input.taiko.l1_header.clone()];
         }
+        guest_input.taiko.prover_data.last_anchor_block_number = None;
         if let Some(chain_spec) = SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(guest_input.taiko.chain_spec.chain_id)
         {
@@ -265,7 +267,8 @@ mod tests {
                 witness.chain_spec = chain_spec.clone();
             }
             guest_input.proof_carry_data =
-                build_proof_carry_data(&guest_input, ProofType::Native).expect("rebuild carry");
+                build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                    .expect("rebuild carry");
         }
         guest_input
     }
@@ -304,8 +307,7 @@ mod tests {
         let prover = NativeProver;
         let config = ProverConfig::default();
         let input = fixture_guest_input();
-        let expected_hash =
-            prove_shasta_proposal_for_proof_type(&input, ProofType::Native).expect("proposal");
+        let expected_hash = prove_shasta_proposal(&input).expect("proposal");
         let proof = prover
             .prove(input, &config, &NativeBackend)
             .await
@@ -322,6 +324,64 @@ mod tests {
 
         let sig: [u8; 65] = bytes[24..].try_into().expect("sig bytes");
         assert_eq!(sig, super::mock_signature(expected_hash));
+    }
+
+    #[test]
+    fn production_reconstruction_rejects_non_canonical_anchor_signature() {
+        let mut input = fixture_guest_input();
+        // Mutating only the final signature preserves execution semantics and avoids any
+        // descendant parent hash that would also need to be rebuilt.
+        let last_witness = input.witnesses.last_mut().expect("fixture witness");
+        let original_tx = last_witness
+            .block
+            .body
+            .transactions
+            .first()
+            .expect("fixture anchor transaction")
+            .clone();
+        let unsigned_tx = original_tx
+            .as_eip1559()
+            .expect("fixture anchor must be EIP-1559")
+            .tx()
+            .clone();
+        let ordinary_signer: PrivateKeySigner = [
+            "92954368afd3caa1f3ce3ead0069c1af",
+            "414054aefe1ef9aeacc1bf426222ce38",
+        ]
+        .concat()
+        .parse()
+        .expect("golden touch signer");
+        let ordinary_signature = ordinary_signer
+            .sign_hash_sync(&unsigned_tx.signature_hash())
+            .expect("ordinary Golden Touch signature");
+        assert_ne!(
+            &ordinary_signature,
+            original_tx.signature(),
+            "negative fixture must differ from the protocol's fixed-k signature"
+        );
+        let replacement_tx: reth_ethereum_primitives::TransactionSigned =
+            unsigned_tx.into_signed(ordinary_signature).into();
+        assert_eq!(
+            original_tx.recover_signer().expect("original signer"),
+            replacement_tx.recover_signer().expect("replacement signer"),
+            "signature mutation must preserve the transaction sender"
+        );
+
+        last_witness.block.body.transactions[0] = replacement_tx;
+        last_witness.block.header.transactions_root =
+            calculate_transaction_root(&last_witness.block.body.transactions);
+        input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&input, ProofType::Native)
+                .expect("rebuild mutated fixture carry");
+
+        let err = prove_shasta_proposal(&input)
+            .expect_err("production path must reject a non-canonical anchor signature");
+        assert!(
+            err.chain().any(|cause| cause
+                .to_string()
+                .contains("anchor transaction signature mismatch")),
+            "unexpected error chain: {err:?}"
+        );
     }
 
     #[tokio::test]

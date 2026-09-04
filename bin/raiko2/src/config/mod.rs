@@ -1,7 +1,8 @@
 //! Configuration management for Raiko V2.
 
 use crate::cli::Cli;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use raiko2_primitives::ProofType;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -15,14 +16,18 @@ mod validation;
 
 pub use preflight::PreflightConfig;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
-pub use queue::{QueueBackend, QueueConfig};
-pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+pub use queue::QueueConfig;
+pub use raiko2_pipeline::{GuestSystem, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
-pub use runtime::RuntimeConfig;
+#[cfg(test)]
+pub use runtime::StartupCleanupScope;
+pub use runtime::{PreflightCacheMode, RuntimeConfig, RuntimeStoreBackend};
 #[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};
 
+#[cfg(test)]
+use raiko2_pipeline::PipelineRoute;
 #[cfg(test)]
 use raiko2_provider::L2ProviderKind;
 
@@ -33,7 +38,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub rpc: RpcConfig,
     pub prover: ProverConfig,
-    #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
@@ -44,6 +48,11 @@ pub struct Config {
 impl Config {
     /// Load configuration from CLI arguments and optional config file.
     pub fn load(cli: &Cli) -> Result<Self> {
+        if std::env::var_os("RAIKO2_PROVER").is_some() {
+            anyhow::bail!(
+                "RAIKO2_PROVER is no longer supported; use prover routes in the config file or RAIKO2_PROVER_ROUTES"
+            );
+        }
         let mut config = if let Some(config_path) = &cli.config {
             Self::from_file(config_path)?
         } else {
@@ -82,44 +91,27 @@ impl Config {
             config.rpc.client.retry.compute_units_per_second = cu_per_second;
         }
 
-        if let Some(route) = &cli.prover {
-            let route: PipelineRoute = route.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            config.prover.guest_system = route.guest_system;
-            config.prover.runner = route.runner;
+        if let Some(routes) = &cli.prover_routes {
+            let routes = routes.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            config.prover.apply_routes_override(&routes);
         }
         if let Some(base_url) = &cli.remote_sgx_base_url {
-            config.prover.remote_sgx.base_url.clone_from(base_url);
+            config.prover.sgx.base_url.clone_from(base_url);
         }
         if let Some(base_url) = &cli.remote_sgx_sgxgeth_base_url {
-            config
-                .prover
-                .remote_sgx
-                .sgxgeth_base_url
-                .clone_from(base_url);
+            config.prover.sgxgeth.base_url.clone_from(base_url);
         }
         if let Some(timeout_ms) = cli.remote_sgx_timeout_ms {
-            config.prover.remote_sgx.timeout_ms = timeout_ms;
+            config.prover.sgx.timeout_ms = timeout_ms;
+            config.prover.sgxgeth.timeout_ms = timeout_ms;
         }
 
-        if let Some(queue_backend) = &cli.queue_backend {
-            config.queue.backend = queue_backend
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
-        }
-        if let Some(queue_namespace) = &cli.queue_namespace {
-            config.queue.namespace.clone_from(queue_namespace);
-        }
         if let Some(queue_workers) = cli.queue_workers {
             config.queue.workers = queue_workers;
         }
         if let Some(interval_ms) = cli.queue_maintenance_interval_ms {
             config.queue.maintenance_interval_ms = interval_ms;
         }
-        if let Some(redis_url) = &cli.redis_url {
-            config.queue.redis_url = Some(redis_url.clone());
-        }
-
-        config.normalize();
 
         // Validate configuration
         config.validate()?;
@@ -128,11 +120,33 @@ impl Config {
     }
 
     /// Load configuration from a TOML file.
+    ///
+    /// Singleton TOML tables shaped as `{ env = "NAME" }` are resolved from
+    /// the process environment before the configuration is deserialized.
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {}", path.display()))
+        let mut value: toml::Value = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        let contains_environment_references = resolve_environment_references(&mut value)
+            .with_context(|| {
+                format!(
+                    "Failed to resolve environment references in config file: {}",
+                    path.display()
+                )
+            })?;
+        let config: Self = value.try_into().map_err(|error| {
+            if contains_environment_references {
+                anyhow::anyhow!(
+                    "Failed to decode config file: {}: schema error details were redacted because configuration contains environment references",
+                    path.display()
+                )
+            } else {
+                anyhow::Error::new(error)
+                    .context(format!("Failed to decode config file: {}", path.display()))
+            }
+        })?;
+        Ok(config)
     }
 
     /// Validate the entire configuration.
@@ -140,7 +154,10 @@ impl Config {
         self.server
             .validate()
             .context("Server configuration error")?;
-        self.rpc.validate().context("RPC configuration error")?;
+        let resolved_pairs = self
+            .rpc
+            .validate_base()
+            .context("RPC configuration error")?;
         self.prover
             .validate()
             .context("Prover configuration error")?;
@@ -148,28 +165,88 @@ impl Config {
             .validate()
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
-        let resolved_pairs = self
-            .rpc
-            .resolved_pairs()
-            .context("RPC configuration error")?;
+
+        if self.prover.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
+            rpc::validate_boundless_pairs(&resolved_pairs)
+                .context("Boundless RPC pair configuration error")?;
+            for pair in &resolved_pairs {
+                self.prover
+                    .risc0
+                    .boundless
+                    .apply_pair_override(&pair.boundless)
+                    .with_context(|| {
+                        format!("Boundless configuration error for rpc pair {}", pair.key)
+                    })?;
+            }
+        }
+        if self.prover.is_enabled(ProofType::Sp1) {
+            rpc::validate_sp1_verifier_pairs(&resolved_pairs)
+                .context("SP1 verifier RPC pair configuration error")?;
+        }
+
         self.preflight
             .validate(&resolved_pairs)
             .context("Preflight configuration error")?;
-        for pair in resolved_pairs {
-            self.prover
-                .boundless
-                .apply_pair_override(&pair.boundless)
-                .with_context(|| {
-                    format!("Boundless configuration error for rpc pair {}", pair.key)
-                })?;
-        }
         Ok(())
     }
+}
 
-    /// Applies cross-field defaults that cannot be represented by Serde defaults alone.
-    pub fn normalize(&mut self) {
-        self.prover.normalize_route();
+/// Resolve explicit environment references in a TOML value tree.
+///
+/// Only a singleton table shaped as `{ env = "NAME" }` is a reference. This
+/// keeps ordinary strings literal, avoids shell-style interpolation, and
+/// resolves values before typed configuration deserialization.
+fn resolve_environment_references(value: &mut toml::Value) -> Result<bool> {
+    let environment = match value {
+        toml::Value::Table(table) if table.len() == 1 && table.contains_key("env") => {
+            match table.get("env") {
+                Some(toml::Value::String(name)) if !name.trim().is_empty() => Some(name.clone()),
+                Some(toml::Value::String(_)) => {
+                    bail!("config environment reference name must not be empty");
+                }
+                Some(_) => {
+                    bail!("config environment reference `env` value must be a string");
+                }
+                None => unreachable!("environment reference table contains env"),
+            }
+        }
+        _ => None,
+    };
+
+    if let Some(environment) = environment {
+        let resolved = std::env::var_os(&environment)
+            .ok_or_else(|| {
+                anyhow::anyhow!("config environment variable `{environment}` is not available")
+            })?
+            .into_string()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "config environment variable `{environment}` must contain valid Unicode"
+                )
+            })?;
+        if resolved.is_empty() {
+            bail!("config environment variable `{environment}` must not be empty");
+        }
+        *value = toml::Value::String(resolved);
+        return Ok(true);
     }
+
+    let mut contains_environment_references = false;
+    match value {
+        toml::Value::Array(values) => {
+            for value in values {
+                contains_environment_references |= resolve_environment_references(value)?;
+            }
+        }
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                contains_environment_references |= resolve_environment_references(value)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(contains_environment_references)
 }
 
 fn override_single_rpc_pair(
@@ -186,13 +263,11 @@ fn override_single_rpc_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::Cli;
+    use crate::cli::{Cli, lock_test_cli_environment};
     use clap::Parser;
-    use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_temp_config(contents: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -205,23 +280,103 @@ mod tests {
         path
     }
 
+    struct ConfigTestEnvironment {
+        _legacy_prover_guard: EnvVarGuard,
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ConfigTestEnvironment {
+        fn new() -> Self {
+            let env_lock = lock_test_cli_environment();
+            let legacy_prover_guard = EnvVarGuard::remove("RAIKO2_PROVER");
+            Self {
+                _legacy_prover_guard: legacy_prover_guard,
+                _env_lock: env_lock,
+            }
+        }
+    }
+
+    fn parse_config_cli(path: &Path, _environment: &ConfigTestEnvironment) -> Cli {
+        Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")])
+    }
+
     fn workspace_config(path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(path)
     }
 
+    fn set_routes(config: &mut Config, routes: &str) {
+        config
+            .prover
+            .apply_routes_override(&routes.parse().expect("valid prover routes"));
+    }
+
+    fn enable_test_boundless_network(config: &mut Config) {
+        set_routes(config, "risc0/network");
+        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
+        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        config.prover.risc0.boundless.transaction = Some(
+            raiko2_prover::boundless_config::BoundlessTransactionConfig {
+                receipt_timeout_ms: 90_000,
+                fee_bump_bps: 5_000,
+                max_replacements: 4,
+                max_fee_per_gas_wei: "1000000000".to_string(),
+            },
+        );
+    }
+
+    fn route_override_config() -> &'static str {
+        r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover.risc0]
+enabled = true
+runner = "local"
+
+[prover.sp1]
+enabled = true
+prover = "local"
+
+[prover.sgx]
+base_url = "http://localhost:8080"
+timeout_ms = 300000
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
+"#
+    }
+
     struct EnvVarGuard {
         key: &'static str,
-        previous: Option<String>,
+        previous: Option<OsString>,
     }
 
     impl EnvVarGuard {
         #[allow(unsafe_code)]
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: tests serialize environment mutation through ENV_LOCK.
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers hold the shared test CLI environment lock.
             unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        #[allow(unsafe_code)]
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers hold the shared test CLI environment lock.
+            unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
     }
@@ -230,10 +385,10 @@ mod tests {
         #[allow(unsafe_code)]
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {
-                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                // SAFETY: the guard is dropped before the shared environment lock.
                 unsafe { std::env::set_var(self.key, previous) };
             } else {
-                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                // SAFETY: the guard is dropped before the shared environment lock.
                 unsafe { std::env::remove_var(self.key) };
             }
         }
@@ -249,18 +404,205 @@ mod tests {
 
     #[test]
     fn test_config_example_validates() {
+        let _env_lock = lock_test_cli_environment();
+        let _signer_key_guard =
+            EnvVarGuard::set("RAIKO2_BOUNDLESS_SIGNER_KEY", "configured-by-secret-store");
         let path = workspace_config("config.example.toml");
-        let mut config = Config::from_file(&path).expect("parse config.example.toml");
-        config.normalize();
+        let config = Config::from_file(&path).expect("parse config.example.toml");
         config.validate().expect("validate config.example.toml");
+    }
+
+    #[test]
+    fn config_file_resolves_environment_references() {
+        let _env_lock = lock_test_cli_environment();
+        let _l1_rpc_guard = EnvVarGuard::set("RAIKO2_TEST_L1_RPC", "http://l1.example.test:8545");
+        let _l2_rpc_guard = EnvVarGuard::set("RAIKO2_TEST_L2_RPC", "http://l2.example.test:8545");
+        let _sgx_url_guard =
+            EnvVarGuard::set("RAIKO2_TEST_SGX_URL", "http://sgx.example.test:8080");
+        let _acl_key_guard = EnvVarGuard::set("RAIKO2_TEST_ACL_KEY", "test-only-acl-key");
+        let path = write_temp_config(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[server.acl]
+keys = [
+  { id = "submit", key = { env = "RAIKO2_TEST_ACL_KEY" }, allow = ["prover.submit"] },
+]
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = { env = "RAIKO2_TEST_L1_RPC" }, l2_rpc = { env = "RAIKO2_TEST_L2_RPC" } },
+]
+
+[prover.native]
+enabled = true
+
+[prover.sgx]
+enabled = true
+base_url = { env = "RAIKO2_TEST_SGX_URL" }
+timeout_ms = 300000
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
+"#,
+        );
+
+        let config = Config::from_file(&path).expect("parse environment references");
+        config.validate().expect("validate environment references");
+        assert_eq!(
+            config.rpc.pairs[0].l1_rpc.as_deref(),
+            Some("http://l1.example.test:8545")
+        );
+        assert_eq!(
+            config.rpc.pairs[0].l2_rpc.as_deref(),
+            Some("http://l2.example.test:8545")
+        );
+        assert_eq!(config.prover.sgx.base_url, "http://sgx.example.test:8080");
+        assert_eq!(config.server.acl.keys[0].key, "test-only-acl-key");
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_rejects_missing_environment_reference() {
+        let _env_lock = lock_test_cli_environment();
+        let _missing_guard = EnvVarGuard::remove("RAIKO2_TEST_MISSING_ENV");
+        let config = config_with_l1_rpc("{ env = \"RAIKO2_TEST_MISSING_ENV\" }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("missing environment variable must fail");
+        assert!(format!("{error:#}").contains("RAIKO2_TEST_MISSING_ENV"));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_rejects_empty_environment_reference() {
+        let _env_lock = lock_test_cli_environment();
+        let _empty_guard = EnvVarGuard::set("RAIKO2_TEST_EMPTY_ENV", "");
+        let config = config_with_l1_rpc("{ env = \"RAIKO2_TEST_EMPTY_ENV\" }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("empty environment variable must fail");
+        let error = format!("{error:#}");
+        assert!(error.contains("RAIKO2_TEST_EMPTY_ENV"));
+        assert!(error.contains("must not be empty"));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_rejects_invalid_environment_reference_shape() {
+        let config = config_with_l1_rpc("{ env = 42 }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("non-string environment name must fail");
+        assert!(format!("{error:#}").contains("env` value must be a string"));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn config_file_redacts_environment_values_from_decode_errors() {
+        let _env_lock = lock_test_cli_environment();
+        let secret = "decode-error-secret";
+        let _secret_guard = EnvVarGuard::set("RAIKO2_TEST_DECODE_SECRET", secret);
+        let path = write_temp_config(
+            r#"
+[server]
+host = "127.0.0.1"
+port = { env = "RAIKO2_TEST_DECODE_SECRET" }
+
+[[rpc.pairs]]
+network = "taiko_hoodi"
+l1_network = "hoodi"
+l1_rpc = "http://l1.example.test:8545"
+l2_rpc = "http://l2.example.test:8545"
+
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
+"#,
+        );
+
+        let error = Config::from_file(&path).expect_err("wrong field type must fail");
+        let full_error = format!("{error:#}");
+        let debug_error = format!("{error:?}");
+        assert!(full_error.contains("schema error details were redacted"));
+        assert!(!full_error.contains(secret));
+        assert!(!debug_error.contains(secret));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_file_redacts_non_unicode_environment_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _env_lock = lock_test_cli_environment();
+        let marker = "non-unicode-secret";
+        let value = OsString::from_vec(b"non-unicode-secret-\xff".to_vec());
+        let _value_guard = EnvVarGuard::set("RAIKO2_TEST_NON_UNICODE_ENV", &value);
+        let config = config_with_l1_rpc("{ env = \"RAIKO2_TEST_NON_UNICODE_ENV\" }");
+        let path = write_temp_config(&config);
+
+        let error = Config::from_file(&path).expect_err("non-Unicode environment value must fail");
+        let full_error = format!("{error:#}");
+        let debug_error = format!("{error:?}");
+        assert!(full_error.contains("RAIKO2_TEST_NON_UNICODE_ENV"));
+        assert!(full_error.contains("must contain valid Unicode"));
+        assert!(!full_error.contains(marker));
+        assert!(!debug_error.contains(marker));
+        std::fs::remove_file(path).expect("remove temp config");
+    }
+
+    fn config_with_l1_rpc(l1_rpc: &str) -> String {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[[rpc.pairs]]
+network = "taiko_hoodi"
+l1_network = "hoodi"
+l1_rpc = {l1_rpc}
+l2_rpc = "http://l2.example.test:8545"
+
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
+"#
+        )
     }
 
     #[test]
     fn test_docker_compose_config_validates() {
         let path = workspace_config("docker/config.compose.toml");
-        let mut config = Config::from_file(&path).expect("parse docker config");
-        config.normalize();
+        let config = Config::from_file(&path).expect("parse docker config");
         config.validate().expect("validate docker config");
+        assert_eq!(
+            config.prover.risc0.boundless.batch_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
+        assert_eq!(
+            config.prover.risc0.boundless.aggregation_quote,
+            raiko2_prover::boundless_config::QuoteSizing::Evaluated
+        );
     }
 
     #[test]
@@ -409,7 +751,7 @@ mod tests {
     #[test]
     fn test_rpc_config_default() {
         let config = RpcConfig::default();
-        assert!(config.validate().is_ok());
+        assert!(config.validate_base().is_ok());
     }
 
     #[test]
@@ -429,7 +771,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        assert!(config.validate_base().is_ok());
     }
 
     #[test]
@@ -449,7 +791,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let result = config.validate();
+        let result = config.validate_base();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("l1_rpc"));
     }
@@ -472,7 +814,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = config.validate();
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        let result = rpc::validate_sp1_verifier_pairs(&pairs);
         assert!(result.is_err());
         assert!(
             result
@@ -502,7 +847,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(config.validate().is_ok());
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        assert!(rpc::validate_sp1_verifier_pairs(&pairs).is_ok());
     }
 
     #[test]
@@ -525,7 +873,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = config.validate();
+        let pairs = config
+            .validate_base()
+            .expect("base RPC configuration should be valid");
+        let result = rpc::validate_sp1_verifier_pairs(&pairs);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains(
@@ -540,18 +891,70 @@ mod tests {
             pairs: Vec::new(),
             ..Default::default()
         };
-        assert!(config.validate().is_err());
+        assert!(config.validate_base().is_err());
     }
 
     #[test]
-    fn test_runtime_config_defaults_inactive_ttl_to_two_hours() {
-        let config = RuntimeConfig::default();
-        assert_eq!(config.inactive_ttl_secs, 7_200);
+    fn config_validate_skips_pair_boundless_when_network_route_disabled() {
+        let mut config = Config::default();
+        set_routes(&mut config, "risc0/local");
+        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
+
+        config
+            .validate()
+            .expect("disabled Boundless settings must not reject startup");
+    }
+
+    #[test]
+    fn config_validate_rejects_pair_boundless_when_network_route_enabled() {
+        let mut config = Config::default();
+        enable_test_boundless_network(&mut config);
+        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
+
+        let err = config
+            .validate()
+            .expect_err("enabled Boundless settings must be validated");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("rebid_timeout_ms"))
+        );
+    }
+
+    #[test]
+    fn config_validate_skips_pair_sp1_when_route_disabled() {
+        let mut config = Config::default();
+        set_routes(&mut config, "native/local");
+        config.rpc.pairs[0].sp1_verifier_rpc_url = Some("not a URL".to_string());
+        config.rpc.pairs[0].sp1_verifier_address =
+            Some("0x0000000000000000000000000000000000000001".to_string());
+
+        config
+            .validate()
+            .expect("disabled SP1 settings must not reject startup");
+    }
+
+    #[test]
+    fn config_validate_rejects_pair_sp1_when_route_enabled() {
+        let mut config = Config::default();
+        set_routes(&mut config, "sp1/local");
+        config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
+        config.rpc.pairs[0].sp1_verifier_rpc_url = Some("not a URL".to_string());
+        config.rpc.pairs[0].sp1_verifier_address =
+            Some("0x0000000000000000000000000000000000000001".to_string());
+
+        let err = config
+            .validate()
+            .expect_err("enabled SP1 settings must be validated");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("sp1_verifier_rpc_url"))
+        );
     }
 
     #[test]
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
+        enable_test_boundless_network(&mut config);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless_config::BoundlessOfferParams {
                 timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
@@ -559,7 +962,7 @@ mod tests {
                     timeout_ms_per_mcycle: 100,
                     dynamic_pricing_timeout_modifier: None,
                 },
-                ..config.prover.boundless.offer_params.batch.clone()
+                ..config.prover.risc0.boundless.offer_params.batch.clone()
             });
 
         let err = config.validate().expect_err("invalid pair offer config");
@@ -592,15 +995,11 @@ mod tests {
             "native/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
-        assert_eq!(
-            "risc0/boundless".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
-        );
-        assert_eq!(
+        assert!("risc0/boundless".parse::<PipelineRoute>().is_err());
+        assert!(
             "shasta-risc0-boundless"
                 .parse::<raiko2_pipeline::PipelineKey>()
-                .unwrap(),
-            raiko2_pipeline::PipelineKey::ShastaRisc0Network
+                .is_err()
         );
         assert_eq!(
             "sgx/remote".parse::<PipelineRoute>().unwrap(),
@@ -610,17 +1009,126 @@ mod tests {
     }
 
     #[test]
-    fn test_config_default_validates() {
+    fn test_config_default_enables_native_prover() {
         let config = Config::default();
-        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.prover.runner(ProofType::Native),
+            Some(RunnerKind::Local)
+        );
+        assert_eq!(config.prover.iter_routes().count(), 1);
+        config.validate().expect("default config is valid");
+    }
+
+    #[test]
+    fn configless_load_uses_default_native_route() {
+        let _environment = ConfigTestEnvironment::new();
+        let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
+        let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let cli = Cli::parse_from(["raiko2"]);
+
+        let config = Config::load(&cli).expect("configless load should use default routes");
+        assert_eq!(
+            config.prover.iter_routes().collect::<Vec<_>>(),
+            vec![(ProofType::Native, RunnerKind::Local)]
+        );
+    }
+
+    #[test]
+    fn configless_load_rejects_legacy_prover_env_with_routes_override() {
+        let _env_lock = lock_test_cli_environment();
+        let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
+        let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let _legacy_guard = EnvVarGuard::set("RAIKO2_PROVER", "sgx/remote");
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "native/local"]);
+
+        let err = Config::load(&cli).expect_err("legacy prover env must be rejected");
+        assert!(
+            err.to_string()
+                .contains("RAIKO2_PROVER is no longer supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn configless_load_accepts_explicit_prover_routes() {
+        let _environment = ConfigTestEnvironment::new();
+        let _config_guard = EnvVarGuard::remove("RAIKO2_CONFIG");
+        let _routes_guard = EnvVarGuard::remove("RAIKO2_PROVER_ROUTES");
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "native/local"]);
+
+        let config = Config::load(&cli).expect("explicit configless route should load");
+        assert_eq!(
+            config.prover.runner(raiko2_primitives::ProofType::Native),
+            Some(RunnerKind::Local)
+        );
+        assert_eq!(config.prover.iter_routes().count(), 1);
+    }
+
+    #[test]
+    fn prover_routes_cli_override_replaces_file_enablement() {
+        let _environment = ConfigTestEnvironment::new();
+        let path = write_temp_config(route_override_config());
+        let cli = Cli::parse_from([
+            "raiko2",
+            "--config",
+            path.to_str().expect("path utf8"),
+            "--prover-routes",
+            "native/local",
+        ]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config.prover.iter_routes().collect::<Vec<_>>(),
+            vec![(raiko2_primitives::ProofType::Native, RunnerKind::Local)]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prover_routes_env_override_replaces_file_enablement() {
+        let _environment = ConfigTestEnvironment::new();
+        let path = write_temp_config(route_override_config());
+        let _routes_guard = EnvVarGuard::set("RAIKO2_PROVER_ROUTES", "sgx/remote");
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config.prover.iter_routes().collect::<Vec<_>>(),
+            vec![(raiko2_primitives::ProofType::Sgx, RunnerKind::Remote)]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prover_routes_cli_override_rejects_duplicate_entries() {
+        let _environment = ConfigTestEnvironment::new();
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "risc0/local,risc0/network"]);
+
+        let err = Config::load(&cli).expect_err("duplicate route override must fail");
+        assert!(err.to_string().contains("duplicate prover route"));
+    }
+
+    #[test]
+    fn file_config_requires_explicit_runtime_environment() {
+        let mut value = toml::Value::try_from(Config::default()).expect("serialize config");
+        value
+            .as_table_mut()
+            .expect("config table")
+            .remove("runtime");
+
+        let error = value
+            .try_into::<Config>()
+            .expect_err("runtime section must be explicit in deployment config");
+        assert!(error.to_string().contains("runtime"));
     }
 
     #[test]
     fn test_boundless_route_requires_signer_key() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Network;
-        config.prover.boundless.signer_key.clear();
+        set_routes(&mut config, "risc0/network");
+        config.prover.risc0.boundless.signer_key.clear();
 
         let err = config.prover.validate().expect_err("missing signer key");
         assert!(err.to_string().contains("signer_key"));
@@ -629,35 +1137,44 @@ mod tests {
     #[test]
     fn test_boundless_route_requires_rpc_url() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Network;
-        config.prover.boundless.rpc_url.clear();
-        config.prover.boundless.signer_key = "dummy-test-signer-key".to_string();
+        set_routes(&mut config, "risc0/network");
+        config.prover.risc0.boundless.rpc_url.clear();
+        config.prover.risc0.boundless.signer_key = "dummy-test-signer-key".to_string();
 
         let err = config.prover.validate().expect_err("missing rpc url");
         assert!(err.to_string().contains("rpc_url"));
     }
 
     #[test]
-    fn test_sgx_remote_route_requires_any_remote_sgx_base_url() {
+    fn test_sgx_remote_route_requires_sgx_base_url() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
+        set_routes(&mut config, "sgx/remote");
 
         let err = config
             .prover
             .validate()
             .expect_err("missing remote sgx url");
-        assert!(err.to_string().contains("sgxgeth_base_url"));
+        assert!(err.to_string().contains("prover.sgx.base_url"));
+    }
+
+    #[test]
+    fn test_sgxgeth_remote_route_requires_sgxgeth_base_url() {
+        let mut config = Config::default();
+        set_routes(&mut config, "sgxgeth/remote");
+
+        let err = config
+            .prover
+            .validate()
+            .expect_err("missing remote sgxgeth url");
+        assert!(err.to_string().contains("prover.sgxgeth.base_url"));
     }
 
     #[test]
     fn test_sgx_remote_route_accepts_configured_remote_sgx() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
-        config.prover.remote_sgx.base_url = "http://127.0.0.1:8080".to_string();
-        config.prover.remote_sgx.timeout_ms = 30_000;
+        set_routes(&mut config, "sgx/remote");
+        config.prover.sgx.base_url = "http://127.0.0.1:8080".to_string();
+        config.prover.sgx.timeout_ms = 30_000;
 
         assert!(config.prover.validate().is_ok());
     }
@@ -665,17 +1182,16 @@ mod tests {
     #[test]
     fn test_sgx_remote_route_accepts_sgxgeth_only_config() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
-        config.prover.remote_sgx.sgxgeth_base_url = "http://127.0.0.1:8090".to_string();
-        config.prover.remote_sgx.timeout_ms = 30_000;
+        set_routes(&mut config, "sgxgeth/remote");
+        config.prover.sgxgeth.base_url = "http://127.0.0.1:8090".to_string();
+        config.prover.sgxgeth.timeout_ms = 30_000;
 
         assert!(config.prover.validate().is_ok());
     }
 
     #[test]
     fn test_sgx_remote_route_env_overrides_remote_sgx_config() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let _environment = ConfigTestEnvironment::new();
         let config_toml = r#"
 [server]
 host = "0.0.0.0"
@@ -686,20 +1202,26 @@ pairs = [
   { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover]
-guest_system = "sgx"
-runner = "remote"
-
-[prover.remote_sgx]
+[prover.sgx]
+enabled = true
 base_url = "http://127.0.0.1:8080"
-sgxgeth_base_url = "http://127.0.0.1:8090"
 timeout_ms = 300000
 
+[prover.sgxgeth]
+enabled = true
+base_url = "http://127.0.0.1:8090"
+timeout_ms = 300001
+
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
         let path = write_temp_config(config_toml);
         let _base_url_guard =
@@ -713,12 +1235,10 @@ maintenance_interval_ms = 200
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
 
         let config = Config::load(&cli).expect("config load");
-        assert_eq!(config.prover.remote_sgx.base_url, "http://127.0.0.1:19090");
-        assert_eq!(
-            config.prover.remote_sgx.sgxgeth_base_url,
-            "http://127.0.0.1:19091"
-        );
-        assert_eq!(config.prover.remote_sgx.timeout_ms, 12_345);
+        assert_eq!(config.prover.sgx.base_url, "http://127.0.0.1:19090");
+        assert_eq!(config.prover.sgxgeth.base_url, "http://127.0.0.1:19091");
+        assert_eq!(config.prover.sgx.timeout_ms, 12_345);
+        assert_eq!(config.prover.sgxgeth.timeout_ms, 12_345);
 
         let _ = std::fs::remove_file(path);
     }
@@ -726,6 +1246,7 @@ maintenance_interval_ms = 200
     #[test]
     fn test_risc0_execution_po2_must_be_non_zero() {
         let mut config = Config::default();
+        set_routes(&mut config, "risc0/local");
         config.prover.risc0.execution_po2 = 0;
 
         let err = config.prover.validate().expect_err("zero po2 should fail");
@@ -744,22 +1265,26 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover]
-guest_system = "risc0"
-runner = "local"
-
 [prover.risc0]
+enabled = true
+runner = "local"
 execution_po2 = 24
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.prover.risc0.execution_po2, 24);
@@ -779,19 +1304,24 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi.example.test", l2_rpc = "http://taiko-hoodi.example.test:8545" },
 ]
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.server.host, "127.0.0.1");
@@ -803,40 +1333,26 @@ maintenance_interval_ms = 200
         assert_eq!(pair.l1_chain_id(), 560_048);
         assert_eq!(pair.l2_chain_id(), 167_013);
         assert_eq!(
-            config.prover.route(),
-            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
+            config.prover.runner(raiko2_primitives::ProofType::Native),
+            Some(RunnerKind::Local)
         );
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn test_cli_sp1_network_route_sets_sp1_network_prover() {
-        let cli = Cli::parse_from(["raiko2", "--prover", "sp1/network"]);
+    fn test_cli_sp1_network_route_updates_sp1_execution_selector() {
+        let _environment = ConfigTestEnvironment::new();
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "sp1/network"]);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
-            config.prover.route(),
-            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
+            config.prover.runner(raiko2_primitives::ProofType::Sp1),
+            Some(RunnerKind::Network)
         );
         assert_eq!(
             config.prover.sp1.prover,
             raiko2_prover::sp1_config::ProverMode::Network
-        );
-    }
-
-    #[test]
-    fn test_cli_sp1_local_route_sets_sp1_local_prover() {
-        let cli = Cli::parse_from(["raiko2", "--prover", "sp1/local"]);
-
-        let config = Config::load(&cli).expect("config load");
-        assert_eq!(
-            config.prover.route(),
-            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local)
-        );
-        assert_eq!(
-            config.prover.sp1.prover,
-            raiko2_prover::sp1_config::ProverMode::Local
         );
     }
 
@@ -855,19 +1371,24 @@ pairs = [
 [rpc.client]
 concurrency_limit = 24
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         let pair = config
@@ -897,10 +1418,17 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545", l2_witness_rpc = "http://localhost:9547" },
 ]
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
         let cli = Cli::parse_from([
             "raiko2",
@@ -934,12 +1462,19 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let err = Config::load(&cli).expect_err("unknown config field must fail");
         assert!(
@@ -963,18 +1498,24 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
 ]
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
 
 [queue]
-backend = "memory"
 
 [queue.retry]
 strategy = "fixed"
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let err = Config::load(&cli).expect_err("legacy queue retry config must fail");
         assert!(
@@ -998,19 +1539,24 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", l2_rpc = "http://taiko-hoodi.example.test:8545", l2_provider = "geth" },
 ]
 
-[prover]
-guest_system = "risc0"
-runner = "local"
+[prover.native]
+enabled = true
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
         let config = Config::load(&cli).expect("config load");
         let pair = config
             .rpc
@@ -1034,19 +1580,24 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth_local_witness" },
 ]
 
-[prover]
-guest_system = "risc0"
-runner = "local"
+[prover.native]
+enabled = true
 
 [queue]
-backend = "memory"
-namespace = "raiko2:queue"
 workers = 1
 maintenance_interval_ms = 200
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
 
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
         let config = Config::load(&cli).expect("config load");
         let pair = config
             .rpc
@@ -1073,12 +1624,19 @@ pairs = [
 [preflight.verify_checkpoint_l2_rpcs]
 taiko_hoodi = "https://verify.hoodi.example"
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let config = Config::load(&cli).expect("config load");
         assert_eq!(
@@ -1109,108 +1667,25 @@ pairs = [
 [preflight.verify_checkpoint_l2_rpcs]
 taiko_dev = "https://verify.dev.example"
 
-[prover]
-guest_system = "native"
-runner = "local"
+[prover.native]
+enabled = true
+
+[runtime]
+environment = "test"
+namespace = "raiko2-test"
+
+[runtime.store]
+backend = "memory"
 "#;
+        let _environment = ConfigTestEnvironment::new();
         let path = write_temp_config(config_toml);
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let cli = parse_config_cli(&path, &_environment);
 
         let err = Config::load(&cli).expect_err("ambiguous network verify rpc must fail");
         let err_text = format!("{err:#}");
         assert!(
             err_text.contains("ambiguous") && err_text.contains("taiko_dev"),
             "unexpected error: {err_text}"
-        );
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn test_queue_backend_cli_overrides_config_file() {
-        let config_toml = r#"
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[rpc]
-pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
-]
-
-[prover]
-guest_system = "risc0"
-runner = "local"
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-"#;
-        let path = write_temp_config(config_toml);
-
-        let cli = Cli::parse_from([
-            "raiko2",
-            "--config",
-            path.to_str().expect("path utf8"),
-            "--queue-backend",
-            "redis",
-            "--redis-url",
-            "redis://localhost:6379/",
-        ]);
-
-        let config = Config::load(&cli).expect("config load");
-        assert_eq!(config.queue.backend, QueueBackend::Redis);
-        assert_eq!(
-            config.queue.redis_url.as_deref(),
-            Some("redis://localhost:6379/")
-        );
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn test_queue_backend_redis_requires_url() {
-        let config_toml = r#"
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[rpc]
-pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
-]
-
-[prover]
-guest_system = "risc0"
-runner = "local"
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-"#;
-        let path = write_temp_config(config_toml);
-
-        let cli = Cli::parse_from([
-            "raiko2",
-            "--config",
-            path.to_str().expect("path utf8"),
-            "--queue-backend",
-            "redis",
-        ]);
-
-        let err = Config::load(&cli).expect_err("expected config error");
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("Queue configuration error"),
-            "unexpected error: {err_msg}"
-        );
-        assert!(
-            err.chain().any(|e| e.to_string().contains("redis_url")),
-            "missing redis_url detail in error chain: {err_msg}"
         );
 
         let _ = std::fs::remove_file(path);

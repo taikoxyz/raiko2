@@ -6,7 +6,6 @@ use alethia_reth_chainspec::{
     spec::TaikoChainSpec,
 };
 use alethia_reth_consensus::validation::{validate_anchor_transaction, AnchorValidationContext};
-use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{
     transaction::{SignerRecoverable, Transaction as _},
     BlockHeader as _, Header,
@@ -15,13 +14,13 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{bail, ensure, Context, Result};
 use raiko2_primitives::{
-    shasta_checkpoint_storage_slot_candidates, ChainSpec, ProofType, StatelessInput,
-    SupportedChainSpecs, WitnessHeader,
+    builtin_taiko_chain_spec, shasta_checkpoint_storage_slot_candidates,
+    shasta_checkpoint_store_address, shasta_taiko_l2_address, StatelessInput, WitnessHeader,
 };
 use raiko2_primitives_shasta::{
     instance::{
-        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
+        build_shasta_commitment_from_proof_carry_data_vec, fits_shasta_uint48,
+        shasta_aggregation_output, shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression, validate_source_aware_anchor_progression,
@@ -40,6 +39,7 @@ use raiko2_stateless::{
     reconstruct_block_from_transactions_with_witness_resources,
 };
 use std::sync::Arc;
+use taiko_client_protocol::FixedKSigner;
 
 const ANCHOR_BLOCK_STATE_SLOT: u64 = 256;
 
@@ -78,8 +78,8 @@ fn bench_report_end(label: &str) {
 fn bench_report_end(_label: &str) {}
 
 impl TaikoRuntime {
-    fn from_chain_spec(chain_spec: &raiko2_primitives::ChainSpec) -> Result<Self> {
-        let chain_spec = chain_spec.to_taiko_chain_spec()?;
+    fn from_chain_id(chain_id: u64) -> Result<Self> {
+        let chain_spec = builtin_taiko_chain_spec(chain_id)?;
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
         Ok(Self {
             chain_spec,
@@ -95,57 +95,8 @@ struct DecodedAnchorCheckpoint {
     state_root: B256,
 }
 
-fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
-    let verified_chain_spec = SupportedChainSpecs::default()
-        .get_chain_spec_with_chain_id(chain_spec.chain_id)
-        .with_context(|| {
-            format!(
-                "unknown chain_id {}: not in trusted chain-spec list",
-                chain_spec.chain_id
-            )
-        })?;
-
-    ensure!(
-        chain_spec.is_taiko == verified_chain_spec.is_taiko,
-        "unexpected is_taiko"
-    );
-
-    let runtime_chain_spec = chain_spec
-        .align_taiko_runtime_forks()
-        .context("failed to align GuestInput chain_spec runtime forks")?;
-    let verified_runtime_chain_spec = verified_chain_spec
-        .align_taiko_runtime_forks()
-        .context("failed to align trusted chain_spec runtime forks")?;
-
-    ensure!(
-        runtime_chain_spec.max_spec_id == verified_runtime_chain_spec.max_spec_id,
-        "unexpected max_spec_id"
-    );
-    ensure!(
-        runtime_chain_spec.hard_forks == verified_runtime_chain_spec.hard_forks,
-        "unexpected hard_forks"
-    );
-    ensure!(
-        chain_spec.eip_1559_constants == verified_chain_spec.eip_1559_constants,
-        "unexpected eip_1559_constants"
-    );
-    ensure!(
-        chain_spec.l1_contract == verified_chain_spec.l1_contract,
-        "unexpected l1_contract"
-    );
-    ensure!(
-        chain_spec.l2_contract == verified_chain_spec.l2_contract,
-        "unexpected l2_contract"
-    );
-    ensure!(
-        chain_spec.checkpoint_store_contract == verified_chain_spec.checkpoint_store_contract,
-        "unexpected checkpoint_store_contract"
-    );
-    ensure!(
-        chain_spec.verifier_address_forks == verified_chain_spec.verifier_address_forks,
-        "unexpected verifier_address_forks"
-    );
-
+fn validate_supported_chain_id(chain_id: u64) -> Result<()> {
+    builtin_taiko_chain_spec(chain_id)?;
     Ok(())
 }
 
@@ -164,12 +115,18 @@ fn decode_anchor_checkpoint(
         block.header.number
     );
 
-    let decoded = anchorV4Call::abi_decode(input).with_context(|| {
+    // Use validate so non-canonical uint48 ABI padding is rejected (driver parity).
+    let decoded = anchorV4Call::abi_decode_validate(input).with_context(|| {
         format!(
             "failed to decode anchorV4 calldata for block {}",
             block.header.number
         )
     })?;
+    ensure!(
+        input.as_ref() == decoded.abi_encode().as_slice(),
+        "block {} anchor transaction calldata must use canonical anchorV4 encoding",
+        block.header.number
+    );
 
     Ok(DecodedAnchorCheckpoint {
         block_number: decoded._checkpoint.blockNumber.to::<u64>(),
@@ -178,6 +135,12 @@ fn decode_anchor_checkpoint(
     })
 }
 
+// Proposal authenticity is anchored exclusively by the on-chain ring-buffer check (`Inbox.prove`
+// requires `commitment.lastProposalHash == getProposalHash(id)`, and `hashProposal` covers
+// `originBlockHash`/`originBlockNumber`). The guest deliberately performs no receipt/log proof of
+// the `Proposed` event; it proves consistency with the supplied event, not that the event was
+// emitted. If the contract ever accepts a commitment without an exact ring-buffer match, that
+// change must add a second anchor here.
 fn validate_l1_anchor_linkage(
     guest_input: &GuestInput,
     anchor_checkpoints: &[DecodedAnchorCheckpoint],
@@ -206,6 +169,17 @@ fn validate_l1_anchor_linkage(
     ensure!(
         guest_input.taiko.l1_header.hash_slow() == origin_block_hash,
         "taiko.l1_header hash mismatch"
+    );
+    // The origin block is the parent of the L1 block that carried the proposal, and L1 headers
+    // have strictly increasing timestamps, so an authentic proposal timestamp is always strictly
+    // after the anchored origin timestamp. Bounding it here keeps the fork-rule-driving timestamp
+    // from being falsifiable at or below the anchored origin if the anchor binding is ever
+    // strengthened independently of `hashProposal`.
+    ensure!(
+        proposal.timestamp.to::<u64>() > guest_input.taiko.l1_header.timestamp,
+        "proposal.timestamp {} must be strictly after anchored L1 origin timestamp {}",
+        proposal.timestamp.to::<u64>(),
+        guest_input.taiko.l1_header.timestamp
     );
 
     if bypass_stalled_anchor_linkage {
@@ -294,10 +268,7 @@ fn validate_l1_anchor_linkage(
             );
         }
 
-        loop {
-            let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) else {
-                break;
-            };
+        while let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) {
             if checkpoint.block_number != header.number {
                 break;
             }
@@ -419,10 +390,8 @@ fn verified_parent_shasta_checkpoint(
         .witnesses
         .first()
         .context("GuestInput must contain least one witness")?;
-    let checkpoint_store = first_witness
-        .chain_spec
-        .checkpoint_store_contract
-        .context("missing chain_spec.checkpoint_store_contract parent checkpoint validation")?;
+    let checkpoint_store = shasta_checkpoint_store_address(first_witness.chain_spec.chain_id)
+        .context("failed to derive CheckpointStore address")?;
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
 
     // Probe the known SignalService checkpoint layouts in precedence order (nested v1, then flat).
@@ -456,10 +425,8 @@ fn verified_parent_anchor_block_number(guest_input: &GuestInput) -> Result<u64> 
         .witnesses
         .first()
         .context("GuestInput must contain least one witness")?;
-    let anchor_address = first_witness
-        .chain_spec
-        .l2_contract
-        .context("missing chain_spec.l2_contract for parent anchor state validation")?;
+    let anchor_address = shasta_taiko_l2_address(first_witness.chain_spec.chain_id)
+        .context("failed to derive TaikoL2 address")?;
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
     let storage_word = read_parent_storage_with_witness_resources(
         anchor_address,
@@ -599,22 +566,8 @@ fn validate_anchor_transaction_binding(
     expected_block: &BlockManifest,
 ) -> Result<()> {
     let block = &stateless_input.block;
-    let anchor_tx = block
-        .body
-        .transactions()
-        .next()
-        .context("missing anchor transaction")?;
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
-    let pre_state_account = stateless_input
-        .accounts
-        .get(&anchor_signer)
-        .context("missing anchor signer account in pre-state callers")?;
-    ensure!(
-        anchor_tx.nonce() == pre_state_account.nonce,
-        "anchor transaction nonce mismatch: expected {}, got {}",
-        pre_state_account.nonce,
-        anchor_tx.nonce()
-    );
+    // The anchor signer nonce is enforced by execution against the Merkle-verified pre-state;
+    // a host-supplied account snapshot proves nothing.
 
     let checkpoint = decode_anchor_checkpoint(block)?;
     ensure!(
@@ -630,17 +583,20 @@ fn validate_anchor_transaction_binding(
 fn validate_anchor_transaction_common(
     stateless_input: &StatelessInput,
     chain_spec: &TaikoChainSpec,
-) -> Result<()> {
+    anchor_signer: &FixedKSigner,
+) -> Result<DecodedAnchorCheckpoint> {
     let block = &stateless_input.block;
     let anchor_tx = block
         .body
         .transactions()
         .next()
         .context("missing anchor transaction")?;
-    let expected_anchor_recipient = stateless_input
-        .chain_spec
-        .l2_contract
-        .context("missing chain_spec.l2_contract for Shasta anchor validation")?;
+    ensure!(
+        anchor_tx.is_eip1559(),
+        "anchor transaction must use EIP-1559 envelope"
+    );
+    let expected_anchor_recipient = shasta_taiko_l2_address(stateless_input.chain_spec.chain_id)
+        .context("failed to derive TaikoL2 address")?;
     ensure!(
         anchor_tx.to() == Some(expected_anchor_recipient),
         "anchor transaction recipient mismatch: expected {expected_anchor_recipient:?}, got {:?}",
@@ -667,6 +623,7 @@ fn validate_anchor_transaction_common(
         },
     )
     .map_err(|err| anyhow::anyhow!(err))?;
+    let checkpoint = decode_anchor_checkpoint(block)?;
     ensure!(
         anchor_tx.max_fee_per_gas() == u128::from(base_fee),
         "anchor transaction max_fee_per_gas mismatch: expected {base_fee}, got {}",
@@ -682,8 +639,19 @@ fn validate_anchor_transaction_common(
             "anchor transaction access list must be empty"
         );
     }
+    let signature_hash = anchor_tx.signature_hash();
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(signature_hash.as_slice());
+    let expected_signature = anchor_signer
+        .sign_with_predefined_k(&hash_bytes)
+        .context("failed to derive canonical anchor transaction signature")?
+        .signature;
+    ensure!(
+        anchor_tx.signature() == &expected_signature,
+        "anchor transaction signature mismatch"
+    );
 
-    Ok(())
+    Ok(checkpoint)
 }
 
 fn validate_shasta_manifest_block_metadata(
@@ -836,7 +804,6 @@ fn shasta_block_env_attributes(
 
 fn prove_shasta_proposal_with_block_verifier<V>(
     guest_input: &GuestInput,
-    proof_type: ProofType,
     mut verify_block: V,
 ) -> Result<B256>
 where
@@ -861,62 +828,34 @@ where
     );
 
     bench_report_start("proposal_invariants");
-    let first_chain_spec = &guest_input.witnesses.first().expect("checked").chain_spec;
-    validate_known_chain_spec(first_chain_spec)?;
+    let first_chain_id = guest_input
+        .witnesses
+        .first()
+        .expect("checked")
+        .chain_spec
+        .chain_id;
+    validate_supported_chain_id(first_chain_id)?;
     ensure!(
-        guest_input.taiko.chain_spec.chain_id == first_chain_spec.chain_id,
+        guest_input.taiko.chain_spec.chain_id == first_chain_id,
         "taiko.chain_spec.chain_id mismatch: expected {}, got {}",
-        first_chain_spec.chain_id,
+        first_chain_id,
         guest_input.taiko.chain_spec.chain_id
-    );
-    ensure!(
-        guest_input.taiko.chain_spec.is_taiko == first_chain_spec.is_taiko,
-        "taiko.chain_spec.is_taiko mismatch: expected {}, got {}",
-        first_chain_spec.is_taiko,
-        guest_input.taiko.chain_spec.is_taiko
     );
 
     for (i, witness) in guest_input.witnesses.iter().enumerate() {
         ensure!(
-            witness.chain_spec == *first_chain_spec,
-            "witness {i} chain_spec mismatch"
+            witness.chain_spec.chain_id == first_chain_id,
+            "witness {i} chain_id mismatch: expected {}, got {}",
+            first_chain_id,
+            witness.chain_spec.chain_id
         );
     }
 
     ensure!(
-        proof_carry_data.chain_id == first_chain_spec.chain_id,
+        proof_carry_data.chain_id == first_chain_id,
         "proof_carry_data.chain_id mismatch: expected {}, got {}",
-        first_chain_spec.chain_id,
+        first_chain_id,
         proof_carry_data.chain_id
-    );
-    let verifier_proof_type = match proof_type {
-        ProofType::Native => ProofType::Sgx,
-        other => other,
-    };
-    let expected_verifier = first_chain_spec
-        .get_fork_verifier_address(
-            guest_input
-                .witnesses
-                .first()
-                .expect("checked")
-                .block
-                .header
-                .number,
-            guest_input
-                .witnesses
-                .first()
-                .expect("checked")
-                .block
-                .header
-                .timestamp,
-            verifier_proof_type,
-        )
-        .with_context(|| {
-            format!("failed to resolve verifier address for proof type {verifier_proof_type}")
-        })?;
-    ensure!(
-        proof_carry_data.verifier == expected_verifier,
-        "proof_carry_data.verifier mismatch"
     );
     ensure!(
         proof_carry_data.transition_input.proposal_id == guest_input.taiko.proposal_id,
@@ -943,6 +882,28 @@ where
         proposal_event_id,
         guest_input.taiko.proposal_id
     );
+    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48; the hash primitive aborts
+    // on wider values, so pre-validate here to surface a clean validation error instead.
+    ensure!(
+        fits_shasta_uint48(proof_carry_data.transition_input.transition.timestamp),
+        "proof_carry_data.transition.timestamp does not fit in uint48: {}",
+        proof_carry_data.transition_input.transition.timestamp
+    );
+    ensure!(
+        fits_shasta_uint48(
+            proof_carry_data
+                .transition_input
+                .checkpoint
+                .blockNumber
+                .to::<u64>()
+        ),
+        "proof_carry_data.checkpoint.blockNumber does not fit in uint48: {}",
+        proof_carry_data
+            .transition_input
+            .checkpoint
+            .blockNumber
+            .to::<u64>()
+    );
     let expected_proposal_hash = hash_proposal(proposal);
     ensure!(
         proof_carry_data.transition_input.proposal_hash == expected_proposal_hash,
@@ -963,8 +924,10 @@ where
     bench_report_end("proposal_invariants");
 
     bench_report_start("proposal_runtime");
-    let runtime = TaikoRuntime::from_chain_spec(first_chain_spec)
-        .context("Failed to build Taiko runtime from GuestInput chain_spec")?;
+    let runtime = TaikoRuntime::from_chain_id(first_chain_id)
+        .context("Failed to build Taiko runtime from GuestInput chain_id")?;
+    let anchor_signer =
+        FixedKSigner::golden_touch().context("failed to initialize Golden Touch fixed-k signer")?;
     bench_report_end("proposal_runtime");
 
     bench_report_start("proposal_derivation");
@@ -996,8 +959,12 @@ where
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
-        validate_anchor_transaction_common(stateless_input, runtime.chain_spec.as_ref())
-            .with_context(|| format!("anchor transaction validation failed at index {index}"))?;
+        let anchor_checkpoint = validate_anchor_transaction_common(
+            stateless_input,
+            runtime.chain_spec.as_ref(),
+            &anchor_signer,
+        )
+        .with_context(|| format!("anchor transaction validation failed at index {index}"))?;
         let expected_block = expected_blocks.and_then(|blocks| blocks.get(index));
         let parent_header = canonical_parent_header.as_ref();
 
@@ -1038,7 +1005,7 @@ where
         last_block_number = Some(block.header.number);
         last_block_hash = Some(validated_hash);
         last_state_root = Some(block.header.state_root);
-        anchor_checkpoints.push(decode_anchor_checkpoint(block)?);
+        anchor_checkpoints.push(anchor_checkpoint);
         if canonical_parent_header.is_some() {
             canonical_parent_header = Some(block.header.clone());
         }
@@ -1092,16 +1059,8 @@ where
 }
 
 pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
-    prove_shasta_proposal_for_proof_type(guest_input, ProofType::Native)
-}
-
-pub fn prove_shasta_proposal_for_proof_type(
-    guest_input: &GuestInput,
-    proof_type: ProofType,
-) -> Result<B256> {
     prove_shasta_proposal_with_block_verifier(
         guest_input,
-        proof_type,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             let expected_block = expected_block
                 .with_context(|| format!("missing expected Shasta block at index {index}"))?;
@@ -1121,7 +1080,6 @@ pub fn prove_shasta_proposal_for_proof_type(
                 &stateless_input.witness,
                 ancestor_headers,
                 guest_input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
                 &runtime.chain_spec,
                 &runtime.evm_config,
             )
@@ -1137,21 +1095,6 @@ pub fn prove_shasta_proposal_for_proof_type(
 
 pub fn prove_shasta_proposal_with_validator<V>(
     guest_input: &GuestInput,
-    validate_block: V,
-) -> Result<B256>
-where
-    V: FnMut(&StatelessInput, &[WitnessHeader], &TaikoRuntime) -> Result<B256>,
-{
-    prove_shasta_proposal_with_validator_for_proof_type(
-        guest_input,
-        ProofType::Native,
-        validate_block,
-    )
-}
-
-pub fn prove_shasta_proposal_with_validator_for_proof_type<V>(
-    guest_input: &GuestInput,
-    proof_type: ProofType,
     mut validate_block: V,
 ) -> Result<B256>
 where
@@ -1159,7 +1102,6 @@ where
 {
     prove_shasta_proposal_with_block_verifier(
         guest_input,
-        proof_type,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             if let Some(expected_block) = expected_block {
                 validate_manifest_transactions_match_canonical(stateless_input, expected_block)
@@ -1192,6 +1134,21 @@ where
         "proof_carry_data_vec must not be empty"
     );
 
+    // On-chain ZK verifiers recompute the public input with the SGX-instance slot pinned to
+    // address(0) (LibPublicInput: for ZK it "must have value address(0)"), so enforce the
+    // requirement in-circuit instead of relying on host convention.
+    ensure!(
+        input.prover_address == Address::ZERO,
+        "ZK aggregation prover_address must be address(0), got {}",
+        input.prover_address
+    );
+
+    // Bounds-validate every carry (uint48 fields, linkage, prover consistency) before hashing:
+    // hash_shasta_subproof_input aborts on out-of-range uint48 values, and malformed input must
+    // surface as a validation error — not a panic — when this path runs host-side (native prover).
+    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&input.proof_carry_data_vec)
+        .context("invalid proof_carry_data_vec")?;
+
     for (i, block_input) in input.block_inputs.iter().enumerate() {
         verify_proof(i, block_input)
             .with_context(|| format!("proof verification failed at index {i}"))?;
@@ -1203,8 +1160,6 @@ where
         );
     }
 
-    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&input.proof_carry_data_vec)
-        .context("invalid proof_carry_data_vec")?;
     let first = input.proof_carry_data_vec.first().expect("checked");
     let aggregation_hash = shasta_aggregation_output(
         &commitment,
@@ -1222,7 +1177,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
+    use alloy_consensus::{
+        constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559, TxEip7702,
+    };
     use alloy_primitives::{keccak256, Address, Signature, TxKind, U256};
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
@@ -1231,11 +1188,11 @@ mod tests {
         shasta_checkpoint_storage_slots, shasta_checkpoint_storage_slots_nested, ChainSpec,
         ExecutionWitness, StatelessInput, SupportedChainSpecs, WitnessStateNode,
     };
-    use raiko2_primitives_shasta::build_proof_carry_data;
+    use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-    use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_protocol_shasta::TaikoManifest;
     use risc0_ethereum_trie::Trie;
+    use taiko_client_protocol::FixedKSigner;
 
     const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
     const TEST_SHASTA_BLOCK_NUMBER: u64 = 1_166_000;
@@ -1247,83 +1204,85 @@ mod tests {
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_unlisted_chain_id() {
+    fn validate_supported_chain_id_rejects_unlisted_chain_id() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.chain_id = 424_242; // absent from config/chain_spec_list_default.json
-        let err = validate_known_chain_spec(&spec)
+        let err = validate_supported_chain_id(spec.chain_id)
             .expect_err("unlisted chain id must be rejected (F-1 regression)");
         assert!(
-            err.to_string().contains("unknown chain_id"),
+            err.to_string().contains("unsupported Taiko chain_id"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn validate_known_chain_spec_accepts_listed_chain() {
-        validate_known_chain_spec(&taiko_mainnet_chain_spec())
-            .expect("listed mainnet chain spec must validate");
+    fn validate_supported_chain_id_accepts_listed_chain() {
+        validate_supported_chain_id(taiko_mainnet_chain_spec().chain_id)
+            .expect("listed mainnet chain id must validate");
     }
 
     #[test]
-    fn validate_known_chain_spec_accepts_runtime_aligned_devnet() {
+    fn validate_supported_chain_id_accepts_runtime_aligned_devnet() {
         let spec = SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(167_001)
             .expect("supported taiko devnet chain spec")
             .align_taiko_runtime_forks()
             .expect("runtime-aligned devnet chain spec");
 
-        validate_known_chain_spec(&spec).expect("runtime-aligned devnet chain spec must validate");
+        validate_supported_chain_id(spec.chain_id)
+            .expect("runtime-aligned devnet chain id must validate");
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_field() {
+    fn validate_supported_chain_id_accepts_tampered_l2_contract() {
         let mut spec = taiko_mainnet_chain_spec();
-        spec.l2_contract = Some(Address::ZERO); // diverge from the trusted spec
-        let err =
-            validate_known_chain_spec(&spec).expect_err("tampered l2_contract must be rejected");
-        assert!(
-            err.to_string().contains("l2_contract"),
-            "unexpected error: {err}"
-        );
+        spec.l2_contract = Some(Address::ZERO);
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest derives TaikoL2 address from chain id, not witness chain spec");
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_checkpoint_store() {
+    fn validate_supported_chain_id_accepts_tampered_checkpoint_store() {
         let mut spec = taiko_mainnet_chain_spec();
-        spec.checkpoint_store_contract = None; // diverge from the trusted spec
-        let err = validate_known_chain_spec(&spec)
-            .expect_err("tampered checkpoint_store_contract must be rejected");
-        assert!(
-            err.to_string().contains("checkpoint_store_contract"),
-            "unexpected error: {err}"
-        );
+        spec.checkpoint_store_contract = None;
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest derives CheckpointStore address from chain id, not witness chain spec");
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_verifiers() {
+    fn validate_supported_chain_id_accepts_tampered_verifiers() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.verifier_address_forks
             .values_mut()
             .next()
             .expect("configured verifier fork")
             .insert(ProofType::Sgx, Some(Address::ZERO));
-        let err = validate_known_chain_spec(&spec)
-            .expect_err("tampered verifier_address_forks must be rejected");
-        assert!(
-            err.to_string().contains("verifier_address_forks"),
-            "unexpected error: {err}"
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest verifier addresses are bound by public input, not trusted chain spec");
+    }
+
+    #[test]
+    fn taiko_runtime_uses_builtin_forks_instead_of_guest_input_forks() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.hard_forks.clear();
+
+        let runtime = TaikoRuntime::from_chain_id(spec.chain_id)
+            .expect("mainnet chain id should select built-in Taiko runtime");
+
+        assert_eq!(
+            runtime
+                .chain_spec
+                .taiko_fork_activation(TaikoHardfork::Shasta),
+            alloy_hardforks::ForkCondition::Timestamp(1_775_135_700)
         );
     }
 
     #[test]
-    fn validate_known_chain_spec_rejects_tampered_is_taiko() {
+    fn validate_supported_chain_id_accepts_tampered_is_taiko() {
         let mut spec = taiko_mainnet_chain_spec();
-        spec.is_taiko = !spec.is_taiko; // diverge from the trusted spec
-        let err = validate_known_chain_spec(&spec).expect_err("tampered is_taiko must be rejected");
-        assert!(
-            err.to_string().contains("is_taiko"),
-            "unexpected error: {err}"
-        );
+        spec.is_taiko = !spec.is_taiko;
+        validate_supported_chain_id(spec.chain_id)
+            .expect("guest uses chain_id only, not witness chain_spec.is_taiko");
     }
 
     fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
@@ -1378,11 +1337,23 @@ mod tests {
         .expect("golden touch signer")
     }
 
+    fn canonical_golden_touch_signature<T>(tx: &T) -> Signature
+    where
+        T: SignableTransaction<Signature>,
+    {
+        let signature_hash = tx.signature_hash();
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes.copy_from_slice(signature_hash.as_slice());
+        FixedKSigner::golden_touch()
+            .expect("golden touch fixed-k signer")
+            .sign_with_predefined_k(&hash_bytes)
+            .expect("canonical golden touch signature")
+            .signature
+    }
+
     fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
         let tx = unsigned_anchor_tx(checkpoint, test_anchor_address());
-        let signature = golden_touch_signer()
-            .sign_hash_sync(&tx.signature_hash())
-            .expect("golden touch anchor signature");
+        let signature = canonical_golden_touch_signature(&tx);
         tx.into_signed(signature).into()
     }
 
@@ -1563,7 +1534,8 @@ mod tests {
             l1_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         guest_input
     }
 
@@ -1677,7 +1649,8 @@ mod tests {
         second.block.body.transactions = first.block.body.transactions.clone();
         guest_input.witnesses = vec![first, second];
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1705,7 +1678,8 @@ mod tests {
         second.block.header.parent_hash = guest_input.witnesses[0].block.header.hash_slow();
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1730,7 +1704,8 @@ mod tests {
         second.chain_spec.chain_id = 167_001;
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1740,7 +1715,7 @@ mod tests {
         )
         .expect_err("chain_id mismatch should fail");
 
-        assert!(err.to_string().contains("chain_spec mismatch"));
+        assert!(err.to_string().contains("chain_id mismatch"));
     }
 
     #[test]
@@ -1768,7 +1743,8 @@ mod tests {
         let mut guest_input = guest_input_with_single_block();
         guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1795,7 +1771,8 @@ mod tests {
             origin_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1812,6 +1789,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_stalled_anchor_when_proposal_timestamp_equals_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        let proposal_timestamp = guest_input
+            .taiko
+            .proposal_event
+            .proposal
+            .timestamp
+            .to::<u64>();
+        let mut origin_header = sample_l1_header(600, B256::from([0x77; 32]));
+        origin_header.timestamp = proposal_timestamp;
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+
+        assert_guest_rejects(
+            guest_input,
+            "must be strictly after anchored L1 origin timestamp",
+        );
+    }
+
+    #[test]
     fn rejects_stalled_anchor_with_mismatched_origin_header() {
         let mut guest_input = guest_input_with_single_block();
         let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
@@ -1822,7 +1823,8 @@ mod tests {
             origin_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1854,7 +1856,8 @@ mod tests {
             },
         );
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1892,7 +1895,8 @@ mod tests {
             stateRoot: B256::from([0xFE; 32]),
         })];
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1934,7 +1938,8 @@ mod tests {
             shasta_checkpoint_storage_slots_nested(TEST_PARENT_ANCHOR_BLOCK_NUMBER),
         );
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1984,7 +1989,8 @@ mod tests {
             stateRoot: B256::from([0x99; 32]),
         })];
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -2060,7 +2066,8 @@ mod tests {
         })];
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -2096,7 +2103,8 @@ mod tests {
         second.block.body.transactions = vec![anchor_tx(&checkpoint)];
         guest_input.witnesses.push(second);
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
 
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -2129,46 +2137,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_verifier_mismatch_between_chain_spec_and_proof_carry_data() {
+    fn accepts_verifier_independent_of_witness_chain_spec() {
         let mut guest_input = guest_input_with_single_block();
         guest_input.proof_carry_data.verifier = Address::from([0x77; 20]);
 
-        let err = prove_shasta_proposal_with_validator(
+        prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _ancestor_headers, _runtime| Ok(B256::ZERO),
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
         )
-        .expect_err("expected verifier mismatch to fail");
-
-        assert!(err
-            .to_string()
-            .contains("proof_carry_data.verifier mismatch"));
+        .expect("verifier is bound by public input, not witness chain spec");
     }
 
     #[test]
-    fn rejects_non_taiko_chain_spec() {
-        let mut chain_spec = taiko_mainnet_chain_spec();
-        chain_spec.is_taiko = false;
+    fn accepts_tampered_non_chain_id_fields_between_taiko_and_witness_specs() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.taiko.chain_spec.is_taiko = false;
+        guest_input.witnesses[0].chain_spec.is_taiko = false;
+        guest_input.witnesses[0].chain_spec.hard_forks.clear();
+        guest_input.witnesses[0]
+            .chain_spec
+            .verifier_address_forks
+            .clear();
 
-        let input = StatelessInput {
-            chain_spec,
-            ..Default::default()
-        };
-
-        let proof_carry_data = ProofCarryData {
-            chain_id: 1,
-            ..Default::default()
-        };
-        let guest_input = GuestInput {
-            witnesses: vec![input],
-            proof_carry_data,
-            ..Default::default()
-        };
-
-        assert!(prove_shasta_proposal_with_validator(
+        prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _ancestor_headers, _runtime| { Ok(B256::ZERO) }
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
         )
-        .is_err());
+        .expect("guest must only require taiko/witness chain_id consistency");
     }
 
     #[test]
@@ -2181,7 +2180,7 @@ mod tests {
             image_id: [1u32; 8],
             block_inputs: vec![expected_block_input],
             proof_carry_data_vec: vec![proof_carry_data.clone()],
-            prover_address: Address::from([0x44; 20]),
+            prover_address: Address::ZERO,
         };
 
         let image_id_b256 = B256::from([0xAA; 32]);
@@ -2211,6 +2210,25 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_shasta_zk_rejects_nonzero_prover_address() {
+        let proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![hash_shasta_subproof_input(&proof_carry_data)],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::from([0x11; 20]),
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("nonzero prover_address must be rejected (L-1 regression)");
+        assert!(
+            err.to_string()
+                .contains("prover_address must be address(0)"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn aggregate_rejects_invalid_proof_carry_sequence() {
         let first = guest_input_with_single_block().proof_carry_data;
         let mut second = first.clone();
@@ -2228,6 +2246,24 @@ mod tests {
 
         let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
             .expect_err("invalid proof carry sequence should fail");
+        assert!(err.to_string().contains("invalid proof_carry_data_vec"));
+    }
+
+    #[test]
+    fn aggregate_rejects_oversized_uint48_timestamp_without_panicking() {
+        let mut proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        // Above uint48: hashing this carry would abort, so the bounds validation must reject the
+        // input first. block_inputs stays a dummy value because hashing it here would panic too.
+        proof_carry_data.transition_input.transition.timestamp = 1_u64 << 48;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![B256::ZERO],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::ZERO,
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("oversized uint48 timestamp must fail validation, not panic");
         assert!(err.to_string().contains("invalid proof_carry_data_vec"));
     }
 
@@ -2279,7 +2315,8 @@ mod tests {
     /// Rebuild carry data after a mutation, then assert the prove path rejects with `expected`.
     fn assert_guest_rejects(mut guest_input: GuestInput, expected: &str) {
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         let err = prove_identity(&guest_input).expect_err("expected guest rejection");
         assert!(
             error_chain_contains(&err, expected),
@@ -2334,7 +2371,8 @@ mod tests {
     fn linkage_guest_control_stalled_chain_proves() {
         let mut guest_input = linked_chain_input();
         guest_input.proof_carry_data =
-            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
         prove_identity(&guest_input).expect("known-good stalled chain proves");
     }
 
@@ -2442,9 +2480,30 @@ mod tests {
     // ── Task 5: anchor-transaction common checks ──────────────────────────────
 
     fn golden_touch_sign(tx: TxEip1559) -> reth_ethereum_primitives::TransactionSigned {
-        let signature = golden_touch_signer()
-            .sign_hash_sync(&tx.signature_hash())
-            .expect("golden touch signature");
+        let signature = canonical_golden_touch_signature(&tx);
+        tx.into_signed(signature).into()
+    }
+
+    fn eip7702_anchor_tx(
+        checkpoint: &AnchorV4Checkpoint,
+    ) -> reth_ethereum_primitives::TransactionSigned {
+        let tx = TxEip7702 {
+            chain_id: 167_000,
+            nonce: 0,
+            gas_limit: ANCHOR_GAS_LIMIT,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: test_anchor_address(),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Default::default(),
+            input: anchorV4Call {
+                _checkpoint: checkpoint.clone(),
+            }
+            .abi_encode()
+            .into(),
+        };
+        let signature = canonical_golden_touch_signature(&tx);
         tx.into_signed(signature).into()
     }
 
@@ -2456,6 +2515,62 @@ mod tests {
             blockHash: header.hash_slow(),
             stateRoot: header.state_root,
         }
+    }
+
+    #[test]
+    fn anchortx_accepts_canonical_eip1559_envelope_and_calldata() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
+
+        prove_identity(&guest_input).expect("canonical anchor transaction must remain accepted");
+    }
+
+    #[test]
+    fn anchortx_rejects_non_canonical_golden_touch_signature() {
+        let mut guest_input = guest_input_with_single_block();
+        let tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        let non_canonical_signature = golden_touch_signer()
+            .sign_hash_sync(&tx.signature_hash())
+            .expect("ordinary Golden Touch signature");
+        assert_ne!(
+            non_canonical_signature,
+            canonical_golden_touch_signature(&tx),
+            "negative fixture must differ from the protocol's fixed-k signature"
+        );
+        guest_input.witnesses[0].block.body.transactions =
+            vec![tx.into_signed(non_canonical_signature).into()];
+
+        assert_guest_rejects(guest_input, "anchor transaction signature mismatch");
+    }
+
+    #[test]
+    fn anchortx_rejects_eip7702_envelope() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.witnesses[0].block.body.transactions =
+            vec![eip7702_anchor_tx(&base_checkpoint())];
+
+        assert_guest_rejects(guest_input, "anchor transaction must use EIP-1559 envelope");
+    }
+
+    #[test]
+    fn anchortx_rejects_trailing_calldata() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        let mut input = tx.input.to_vec();
+        input.push(0);
+        tx.input = input.into();
+        assert!(
+            anchorV4Call::abi_decode_validate(&tx.input).is_ok(),
+            "fixture must characterize Alloy accepting trailing calldata"
+        );
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+
+        assert_guest_rejects(
+            guest_input,
+            "anchor transaction calldata must use canonical anchorV4 encoding",
+        );
     }
 
     #[test]
@@ -2585,6 +2700,81 @@ mod tests {
         assert_guest_rejects(guest_input, "last hash mismatch");
     }
 
+    // ── Audit L-3: proposal.timestamp bounded by anchored L1 origin ──────────
+
+    /// Re-pin every fixture binding that depends on the origin header after changing its
+    /// timestamp: `taiko.l1_header`, the ancestor-header chain, `originBlockHash`, and the
+    /// anchor-transaction checkpoint embedded in the witness block.
+    fn set_origin_header_timestamp(guest_input: &mut GuestInput, timestamp: u64) {
+        let mut l1_header = guest_input.taiko.l1_header.clone();
+        l1_header.timestamp = timestamp;
+        guest_input.taiko.l1_header = l1_header.clone();
+        guest_input.taiko.l1_ancestor_headers = vec![l1_header.clone()];
+        guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
+            blockNumber: l1_header.number.try_into().expect("fits in uint48"),
+            blockHash: l1_header.hash_slow(),
+            stateRoot: l1_header.state_root,
+        })];
+    }
+
+    #[test]
+    fn linkage_rejects_proposal_timestamp_equal_to_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        assert_eq!(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>(),
+            123
+        );
+        set_origin_header_timestamp(&mut guest_input, 123);
+        assert_guest_rejects(
+            guest_input,
+            "must be strictly after anchored L1 origin timestamp",
+        );
+    }
+
+    #[test]
+    fn linkage_accepts_proposal_timestamp_above_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        assert_eq!(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>(),
+            123
+        );
+        set_origin_header_timestamp(&mut guest_input, 122);
+        guest_input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
+        prove_identity(&guest_input).expect("proposal timestamp above origin timestamp proves");
+    }
+
+    #[test]
+    fn linkage_rejects_proposal_timestamp_below_origin() {
+        let mut guest_input = guest_input_with_single_block();
+        assert_eq!(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>(),
+            123
+        );
+        set_origin_header_timestamp(&mut guest_input, 124);
+        assert_guest_rejects(
+            guest_input,
+            "must be strictly after anchored L1 origin timestamp",
+        );
+    }
+
     // ── Task 7: derivation guards + empty-sources parity ─────────────────────
 
     #[test]
@@ -2600,8 +2790,8 @@ mod tests {
         let guest_input = guest_input_with_single_block(); // sources are empty by construction
         assert!(guest_input.taiko.proposal_event.proposal.sources.is_empty());
         let mut gi = guest_input;
-        gi.proof_carry_data =
-            build_proof_carry_data(&gi, ProofType::Native).expect("build carry data");
+        gi.proof_carry_data = build_proof_carry_data_from_witness_spec(&gi, ProofType::Native)
+            .expect("build carry data");
         prove_identity(&gi).expect("empty-sources proposal still proves");
     }
 
@@ -2633,5 +2823,32 @@ mod tests {
         guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource::default()];
         guest_input.taiko.data_sources = Vec::new();
         assert_guest_rejects(guest_input, "data source count");
+    }
+
+    #[test]
+    fn anchor_v4_abi_decode_validate_rejects_non_canonical_uint48_padding() {
+        // Canonical ABI: selector + (uint48 blockNumber, bytes32, bytes32) as three 32-byte words.
+        let call = anchorV4Call {
+            _checkpoint: AnchorV4Checkpoint {
+                blockNumber: 42u64.try_into().expect("fits uint48"),
+                blockHash: B256::from([0x11; 32]),
+                stateRoot: B256::from([0x22; 32]),
+            },
+        };
+        let mut encoded = call.abi_encode();
+        // Dirty a high byte of the uint48 word (outside the low 48 bits). Lenient decode may
+        // still accept this; abi_decode_validate must reject non-canonical padding.
+        let word_start = 4; // after selector
+        assert_eq!(encoded[word_start], 0);
+        encoded[word_start] = 0x01;
+
+        assert!(
+            anchorV4Call::abi_decode(&encoded).is_ok(),
+            "lenient abi_decode is expected to accept dirty high bits of uint48 word"
+        );
+        assert!(
+            anchorV4Call::abi_decode_validate(&encoded).is_err(),
+            "abi_decode_validate must reject non-canonical uint48 ABI padding"
+        );
     }
 }

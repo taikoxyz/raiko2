@@ -26,6 +26,7 @@ pub(crate) struct TaskResponse<T> {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProofType {
+    Native,
     Risc0,
     Sp1,
     Sgx,
@@ -36,6 +37,7 @@ pub(crate) enum ProofType {
 impl ProofType {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Native => "native",
             Self::Risc0 => "risc0",
             Self::Sp1 => "sp1",
             Self::Sgx => "sgx",
@@ -83,21 +85,6 @@ pub(crate) struct ProverClearRequest {
     pub(crate) proof_type: ProofType,
 }
 
-/// Request body accepted by the v4 proof-artifact invalidation endpoint.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct InvalidateArtifactsRequest {
-    pub(crate) proof_type: ProofType,
-    #[serde(default)]
-    pub(crate) proof_prefix: Option<String>,
-    #[serde(default)]
-    pub(crate) proposal_id_start: Option<u64>,
-    #[serde(default)]
-    pub(crate) proposal_id_end: Option<u64>,
-    #[serde(default)]
-    pub(crate) dry_run: bool,
-}
-
 /// Response data for a v4 proof task.
 #[derive(Debug, Serialize)]
 pub(crate) struct ProofTaskData {
@@ -113,31 +100,5 @@ pub(crate) struct ProofTaskData {
 pub(crate) struct ClearProverData {
     pub(crate) cancelled: usize,
     pub(crate) skipped: ProverSkippedStatusCounts,
-    pub(crate) failed: usize,
-}
-
-/// Response data for a v4 proof-artifact invalidation request.
-#[derive(Default, Serialize)]
-pub(crate) struct InvalidateArtifactsData {
-    pub(crate) dry_run: bool,
-    pub(crate) artifacts: InvalidateArtifactCounts,
-    pub(crate) tasks: InvalidateTaskCounts,
-}
-
-#[derive(Default, Serialize)]
-pub(crate) struct InvalidateArtifactCounts {
-    pub(crate) matched: usize,
-    pub(crate) removed: usize,
-    pub(crate) files_removed: usize,
-    pub(crate) files_missing: usize,
-    pub(crate) failed: usize,
-}
-
-#[derive(Default, Serialize)]
-pub(crate) struct InvalidateTaskCounts {
-    pub(crate) matched: usize,
-    pub(crate) removed: usize,
-    pub(crate) skipped_non_terminal: usize,
-    pub(crate) invalid_metadata: usize,
     pub(crate) failed: usize,
 }

@@ -1,0 +1,67 @@
+{
+  "aggregation": {
+    "per_child_mcycles": 180,
+    "provenance": {
+      "elf_sha256": "fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924",
+      "execution_po2": 20,
+      "image_id": null
+    }
+  },
+  "model_id": "risc0-zkgas-m2-c71d7a4ff237c10d",
+  "originating_experiment_model": "M2",
+  "proposal": {
+    "coefficients": {
+      "scale": 1000000000000
+    },
+    "cohorts": {
+      "hoodi": {
+        "calibration_count": 40,
+        "diagnostic_decimal_places": {
+          "continuous": 6,
+          "scaled_integer": 6
+        },
+        "fit_count": 80
+      },
+      "mainnet": {
+        "diagnostic_decimal_places": {
+          "continuous": 2,
+          "scaled_integer": 4
+        },
+        "evaluation_count": 20,
+        "influenced_model_selection": true,
+        "untouched_holdout": false
+      }
+    },
+    "collector_artifact_hashes": {
+      "chain_spec_sha256_by_network": {
+        "taiko_hoodi": "b2f3f79363274e6132e6a8216979514d95cd70f73411328c0f5a80dbf53401a4",
+        "taiko_mainnet": "b2f3f79363274e6132e6a8216979514d95cd70f73411328c0f5a80dbf53401a4"
+      },
+      "shared": {
+        "cargo_lock_sha256": "187f36d2f9ef9544b20e53f23de78ae952dfd9c188efa851cd470d2ee9fb7c0a",
+        "collector_script_sha256": "c23ab11a38403f8fbc63ca5e4bc1696fe7266cc1c520e244ec937c710084b5c5",
+        "guest_launcher_binary_sha256": "4e330def593e6e7552e0fa095ad4cb52d884e09174fbd875d4ff869914e10c56",
+        "preflight_binary_sha256": "f481a7f1bf2ea3c834aaaf8cb72371d0ea85e3220edc12fe3fb05aa34cb9eda5",
+        "proposal_elf_sha256": "d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35",
+        "stress_discovery_script_sha256": "91ee057567d128f960ca33fd87c7ff0699daca4d056e4831fe2a0200dbe951fe"
+      }
+    },
+    "error_budget_percent": 10,
+    "max_total_zkgas": 500000000,
+    "provenance": {
+      "elf_sha256": "d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35",
+      "image_id": "0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10",
+      "min_execution_po2": 20,
+      "risc0_version": "3.0.5",
+      "source_revision": "4f8300497aba75605b9b8568b1955faa1f7f04bc"
+    }
+  },
+  "raw_input_rows_hash": {
+    "algorithm": "sha256",
+    "inputs": [
+      "hoodi-fit.jsonl",
+      "validation.jsonl"
+    ]
+  },
+  "schema_version": 3
+}

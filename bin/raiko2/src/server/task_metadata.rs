@@ -1,14 +1,16 @@
-use alloy_primitives::{hex, keccak256};
+use alloy_primitives::{B256, U256, hex, keccak256};
+use anyhow::{Context, Result};
 use raiko2_engine::{
     AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
 };
-use raiko2_pipeline::PipelineKey;
-use raiko2_primitives::{ProofType, ShastaCheckpoint, proof_type::lowercase};
+use raiko2_pipeline::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
+use raiko2_primitives::{L2BlockRange, ProofType, ShastaCheckpoint, proof_type::lowercase};
 use raiko2_prover::{
-    BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
-    Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
+    BoundlessQuoteStrategy, BoundlessSubmissionProgress, NetworkProverBackend,
+    PendingProofCheckpointIdentity, Sp1FulfillmentStrategy, Sp1NetworkMode,
+    Sp1NetworkSubmissionProgress, boundless::BoundlessAccountBlocker, sp1_config::ExecutionMode,
 };
-use raiko2_queue::decode_task_id;
+use raiko2_runtime::{ProofArtifactDescriptor, RunnerStatus, RuntimeTaskRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -30,7 +32,22 @@ impl ProverType {
     }
 }
 
+pub(crate) fn format_proposal_ids(proposal_ids: &[u64]) -> String {
+    match proposal_ids {
+        [] => "none".to_string(),
+        [single] => single.to_string(),
+        ids if ids
+            .windows(2)
+            .all(|window| window[0].checked_add(1) == Some(window[1])) =>
+        {
+            format!("{}..{}", ids[0], ids[ids.len() - 1])
+        }
+        ids => ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TaskMetadata {
     pub(crate) network_pair: String,
     pub(crate) network: String,
@@ -56,9 +73,9 @@ pub(crate) struct TaskMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AggregateInputProofArtifact {
     pub(crate) proof_ref: String,
-    pub(crate) proof_path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +90,7 @@ pub(crate) struct BuildTaskMetadataParams<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProposalTask {
     pub(crate) proposal_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,11 +99,11 @@ pub(crate) struct ProposalTask {
     pub(crate) l2_block_numbers: Vec<u64>,
     pub(crate) last_anchor_block_number: u64,
     pub(crate) task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) request: Option<ProposalTaskRequest>,
+    pub(crate) request: ProposalTaskRequest,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) active_stage: Option<String>,
@@ -97,9 +115,41 @@ pub(crate) struct RuntimeMetadata {
     pub(crate) proposals: BTreeMap<String, TaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate: Option<TaskRuntimeMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_artifact: Option<ProofArtifactDescriptor>,
+}
+
+impl RuntimeMetadata {
+    pub(crate) fn current() -> Self {
+        Self::default()
+    }
+}
+
+impl TaskMetadata {
+    pub(crate) fn boundless_account_blockers(
+        &self,
+        runner_status: RunnerStatus,
+        now: u64,
+    ) -> Result<Vec<BoundlessAccountBlocker>> {
+        if runner_status == RunnerStatus::Completed {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .runtime
+            .proposals
+            .values()
+            .chain(self.runtime.aggregate.iter())
+            .map(TaskRuntimeMetadata::boundless_account_blocker)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .filter(|blocker| now < blocker.lock_expires_at)
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StageTimingMetadata {
     pub(crate) stage: String,
     pub(crate) started_at_ms: i64,
@@ -109,13 +159,20 @@ pub(crate) struct StageTimingMetadata {
     pub(crate) terminal_status: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TaskRuntimeMetadata {
     pub(crate) updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_tx_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) request_id_has_confirmed_submission: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) broadcast_from_block: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) image_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +189,10 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_strategy: Option<BoundlessQuoteStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quote_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
     /// Exact escalated max price bid, in wei, as a decimal string. The floored
@@ -156,7 +217,150 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) sp1_auction_timeout_secs: Option<u64>,
 }
 
+#[derive(Debug)]
+pub(crate) struct RemoteSubmissionConflict(String);
+
+impl RemoteSubmissionConflict {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for RemoteSubmissionConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "remote submission checkpoint conflict: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RemoteSubmissionConflict {}
+
 impl TaskMetadata {
+    pub(crate) fn decode_for_record(record: &RuntimeTaskRecord) -> Result<Self> {
+        let metadata: Self = serde_json::from_value(record.metadata.clone())
+            .context("failed to parse runtime task metadata")?;
+        let canonical_route = record
+            .pipeline_key
+            .canonicalize_persisted_route(record.route)
+            .context("runtime task route does not match the canonical pipeline")?;
+        anyhow::ensure!(
+            metadata.network_pair == format!("{}/{}", metadata.network, metadata.l1_network),
+            "runtime task metadata network fields are inconsistent"
+        );
+        anyhow::ensure!(
+            metadata.network_pair == record.network_pair,
+            "runtime task metadata network_pair does not match the canonical record"
+        );
+        anyhow::ensure!(
+            metadata.proof_type == record.pipeline_key.proof_type(),
+            "runtime task metadata proof_type does not match the canonical pipeline"
+        );
+        metadata.validate_execution_identity(record)?;
+        metadata.validate_runtime_progress(canonical_route)?;
+        anyhow::ensure!(
+            publication_proof_artifact_refs(&metadata, record.pipeline_key) == record.artifact_refs,
+            "runtime task metadata artifact references do not match the canonical record"
+        );
+        Ok(metadata)
+    }
+
+    fn validate_execution_identity(&self, record: &RuntimeTaskRecord) -> Result<()> {
+        anyhow::ensure!(
+            !self.proposals.is_empty() || self.aggregate_request.is_some(),
+            "runtime task metadata has no execution request"
+        );
+        anyhow::ensure!(
+            self.aggregate_requested == self.aggregate_request.is_some(),
+            "runtime task aggregate flag does not match its request"
+        );
+
+        for proposal in &self.proposals {
+            let request = &proposal.request;
+            anyhow::ensure!(
+                proposal.proposal_id == request.proposal_id
+                    && proposal.l1_inclusion_block_number == request.l1_inclusion_block_number
+                    && proposal.last_anchor_block_number == request.last_anchor_block_number
+                    && proposal.checkpoint == request.checkpoint,
+                "runtime proposal projection does not match its canonical request"
+            );
+            anyhow::ensure!(
+                request.l2_block_range
+                    == Some(canonical_l2_block_range(&proposal.l2_block_numbers)?),
+                "runtime proposal block projection does not match its canonical request"
+            );
+            anyhow::ensure!(
+                proposal.task_id == proposal_task_ref(record.pipeline_key, request),
+                "runtime proposal task_id does not match its canonical request"
+            );
+        }
+
+        match (&self.aggregate_request, &self.aggregate_task_id) {
+            (Some(request), Some(task_id)) => {
+                anyhow::ensure!(
+                    *task_id == aggregate_task_ref(record.pipeline_key, request),
+                    "runtime aggregate task_id does not match its canonical request"
+                );
+                if self.proposals.is_empty() {
+                    anyhow::ensure!(
+                        !self.aggregate_input_artifacts.is_empty(),
+                        "external aggregate metadata contains no input artifacts"
+                    );
+                    anyhow::ensure!(
+                        request.proposal_ids.is_empty()
+                            || request.proposal_ids.len() == self.aggregate_input_artifacts.len(),
+                        "external aggregate proposal ids do not match input artifacts"
+                    );
+                } else {
+                    let persisted_ids = self
+                        .proposals
+                        .iter()
+                        .map(|proposal| proposal.proposal_id)
+                        .collect::<Vec<_>>();
+                    anyhow::ensure!(
+                        request.proposal_ids == persisted_ids,
+                        "runtime aggregate proposal ids do not match its proposal requests"
+                    );
+                    anyhow::ensure!(
+                        self.aggregate_input_artifacts.is_empty(),
+                        "batch aggregate metadata contains external input artifacts"
+                    );
+                }
+            }
+            (None, None) => {
+                anyhow::ensure!(
+                    self.aggregate_input_artifacts.is_empty(),
+                    "proposal metadata contains external aggregate input artifacts"
+                );
+            }
+            _ => anyhow::bail!("runtime aggregate task identity is incomplete"),
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_runtime_progress(&self, route: PipelineRoute) -> Result<()> {
+        for (task_ref, runtime) in &self.runtime.proposals {
+            anyhow::ensure!(
+                self.proposals
+                    .iter()
+                    .any(|proposal| proposal.task_id == task_ref.as_str()),
+                "runtime proposal progress does not belong to a canonical proposal"
+            );
+            validate_remote_submission_route(runtime.validate_remote_submission()?, route)?;
+        }
+        if let Some(runtime) = &self.runtime.aggregate {
+            anyhow::ensure!(
+                self.aggregate_request.is_some(),
+                "runtime aggregate progress has no canonical aggregate request"
+            );
+            validate_remote_submission_route(runtime.validate_remote_submission()?, route)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prover_type_str(&self) -> Option<String> {
         self.prover_type.map(|kind| kind.as_str().to_string())
     }
@@ -197,19 +401,25 @@ impl TaskMetadata {
         &self,
         pipeline_key: PipelineKey,
     ) -> Option<EngineTaskId> {
-        self.aggregate_request
-            .clone()
-            .map(|request| {
-                EngineTaskId::new(EngineTaskKey::Aggregate {
-                    pipeline: pipeline_key,
-                    request,
-                })
+        self.aggregate_request.clone().map(|request| {
+            EngineTaskId::new(EngineTaskKey::Aggregate {
+                pipeline: pipeline_key,
+                request,
             })
-            .or_else(|| {
-                self.aggregate_task_id
-                    .as_deref()
-                    .and_then(decode_legacy_aggregate_task_id)
-            })
+        })
+    }
+
+    pub(crate) fn owns_engine_task(&self, task_id: &EngineTaskId) -> bool {
+        match &task_id.0 {
+            EngineTaskKey::Proposal { pipeline, .. } => self
+                .proposals
+                .iter()
+                .any(|proposal| proposal.engine_task_id(*pipeline) == *task_id),
+            EngineTaskKey::Aggregate { pipeline, .. } => self
+                .aggregate_engine_task_id(*pipeline)
+                .as_ref()
+                .is_some_and(|aggregate| aggregate == task_id),
+        }
     }
 
     pub(crate) fn upsert_proposal_runtime(
@@ -217,23 +427,23 @@ impl TaskMetadata {
         task_id: &str,
         progress: &BoundlessSubmissionProgress,
         updated_at: i64,
-    ) {
+    ) -> Result<bool> {
         self.runtime
             .proposals
             .entry(task_id.to_string())
             .or_default()
-            .apply_boundless_submission(progress, updated_at);
+            .merge_boundless_submission(progress, updated_at)
     }
 
     pub(crate) fn upsert_aggregate_runtime(
         &mut self,
         progress: &BoundlessSubmissionProgress,
         updated_at: i64,
-    ) {
+    ) -> Result<bool> {
         self.runtime
             .aggregate
             .get_or_insert_with(TaskRuntimeMetadata::default)
-            .apply_boundless_submission(progress, updated_at);
+            .merge_boundless_submission(progress, updated_at)
     }
 
     pub(crate) fn upsert_proposal_sp1_network_runtime(
@@ -241,23 +451,23 @@ impl TaskMetadata {
         task_id: &str,
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
-    ) {
+    ) -> Result<bool> {
         self.runtime
             .proposals
             .entry(task_id.to_string())
             .or_default()
-            .apply_sp1_network_submission(progress, updated_at);
+            .merge_sp1_network_submission(progress, updated_at)
     }
 
     pub(crate) fn upsert_aggregate_sp1_network_runtime(
         &mut self,
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
-    ) {
+    ) -> Result<bool> {
         self.runtime
             .aggregate
             .get_or_insert_with(TaskRuntimeMetadata::default)
-            .apply_sp1_network_submission(progress, updated_at);
+            .merge_sp1_network_submission(progress, updated_at)
     }
 
     pub(crate) fn mark_stage_started(&mut self, task_id: &str, stage: &str, started_at_ms: i64) {
@@ -304,17 +514,28 @@ impl TaskMetadata {
     }
 }
 
+fn canonical_l2_block_range(block_numbers: &[u64]) -> Result<L2BlockRange> {
+    let start = *block_numbers
+        .first()
+        .context("runtime proposal block projection is empty")?;
+    let end = *block_numbers
+        .last()
+        .expect("checked non-empty block projection");
+    anyhow::ensure!(
+        block_numbers
+            .windows(2)
+            .all(|window| window[0].checked_add(1) == Some(window[1])),
+        "runtime proposal block projection is not contiguous"
+    );
+    Ok(L2BlockRange { start, end })
+}
+
 impl ProposalTask {
-    pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> Option<EngineTaskId> {
-        self.request
-            .clone()
-            .map(|request| {
-                EngineTaskId::new(EngineTaskKey::Proposal {
-                    pipeline: pipeline_key,
-                    request,
-                })
-            })
-            .or_else(|| decode_legacy_proposal_task_id(&self.task_id))
+    pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> EngineTaskId {
+        EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: pipeline_key,
+            request: self.request.clone(),
+        })
     }
 }
 
@@ -356,15 +577,7 @@ pub(crate) fn proposal_proof_artifact_refs(
     pipeline_key: PipelineKey,
     proposal: &ProposalTask,
 ) -> Vec<String> {
-    let mut refs = proposal
-        .request
-        .as_ref()
-        .map(|request| vec![proposal_task_ref(pipeline_key, request)])
-        .unwrap_or_default();
-    if !refs.contains(&proposal.task_id) {
-        refs.push(proposal.task_id.clone());
-    }
-    refs
+    vec![proposal_task_ref(pipeline_key, &proposal.request)]
 }
 
 pub(crate) fn root_proof_artifact_refs(
@@ -372,20 +585,8 @@ pub(crate) fn root_proof_artifact_refs(
     pipeline_key: PipelineKey,
 ) -> Option<ProofArtifactRefs> {
     if let Some(request) = metadata.aggregate_request.as_ref() {
-        let mut refs = vec![aggregate_task_ref(pipeline_key, request)];
-        if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref()
-            && !refs.contains(legacy_ref)
-        {
-            refs.push(legacy_ref.clone());
-        }
         return Some(ProofArtifactRefs {
-            refs,
-            kind: ProofArtifactKind::Aggregate,
-        });
-    }
-    if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref() {
-        return Some(ProofArtifactRefs {
-            refs: vec![legacy_ref.clone()],
+            refs: vec![aggregate_task_ref(pipeline_key, request)],
             kind: ProofArtifactKind::Aggregate,
         });
     }
@@ -396,6 +597,28 @@ pub(crate) fn root_proof_artifact_refs(
         }),
         _ => None,
     }
+}
+
+pub(crate) fn publication_proof_artifact_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Vec<String> {
+    let mut refs = root_proof_artifact_refs(metadata, pipeline_key)
+        .map(|root| root.refs)
+        .unwrap_or_default();
+    for proposal in &metadata.proposals {
+        for proof_ref in proposal_proof_artifact_refs(pipeline_key, proposal) {
+            if !refs.contains(&proof_ref) {
+                refs.push(proof_ref);
+            }
+        }
+    }
+    for artifact in &metadata.aggregate_input_artifacts {
+        if !refs.contains(&artifact.proof_ref) {
+            refs.push(artifact.proof_ref.clone());
+        }
+    }
+    refs
 }
 
 pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
@@ -414,49 +637,6 @@ pub(crate) fn stage_task_ref_for_stage(task_id: &EngineTaskId, stage: ProposalSt
         }
         EngineTaskKey::Aggregate { pipeline, request } => aggregate_task_ref(*pipeline, request),
     }
-}
-
-fn decode_legacy_proposal_task_id(raw: &str) -> Option<EngineTaskId> {
-    if let Ok(task_id) = decode_task_id::<EngineTaskKey>(raw) {
-        return match task_id.0 {
-            EngineTaskKey::Proposal { pipeline, request } => {
-                Some(EngineTaskId::new(EngineTaskKey::Proposal {
-                    pipeline,
-                    request,
-                }))
-            }
-            EngineTaskKey::Aggregate { .. } => None,
-        };
-    }
-
-    match decode_task_id::<LegacyEngineTaskKey>(raw).ok()?.0 {
-        LegacyEngineTaskKey::Proposal {
-            pipeline, request, ..
-        } => Some(EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request,
-        })),
-        LegacyEngineTaskKey::Aggregate { .. } => None,
-    }
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-enum LegacyEngineTaskKey {
-    Proposal {
-        pipeline: PipelineKey,
-        request: ProposalTaskRequest,
-        stage: ProposalStage,
-    },
-    Aggregate {
-        pipeline: PipelineKey,
-        request: AggregationTaskRequest,
-    },
-}
-
-fn decode_legacy_aggregate_task_id(raw: &str) -> Option<EngineTaskId> {
-    let task_id = decode_task_id::<EngineTaskKey>(raw).ok()?;
-    matches!(task_id.0, EngineTaskKey::Aggregate { .. }).then_some(task_id)
 }
 
 fn stable_task_ref<T>(kind: &str, pipeline_key: PipelineKey, request: &T) -> String
@@ -507,63 +687,475 @@ impl TaskRuntimeMetadata {
     pub(crate) const fn has_remote_submission_progress(&self) -> bool {
         self.provider_request_id.is_some()
             || self.remote_tx_hash.is_some()
+            || self.request_id_has_confirmed_submission
+            || self.request_digest.is_some()
+            || self.broadcast_from_block.is_some()
             || self.image_ref.is_some()
+            || self.deployment.is_some()
+            || self.offchain.is_some()
             || self.expires_at.is_some()
+            || self.lock_expires_at.is_some()
+            || self.submitted_at.is_some()
+            || self.quoted_mcycles_count.is_some()
+            || self.evaluated_mcycles_count.is_some()
+            || self.quote_strategy.is_some()
+            || self.quote_model_id.is_some()
+            || self.max_price_multiplier.is_some()
+            || self.max_price_wei.is_some()
+            || self.rebid_attempt.is_some()
             || self.sp1_network_mode.is_some()
             || self.sp1_fulfillment_strategy.is_some()
+            || self.sp1_skip_simulation.is_some()
+            || self.sp1_cycle_limit.is_some()
+            || self.sp1_timeout_secs.is_some()
+            || self.sp1_max_price_per_pgu.is_some()
+            || self.sp1_auction_timeout_secs.is_some()
     }
 
     pub(crate) const fn has_boundless_submission_resume(&self) -> bool {
-        self.provider_request_id.is_some() && self.expires_at.is_some()
+        self.provider_request_id.is_some()
+            && self.image_ref.is_some()
+            && self.deployment.is_some()
+            && self.offchain.is_some()
+            && self.expires_at.is_some()
+            && self.lock_expires_at.is_some()
+            && self.submitted_at.is_some()
+            && self.max_price_multiplier.is_some()
+            && self.max_price_wei.is_some()
+            && matches!(self.rebid_attempt, Some(attempt) if attempt > 0)
     }
 
     pub(crate) const fn has_sp1_network_submission_progress(&self) -> bool {
         self.provider_request_id.is_some()
-            && (self.sp1_network_mode.is_some()
-                || self.sp1_fulfillment_strategy.is_some()
-                || self.sp1_timeout_secs.is_some())
+            && self.expires_at.is_some()
+            && self.submitted_at.is_some()
+            && matches!(self.rebid_attempt, Some(attempt) if attempt > 0)
+            && self.sp1_network_mode.is_some()
+            && self.sp1_fulfillment_strategy.is_some()
+            && self.sp1_skip_simulation.is_some()
+            && self.sp1_cycle_limit.is_some()
+            && self.sp1_timeout_secs.is_some()
     }
 
     pub(crate) const fn has_resumable_remote_submission(&self) -> bool {
         self.has_boundless_submission_resume() || self.has_sp1_network_submission_progress()
     }
 
-    fn apply_boundless_submission(
+    pub(crate) fn boundless_account_blocker(&self) -> Result<Option<BoundlessAccountBlocker>> {
+        if !matches!(
+            self.validate_remote_submission()?,
+            Some(RemoteSubmissionKind::Boundless)
+        ) || self.offchain == Some(true)
+            || self.remote_tx_hash.is_some()
+        {
+            return Ok(None);
+        }
+        let checkpoint_key = if let Some(raw_digest) = self.request_digest.as_deref() {
+            raw_digest
+                .parse::<B256>()
+                .context("runtime unconfirmed Boundless checkpoint has invalid request_digest")?
+        } else {
+            let provider_request_id = self
+                .provider_request_id
+                .as_deref()
+                .context("runtime legacy Boundless checkpoint is missing provider_request_id")?;
+            keccak256(format!("legacy-boundless-checkpoint:{provider_request_id}"))
+        };
+        let lock_expires_at = self
+            .lock_expires_at
+            .context("runtime unconfirmed Boundless checkpoint is missing lock_expires_at")?;
+        Ok(Some(BoundlessAccountBlocker {
+            checkpoint_key,
+            lock_expires_at,
+        }))
+    }
+
+    pub(crate) fn clear_remote_submission(
+        &mut self,
+        identity: &PendingProofCheckpointIdentity,
+        updated_at: i64,
+    ) -> Result<()> {
+        let current_kind = self
+            .validate_remote_submission()?
+            .context("runtime provider checkpoint is missing")?;
+        anyhow::ensure!(
+            matches!(identity.backend, NetworkProverBackend::Boundless),
+            "terminal provider checkpoint reset only supports Boundless"
+        );
+        anyhow::ensure!(
+            matches!(current_kind, RemoteSubmissionKind::Boundless),
+            "runtime provider checkpoint is not a Boundless submission"
+        );
+        anyhow::ensure!(
+            self.provider_request_id.as_deref() == Some(identity.provider_request_id.as_str()),
+            "runtime provider request id does not match clear request"
+        );
+        anyhow::ensure!(
+            self.rebid_attempt == Some(identity.attempt.get()),
+            "runtime provider attempt does not match clear request"
+        );
+
+        *self = Self {
+            updated_at,
+            ..Self::default()
+        };
+        Ok(())
+    }
+
+    fn validate_remote_submission(&self) -> Result<Option<RemoteSubmissionKind>> {
+        if !self.has_remote_submission_progress() {
+            return Ok(None);
+        }
+
+        let has_boundless_fields = self.remote_tx_hash.is_some()
+            || self.request_id_has_confirmed_submission
+            || self.request_digest.is_some()
+            || self.broadcast_from_block.is_some()
+            || self.image_ref.is_some()
+            || self.deployment.is_some()
+            || self.offchain.is_some()
+            || self.lock_expires_at.is_some()
+            || self.quoted_mcycles_count.is_some()
+            || self.evaluated_mcycles_count.is_some()
+            || self.quote_strategy.is_some()
+            || self.quote_model_id.is_some()
+            || self.max_price_multiplier.is_some()
+            || self.max_price_wei.is_some();
+        let has_sp1_fields = self.sp1_network_mode.is_some()
+            || self.sp1_fulfillment_strategy.is_some()
+            || self.sp1_skip_simulation.is_some()
+            || self.sp1_cycle_limit.is_some()
+            || self.sp1_timeout_secs.is_some()
+            || self.sp1_max_price_per_pgu.is_some()
+            || self.sp1_auction_timeout_secs.is_some();
+        anyhow::ensure!(
+            has_boundless_fields ^ has_sp1_fields,
+            "runtime provider checkpoint has no unique backend or mixes provider fields"
+        );
+
+        let provider_request_id = self
+            .provider_request_id
+            .as_deref()
+            .context("runtime provider checkpoint is missing provider_request_id")?;
+        anyhow::ensure!(
+            !provider_request_id.trim().is_empty(),
+            "runtime provider checkpoint has an empty provider_request_id"
+        );
+        let submitted_at = self
+            .submitted_at
+            .context("runtime provider checkpoint is missing submitted_at")?;
+        let expires_at = self
+            .expires_at
+            .context("runtime provider checkpoint is missing expires_at")?;
+        anyhow::ensure!(
+            submitted_at > 0 && expires_at > 0 && submitted_at < expires_at,
+            "runtime provider checkpoint has invalid submission deadlines"
+        );
+        anyhow::ensure!(
+            matches!(self.rebid_attempt, Some(attempt) if attempt > 0),
+            "runtime provider checkpoint has an invalid attempt"
+        );
+
+        let kind = if has_boundless_fields {
+            self.validate_boundless_submission(submitted_at, expires_at)?;
+            RemoteSubmissionKind::Boundless
+        } else {
+            self.validate_sp1_submission(submitted_at, expires_at)?;
+            RemoteSubmissionKind::Sp1
+        };
+        Ok(Some(kind))
+    }
+
+    fn validate_boundless_submission(&self, submitted_at: u64, expires_at: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.has_boundless_submission_resume(),
+            "runtime Boundless checkpoint is incomplete"
+        );
+        anyhow::ensure!(
+            self.image_ref
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+                && self
+                    .deployment
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty()),
+            "runtime Boundless checkpoint has an empty image or deployment"
+        );
+        let lock_expires_at = self
+            .lock_expires_at
+            .context("runtime Boundless checkpoint is missing lock_expires_at")?;
+        anyhow::ensure!(
+            submitted_at < lock_expires_at && lock_expires_at <= expires_at,
+            "runtime Boundless checkpoint has invalid lock deadlines"
+        );
+        let offchain = self
+            .offchain
+            .context("runtime Boundless checkpoint is missing offchain")?;
+        if offchain {
+            anyhow::ensure!(
+                self.request_digest.is_none() && self.broadcast_from_block.is_none(),
+                "runtime off-chain Boundless checkpoint contains on-chain recovery identity"
+            );
+            anyhow::ensure!(
+                !self.request_id_has_confirmed_submission,
+                "runtime off-chain Boundless checkpoint claims an on-chain predecessor"
+            );
+        } else {
+            anyhow::ensure!(
+                self.request_digest.is_some() == self.broadcast_from_block.is_some(),
+                "runtime on-chain Boundless checkpoint has incomplete recovery identity"
+            );
+            if let Some(raw_digest) = self.request_digest.as_deref() {
+                let digest = raw_digest
+                    .parse::<B256>()
+                    .context("runtime Boundless checkpoint has invalid request_digest")?;
+                anyhow::ensure!(
+                    raw_digest == format!("{digest}"),
+                    "runtime Boundless checkpoint has non-canonical request_digest"
+                );
+            }
+        }
+        anyhow::ensure!(
+            matches!(self.max_price_multiplier, Some(multiplier) if multiplier > 0),
+            "runtime Boundless checkpoint has an invalid max_price_multiplier"
+        );
+        let max_price_wei = self
+            .max_price_wei
+            .as_deref()
+            .context("runtime Boundless checkpoint is missing max_price_wei")?
+            .parse::<U256>()
+            .context("runtime Boundless checkpoint has invalid max_price_wei")?;
+        anyhow::ensure!(
+            max_price_wei != U256::ZERO,
+            "runtime Boundless checkpoint has zero max_price_wei"
+        );
+        Ok(())
+    }
+
+    fn validate_sp1_submission(&self, submitted_at: u64, expires_at: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.has_sp1_network_submission_progress(),
+            "runtime SP1 checkpoint is incomplete"
+        );
+        let timeout_secs = self
+            .sp1_timeout_secs
+            .context("runtime SP1 checkpoint is missing timeout_secs")?;
+        anyhow::ensure!(
+            matches!(self.sp1_cycle_limit, Some(limit) if limit > 0)
+                && timeout_secs > 0
+                && self.sp1_max_price_per_pgu != Some(0)
+                && self.sp1_auction_timeout_secs != Some(0),
+            "runtime SP1 checkpoint has invalid provider limits"
+        );
+        anyhow::ensure!(
+            submitted_at.checked_add(timeout_secs) == Some(expires_at),
+            "runtime SP1 checkpoint deadline does not match its timeout"
+        );
+        Ok(())
+    }
+
+    fn merge_boundless_submission(
         &mut self,
         progress: &BoundlessSubmissionProgress,
         updated_at: i64,
-    ) {
-        self.updated_at = updated_at;
-        self.provider_request_id = Some(progress.provider_request_id.clone());
-        self.remote_tx_hash.clone_from(&progress.remote_tx_hash);
-        self.image_ref = Some(progress.image_ref.clone());
-        self.deployment = Some(progress.deployment.clone());
-        self.offchain = Some(progress.offchain);
-        self.expires_at = Some(progress.expires_at);
-        self.lock_expires_at = Some(progress.lock_expires_at);
-        self.submitted_at = Some(progress.submitted_at);
-        self.quoted_mcycles_count = progress.quoted_mcycles_count;
-        self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
-        self.max_price_multiplier = Some(progress.max_price_multiplier);
-        self.max_price_wei.clone_from(&progress.max_price_wei);
-        self.rebid_attempt = Some(progress.rebid_attempt);
+    ) -> Result<bool> {
+        let candidate = Self {
+            updated_at,
+            provider_request_id: Some(progress.provider_request_id.clone()),
+            remote_tx_hash: progress.remote_tx_hash.clone(),
+            request_id_has_confirmed_submission: progress.request_id_has_confirmed_submission,
+            request_digest: progress.request_digest.clone(),
+            broadcast_from_block: progress.broadcast_from_block,
+            image_ref: Some(progress.image_ref.clone()),
+            deployment: Some(progress.deployment.clone()),
+            offchain: Some(progress.offchain),
+            expires_at: Some(progress.expires_at),
+            lock_expires_at: Some(progress.lock_expires_at),
+            submitted_at: Some(progress.submitted_at),
+            quoted_mcycles_count: progress.quoted_mcycles_count,
+            evaluated_mcycles_count: progress.evaluated_mcycles_count,
+            quote_strategy: progress.quote_strategy.clone(),
+            quote_model_id: progress.quote_model_id.clone(),
+            max_price_multiplier: Some(progress.max_price_multiplier),
+            max_price_wei: progress.max_price_wei.clone(),
+            rebid_attempt: Some(progress.rebid_attempt),
+            ..Self::default()
+        };
+        anyhow::ensure!(
+            candidate.validate_remote_submission()?.is_some(),
+            "Boundless progress did not produce a provider checkpoint"
+        );
+
+        let Some(current_kind) = self.validate_remote_submission()? else {
+            *self = candidate;
+            return Ok(true);
+        };
+        if !matches!(current_kind, RemoteSubmissionKind::Boundless) {
+            return Err(RemoteSubmissionConflict::new(
+                "Boundless progress cannot replace an SP1 checkpoint",
+            )
+            .into());
+        }
+        let current_attempt = self
+            .rebid_attempt
+            .context("runtime Boundless checkpoint is missing rebid_attempt")?;
+        match progress.rebid_attempt.cmp(&current_attempt) {
+            std::cmp::Ordering::Less => {
+                return Err(RemoteSubmissionConflict::new(
+                    "Boundless attempt regressed below the durable checkpoint",
+                )
+                .into());
+            }
+            std::cmp::Ordering::Greater => {
+                if self.provider_request_id == candidate.provider_request_id
+                    && (self.quoted_mcycles_count != candidate.quoted_mcycles_count
+                        || self.evaluated_mcycles_count != candidate.evaluated_mcycles_count
+                        || self.quote_strategy != candidate.quote_strategy
+                        || self.quote_model_id != candidate.quote_model_id)
+                {
+                    return Err(RemoteSubmissionConflict::new(
+                        "Boundless quote provenance changed across attempts sharing one provider request id",
+                    )
+                    .into());
+                }
+                *self = candidate;
+                return Ok(true);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+
+        let mut current_identity = self.clone();
+        let mut candidate_identity = candidate.clone();
+        let current_tx_hash = current_identity.remote_tx_hash.take();
+        let candidate_tx_hash = candidate_identity.remote_tx_hash.take();
+        current_identity.updated_at = 0;
+        candidate_identity.updated_at = 0;
+        if current_identity != candidate_identity {
+            return Err(RemoteSubmissionConflict::new(
+                "Boundless identity changed within one attempt",
+            )
+            .into());
+        }
+        match (current_tx_hash, candidate_tx_hash) {
+            (Some(current), Some(candidate)) if current != candidate => {
+                Err(RemoteSubmissionConflict::new(
+                    "Boundless transaction hash changed within one attempt",
+                )
+                .into())
+            }
+            (Some(_), None) => Err(RemoteSubmissionConflict::new(
+                "Boundless transaction hash cannot be removed from one attempt",
+            )
+            .into()),
+            _ => {
+                *self = candidate;
+                Ok(false)
+            }
+        }
     }
 
-    fn apply_sp1_network_submission(
+    fn merge_sp1_network_submission(
         &mut self,
         progress: &Sp1NetworkSubmissionProgress,
         updated_at: i64,
-    ) {
-        self.updated_at = updated_at;
-        self.provider_request_id = Some(progress.provider_request_id.clone());
-        self.sp1_network_mode = Some(progress.network_mode);
-        self.sp1_fulfillment_strategy = Some(progress.fulfillment_strategy);
-        self.sp1_skip_simulation = Some(progress.skip_simulation);
-        self.sp1_cycle_limit = Some(progress.cycle_limit);
-        self.sp1_timeout_secs = Some(progress.timeout_secs);
-        self.sp1_max_price_per_pgu = progress.max_price_per_pgu;
-        self.sp1_auction_timeout_secs = progress.auction_timeout_secs;
+    ) -> Result<bool> {
+        let expires_at = progress
+            .submitted_at
+            .checked_add(progress.timeout_secs)
+            .context("SP1 checkpoint deadline overflow")?;
+        let mut candidate = Self {
+            updated_at,
+            provider_request_id: Some(progress.provider_request_id.clone()),
+            expires_at: Some(expires_at),
+            submitted_at: Some(progress.submitted_at),
+            rebid_attempt: Some(progress.attempt),
+            sp1_network_mode: Some(progress.network_mode),
+            sp1_fulfillment_strategy: Some(progress.fulfillment_strategy),
+            sp1_skip_simulation: Some(progress.skip_simulation),
+            sp1_cycle_limit: Some(progress.cycle_limit),
+            sp1_timeout_secs: Some(progress.timeout_secs),
+            sp1_max_price_per_pgu: progress.max_price_per_pgu,
+            sp1_auction_timeout_secs: progress.auction_timeout_secs,
+            ..Self::default()
+        };
+        anyhow::ensure!(
+            candidate.validate_remote_submission()?.is_some(),
+            "SP1 progress did not produce a provider checkpoint"
+        );
+
+        let Some(current_kind) = self.validate_remote_submission()? else {
+            *self = candidate;
+            return Ok(true);
+        };
+        if !matches!(current_kind, RemoteSubmissionKind::Sp1) {
+            return Err(RemoteSubmissionConflict::new(
+                "SP1 progress cannot replace a Boundless checkpoint",
+            )
+            .into());
+        }
+        let current_attempt = self
+            .rebid_attempt
+            .context("runtime SP1 checkpoint is missing rebid_attempt")?;
+        match progress.attempt.cmp(&current_attempt) {
+            std::cmp::Ordering::Less => {
+                return Err(RemoteSubmissionConflict::new(
+                    "SP1 attempt regressed below the durable checkpoint",
+                )
+                .into());
+            }
+            std::cmp::Ordering::Greater => {
+                *self = candidate;
+                return Ok(true);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+
+        let mut current_identity = self.clone();
+        current_identity.updated_at = 0;
+        candidate.updated_at = 0;
+        if current_identity != candidate {
+            return Err(
+                RemoteSubmissionConflict::new("SP1 identity changed within one attempt").into(),
+            );
+        }
+        candidate.updated_at = updated_at;
+        *self = candidate;
+        Ok(false)
     }
+}
+
+#[derive(Clone, Copy)]
+enum RemoteSubmissionKind {
+    Boundless,
+    Sp1,
+}
+
+fn validate_remote_submission_route(
+    kind: Option<RemoteSubmissionKind>,
+    route: PipelineRoute,
+) -> Result<()> {
+    let matches_route = match kind {
+        None => true,
+        Some(RemoteSubmissionKind::Boundless) => matches!(
+            route,
+            PipelineRoute {
+                guest_system: GuestSystem::Risc0,
+                runner: RunnerKind::Network,
+            }
+        ),
+        Some(RemoteSubmissionKind::Sp1) => matches!(
+            route,
+            PipelineRoute {
+                guest_system: GuestSystem::Sp1,
+                runner: RunnerKind::Network,
+            }
+        ),
+    };
+    anyhow::ensure!(
+        matches_route,
+        "runtime provider checkpoint does not match the canonical proving route"
+    );
+    Ok(())
 }
 
 impl StageTimingMetadata {
@@ -577,6 +1169,610 @@ impl StageTimingMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raiko2_runtime::{RunnerStatus, TaskRetentionState};
+
+    fn runtime_record(metadata: &TaskMetadata, artifact_refs: Vec<String>) -> RuntimeTaskRecord {
+        RuntimeTaskRecord {
+            task_id: "root".to_string(),
+            incarnation_id: uuid::Uuid::new_v4(),
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: PipelineKey::ShastaSp1.route(),
+            task_kind: "proposal".to_string(),
+            network_pair: metadata.network_pair.clone(),
+            artifact_refs,
+            runner_status: RunnerStatus::Allocated,
+            retention_state: TaskRetentionState::Retained,
+            image_ref: None,
+            proof_uri: None,
+            error: None,
+            metadata: serde_json::to_value(metadata).expect("serialize metadata"),
+            request_fingerprint: "root-request".into(),
+            updated_at: 0,
+        }
+    }
+
+    fn external_aggregate_metadata() -> TaskMetadata {
+        let request = AggregationTaskRequest {
+            request_id: "aggregate-request".to_string(),
+            proposal_ids: vec![1],
+            prover_config: raiko2_engine::ProverTaskConfig::default(),
+        };
+        TaskMetadata {
+            network_pair: "taiko_hoodi/hoodi".to_string(),
+            network: "taiko_hoodi".to_string(),
+            l1_network: "hoodi".to_string(),
+            proof_type: ProofType::Sp1,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(aggregate_task_ref(PipelineKey::ShastaSp1, &request)),
+            aggregate_request: Some(request),
+            aggregate_input_artifacts: vec![AggregateInputProofArtifact {
+                proof_ref: "external-input".to_string(),
+            }],
+            runtime: RuntimeMetadata::default(),
+        }
+    }
+
+    fn complete_boundless_runtime() -> TaskRuntimeMetadata {
+        TaskRuntimeMetadata {
+            provider_request_id: Some("0x1".to_string()),
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(1),
+            image_ref: Some("0ximage".to_string()),
+            deployment: Some("base".to_string()),
+            offchain: Some(false),
+            expires_at: Some(3),
+            lock_expires_at: Some(2),
+            submitted_at: Some(1),
+            quoted_mcycles_count: Some(1),
+            evaluated_mcycles_count: Some(1),
+            quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            quote_model_id: None,
+            max_price_multiplier: Some(1),
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: Some(1),
+            ..TaskRuntimeMetadata::default()
+        }
+    }
+
+    fn complete_sp1_runtime() -> TaskRuntimeMetadata {
+        TaskRuntimeMetadata {
+            provider_request_id: Some("sp1-request".to_string()),
+            expires_at: Some(3_601),
+            submitted_at: Some(1),
+            rebid_attempt: Some(1),
+            sp1_network_mode: Some(Sp1NetworkMode::Reserved),
+            sp1_fulfillment_strategy: Some(Sp1FulfillmentStrategy::Reserved),
+            sp1_skip_simulation: Some(false),
+            sp1_cycle_limit: Some(1_000_000),
+            sp1_timeout_secs: Some(3_600),
+            ..TaskRuntimeMetadata::default()
+        }
+    }
+
+    #[test]
+    fn unconfirmed_submission_marker_serializes_only_when_true() {
+        let mut runtime = TaskRuntimeMetadata::default();
+        let serialized = serde_json::to_value(&runtime).expect("serialize default runtime");
+        assert!(
+            serialized
+                .get("request_id_has_confirmed_submission")
+                .is_none(),
+            "the default false value must remain readable by the previous binary"
+        );
+
+        runtime.request_id_has_confirmed_submission = true;
+        let serialized = serde_json::to_value(&runtime).expect("serialize confirmed runtime");
+        assert_eq!(
+            serialized.get("request_id_has_confirmed_submission"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn unresolved_onchain_boundless_runtime_restores_a_signer_blocker() {
+        let mut runtime = complete_boundless_runtime();
+        let blocker = runtime
+            .boundless_account_blocker()
+            .expect("valid runtime checkpoint")
+            .expect("unconfirmed on-chain submission blocks the signer");
+        assert_eq!(blocker.checkpoint_key, B256::repeat_byte(0x11));
+        assert_eq!(blocker.lock_expires_at, 2);
+
+        runtime.remote_tx_hash = Some("0xtx".to_string());
+        assert!(
+            runtime
+                .boundless_account_blocker()
+                .expect("confirmed checkpoint")
+                .is_none()
+        );
+
+        runtime.remote_tx_hash = None;
+        runtime.offchain = Some(true);
+        runtime.request_digest = None;
+        runtime.broadcast_from_block = None;
+        assert!(
+            runtime
+                .boundless_account_blocker()
+                .expect("off-chain checkpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn completed_or_expired_boundless_runtime_does_not_restore_a_signer_blocker() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.runtime.aggregate = Some(complete_boundless_runtime());
+
+        assert_eq!(
+            metadata
+                .boundless_account_blockers(RunnerStatus::Failed, 1)
+                .expect("failed task blocker"),
+            vec![BoundlessAccountBlocker {
+                checkpoint_key: B256::repeat_byte(0x11),
+                lock_expires_at: 2,
+            }]
+        );
+        assert!(
+            metadata
+                .boundless_account_blockers(RunnerStatus::Completed, 1)
+                .expect("completed task")
+                .is_empty()
+        );
+        assert!(
+            metadata
+                .boundless_account_blockers(RunnerStatus::Failed, 2)
+                .expect("expired blocker")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn legacy_unconfirmed_boundless_runtime_fails_closed_without_fabricating_a_digest() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.request_digest = None;
+        runtime.broadcast_from_block = None;
+
+        runtime
+            .validate_remote_submission()
+            .expect("legacy checkpoint remains readable during rolling upgrade")
+            .expect("legacy checkpoint remains classified as Boundless");
+        let blocker = runtime
+            .boundless_account_blocker()
+            .expect("legacy checkpoint is valid")
+            .expect("legacy checkpoint blocks the shared signer");
+        assert_eq!(
+            blocker.checkpoint_key,
+            keccak256(b"legacy-boundless-checkpoint:0x1")
+        );
+        assert_eq!(blocker.lock_expires_at, 2);
+    }
+
+    fn boundless_checkpoint_identity(
+        provider_request_id: &str,
+        attempt: u32,
+    ) -> PendingProofCheckpointIdentity {
+        PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Boundless,
+            provider_request_id: provider_request_id.to_string(),
+            attempt: std::num::NonZeroU32::new(attempt).expect("non-zero attempt"),
+        }
+    }
+
+    #[test]
+    fn clear_boundless_checkpoint_requires_exact_identity() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.remote_tx_hash = Some("0xtx".to_string());
+        let original = runtime.clone();
+
+        runtime
+            .clear_remote_submission(&boundless_checkpoint_identity("0xother", 1), 10)
+            .expect_err("a different provider request must be rejected");
+        assert_eq!(runtime, original);
+
+        runtime
+            .clear_remote_submission(&boundless_checkpoint_identity("0x1", 2), 11)
+            .expect_err("a different attempt must be rejected");
+        assert_eq!(runtime, original);
+    }
+
+    #[test]
+    fn clear_boundless_checkpoint_removes_only_matching_submission() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.remote_tx_hash = Some("0xtx".to_string());
+
+        runtime
+            .clear_remote_submission(&boundless_checkpoint_identity("0x1", 1), 42)
+            .expect("matching checkpoint clears");
+
+        assert_eq!(
+            runtime,
+            TaskRuntimeMetadata {
+                updated_at: 42,
+                ..TaskRuntimeMetadata::default()
+            }
+        );
+    }
+
+    #[test]
+    fn clear_boundless_checkpoint_rejects_sp1_submission() {
+        let mut runtime = complete_sp1_runtime();
+        let original = runtime.clone();
+        let identity = PendingProofCheckpointIdentity {
+            backend: NetworkProverBackend::Sp1,
+            provider_request_id: "sp1-request".to_string(),
+            attempt: std::num::NonZeroU32::MIN,
+        };
+
+        runtime
+            .clear_remote_submission(&identity, 42)
+            .expect_err("terminal reset must not support SP1 checkpoints");
+
+        assert_eq!(runtime, original);
+    }
+
+    fn sp1_progress(provider_request_id: &str, attempt: u32) -> Sp1NetworkSubmissionProgress {
+        Sp1NetworkSubmissionProgress {
+            provider_request_id: provider_request_id.to_string(),
+            submitted_at: 1,
+            network_mode: Sp1NetworkMode::Reserved,
+            fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+            skip_simulation: false,
+            cycle_limit: 1_000_000,
+            timeout_secs: 3_600,
+            attempt,
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn sp1_progress_merge_rejects_regression_and_same_attempt_identity_drift() {
+        let mut runtime = TaskRuntimeMetadata::default();
+        assert!(
+            runtime
+                .merge_sp1_network_submission(&sp1_progress("request-2", 2), 100)
+                .expect("initial checkpoint")
+        );
+        assert!(
+            !runtime
+                .merge_sp1_network_submission(&sp1_progress("request-2", 2), 101)
+                .expect("replayed checkpoint")
+        );
+        let checkpoint = runtime.clone();
+
+        let stale = runtime
+            .merge_sp1_network_submission(&sp1_progress("request-1", 1), 200)
+            .expect_err("an older attempt is rejected");
+        assert!(stale.downcast_ref::<RemoteSubmissionConflict>().is_some());
+        assert_eq!(runtime, checkpoint);
+
+        let error = runtime
+            .merge_sp1_network_submission(&sp1_progress("other-request", 2), 200)
+            .expect_err("one attempt cannot change provider identity");
+        assert!(error.downcast_ref::<RemoteSubmissionConflict>().is_some());
+        assert_eq!(runtime, checkpoint);
+    }
+
+    #[test]
+    fn boundless_progress_merge_only_allows_transaction_hash_enrichment() {
+        let mut runtime = TaskRuntimeMetadata::default();
+        let mut progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
+            expires_at: 200,
+            lock_expires_at: 180,
+            submitted_at: 100,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1),
+            evaluated_mcycles_count: Some(1),
+            quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            quote_model_id: None,
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+        assert!(
+            runtime
+                .merge_boundless_submission(&progress, 100)
+                .expect("initial checkpoint")
+        );
+        assert!(runtime.request_id_has_confirmed_submission);
+        assert_eq!(
+            runtime.quote_strategy,
+            Some(BoundlessQuoteStrategy::Evaluated)
+        );
+        assert_eq!(runtime.quote_model_id, None);
+        progress.remote_tx_hash = Some("0xtx".to_string());
+        assert!(
+            !runtime
+                .merge_boundless_submission(&progress, 101)
+                .expect("transaction hash enrichment")
+        );
+
+        progress.remote_tx_hash = None;
+        let stale_hash = runtime
+            .merge_boundless_submission(&progress, 102)
+            .expect_err("a transaction hash cannot regress to missing");
+        assert!(
+            stale_hash
+                .downcast_ref::<RemoteSubmissionConflict>()
+                .is_some()
+        );
+        assert_eq!(runtime.remote_tx_hash.as_deref(), Some("0xtx"));
+        assert_eq!(runtime.submitted_at, Some(100));
+
+        progress.remote_tx_hash = Some("0xother".to_string());
+        let error = runtime
+            .merge_boundless_submission(&progress, 103)
+            .expect_err("one attempt cannot change transaction hash");
+        assert!(error.downcast_ref::<RemoteSubmissionConflict>().is_some());
+        assert_eq!(runtime.remote_tx_hash.as_deref(), Some("0xtx"));
+
+        progress.remote_tx_hash = Some("0xtx".to_string());
+        progress.request_digest = Some(format!("{}", B256::repeat_byte(0x22)));
+        let changed_digest = runtime
+            .merge_boundless_submission(&progress, 104)
+            .expect_err("one attempt cannot change its exact request digest");
+        assert!(
+            changed_digest
+                .downcast_ref::<RemoteSubmissionConflict>()
+                .is_some()
+        );
+
+        progress.request_digest = Some(format!("{}", B256::repeat_byte(0x11)));
+        progress.broadcast_from_block = Some(91);
+        let changed_lower_block = runtime
+            .merge_boundless_submission(&progress, 105)
+            .expect_err("one attempt cannot change its recovery lower block");
+        assert!(
+            changed_lower_block
+                .downcast_ref::<RemoteSubmissionConflict>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn boundless_progress_merge_rejects_same_request_quote_provenance_drift() {
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
+            expires_at: 200,
+            lock_expires_at: 180,
+            submitted_at: 100,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1_234),
+            evaluated_mcycles_count: None,
+            quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+            quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+        let mut durable = TaskRuntimeMetadata::default();
+        durable
+            .merge_boundless_submission(&progress, 100)
+            .expect("initial checkpoint");
+
+        let mut drifted = Vec::new();
+        let mut quoted = progress.clone();
+        quoted.quoted_mcycles_count = Some(1_235);
+        drifted.push(("quoted_mcycles_count", quoted));
+        let mut evaluated = progress.clone();
+        evaluated.evaluated_mcycles_count = Some(1_234);
+        drifted.push(("evaluated_mcycles_count", evaluated));
+        let mut strategy = progress.clone();
+        strategy.quote_strategy = Some(BoundlessQuoteStrategy::Evaluated);
+        drifted.push(("quote_strategy", strategy));
+        let mut model = progress.clone();
+        model.quote_model_id = Some("replacement-model".to_string());
+        drifted.push(("quote_model_id", model));
+
+        for (field, mut candidate) in drifted {
+            candidate.rebid_attempt = 2;
+            let mut runtime = durable.clone();
+            let error = runtime
+                .merge_boundless_submission(&candidate, 200)
+                .expect_err("same request id must preserve quote provenance");
+
+            assert!(
+                error.downcast_ref::<RemoteSubmissionConflict>().is_some(),
+                "{field} drift must produce a RemoteSubmissionConflict: {error:#}"
+            );
+            assert_eq!(
+                runtime, durable,
+                "{field} drift must not mutate durable state"
+            );
+        }
+    }
+
+    #[test]
+    fn boundless_progress_merge_rejects_legacy_quote_upgrade_for_same_request_id() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.quoted_mcycles_count = None;
+        runtime.evaluated_mcycles_count = None;
+        runtime.quote_strategy = None;
+        runtime.quote_model_id = None;
+        let durable = runtime.clone();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: false,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(1),
+            expires_at: 3,
+            lock_expires_at: 2,
+            submitted_at: 1,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1_234),
+            evaluated_mcycles_count: None,
+            quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+            quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 2,
+        };
+
+        let error = runtime
+            .merge_boundless_submission(&progress, 200)
+            .expect_err("same request id cannot add provenance missing from a legacy checkpoint");
+
+        assert!(error.downcast_ref::<RemoteSubmissionConflict>().is_some());
+        assert_eq!(runtime, durable);
+    }
+
+    #[test]
+    fn boundless_progress_merge_allows_new_rung_with_identical_quote_provenance() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.remote_tx_hash = Some(format!("{:#x}", B256::repeat_byte(0x33)));
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x22))),
+            broadcast_from_block: Some(1),
+            expires_at: 30,
+            lock_expires_at: 20,
+            submitted_at: 10,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1),
+            evaluated_mcycles_count: Some(1),
+            quote_strategy: Some(BoundlessQuoteStrategy::Evaluated),
+            quote_model_id: None,
+            max_price_multiplier: 2,
+            max_price_wei: Some("2".to_string()),
+            rebid_attempt: 2,
+        };
+
+        assert!(
+            runtime
+                .merge_boundless_submission(&progress, 300)
+                .expect("a new rung may update non-provenance fields")
+        );
+        assert_eq!(runtime.updated_at, 300);
+        assert_eq!(runtime.provider_request_id.as_deref(), Some("0x1"));
+        assert_eq!(runtime.remote_tx_hash, None);
+        assert!(runtime.request_id_has_confirmed_submission);
+        assert_eq!(runtime.request_digest, progress.request_digest);
+        assert_eq!(runtime.broadcast_from_block, Some(1));
+        assert_eq!(runtime.submitted_at, Some(10));
+        assert_eq!(runtime.lock_expires_at, Some(20));
+        assert_eq!(runtime.expires_at, Some(30));
+        assert_eq!(runtime.quoted_mcycles_count, Some(1));
+        assert_eq!(runtime.evaluated_mcycles_count, Some(1));
+        assert_eq!(
+            runtime.quote_strategy,
+            Some(BoundlessQuoteStrategy::Evaluated)
+        );
+        assert_eq!(runtime.quote_model_id, None);
+        assert_eq!(runtime.max_price_multiplier, Some(2));
+        assert_eq!(runtime.max_price_wei.as_deref(), Some("2"));
+        assert_eq!(runtime.rebid_attempt, Some(2));
+    }
+
+    #[test]
+    fn boundless_progress_merge_allows_new_quote_context_after_request_id_rotation() {
+        let mut runtime = complete_boundless_runtime();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x2".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: false,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x22))),
+            broadcast_from_block: Some(90),
+            expires_at: 400,
+            lock_expires_at: 380,
+            submitted_at: 300,
+            image_ref: "0xrotated-image".to_string(),
+            deployment: "taiko".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(2_000),
+            evaluated_mcycles_count: Some(1_500),
+            quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
+            quote_model_id: None,
+            max_price_multiplier: 2,
+            max_price_wei: Some("2".to_string()),
+            rebid_attempt: 2,
+        };
+
+        assert!(
+            runtime
+                .merge_boundless_submission(&progress, 300)
+                .expect("rotated request id accepts a new quote context")
+        );
+        assert_eq!(runtime.provider_request_id.as_deref(), Some("0x2"));
+        assert_eq!(runtime.quoted_mcycles_count, Some(2_000));
+        assert_eq!(runtime.evaluated_mcycles_count, Some(1_500));
+        assert_eq!(runtime.quote_strategy, Some(BoundlessQuoteStrategy::Fixed));
+        assert_eq!(runtime.quote_model_id, None);
+    }
+
+    #[test]
+    fn estimated_boundless_progress_without_evaluation_remains_resumable() {
+        let mut runtime = TaskRuntimeMetadata::default();
+        let progress = BoundlessSubmissionProgress {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            request_id_has_confirmed_submission: true,
+            request_digest: Some(format!("{}", B256::repeat_byte(0x11))),
+            broadcast_from_block: Some(90),
+            expires_at: 200,
+            lock_expires_at: 180,
+            submitted_at: 100,
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: false,
+            quoted_mcycles_count: Some(1_234),
+            evaluated_mcycles_count: None,
+            quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
+            quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
+            max_price_multiplier: 1,
+            max_price_wei: Some("1".to_string()),
+            rebid_attempt: 1,
+        };
+
+        runtime
+            .merge_boundless_submission(&progress, 100)
+            .expect("estimated progress persists");
+
+        assert!(runtime.has_boundless_submission_resume());
+        assert_eq!(runtime.evaluated_mcycles_count, None);
+        assert_eq!(runtime.quote_strategy, progress.quote_strategy);
+        assert_eq!(runtime.quote_model_id, progress.quote_model_id);
+    }
+
+    #[test]
+    fn legacy_boundless_submission_without_quote_remains_resumable_for_polling() {
+        let mut runtime = complete_boundless_runtime();
+        runtime.quoted_mcycles_count = None;
+        runtime.evaluated_mcycles_count = None;
+        runtime.quote_strategy = None;
+        runtime.quote_model_id = None;
+
+        assert!(runtime.has_boundless_submission_resume());
+        assert!(
+            runtime
+                .validate_remote_submission()
+                .expect("legacy checkpoint remains valid")
+                .is_some()
+        );
+    }
 
     #[test]
     fn task_metadata_roundtrips_canonical_proof_type() {
@@ -599,6 +1795,179 @@ mod tests {
         let roundtrip: TaskMetadata = serde_json::from_value(json).expect("deserialize metadata");
 
         assert_eq!(roundtrip.proof_type, ProofType::Risc0);
+    }
+
+    #[test]
+    fn publication_refs_include_external_aggregate_inputs() {
+        let metadata = external_aggregate_metadata();
+
+        assert_eq!(
+            publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1),
+            vec![
+                metadata.aggregate_task_id.clone().expect("aggregate ref"),
+                "external-input".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_for_record_rejects_identity_drift() {
+        let metadata = external_aggregate_metadata();
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let valid = runtime_record(&metadata, artifact_refs);
+        assert!(TaskMetadata::decode_for_record(&valid).is_ok());
+
+        let mut wrong_network = valid.clone();
+        wrong_network.network_pair = "taiko_dev/ethereum".to_string();
+        assert!(TaskMetadata::decode_for_record(&wrong_network).is_err());
+
+        let mut wrong_pipeline = valid.clone();
+        wrong_pipeline.pipeline_key = PipelineKey::ShastaRisc0;
+        wrong_pipeline.route = wrong_pipeline.pipeline_key.route();
+        assert!(TaskMetadata::decode_for_record(&wrong_pipeline).is_err());
+
+        let mut wrong_artifacts = valid;
+        wrong_artifacts.artifact_refs = vec!["different-input".to_string()];
+        assert!(TaskMetadata::decode_for_record(&wrong_artifacts).is_err());
+    }
+
+    #[test]
+    fn decode_for_record_accepts_only_legacy_sgxgeth_route_alias() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.proof_type = ProofType::SgxGeth;
+        metadata.aggregate_task_id = Some(aggregate_task_ref(
+            PipelineKey::ShastaSgxGeth,
+            metadata
+                .aggregate_request
+                .as_ref()
+                .expect("aggregate request"),
+        ));
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSgxGeth);
+        let mut legacy = runtime_record(&metadata, artifact_refs);
+        legacy.pipeline_key = PipelineKey::ShastaSgxGeth;
+        legacy.route = "sgx/remote".parse().expect("legacy SGXGETH route");
+
+        assert!(TaskMetadata::decode_for_record(&legacy).is_ok());
+
+        let mut wrong_route = legacy;
+        wrong_route.route = "risc0/local".parse().expect("mismatched route");
+        assert!(TaskMetadata::decode_for_record(&wrong_route).is_err());
+    }
+
+    #[test]
+    fn decode_for_record_rejects_noncanonical_metadata_shape() {
+        let metadata = external_aggregate_metadata();
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let valid = runtime_record(&metadata, artifact_refs);
+
+        let mut missing_request = valid.clone();
+        missing_request.metadata["aggregate_request"] = serde_json::Value::Null;
+        assert!(TaskMetadata::decode_for_record(&missing_request).is_err());
+
+        let mut wrong_task_id = valid.clone();
+        wrong_task_id.metadata["aggregate_task_id"] = serde_json::json!("wrong");
+        assert!(TaskMetadata::decode_for_record(&wrong_task_id).is_err());
+
+        let mut mismatched_inputs = metadata;
+        let request = mismatched_inputs
+            .aggregate_request
+            .as_mut()
+            .expect("aggregate request");
+        request.proposal_ids.push(2);
+        mismatched_inputs.aggregate_task_id = Some(aggregate_task_ref(
+            PipelineKey::ShastaSp1,
+            mismatched_inputs
+                .aggregate_request
+                .as_ref()
+                .expect("aggregate request"),
+        ));
+        let mismatch_refs =
+            publication_proof_artifact_refs(&mismatched_inputs, PipelineKey::ShastaSp1);
+        let mismatched_inputs = runtime_record(&mismatched_inputs, mismatch_refs);
+        assert!(TaskMetadata::decode_for_record(&mismatched_inputs).is_err());
+
+        let mut unknown_legacy_index = valid;
+        unknown_legacy_index.metadata["proof_ids"] = serde_json::json!(["legacy"]);
+        assert!(TaskMetadata::decode_for_record(&unknown_legacy_index).is_err());
+    }
+
+    #[test]
+    fn decode_for_record_rejects_partial_provider_checkpoint() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
+            provider_request_id: Some("0xpartial".to_string()),
+            submitted_at: Some(1),
+            expires_at: Some(2),
+            rebid_attempt: Some(1),
+            ..TaskRuntimeMetadata::default()
+        });
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let record = runtime_record(&metadata, artifact_refs);
+
+        let error = TaskMetadata::decode_for_record(&record)
+            .expect_err("partial provider checkpoint must fail closed");
+        assert!(error.to_string().contains("no unique backend"));
+    }
+
+    #[test]
+    fn decode_for_record_accepts_sp1_checkpoint_only_on_the_network_route() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.runtime.aggregate = Some(complete_sp1_runtime());
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let mut network = runtime_record(&metadata, artifact_refs);
+        network.route = "sp1/network".parse().expect("parse SP1 network route");
+        assert!(TaskMetadata::decode_for_record(&network).is_ok());
+
+        let mut local = network;
+        local.route = PipelineKey::ShastaSp1.route();
+        let error = TaskMetadata::decode_for_record(&local)
+            .expect_err("SP1 provider checkpoint must not load on a local route");
+        assert!(error.to_string().contains("canonical proving route"));
+    }
+
+    #[test]
+    fn decode_for_record_accepts_boundless_checkpoint_only_on_the_network_pipeline() {
+        let mut metadata = external_aggregate_metadata();
+        metadata.proof_type = ProofType::Risc0;
+        let request = metadata
+            .aggregate_request
+            .clone()
+            .expect("aggregate request");
+        metadata.aggregate_task_id = Some(aggregate_task_ref(
+            PipelineKey::ShastaRisc0Network,
+            &request,
+        ));
+        metadata.runtime.aggregate = Some(complete_boundless_runtime());
+        let artifact_refs =
+            publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0Network);
+        let mut network = runtime_record(&metadata, artifact_refs);
+        network.pipeline_key = PipelineKey::ShastaRisc0Network;
+        network.route = PipelineKey::ShastaRisc0Network.route();
+        assert!(TaskMetadata::decode_for_record(&network).is_ok());
+
+        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::ShastaRisc0, &request));
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0);
+        let mut local = runtime_record(&metadata, artifact_refs);
+        local.pipeline_key = PipelineKey::ShastaRisc0;
+        local.route = PipelineKey::ShastaRisc0.route();
+        let error = TaskMetadata::decode_for_record(&local)
+            .expect_err("Boundless provider checkpoint must not load on a local pipeline");
+        assert!(error.to_string().contains("canonical proving route"));
+    }
+
+    #[test]
+    fn decode_for_record_rejects_mixed_provider_checkpoint_fields() {
+        let mut metadata = external_aggregate_metadata();
+        let mut runtime = complete_sp1_runtime();
+        runtime.remote_tx_hash = Some("0xdeadbeef".to_string());
+        metadata.runtime.aggregate = Some(runtime);
+        let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
+        let mut record = runtime_record(&metadata, artifact_refs);
+        record.route = "sp1/network".parse().expect("parse SP1 network route");
+
+        let error = TaskMetadata::decode_for_record(&record)
+            .expect_err("mixed provider checkpoint fields must fail closed");
+        assert!(error.to_string().contains("mixes provider fields"));
     }
 
     #[test]

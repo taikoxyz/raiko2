@@ -7,11 +7,23 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 anyhow.workspace = true
+alloy-primitives.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+google-cloud-storage.workspace = true
+google-cloud-gax = "1.10.0"
 raiko2-pipeline.workspace = true
+raiko2-primitives.workspace = true
+rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
-tokio-rusqlite.workspace = true
-rusqlite.workspace = true
+tracing.workspace = true
+uuid.workspace = true

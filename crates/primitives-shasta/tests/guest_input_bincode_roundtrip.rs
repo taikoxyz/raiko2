@@ -7,7 +7,7 @@ fn guest_input_json_to_bincode_roundtrip_shared_fixture() -> Result<(), Box<dyn 
     // Keep this test pinned to the repo's shared Shasta fixture so we catch any newly introduced
     // non-bincode-compatible custom serde early (before SP1 runtime).
     let json = include_str!(
-        "../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+        "../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json"
     );
     let input: GuestInput = serde_json::from_str(json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -117,7 +117,23 @@ fn guest_input_json_to_bincode_roundtrip_shared_fixture() -> Result<(), Box<dyn 
     // Ensure the encoding is stable (helps catch accidental config-dependent encoding).
     let bytes2 = bincode::serialize(&decoded)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    assert_eq!(bytes2, bytes, "bincode bytes changed after roundtrip");
+    if bytes2 != bytes {
+        let first_diff = bytes
+            .iter()
+            .zip(&bytes2)
+            .position(|(expected, actual)| expected != actual)
+            .unwrap_or(bytes.len().min(bytes2.len()));
+        explain_guest_input_offset(&input, first_diff);
+        let window_start = first_diff.saturating_sub(8);
+        let window_end = (first_diff + 8).min(bytes.len().min(bytes2.len()));
+        panic!(
+            "bincode bytes changed after roundtrip: first_diff={first_diff}, original_len={}, roundtrip_len={}, original={:?}, roundtrip={:?}",
+            bytes.len(),
+            bytes2.len(),
+            &bytes[window_start..window_end],
+            &bytes2[window_start..window_end]
+        );
+    }
     Ok(())
 }
 

@@ -15,8 +15,6 @@
 
 use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy::{
-    consensus::TrieAccount,
-    consensus::transaction::SignerRecoverable,
     primitives::{Address, B256, address},
     providers::{Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
@@ -114,11 +112,11 @@ async fn main() -> Result<()> {
         evm_config: &evm_config,
         metrics: &mut metrics,
     };
-    let (blocks, witnesses, accounts) =
+    let (blocks, witnesses) =
         fetch_inputs(&provider, args.block_number, validation_env.metrics).await?;
     validation_env.metrics.set_block_stats(&blocks);
 
-    for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
+    for (block, witness) in blocks.into_iter().zip(witnesses) {
         diagnose_witness_addresses(&args, &rpc_provider, &block, &witness)
             .await
             .context("diagnose witness address coverage")?;
@@ -128,7 +126,6 @@ async fn main() -> Result<()> {
             &rpc_provider,
             &block,
             &witness,
-            &callers,
             &mut validation_env,
         )
         .await?
@@ -137,9 +134,8 @@ async fn main() -> Result<()> {
         }
 
         let start = Instant::now();
-        let block_hash =
-            validate_block_captured(block, &witness, callers, &taiko_chain_spec, &evm_config)
-                .context("Stateless validation failed")?;
+        let block_hash = validate_block_captured(block, &witness, &taiko_chain_spec, &evm_config)
+            .context("Stateless validation failed")?;
         validation_env
             .metrics
             .observe("stateless.validate_block", start.elapsed(), 1);
@@ -186,11 +182,7 @@ async fn fetch_inputs(
     provider: &NetworkProvider,
     block_number: u64,
     metrics: &mut RunMetrics,
-) -> Result<(
-    Vec<Block>,
-    Vec<ExecutionWitness>,
-    Vec<alloy_primitives::map::AddressMap<TrieAccount>>,
-)> {
+) -> Result<(Vec<Block>, Vec<ExecutionWitness>)> {
     let block_numbers = vec![block_number];
     let blocks = {
         let start = Instant::now();
@@ -212,20 +204,12 @@ async fn fetch_inputs(
         );
         res.context("Failed to fetch witnesses")?
     };
-    let signers = blocks.iter().map(collect_signers).collect::<Vec<_>>();
-    let signer_count = signers.iter().map(Vec::len).sum::<usize>();
-    let accounts = {
-        let start = Instant::now();
-        let res = provider.batch_accounts(&block_numbers, &signers).await;
-        metrics.observe("provider.batch_accounts", start.elapsed(), signer_count);
-        res.context("Failed to fetch accounts")?
-    };
 
-    if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
+    if blocks.len() != witnesses.len() {
         bail!("Provider returned mismatched input lengths");
     }
 
-    Ok((blocks, witnesses, accounts))
+    Ok((blocks, witnesses))
 }
 
 struct ValidationEnv<'a> {
@@ -332,7 +316,6 @@ async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
     rpc_provider: &P,
     block: &Block,
     witness: &ExecutionWitness,
-    callers: &alloy_primitives::map::AddressMap<TrieAccount>,
     validation_env: &mut ValidationEnv<'_>,
 ) -> Result<bool> {
     if !args.diagnose_golden_touch && !args.supplement_golden_touch_proof {
@@ -372,7 +355,6 @@ async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
     let block_hash = validate_block_captured(
         block.clone(),
         &supplemented_witness,
-        callers.clone(),
         validation_env.chain_spec,
         validation_env.evm_config,
     )
@@ -480,12 +462,11 @@ fn print_address_coverage(
 fn validate_block_captured(
     block: Block,
     witness: &ExecutionWitness,
-    callers: alloy_primitives::map::AddressMap<TrieAccount>,
     chain_spec: &std::sync::Arc<TaikoChainSpec>,
     evm_config: &alethia_reth_block::config::TaikoEvmConfig,
 ) -> Result<alloy_primitives::B256> {
     match catch_unwind(AssertUnwindSafe(|| {
-        validate_block(block, witness, callers, chain_spec, evm_config)
+        validate_block(block, witness, chain_spec, evm_config)
     })) {
         Ok(result) => result.context("validate_block returned error"),
         Err(payload) => bail!("validate_block panicked: {}", panic_message(payload)),
@@ -500,14 +481,6 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
             Err(_) => "unknown panic payload".to_string(),
         },
     }
-}
-
-fn collect_signers(block: &Block) -> Vec<alloy_primitives::Address> {
-    block
-        .body
-        .transactions()
-        .filter_map(|tx| tx.recover_signer().ok())
-        .collect()
 }
 
 fn load_supported_chain_specs(chain_spec_file: Option<&PathBuf>) -> Result<SupportedChainSpecs> {

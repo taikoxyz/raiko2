@@ -1,6 +1,7 @@
 #[cfg(feature = "guest-tools")]
 mod bench_guest;
 mod download_guest_elves;
+mod export_unzen_zk_gas_schedule;
 #[cfg(feature = "guest-tools")]
 mod latest_proposal_request;
 #[cfg(feature = "guest-tools")]
@@ -54,6 +55,9 @@ enum Cmd {
     #[cfg(feature = "guest-tools")]
     GuestDigests(xtask_build_guest::guest_digests::GuestDigestsArgs),
 
+    /// Export the pinned alethia-reth Unzen opcode and precompile zk-gas multipliers.
+    ExportUnzenZkGasSchedule,
+
     /// Register the current Shasta guest image ids on verifier contracts.
     #[cfg(feature = "guest-tools")]
     RegisterImage(register_image::RegisterImageArgs),
@@ -87,6 +91,7 @@ async fn main() -> Result<()> {
         Cmd::DownloadGuestElves(args) => download_guest_elves::run(&root, args),
         #[cfg(feature = "guest-tools")]
         Cmd::GuestDigests(args) => xtask_build_guest::guest_digests::run(&root, args),
+        Cmd::ExportUnzenZkGasSchedule => export_unzen_zk_gas_schedule::run(),
         #[cfg(feature = "guest-tools")]
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
         #[cfg(any(feature = "guest-tools", feature = "tee-provider-release"))]

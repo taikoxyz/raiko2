@@ -6,8 +6,22 @@ software `proverGas`; opcode fixtures can run through either the fast synthetic 
 revm-backed guest; proposal-level GuestInput runs can also collect RISC0 cycle metrics.
 
 V1 intentionally exports a one-dimensional result shape compatible with the current alethia-reth
-Uzen table. Warm/cold storage access, argument-dependent precompile cost, and memory-size sweeps are
+Unzen table. Warm/cold storage access, argument-dependent precompile cost, and memory-size sweeps are
 tracked as future dimensions, not V1 coefficients.
+
+The multiplier source of truth is the Cargo-pinned
+`alethia-reth-evm::zk_gas::unzen::UNZEN_ZK_GAS_SCHEDULE`. Python keeps only experiment metadata
+such as names, categories, and fixture templates; it does not duplicate the pricing table. Commands
+that need the active schedule obtain it at runtime through:
+
+```bash
+cargo run --quiet --locked -p xtask --no-default-features -- export-unzen-zk-gas-schedule
+```
+
+`generate` invokes the exporter when a manifest enables schedule-driven expansion, while `damage`
+and `inventory` always invoke it. The first such command may pay the one-time Cargo dependency build
+cost; subsequent invocations use Cargo's incremental cache. `run`, `run-proposal`, and `fit` do not
+load the schedule.
 
 ## Commands
 
@@ -88,7 +102,7 @@ metric explicitly:
   --out /tmp/raiko2-opcode-gas/risc0-report
 ```
 
-Compute an eth-limit damage frontier and current-Uzen containment report from fit results:
+Compute an eth-limit damage frontier and current-Unzen containment report from fit results:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py damage \
@@ -99,7 +113,7 @@ Compute an eth-limit damage frontier and current-Uzen containment report from fi
   --out /tmp/raiko2-opcode-gas/damage
 ```
 
-Write the Uzen opcode/precompile coverage inventory:
+Write the Unzen opcode/precompile coverage inventory:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py inventory \
@@ -121,12 +135,12 @@ controlled target-count sweep. Its `--target-raw-gas` value is report metadata f
 it does not mean the proposal itself is exactly one 30M-gas block.
 
 The `damage` command is measurement-only. It answers how much measured workload fits under an Ethereum gas
-limit, then shows how much of that surface remains reachable under the current-Uzen smoke multipliers
+limit, then shows how much of that surface remains reachable under the current-Unzen multipliers
 and a chosen block zk gas limit. Realistic block and app impact is a later input to the same report,
 not inferred from the smoke lab.
 
 The `inventory` command is coverage-only. It lists every opcode and precompile entry from the current
-Uzen table and marks whether the smoke manifest measures it or which future measurement path is
+Unzen table and marks whether the smoke manifest measures it or which future measurement path is
 needed.
 
 For a quick smoke after changing launcher code, `target/debug/guest-launcher` built with
@@ -148,12 +162,14 @@ replace it with a lower-level direct interpreter call unless there is a specific
 that would drop useful revm execution context. The remaining gap is not interpreter reuse, but
 realistic context.
 
-The smoke manifest now expands to every Uzen opcode that can be isolated without state, environment,
+The smoke manifest now expands to every active Unzen opcode that can be isolated without state, environment,
 or CALL/CREATE wrapper semantics, including arithmetic, comparison, bitwise, stack, fixed
 control-flow, and memory-copy templates.
 
-The precompile-lab guest supports direct body measurements for every Uzen precompile row through
-fixed deterministic inputs. These are direct body calls, not `STATICCALL` dispatch measurements.
+The precompile-lab guest supports direct body measurements for the active Unzen precompiles with
+existing fixed deterministic input templates. CLZ (`0x1e`) and p256 (`0x100`) are listed by
+`inventory` as `unsupported_by_experiment`; this change does not add guest implementations or
+fixtures for them. These are direct body calls, not `STATICCALL` dispatch measurements.
 `STATICCALL` wrapper cost, warm/cold account access, precompile argument sweeps, stateful opcodes,
 and full block execution are TODOs for later suites.
 

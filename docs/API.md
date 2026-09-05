@@ -1284,8 +1284,10 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   That older release cohort measured about 175 mcycles at one child and 817-818 at five children:
   the five-child quote is 10.02-10.16% high, and extending the observed 1-to-5 trend would approach
   roughly 12% overquote at larger counts. Those observations do not measure the shipped aggregation
-  guest. The artifact pins its ELF SHA-256 as
-  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
+  guest. The artifact pins aggregation ELF SHA-256
+  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, which predates the
+  aggregation guest rebuilt for the checkpoint-layout probe (raiko2 #116), so the shipped
+  `crates/guests/elf/risc0_shasta_aggregation.elf` no longer hashes to that value; its
   `disable-dev-mode` build prevents the development-receipt probe and the artifact has no aggregation
   image ID. Error direction for the running guest is therefore unknown. With the
   committed scalar and v4 limit, the estimator's multiplication/conversion overflow fallback is

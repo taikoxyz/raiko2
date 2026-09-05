@@ -18,7 +18,9 @@ pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witnes
 pub use crate::trie::StatelessTrie;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::{
-    FilteredBlockExecutionOutcome, read_parent_storage_with_witness_resources,
+    FilteredBlockExecutionOutcome, ParentCheckpointRecord,
+    read_parent_shasta_checkpoint_with_witness_resources,
+    read_parent_storage_with_witness_resources,
     reconstruct_block_from_transactions_with_witness_resources, validate_block,
     validate_block_with_ancestor_headers, validate_block_with_witness_resources,
 };

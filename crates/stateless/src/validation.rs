@@ -14,7 +14,8 @@ use alethia_reth_consensus::validation::{
 use alloy_consensus::{BlockHeader, Header, TxReceipt, proofs, transaction::Recovered};
 use alloy_primitives::{Address, B256, U256};
 use raiko2_primitives::{
-    ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
+    ExecutionWitness, ShastaCheckpointLayout, StatelessValidationError, WitnessHeader,
+    WitnessStateNode, shasta_checkpoint_storage_slot_candidates,
 };
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_consensus_common::validation::validate_block_pre_execution;
@@ -125,6 +126,86 @@ pub fn read_parent_storage_with_witness_resources(
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
     trie.storage_from_witness(address, slot)
         .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))
+}
+
+/// A `CheckpointRecord` read from the parent state of the Shasta `SignalService` checkpoint store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParentCheckpointRecord {
+    /// Layout the record was found under.
+    pub layout: ShastaCheckpointLayout,
+    /// Stored `blockHash`.
+    pub block_hash: B256,
+    /// Stored `stateRoot`.
+    pub state_root: B256,
+}
+
+/// Read the parent-state `CheckpointRecord` for `block_number`, probing every known
+/// `SignalService` layout in [`ShastaCheckpointLayout::PROBE_ORDER`] from one witness trie.
+///
+/// Every read is MPT-proven against the parent state root, so the probe is fail-closed and never
+/// forgeable: a candidate whose `blockHash` slot is proven zero is absent and the next layout is
+/// tried; a candidate whose `blockHash` is present but whose `stateRoot` is zero is malformed and
+/// fails; a slot the witness cannot prove (an unrevealed trie node) is an error rather than a
+/// fall-through, so a host that omits a candidate's proof cannot steer which layout is read.
+///
+/// # Errors
+///
+/// Returns `StatelessValidationError::ParentCheckpointUnavailable` when no layout holds a record,
+/// when a record is malformed, or when the witness cannot prove a probed slot, and propagates
+/// ancestor-header and witness reveal errors.
+pub fn read_parent_shasta_checkpoint_with_witness_resources(
+    checkpoint_store: Address,
+    block_number: u64,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+) -> Result<ParentCheckpointRecord, StatelessValidationError> {
+    let pre_state_root = determine_pre_state_root(ancestor_headers)?;
+    let (mut trie, _) =
+        SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
+    let mut read_word = |field: &str, layout: ShastaCheckpointLayout, slot: U256| {
+        trie.storage_from_witness(checkpoint_store, slot)
+            .map(B256::from)
+            .map_err(|err| {
+                StatelessValidationError::ParentCheckpointUnavailable(format!(
+                    "failed to read parent CheckpointStore {field} for block {block_number} ({} \
+                     layout, slot {slot:#x}): {err}",
+                    layout.label()
+                ))
+            })
+    };
+
+    for (layout, (block_hash_slot, state_root_slot)) in
+        shasta_checkpoint_storage_slot_candidates(block_number)
+    {
+        let block_hash = read_word("blockHash", layout, block_hash_slot)?;
+        if block_hash == B256::ZERO {
+            continue;
+        }
+        let state_root = read_word("stateRoot", layout, state_root_slot)?;
+        if state_root == B256::ZERO {
+            return Err(StatelessValidationError::ParentCheckpointUnavailable(
+                format!(
+                    "parent CheckpointStore stateRoot is zero for block {block_number} ({} layout)",
+                    layout.label()
+                ),
+            ));
+        }
+        return Ok(ParentCheckpointRecord {
+            layout,
+            block_hash,
+            state_root,
+        });
+    }
+
+    Err(StatelessValidationError::ParentCheckpointUnavailable(
+        format!(
+            "parent CheckpointStore blockHash is zero for block {block_number} in all known layouts ({})",
+            ShastaCheckpointLayout::PROBE_ORDER
+                .map(ShastaCheckpointLayout::label)
+                .join(", ")
+        ),
+    ))
 }
 
 // Compact witness headers carry host-trusted hash/timestamp metadata (see `WitnessHeader` docs);

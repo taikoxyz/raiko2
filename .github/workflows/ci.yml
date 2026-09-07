@@ -34,6 +34,12 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
+          # Load-bearing for the `!crates/guests/elf/**` exclusion in `rust` below. The default
+          # quantifier (`some`) ORs every pattern of a filter together, and a negated pattern
+          # matches every file *outside* what it excludes -- which made `rust` unconditionally
+          # true for any change at all. `some-with-excludes` is the intended "matches at least
+          # one include and no exclude". Do not drop this while any filter uses a `!` pattern.
+          predicate-quantifier: some-with-excludes
           filters: |
             rust:
               - '**/*.rs'
@@ -41,6 +47,9 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'crates/**'
+              # Committed ELFs have their own `guest_artifacts` lane: an ELF-only change is meant
+              # to run just `rust-test-xtask` (provenance) rather than the full Rust suite, which
+              # is what the `FULL_RUST_LANES_REQUIRED` split in the `rust` gate job expects.
               - '!crates/guests/elf/**'
               - 'bin/**'
               - 'guests/**'
@@ -418,7 +427,10 @@ jobs:
       - rust-test-runtime
       - rust-test-prover
       - rust-test-xtask
-    if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
+    # Must cover the union of every lane in `needs` above, or a lane can run, fail, and be
+    # unobserved: this gate is the required status check, `rust-test-xtask` is not. `opcode_gas`
+    # is here because `rust-test-xtask` runs on it.
+    if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.opcode_gas == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -21,8 +21,10 @@ mod serde_bincode;
 mod stateless;
 
 pub use chain_spec::{
-    ChainSpec, SupportedChainSpecs, builtin_taiko_chain_spec, shasta_checkpoint_storage_slots,
-    shasta_checkpoint_store_address, shasta_taiko_l2_address, storage_slot_key,
+    ChainSpec, SHASTA_CHECKPOINT_VERSION, ShastaCheckpointLayout, SupportedChainSpecs,
+    builtin_taiko_chain_spec, shasta_checkpoint_storage_keys,
+    shasta_checkpoint_storage_slot_candidates, shasta_checkpoint_store_address,
+    shasta_taiko_l2_address, storage_slot_key,
 };
 pub use context::{
     L2BlockRange, PreflightOptions, PreflightRpcClientConfig, PreflightRpcRetryConfig,

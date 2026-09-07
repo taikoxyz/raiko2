@@ -1,6 +1,6 @@
 use alloy::{eips::BlockNumberOrTag, rlp::decode_exact};
 use alloy_primitives::{Address, B256, keccak256, map::AddressMap};
-use alloy_rpc_types_eth::EIP1186AccountProofResponse;
+use alloy_rpc_types_eth::{EIP1186AccountProofResponse, EIP1186StorageProof};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{ExecutionWitness, RaikoError, RaikoResult, WitnessStateNode};
 use risc0_ethereum_trie::Trie;
@@ -113,6 +113,34 @@ fn build_storage_proof_requests(
     }
 
     Ok(requests)
+}
+
+/// Rejects an `eth_getProof` response that does not carry exactly one storage proof per requested
+/// key. Absent (zero-valued) slots are the entries a non-conforming client or proxy is most likely
+/// to drop, and a witness missing their exclusion proofs would only surface later as an unresolved
+/// trie node inside guest validation instead of failing the preflight here.
+fn ensure_storage_proof_covers_keys(
+    address: Address,
+    parent_block_number: u64,
+    requested_keys: &[B256],
+    storage_proofs: &[EIP1186StorageProof],
+) -> RaikoResult<()> {
+    let returned_keys = storage_proofs
+        .iter()
+        .map(|storage_proof| storage_proof.key.as_b256())
+        .collect::<Vec<_>>();
+    let missing_keys = requested_keys
+        .iter()
+        .filter(|key| !returned_keys.contains(key))
+        .collect::<Vec<_>>();
+    if storage_proofs.len() != requested_keys.len() || !missing_keys.is_empty() {
+        return Err(RaikoError::RPC(format!(
+            "storage eth_getProof for address {address} at parent block {parent_block_number} returned {} storage proofs for {} requested keys (missing {missing_keys:?})",
+            storage_proofs.len(),
+            requested_keys.len()
+        )));
+    }
+    Ok(())
 }
 
 fn account_proof_batch_size() -> usize {
@@ -259,6 +287,7 @@ impl RpcL2Provider {
                     *block_number,
                     *parent_block_number,
                     *address,
+                    storage_keys,
                     Box::pin(
                         batch
                             .add_call::<_, EIP1186AccountProofResponse>(
@@ -288,12 +317,20 @@ impl RpcL2Provider {
                 ))
             })?;
 
-            for (block_idx, block_number, parent_block_number, address, request) in pending {
+            for (block_idx, block_number, parent_block_number, address, storage_keys, request) in
+                pending
+            {
                 let proof = request.await.map_err(|e| {
                     RaikoError::RPC(format!(
                         "error collecting storage eth_getProof for address {address} at parent block {parent_block_number} (block {block_number}): {e}"
                     ))
                 })?;
+                ensure_storage_proof_covers_keys(
+                    address,
+                    parent_block_number,
+                    storage_keys,
+                    &proof.storage_proof,
+                )?;
                 result[block_idx].extend(
                     proof
                         .account_proof
@@ -340,5 +377,59 @@ mod tests {
             err.to_string()
                 .contains("account proof block count (2) does not match address list count (1)")
         );
+    }
+
+    fn storage_proof(key: B256) -> EIP1186StorageProof {
+        EIP1186StorageProof {
+            key: key.into(),
+            value: alloy_primitives::U256::ZERO,
+            proof: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn storage_proof_coverage_accepts_every_requested_key_in_any_order() {
+        let keys = [B256::from([0x01; 32]), B256::from([0x02; 32])];
+
+        ensure_storage_proof_covers_keys(
+            Address::ZERO,
+            9,
+            &keys,
+            &[storage_proof(keys[1]), storage_proof(keys[0])],
+        )
+        .expect("zero-valued proofs for every requested key are complete");
+    }
+
+    #[test]
+    fn storage_proof_coverage_rejects_dropped_keys() {
+        let keys = [B256::from([0x01; 32]), B256::from([0x02; 32])];
+
+        let err =
+            ensure_storage_proof_covers_keys(Address::ZERO, 9, &keys, &[storage_proof(keys[0])])
+                .expect_err("a dropped key must fail fast");
+
+        assert!(matches!(err, RaikoError::RPC(_)));
+        assert!(
+            err.to_string()
+                .contains("returned 1 storage proofs for 2 requested keys")
+        );
+    }
+
+    #[test]
+    fn storage_proof_coverage_rejects_substituted_keys() {
+        let keys = [B256::from([0x01; 32]), B256::from([0x02; 32])];
+
+        let err = ensure_storage_proof_covers_keys(
+            Address::ZERO,
+            9,
+            &keys,
+            &[
+                storage_proof(keys[0]),
+                storage_proof(B256::from([0x03; 32])),
+            ],
+        )
+        .expect_err("a substituted key must fail fast");
+
+        assert!(err.to_string().contains("missing"));
     }
 }

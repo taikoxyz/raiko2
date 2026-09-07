@@ -41,6 +41,19 @@ Update request schema validation in:
 - `internal/prover/validate.go`
 - `internal/prover/aggregate_validate.go`
 
+Mirror the Shasta stalled-anchor checkpoint probe. `raiko2` reads the parent `CheckpointRecord`
+from the L2 SignalService predeploy (`0x…0005`, mapping base slot 254) and probes both known
+storage layouts in order: nested v1 first
+(`mapping(uint256 VERSION => mapping(uint48 => CheckpointRecord))` with `VERSION = 1`, introduced by
+taiko-mono #21820 and first tagged `taiko-alethia-protocol-v3.1.0`), then flat
+(`mapping(uint48 => CheckpointRecord)`, what every live chain runs today). A layout whose `blockHash`
+slot is proven zero is skipped; an unproven slot fails closed. `gaiko2`'s
+`internal/prover/manifest_validate.go` derives the flat slot only and errors on a zero `blockHash`, so
+once any chain upgrades its SignalService to the nested layout the `sgxgeth` lane rejects every
+stalled-anchor proposal that `raiko2` accepts. Land the same probe in `gaiko2` before the L2 upgrade;
+the request payload already carries the nested-slot proof nodes because `raiko2` requests all four
+candidate storage keys in preflight.
+
 Update checked-in testdata and tests that still assert the old schemas. Common touch points include:
 
 - `internal/protocol/shasta_v1_test.go`

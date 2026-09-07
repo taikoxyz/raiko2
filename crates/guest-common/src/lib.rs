@@ -14,8 +14,8 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{bail, ensure, Context, Result};
 use raiko2_primitives::{
-    builtin_taiko_chain_spec, shasta_checkpoint_storage_slots, shasta_checkpoint_store_address,
-    shasta_taiko_l2_address, StatelessInput, WitnessHeader,
+    builtin_taiko_chain_spec, shasta_checkpoint_store_address, shasta_taiko_l2_address,
+    StatelessInput, WitnessHeader,
 };
 use raiko2_primitives_shasta::{
     instance::{
@@ -35,6 +35,7 @@ use raiko2_protocol_shasta::shasta::{
     prepare_source_manifest_with_max_blocks, ParentBlockContext, ProposalMetadata,
 };
 use raiko2_stateless::{
+    read_parent_shasta_checkpoint_with_witness_resources,
     read_parent_storage_with_witness_resources,
     reconstruct_block_from_transactions_with_witness_resources,
 };
@@ -336,10 +337,6 @@ fn anchor_block_number_from_storage_word(word: U256) -> u64 {
     u64::from_be_bytes(value)
 }
 
-fn storage_word_as_b256(word: U256) -> B256 {
-    B256::from(word.to_be_bytes::<32>())
-}
-
 fn verified_parent_shasta_checkpoint(
     guest_input: &GuestInput,
     block_number: u64,
@@ -351,40 +348,24 @@ fn verified_parent_shasta_checkpoint(
     let checkpoint_store = shasta_checkpoint_store_address(first_witness.chain_spec.chain_id)
         .context("failed to derive CheckpointStore address")?;
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
-    let (block_hash_slot, state_root_slot) = shasta_checkpoint_storage_slots(block_number);
-    let block_hash = storage_word_as_b256(
-        read_parent_storage_with_witness_resources(
-            checkpoint_store,
-            block_hash_slot,
-            &first_witness.witness,
-            &ancestor_headers,
-            guest_input.proposal_state_nodes(),
-        )
-        .context("failed to read parent CheckpointStore blockHash")?,
-    );
-    let state_root = storage_word_as_b256(
-        read_parent_storage_with_witness_resources(
-            checkpoint_store,
-            state_root_slot,
-            &first_witness.witness,
-            &ancestor_headers,
-            guest_input.proposal_state_nodes(),
-        )
-        .context("failed to read parent CheckpointStore stateRoot")?,
-    );
-    ensure!(
-        block_hash != B256::ZERO,
-        "parent CheckpointStore blockHash is zero"
-    );
-    ensure!(
-        state_root != B256::ZERO,
-        "parent CheckpointStore stateRoot is zero"
-    );
+
+    // Every known SignalService layout is probed from one MPT-proven parent state (nested v1, then
+    // flat), so an absent or wrong slot is fail-closed and never forgeable: only a proven-zero
+    // blockHash advances to the next layout, and a slot the witness cannot prove is an error rather
+    // than a fall-through. The host preflight runs the same reader, so host and guest cannot drift.
+    let record = read_parent_shasta_checkpoint_with_witness_resources(
+        checkpoint_store,
+        block_number,
+        &first_witness.witness,
+        &ancestor_headers,
+        guest_input.proposal_state_nodes(),
+    )
+    .context("failed to verify parent CheckpointStore checkpoint")?;
 
     Ok(DecodedAnchorCheckpoint {
         block_number,
-        block_hash,
-        state_root,
+        block_hash: record.block_hash,
+        state_root: record.state_root,
     })
 }
 
@@ -1153,7 +1134,8 @@ mod tests {
     use alloy_signer_local::PrivateKeySigner;
     use raiko2_primitives::ProofType;
     use raiko2_primitives::{
-        ChainSpec, ExecutionWitness, StatelessInput, SupportedChainSpecs, WitnessStateNode,
+        ChainSpec, ExecutionWitness, ShastaCheckpointLayout, StatelessInput, SupportedChainSpecs,
+        WitnessStateNode,
     };
     use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
@@ -1324,11 +1306,48 @@ mod tests {
         tx.into_signed(signature).into()
     }
 
+    /// A `CheckpointRecord` to store in the parent checkpoint-store storage trie.
+    #[derive(Clone, Copy)]
+    struct StoredCheckpointRecord {
+        layout: ShastaCheckpointLayout,
+        block_number: u64,
+        block_hash: B256,
+        state_root: B256,
+    }
+
+    impl StoredCheckpointRecord {
+        fn new(layout: ShastaCheckpointLayout, checkpoint: &DecodedAnchorCheckpoint) -> Self {
+            Self {
+                layout,
+                block_number: checkpoint.block_number,
+                block_hash: checkpoint.block_hash,
+                state_root: checkpoint.state_root,
+            }
+        }
+    }
+
+    fn storage_key(slot: U256) -> B256 {
+        keccak256(B256::from(slot.to_be_bytes::<32>()))
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    /// Builds the parent state (the Anchor `_blockState` word plus the checkpoint-store records)
+    /// and returns its root and witness nodes. `extra_checkpoint_storage` adds arbitrary
+    /// checkpoint-store slots, and `omit_checkpoint_nodes_containing` drops every checkpoint-store
+    /// trie node whose RLP contains the given bytes, which leaves that subtree unrevealed exactly
+    /// like a witness that lacks the proof for a slot inside it.
     fn parent_anchor_state_witness(
         anchor_address: Address,
         anchor_block_number: u64,
         checkpoint_store: Address,
-        checkpoint: DecodedAnchorCheckpoint,
+        records: &[StoredCheckpointRecord],
+        extra_checkpoint_storage: &[(U256, U256)],
+        omit_checkpoint_nodes_containing: Option<&[u8]>,
     ) -> (B256, Vec<WitnessStateNode>) {
         let mut storage_trie = Trie::default();
         storage_trie.insert(
@@ -1336,17 +1355,22 @@ mod tests {
             alloy_rlp::encode(U256::from(anchor_block_number)),
         );
 
-        let (block_hash_slot, state_root_slot) =
-            shasta_checkpoint_storage_slots(checkpoint.block_number);
         let mut checkpoint_storage_trie = Trie::default();
-        checkpoint_storage_trie.insert(
-            keccak256(B256::from(block_hash_slot.to_be_bytes::<32>())),
-            alloy_rlp::encode(U256::from_be_slice(checkpoint.block_hash.as_slice())),
-        );
-        checkpoint_storage_trie.insert(
-            keccak256(B256::from(state_root_slot.to_be_bytes::<32>())),
-            alloy_rlp::encode(U256::from_be_slice(checkpoint.state_root.as_slice())),
-        );
+        for record in records {
+            let (block_hash_slot, state_root_slot) =
+                record.layout.storage_slots(record.block_number);
+            checkpoint_storage_trie.insert(
+                storage_key(block_hash_slot),
+                alloy_rlp::encode(U256::from_be_slice(record.block_hash.as_slice())),
+            );
+            checkpoint_storage_trie.insert(
+                storage_key(state_root_slot),
+                alloy_rlp::encode(U256::from_be_slice(record.state_root.as_slice())),
+            );
+        }
+        for (slot, value) in extra_checkpoint_storage {
+            checkpoint_storage_trie.insert(storage_key(*slot), alloy_rlp::encode(*value));
+        }
 
         let mut state_trie = Trie::default();
         state_trie.insert(
@@ -1369,11 +1393,19 @@ mod tests {
         );
 
         let state_root = state_trie.hash_slow();
+        let checkpoint_storage_nodes =
+            checkpoint_storage_trie
+                .rlp_nodes()
+                .into_iter()
+                .filter(|node| {
+                    omit_checkpoint_nodes_containing
+                        .is_none_or(|needle| !contains_bytes(node, needle))
+                });
         let state_nodes = state_trie
             .rlp_nodes()
             .into_iter()
             .chain(storage_trie.rlp_nodes())
-            .chain(checkpoint_storage_trie.rlp_nodes())
+            .chain(checkpoint_storage_nodes)
             .map(WitnessStateNode::from_bytes)
             .collect();
         (
@@ -1386,6 +1418,28 @@ mod tests {
         guest_input: &mut GuestInput,
         checkpoint: DecodedAnchorCheckpoint,
     ) {
+        replace_parent_checkpoint_records(
+            guest_input,
+            &[StoredCheckpointRecord::new(
+                ShastaCheckpointLayout::Flat,
+                &checkpoint,
+            )],
+        );
+    }
+
+    fn replace_parent_checkpoint_records(
+        guest_input: &mut GuestInput,
+        records: &[StoredCheckpointRecord],
+    ) {
+        replace_parent_state(guest_input, records, &[], None);
+    }
+
+    fn replace_parent_state(
+        guest_input: &mut GuestInput,
+        records: &[StoredCheckpointRecord],
+        extra_checkpoint_storage: &[(U256, U256)],
+        omit_checkpoint_nodes_containing: Option<&[u8]>,
+    ) {
         let chain_spec = &guest_input.witnesses[0].chain_spec;
         let anchor_address = chain_spec
             .l2_contract
@@ -1397,7 +1451,9 @@ mod tests {
             anchor_address,
             TEST_PARENT_ANCHOR_BLOCK_NUMBER,
             checkpoint_store,
-            checkpoint,
+            records,
+            extra_checkpoint_storage,
+            omit_checkpoint_nodes_containing,
         );
         let mut parent_header = guest_input.witnesses[0].witness.headers[0]
             .header
@@ -1430,7 +1486,12 @@ mod tests {
             anchor_address,
             TEST_PARENT_ANCHOR_BLOCK_NUMBER,
             checkpoint_store,
-            parent_checkpoint,
+            &[StoredCheckpointRecord::new(
+                ShastaCheckpointLayout::Flat,
+                &parent_checkpoint,
+            )],
+            &[],
+            None,
         );
         let parent_header = alloy_consensus::Header {
             number: TEST_SHASTA_BLOCK_NUMBER - 1,
@@ -1863,6 +1924,181 @@ mod tests {
             &err,
             "does not match parent checkpoint"
         ));
+    }
+
+    /// A single-block proposal whose anchor is stalled beyond the origin window, so linkage must be
+    /// pinned by the parent CheckpointStore record instead of L1 ancestor headers.
+    fn stalled_anchor_guest_input() -> GuestInput {
+        let mut guest_input = guest_input_with_single_block();
+        let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number =
+            Some(TEST_PARENT_ANCHOR_BLOCK_NUMBER);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        guest_input
+    }
+
+    /// The checkpoint carried by the fixture block's anchor transaction, i.e. the record the
+    /// parent CheckpointStore must hold for stalled-anchor linkage to validate.
+    fn fixture_anchor_checkpoint(guest_input: &GuestInput) -> DecodedAnchorCheckpoint {
+        decode_anchor_checkpoint(&guest_input.witnesses[0].block).expect("fixture anchor")
+    }
+
+    fn prove_stalled_anchor(guest_input: &mut GuestInput) -> Result<B256> {
+        guest_input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(guest_input, ProofType::Native)
+                .expect("build carry data");
+        prove_shasta_proposal_with_validator(
+            guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+    }
+
+    #[test]
+    fn accepts_stalled_anchor_linkage_with_nested_checkpoint_layout() {
+        let mut guest_input = stalled_anchor_guest_input();
+        // Relocate the parent checkpoint from the flat slots to the nested v1 slots, so only the
+        // nested layout is populated; the probe must find it there.
+        let parent_checkpoint = fixture_anchor_checkpoint(&guest_input);
+        replace_parent_checkpoint_records(
+            &mut guest_input,
+            &[StoredCheckpointRecord::new(
+                ShastaCheckpointLayout::NestedV1,
+                &parent_checkpoint,
+            )],
+        );
+
+        let subproof_input_hash = prove_stalled_anchor(&mut guest_input)
+            .expect("nested checkpoint layout should validate");
+
+        assert_eq!(
+            subproof_input_hash,
+            hash_shasta_subproof_input(&guest_input.proof_carry_data)
+        );
+    }
+
+    #[test]
+    fn stalled_anchor_prefers_nested_record_over_flat() {
+        let mut guest_input = stalled_anchor_guest_input();
+        let parent_checkpoint = fixture_anchor_checkpoint(&guest_input);
+        let stale_flat_record = DecodedAnchorCheckpoint {
+            block_hash: B256::from([0xF1; 32]),
+            state_root: B256::from([0xF2; 32]),
+            ..parent_checkpoint
+        };
+        // Both layouts hold a record for the parent anchor block; only the nested one matches the
+        // anchor transaction, so validation succeeds only if nested v1 takes precedence.
+        replace_parent_checkpoint_records(
+            &mut guest_input,
+            &[
+                StoredCheckpointRecord::new(ShastaCheckpointLayout::NestedV1, &parent_checkpoint),
+                StoredCheckpointRecord::new(ShastaCheckpointLayout::Flat, &stale_flat_record),
+            ],
+        );
+
+        prove_stalled_anchor(&mut guest_input)
+            .expect("nested record must take precedence over the flat record");
+    }
+
+    #[test]
+    fn stalled_anchor_does_not_fall_back_to_flat_when_nested_record_differs() {
+        let mut guest_input = stalled_anchor_guest_input();
+        let parent_checkpoint = fixture_anchor_checkpoint(&guest_input);
+        let foreign_nested_record = DecodedAnchorCheckpoint {
+            block_hash: B256::from([0xF1; 32]),
+            state_root: B256::from([0xF2; 32]),
+            ..parent_checkpoint
+        };
+        // The flat record matches the anchor transaction but the nested record is present and
+        // different: precedence must bind to the nested record and reject the linkage, never
+        // scan on to a matching lower-precedence layout.
+        replace_parent_checkpoint_records(
+            &mut guest_input,
+            &[
+                StoredCheckpointRecord::new(
+                    ShastaCheckpointLayout::NestedV1,
+                    &foreign_nested_record,
+                ),
+                StoredCheckpointRecord::new(ShastaCheckpointLayout::Flat, &parent_checkpoint),
+            ],
+        );
+
+        let err = prove_stalled_anchor(&mut guest_input)
+            .expect_err("a differing nested record must not fall back to the flat record");
+
+        assert!(error_chain_contains(
+            &err,
+            "does not match parent checkpoint"
+        ));
+    }
+
+    fn hashed_slot_nibbles(slot: U256) -> Vec<u8> {
+        storage_key(slot)
+            .iter()
+            .flat_map(|byte| [byte >> 4, byte & 0x0f])
+            .collect()
+    }
+
+    fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+        a.iter().zip(b).take_while(|(x, y)| x == y).count()
+    }
+
+    /// Finds a storage slot whose hashed key shares a longer prefix with `target_slot`'s hashed key
+    /// than any of `revealed_slots` do, so a lookup of `target_slot` must descend into a subtree
+    /// that only that slot's own proof nodes would reveal.
+    fn decoy_slot_shadowing(target_slot: U256, revealed_slots: &[U256]) -> U256 {
+        let target = hashed_slot_nibbles(target_slot);
+        let revealed_prefix = revealed_slots
+            .iter()
+            .map(|slot| common_prefix_len(&target, &hashed_slot_nibbles(*slot)))
+            .max()
+            .unwrap_or(0);
+        (1u64..)
+            .map(U256::from)
+            .find(|slot| common_prefix_len(&target, &hashed_slot_nibbles(*slot)) > revealed_prefix)
+            .expect("a decoy slot exists")
+    }
+
+    #[test]
+    fn rejects_stalled_anchor_when_nested_slot_proof_is_missing() {
+        let mut guest_input = stalled_anchor_guest_input();
+        let parent_checkpoint = fixture_anchor_checkpoint(&guest_input);
+        let (nested_block_hash_slot, _) =
+            ShastaCheckpointLayout::NestedV1.storage_slots(TEST_PARENT_ANCHOR_BLOCK_NUMBER);
+        let (flat_block_hash_slot, flat_state_root_slot) =
+            ShastaCheckpointLayout::Flat.storage_slots(TEST_PARENT_ANCHOR_BLOCK_NUMBER);
+        // The flat record is present and proven, but the witness omits the subtree the nested
+        // blockHash lookup has to descend into (a decoy slot lives there), exactly like a witness
+        // built without the nested-slot proof. The probe must fail closed on the unproven nested
+        // slot rather than fall through to the matching flat record.
+        let decoy_slot = decoy_slot_shadowing(
+            nested_block_hash_slot,
+            &[flat_block_hash_slot, flat_state_root_slot],
+        );
+        let decoy_value = U256::from_be_bytes([0xDC; 32]);
+        replace_parent_state(
+            &mut guest_input,
+            &[StoredCheckpointRecord::new(
+                ShastaCheckpointLayout::Flat,
+                &parent_checkpoint,
+            )],
+            &[(decoy_slot, decoy_value)],
+            Some(&alloy_rlp::encode(decoy_value)),
+        );
+
+        let err = prove_stalled_anchor(&mut guest_input)
+            .expect_err("an unproven nested slot must fail closed");
+
+        assert!(error_chain_contains(
+            &err,
+            "failed to read parent CheckpointStore blockHash"
+        ));
+        assert!(error_chain_contains(&err, "nested v1 layout"));
     }
 
     #[test]

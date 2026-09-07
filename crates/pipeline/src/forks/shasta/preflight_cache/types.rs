@@ -17,7 +17,12 @@ use sha2::{Digest, Sha256};
 ///
 /// Bump this value whenever cached output from an older host implementation may no longer be a
 /// valid candidate for the current derivation, witness, canonicalization, or validation rules.
-pub const CANONICAL_PREFLIGHT_SCHEMA_V1: u16 = 1;
+///
+/// History:
+/// - `1`: initial canonical preflight cache.
+/// - `2`: stalled-anchor witnesses carry storage proofs for every known `SignalService` checkpoint
+///   layout (nested v1 and flat); entries built with only the flat pair cannot satisfy the probe.
+pub const CANONICAL_PREFLIGHT_SCHEMA_V1: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalPreflightKeyV1 {

@@ -518,6 +518,11 @@ pub enum StatelessValidationError {
     #[error("signature s value not normalized for homestead block")]
     HomesteadSignatureNotNormalized,
 
+    /// The parent-state Shasta `CheckpointStore` record could not be read: no known layout holds a
+    /// record, the record is malformed, or the witness cannot prove a probed slot.
+    #[error("{0}")]
+    ParentCheckpointUnavailable(String),
+
     #[error("{0}")]
     Custom(&'static str),
 }

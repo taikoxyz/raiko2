@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tarfile
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -77,7 +78,7 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(opcode_gas.subprocess, "run", fake_run), mock.patch.object(opcode_gas, "REPO_ROOT", pathlib.Path(tmp)), mock.patch.object(opcode_gas, "git_head", return_value="a" * 40), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
             root = pathlib.Path(tmp)
             spec = root / "spec.json"
-            spec.write_text(json.dumps({"taiko_hoodi": {"unzen_time": 1}}))
+            spec.write_text(json.dumps(actual_chain_spec_list("taiko_hoodi", 1)))
             with mock.patch.object(opcode_gas, "select_final_validation_corpus", return_value=rows):
                 manifest = opcode_gas.prepare_corpus(
                     corpus_root=root / "corpus",
@@ -309,7 +310,7 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(opcode_gas, "REPO_ROOT", pathlib.Path(tmp)), mock.patch.object(opcode_gas, "git_head", return_value="a" * 40), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
             root = pathlib.Path(tmp)
             spec = root / "spec.json"
-            spec.write_text(json.dumps({"taiko_hoodi": {"unzen_time": 100}}))
+            spec.write_text(json.dumps(actual_chain_spec_list("taiko_hoodi", 100)))
             with self.assertRaisesRegex(ValueError, "chain-spec hash"):
                 with mock.patch.object(opcode_gas, "select_final_validation_corpus", return_value=rows):
                     opcode_gas.prepare_corpus(
@@ -325,7 +326,7 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(opcode_gas, "REPO_ROOT", pathlib.Path(tmp)), mock.patch.object(opcode_gas, "git_head", return_value="a" * 40), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
             root = pathlib.Path(tmp)
             spec = root / "spec.json"
-            spec.write_text(json.dumps({"taiko_hoodi": {"unzen_time": 1}}))
+            spec.write_text(json.dumps(actual_chain_spec_list("taiko_hoodi", 1)))
 
             def fake_run(command, **kwargs):
                 if any("stress_shasta_proposal.py" in argument for argument in command):
@@ -396,6 +397,120 @@ class RunManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "readback SHA256 mismatch"):
                     opcode_gas.publish_corpus(archive, f"gs://bucket/{digest}.tar")
 
+    def test_run_proposal_smoke_requires_a_matching_prepared_record_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            args = proposal_args(root, purpose="integration_smoke", smoke_record=root / "smoke.json")
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "run_proposal_guest_input"
+            ) as execute:
+                with self.assertRaisesRegex(ValueError, "prepared integration_smoke"):
+                    opcode_gas.cmd_run_proposal(args)
+                execute.assert_not_called()
+
+                args.smoke_record.write_text(json.dumps({
+                    "network": "taiko_hoodi", "proposal_id": 1, "purpose": "final_validation"
+                }))
+                with self.assertRaisesRegex(ValueError, "cannot be relabeled"):
+                    opcode_gas.cmd_run_proposal(args)
+                execute.assert_not_called()
+
+                args.smoke_record.write_text(json.dumps({
+                    "network": "taiko_hoodi", "proposal_id": 1, "purpose": "integration_smoke"
+                }))
+                opcode_gas.cmd_run_proposal(args)
+                execute.assert_called_once()
+
+    def test_prepare_corpus_resolves_relative_actual_chain_spec_and_passes_it_to_preflight(self):
+        rows = [{"network": "taiko_hoodi", "proposal_id": 7, "block_count": 1, "total_zkgas": 1, "purpose": "final_validation"}]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if any("stress_shasta_proposal.py" in part for part in command):
+                pathlib.Path(command[command.index("--proposal-out") + 1]).write_text(json.dumps([{
+                    "proposal_id": 7, "l1_inclusion_block_number": 10,
+                    "last_anchor_block_number": 9, "l2_start": 1, "l2_end": 1,
+                }]))
+            else:
+                pathlib.Path(command[command.index("--output") + 1]).write_text(
+                    '{"blocks":[{"block_difficulty":1,"timestamp":1}]}\n'
+                )
+            return subprocess_completed(command)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            spec = root / "chain-spec.json"
+            spec.write_text(json.dumps(actual_chain_spec_list("taiko_hoodi", 1)))
+            args = opcode_gas.build_parser().parse_args([
+                "prepare-corpus", "--corpus-root", "corpus", "--manifest", "manifest.json",
+                "--l1-rpc", "taiko_hoodi=https://l1.invalid",
+                "--l2-rpc", "taiko_hoodi=https://l2.invalid",
+                "--chain-spec-hash", f"taiko_hoodi={hashlib.sha256(spec.read_bytes()).hexdigest()}",
+                "--chain-spec-file", "taiko_hoodi=chain-spec.json",
+            ])
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""), mock.patch.object(
+                opcode_gas, "select_final_validation_corpus", return_value=rows
+            ), mock.patch.object(opcode_gas.subprocess, "run", fake_run):
+                opcode_gas.cmd_prepare_corpus(args)
+                preflight = next(command for command in calls if command[0] == "target/release/preflight")
+                self.assertEqual(preflight[preflight.index("--chain-spec-file") + 1], str(spec))
+                self.assertTrue((root / "corpus" / "taiko_hoodi" / "proposal_7.json").exists())
+                self.assertTrue((root / "manifest.json").exists())
+
+    def test_controlled_manifest_is_materialized_and_swap_is_rejected_before_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            manifest_a = root / "manifest-a.toml"
+            manifest_b = root / "manifest-b.toml"
+            manifest_a.write_text(controlled_manifest_text("controlled-a"))
+            manifest_b.write_text(controlled_manifest_text("controlled-b"))
+            with mock.patch.object(opcode_gas, "git_worktree_status", return_value=""), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ):
+                experiment = opcode_gas.prepare_calibration(
+                    root, manifest_a, implementation_revision="a" * 40, complete_schedule_hash="b" * 64
+                )
+            run = root / "runs" / experiment["calibration_id"]
+            self.assertEqual((run / "controlled-manifest.toml").read_bytes(), manifest_a.read_bytes())
+            args = types.SimpleNamespace(
+                calibration_run=run, manifest=manifest_b, out=root / "fixtures"
+            )
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "generate_cases"
+            ) as generate:
+                with self.assertRaisesRegex(ValueError, "controlled manifest"):
+                    opcode_gas.cmd_generate(args)
+            generate.assert_not_called()
+
+    def test_controlled_run_rejects_resume_provenance_mismatch_before_guest_launcher(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run = write_controlled_run(root)
+            fixture_dir = root / "fixtures" / "case"
+            fixture_dir.mkdir(parents=True)
+            (fixture_dir / "guest-input.json").write_text("{}\n")
+            (fixture_dir / "case.json").write_text(json.dumps({
+                "kind": "opcode", "case": "add", "target_count": 1, "target_raw_gas": 3,
+                "calibration_id": "wrong", "controlled_manifest_sha256": "b" * 64,
+                "controlled_manifest_rows_sha256": "c" * 64,
+            }))
+            args = types.SimpleNamespace(
+                fixtures=root / "fixtures", guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                elf=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
+                precompile_elf=pathlib.Path("crates/guests/elf/sp1_precompile_lab.elf"),
+                opcode_stage="opcode-lab", out=root / "runs.jsonl", calibration_run=run,
+                controlled_manifest=run / "controlled-manifest.toml",
+            )
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "run_guest_inputs"
+            ) as execute:
+                with self.assertRaisesRegex(ValueError, "controlled manifest provenance"):
+                    opcode_gas.cmd_run(args)
+            execute.assert_not_called()
+
 
 def completed(args, stdout):
     return subprocess_completed(args, stdout)
@@ -412,6 +527,73 @@ def complete_rows():
         digest = f"{i:064x}"
         rows.append({"network": network, "proposal_id": i + 1, "purpose": "final_validation", "block_count": 1, "total_zkgas": 1, "guest_input_sha256": digest, "workload_id": opcode_gas.proposal_workload_id(digest)})
     return rows
+
+
+def actual_chain_spec_list(network, unzen_timestamp):
+    return [{
+        "name": network,
+        "chain_id": 167013,
+        "is_taiko": True,
+        "hard_forks": {"UNZEN": {"Timestamp": unzen_timestamp}},
+        "rpc": "https://l2.invalid",
+        "beacon_rpc": None,
+        "verifier_address_forks": {"UNZEN": {"SP1": "0x1"}},
+        "genesis_time": 0,
+        "seconds_per_slot": 1,
+    }]
+
+
+def proposal_args(root, *, purpose, smoke_record):
+    return types.SimpleNamespace(
+        guest_launcher=root / "guest-launcher",
+        guest_input=root / "guest-input.json",
+        proof_type="sp1",
+        case="proposal-1",
+        target_raw_gas=1,
+        target_count=1,
+        risc0_execution_po2=20,
+        out=root / "run.jsonl",
+        purpose=purpose,
+        smoke_record=smoke_record,
+        network="taiko_hoodi",
+        proposal_id=1,
+    )
+
+
+def controlled_manifest_text(name):
+    return (
+        f'name = "{name}"\n'
+        'backend = "sp1"\n'
+        'variants = [1]\n'
+        'normalization_reference_key = "opcode:0x01"\n'
+        'q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
+        'bridge_key_ids = ["opcode:0x01", "proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
+        '[[cases]]\n'
+        'name = "add"\n'
+        'scenario = "controlled"\n'
+        'template = "repeat"\n'
+        'target_raw_gas = 3\n'
+        'opcode = "0x01"\n'
+    )
+
+
+def write_controlled_run(root):
+    manifest = root / "controlled.toml"
+    manifest.write_text(controlled_manifest_text("controlled"))
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    rows = opcode_gas.controlled_manifest_rows_sha256(manifest)
+    run = root / "runs" / "calibration"
+    run.mkdir(parents=True)
+    (run / "controlled-manifest.toml").write_bytes(manifest.read_bytes())
+    (run / "controlled-manifest.sha256").write_text(digest + "\n")
+    (run / "experiment.json").write_text(json.dumps({
+        "calibration_id": "calibration",
+        "calibration_identity": {
+            "controlled_manifest_sha256": digest,
+            "controlled_manifest_rows_sha256": rows,
+        },
+    }))
+    return run
 
 
 def write_frozen_corpus(root, revision):

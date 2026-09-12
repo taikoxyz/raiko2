@@ -156,6 +156,10 @@ class RunnerTests(unittest.TestCase):
                 "target/release/guest-launcher",
                 "--opcode-stage",
                 "revm-opcode-lab",
+                "--calibration-run",
+                "/tmp/calibration",
+                "--controlled-manifest",
+                "/tmp/controlled.toml",
                 "--out",
                 "/tmp/runs.jsonl",
             ]
@@ -194,6 +198,9 @@ class RunnerTests(unittest.TestCase):
                         "case": "add",
                         "target_count": 1,
                         "target_raw_gas": 3,
+                        "calibration_id": "calibration",
+                        "controlled_manifest_sha256": "a" * 64,
+                        "controlled_manifest_rows_sha256": "b" * 64,
                     }
                 )
                 + "\n"
@@ -208,12 +215,22 @@ class RunnerTests(unittest.TestCase):
                     "target/release/guest-launcher",
                     "--opcode-stage",
                     "revm-opcode-lab",
+                    "--calibration-run",
+                    str(tmp_path / "calibration"),
+                    "--controlled-manifest",
+                    str(tmp_path / "controlled.toml"),
                     "--out",
                     str(out_path),
                 ]
             )
 
-            with mock.patch.object(opcode_gas.subprocess, "run", fake_run):
+            with mock.patch.object(opcode_gas, "REPO_ROOT", tmp_path), mock.patch.object(
+                opcode_gas, "verify_frozen_controlled_manifest",
+                return_value=(None, {
+                    "controlled_manifest_sha256": "a" * 64,
+                    "controlled_manifest_rows_sha256": "b" * 64,
+                }),
+            ), mock.patch.object(opcode_gas.subprocess, "run", fake_run):
                 opcode_gas.cmd_run(args)
 
         self.assertIn("revm-opcode-lab", calls[0])

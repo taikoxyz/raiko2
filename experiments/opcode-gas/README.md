@@ -32,33 +32,49 @@ cargo run -r -p xtask -- build-guest sp1 --bench
 cargo build -r -p guest-launcher --features sp1-sdk/profiling
 ```
 
-Generate smoke case metadata and lab inputs:
+First freeze a controlled manifest with explicit cases, `q_formula`, and
+`bridge_key_ids` (the broad `sp1-smoke.toml` inventory manifest is not a
+controlled calibration manifest). `prepare-calibration` prints the derived
+calibration ID; use that same run for generation and execution:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
+  --controlled-manifest experiments/opcode-gas/manifests/<controlled>.toml \
+  --out experiments/opcode-gas
+```
+
+Generate sealed controlled case metadata and lab inputs:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate \
-  --manifest experiments/opcode-gas/manifests/sp1-smoke.toml \
-  --out /tmp/raiko2-opcode-gas/fixtures
+  --manifest experiments/opcode-gas/manifests/<controlled>.toml \
+  --calibration-run experiments/opcode-gas/runs/<calibration-id> \
+  --out experiments/opcode-gas/runs/<calibration-id>/fixtures
 ```
 
 Run existing `guest-input.json` cases with a prebuilt launcher:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run \
-  --fixtures /tmp/raiko2-opcode-gas/fixtures \
+  --fixtures experiments/opcode-gas/runs/<calibration-id>/fixtures \
   --guest-launcher target/release/guest-launcher \
   --elf crates/guests/elf/sp1_opcode_lab.elf \
   --precompile-elf crates/guests/elf/sp1_precompile_lab.elf \
-  --out /tmp/raiko2-opcode-gas/raw-runs.jsonl
+  --calibration-run experiments/opcode-gas/runs/<calibration-id> \
+  --controlled-manifest experiments/opcode-gas/manifests/<controlled>.toml \
+  --out experiments/opcode-gas/runs/<calibration-id>/raw-runs.jsonl
 ```
 
 Run the same opcode fixtures through the revm-backed SP1 guest:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run \
-  --fixtures /tmp/raiko2-opcode-gas/fixtures \
+  --fixtures experiments/opcode-gas/runs/<calibration-id>/fixtures \
   --guest-launcher target/release/guest-launcher \
   --opcode-stage revm-opcode-lab \
-  --out /tmp/raiko2-opcode-gas/revm-raw-runs.jsonl
+  --calibration-run experiments/opcode-gas/runs/<calibration-id> \
+  --controlled-manifest experiments/opcode-gas/manifests/<controlled>.toml \
+  --out experiments/opcode-gas/runs/<calibration-id>/revm-raw-runs.jsonl
 ```
 
 Use this `revm-opcode-lab` path as the primary opcode-tuning path once the smoke suite is stable. It
@@ -193,8 +209,11 @@ without changing the primary `proverGas` candidate.
 
 `prepare-corpus` selects the fixed 60-row V1 validation corpus (40 Hoodi, 20
 Mainnet) from the two checked-in 2026-09-02 fixture files before it contacts an
-RPC endpoint. It accepts only network-qualified RPC and chain-spec hash inputs,
-uses the fixed proposal IDs with discovery-only mode, and invokes preflight with
+RPC endpoint. It accepts only network-qualified RPC, chain-spec hash, and
+chain-spec file inputs. Each chain-spec file is the JSON list format consumed by
+preflight, must contain exactly one selected network entry with an explicit
+`hard_forks.UNZEN` activation, and is passed unchanged to preflight. The command
+uses the fixed proposal IDs with discovery-only mode and invokes preflight with
 the valueless `--validate` flag. It never substitutes a failed proposal. The
 saved GuestInputs are written below the ignored repository-relative corpus path
 and packed with deterministic tar metadata.
@@ -208,7 +227,9 @@ and packed with deterministic tar metadata.
   --l2-rpc taiko_hoodi=https://l2.example.invalid \
   --l2-rpc taiko_mainnet=https://l2.example.invalid \
   --chain-spec-hash taiko_hoodi=<sha256> \
-  --chain-spec-hash taiko_mainnet=<sha256>
+  --chain-spec-hash taiko_mainnet=<sha256> \
+  --chain-spec-file taiko_hoodi=config/frozen-taiko-chain-specs.json \
+  --chain-spec-file taiko_mainnet=config/frozen-taiko-chain-specs.json
 ```
 
 The actual final acquisition belongs only to the later measurement step. To
@@ -224,6 +245,20 @@ fully published 60-row corpus. It writes only below its new validation directory
 Generated corpus, run, manifest, and validation output paths may remain dirty;
 any implementation, dependency, controlled-manifest, or guest-artifact change
 rejects the operation.
+
+`prepare-calibration` copies and seals the exact controlled TOML under its new
+calibration run. Controlled `generate` and `run` commands require both
+`--calibration-run` and `--controlled-manifest`; they reject a swapped manifest
+or generated fixture whose calibration/controlled-manifest provenance does not
+match that run before starting guest execution. Repository-relative paths in
+these commands are resolved from the repository root and cannot escape it.
+
+For an `integration_smoke` proposal execution, first write the smoke record with
+`prepare-integration-smoke --out <record.json>`, then supply the same
+`--network`, `--proposal-id`, and `--smoke-record <record.json>` to
+`run-proposal --purpose integration_smoke`. The command validates that the
+record is still purpose-labelled `integration_smoke` and is disjoint from the
+frozen final 60 rows before invoking guest-launcher.
 
 - Add a Taiko/reth-context revm lab that keeps the `revm-opcode-lab` execution path but uses Taiko
   fork config, block env, and realistic tx env instead of fixed Prague/mainnet benchmark defaults.

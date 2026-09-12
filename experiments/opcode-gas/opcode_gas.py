@@ -942,7 +942,11 @@ def modexp_small_payload() -> bytes:
     return bytes(out)
 
 
-def generate_cases(manifest: Manifest, out_dir: pathlib.Path) -> list[pathlib.Path]:
+def generate_cases(
+    manifest: Manifest,
+    out_dir: pathlib.Path,
+    provenance: Mapping[str, Any] | None = None,
+) -> list[pathlib.Path]:
     written = []
     for case in manifest.cases:
         for variant in manifest.variants:
@@ -1007,6 +1011,8 @@ def generate_cases(manifest: Manifest, out_dir: pathlib.Path) -> list[pathlib.Pa
                 }
             else:
                 raise ValueError(f"unknown case kind: {case.kind}")
+            if provenance:
+                payload.update(provenance)
             path = case_dir / "case.json"
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             (case_dir / "guest-input.json").write_text(
@@ -1567,6 +1573,22 @@ def prepare_integration_smoke(network: str, proposal_id: int, *, purpose: str = 
     )
 
 
+def verify_prepared_integration_smoke(
+    record_path: pathlib.Path, *, network: str, proposal_id: int
+) -> dict[str, Any]:
+    if not record_path.is_file():
+        raise ValueError("run-proposal requires a prepared integration_smoke record")
+    record = json.loads(record_path.read_text())
+    if record.get("purpose") != "integration_smoke":
+        raise ValueError("integration_smoke rows cannot be relabeled after execution")
+    if record.get("network") != network or record.get("proposal_id") != proposal_id:
+        raise ValueError("prepared integration_smoke record does not match run-proposal identity")
+    assert_integration_smoke_is_disjoint(
+        select_final_validation_corpus(), network, proposal_id
+    )
+    return freeze_smoke_row(record, purpose="integration_smoke")
+
+
 def proposal_workload_id(guest_input_sha256: str) -> str:
     if len(guest_input_sha256) != 64:
         raise ValueError("guest_input_sha256 must be a SHA256 digest")
@@ -1592,6 +1614,34 @@ def _repo_relative_path(value: Any, *, field_name: str) -> pathlib.Path:
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"{field_name} must be a repository-relative path")
     return REPO_ROOT / path
+
+
+def _resolve_repo_path(value: pathlib.Path | str, *, field_name: str) -> pathlib.Path:
+    path = pathlib.Path(value)
+    root = REPO_ROOT.resolve()
+    resolved = (path if path.is_absolute() else root / path).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"{field_name} must stay within the repository")
+    return resolved
+
+
+def _unzen_activation_from_chain_spec(
+    chain_spec_path: pathlib.Path, network: str
+) -> tuple[str, int]:
+    data = json.loads(chain_spec_path.read_text())
+    if not isinstance(data, list):
+        raise ValueError("chain-spec file must be a JSON array")
+    matches = [item for item in data if isinstance(item, Mapping) and item.get("name") == network]
+    if len(matches) != 1:
+        raise ValueError(f"chain-spec file must contain exactly one {network} entry")
+    hard_forks = matches[0].get("hard_forks")
+    unzen = hard_forks.get("UNZEN") if isinstance(hard_forks, Mapping) else None
+    if not isinstance(unzen, Mapping) or len(unzen) != 1:
+        raise ValueError(f"chain-spec for {network} must declare hard_forks.UNZEN")
+    kind, activation = next(iter(unzen.items()))
+    if kind not in ("Timestamp", "Block") or isinstance(activation, bool) or not isinstance(activation, int):
+        raise ValueError(f"chain-spec for {network} has an invalid UNZEN activation")
+    return kind, activation
 
 
 def _discovery_rows(path: pathlib.Path) -> dict[int, Mapping[str, Any]]:
@@ -1631,7 +1681,7 @@ def _guest_input_block_summary(path: pathlib.Path) -> tuple[int, int]:
     return len(values), sum(values)
 
 
-def _assert_guest_input_post_unzen(path: pathlib.Path, unzen_time: int) -> None:
+def _assert_guest_input_post_unzen(path: pathlib.Path, activation: tuple[str, int]) -> None:
     guest_input = json.loads(path.read_text())
     blocks = guest_input.get("blocks")
     if blocks is None:
@@ -1640,11 +1690,12 @@ def _assert_guest_input_post_unzen(path: pathlib.Path, unzen_time: int) -> None:
             blocks = [item.get("block", {}).get("header", {}) for item in witnesses]
     if not isinstance(blocks, list) or not blocks:
         raise ValueError("GuestInput must contain blocks for post-Unzen validation")
+    kind, threshold = activation
     for block in blocks:
-        timestamp = block.get("timestamp")
-        if isinstance(timestamp, str):
-            timestamp = int(timestamp, 0)
-        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < unzen_time:
+        value = block.get("timestamp") if kind == "Timestamp" else block.get("number")
+        if isinstance(value, str):
+            value = int(value, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < threshold:
             raise ValueError("GuestInput is not post-Unzen under the acquisition chain spec")
 
 
@@ -1668,21 +1719,21 @@ def prepare_corpus(*, corpus_root: pathlib.Path, l1_rpc_by_network: Mapping[str,
     if git_head() != implementation_revision:
         raise ValueError("current HEAD does not match implementation_revision")
     assert_generated_paths_only(git_worktree_status())
-    if not corpus_root.is_relative_to(REPO_ROOT):
-        raise ValueError("corpus_root must be repository-relative")
+    corpus_root = _resolve_repo_path(corpus_root, field_name="corpus_root")
+    if manifest_path is not None:
+        manifest_path = _resolve_repo_path(manifest_path, field_name="manifest_path")
     corpus_root.mkdir(parents=True, exist_ok=True); final_rows = []
     for network in sorted({str(row["network"]) for row in rows}):
         selected = sorted((row for row in rows if row["network"] == network), key=lambda row: row["proposal_id"])
         if not all(network in values for values in (l1_rpc_by_network, l2_rpc_by_network, chain_spec_hash_by_network, chain_spec_path_by_network)):
             raise ValueError(f"missing RPC/chain-spec input for {network}")
         expected_chain_spec_hash = chain_spec_hash_by_network[network]
-        chain_spec_path = chain_spec_path_by_network[network]
+        chain_spec_path = _resolve_repo_path(
+            chain_spec_path_by_network[network], field_name="chain_spec_file"
+        )
         if not _is_sha256(expected_chain_spec_hash) or sha256_file(chain_spec_path) != expected_chain_spec_hash:
             raise ValueError(f"chain-spec hash does not match {network} chain-spec file")
-        chain_spec = json.loads(chain_spec_path.read_text())
-        network_chain_spec = chain_spec.get(network, chain_spec)
-        if not isinstance(network_chain_spec, Mapping) or not isinstance(network_chain_spec.get("unzen_time"), int):
-            raise ValueError(f"chain-spec for {network} must declare unzen_time")
+        unzen_activation = _unzen_activation_from_chain_spec(chain_spec_path, network)
         with tempfile.TemporaryDirectory(prefix="opcode-gas-discovery-") as tmp:
             discovery = pathlib.Path(tmp) / f"{network}.json"
             subprocess.run([os.environ.get("PYTHON_BIN", str(pathlib.Path.home() / ".venv/bin/python")), "scripts/regression/stress_shasta_proposal.py", "--network", network, "--l1-rpc", l1_rpc_by_network[network], "--l2-rpc", l2_rpc_by_network[network], "--proposal-ids", ",".join(str(row["proposal_id"]) for row in selected), "--discover-only", "--proposal-out", str(discovery)], cwd=REPO_ROOT, check=True)
@@ -1693,9 +1744,9 @@ def prepare_corpus(*, corpus_root: pathlib.Path, l1_rpc_by_network: Mapping[str,
                 item, output = discovered[proposal_id], corpus_root / network / f"proposal_{proposal_id}.json"
                 output.parent.mkdir(parents=True, exist_ok=True)
                 temporary_output = output.with_name(f".{output.name}.tmp")
-                subprocess.run(["target/release/preflight", "--network", network, "--rpc-url", l2_rpc_by_network[network], "--l1-rpc-url", l1_rpc_by_network[network], "--proposal-id", str(proposal_id), "--l1-inclusion-block-number", str(_discovery_value(item, "l1_inclusion_block_number", "inclusion_block")), "--last-anchor-block-number", str(_discovery_value(item, "last_anchor_block_number", "previous_anchor_block")), "--l2-start", str(_discovery_value(item, "l2_start", "l2_block_start")), "--l2-end", str(_discovery_value(item, "l2_end", "l2_block_end")), "--proof-type", "sp1", "--validate", "--output", str(temporary_output)], cwd=REPO_ROOT, check=True)
+                subprocess.run(["target/release/preflight", "--chain-spec-file", str(chain_spec_path), "--network", network, "--rpc-url", l2_rpc_by_network[network], "--l1-rpc-url", l1_rpc_by_network[network], "--proposal-id", str(proposal_id), "--l1-inclusion-block-number", str(_discovery_value(item, "l1_inclusion_block_number", "inclusion_block")), "--last-anchor-block-number", str(_discovery_value(item, "last_anchor_block_number", "previous_anchor_block")), "--l2-start", str(_discovery_value(item, "l2_start", "l2_block_start")), "--l2-end", str(_discovery_value(item, "l2_end", "l2_block_end")), "--proof-type", "sp1", "--validate", "--output", str(temporary_output)], cwd=REPO_ROOT, check=True)
                 block_count, difficulty_sum = _guest_input_block_summary(temporary_output)
-                _assert_guest_input_post_unzen(temporary_output, network_chain_spec["unzen_time"])
+                _assert_guest_input_post_unzen(temporary_output, unzen_activation)
                 if block_count != row["block_count"] or difficulty_sum != row["total_zkgas"]:
                     raise ValueError(f"GuestInput does not match fixed count/total for {network}/{proposal_id}")
                 os.replace(temporary_output, output)
@@ -1766,6 +1817,41 @@ def _rust_version() -> str:
     return subprocess.run(["rustc", "--version"], check=True, capture_output=True, text=True).stdout.strip()
 
 
+def controlled_manifest_rows_sha256(path: pathlib.Path) -> str:
+    data = tomllib.loads(path.read_text())
+    rows = {
+        "name": data.get("name"),
+        "backend": data.get("backend", "sp1"),
+        "variants": data.get("variants", []),
+        "cases": data.get("cases", []),
+    }
+    return sha256_bytes(canonical_json(rows))
+
+
+def verify_frozen_controlled_manifest(
+    run: pathlib.Path, supplied_manifest: pathlib.Path
+) -> tuple[Manifest, Mapping[str, Any]]:
+    experiment = json.loads((run / "experiment.json").read_text())
+    identity = experiment.get("calibration_identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError("calibration run has no calibration_identity")
+    expected_hash = identity.get("controlled_manifest_sha256")
+    expected_rows = identity.get("controlled_manifest_rows_sha256")
+    if not _is_sha256(expected_hash) or not _is_sha256(expected_rows):
+        raise ValueError("calibration identity has no sealed controlled manifest")
+    frozen = run / "controlled-manifest.toml"
+    seal = run / "controlled-manifest.sha256"
+    if not frozen.is_file() or not seal.is_file() or _read_digest(seal) != expected_hash:
+        raise ValueError("calibration controlled manifest seal is missing or invalid")
+    if sha256_file(frozen) != expected_hash:
+        raise ValueError("calibration controlled manifest bytes do not match calibration identity")
+    if sha256_file(supplied_manifest) != expected_hash:
+        raise ValueError("controlled manifest does not match calibration identity")
+    if controlled_manifest_rows_sha256(supplied_manifest) != expected_rows:
+        raise ValueError("controlled manifest rows do not match calibration identity")
+    return load_manifest(frozen), identity
+
+
 def prepare_calibration(
     output_root: pathlib.Path,
     controlled_manifest: pathlib.Path,
@@ -1778,6 +1864,7 @@ def prepare_calibration(
     if implementation_revision is not None and git_head() != revision:
         raise ValueError("current HEAD does not match implementation_revision")
     controlled_hash = sha256_file(controlled_manifest)
+    controlled_rows_hash = controlled_manifest_rows_sha256(controlled_manifest)
     data = tomllib.loads(controlled_manifest.read_text())
     if data.get("include_uzen_pure_opcodes") or data.get("include_uzen_precompile_bodies"):
         raise ValueError("controlled manifest must not use implicit include flags")
@@ -1825,6 +1912,7 @@ def prepare_calibration(
         "rust_version": rust_version,
         "sp1_sdk_version": sp1_sdk_version,
         "controlled_manifest_sha256": controlled_hash,
+        "controlled_manifest_rows_sha256": controlled_rows_hash,
         "complete_schedule_sha256": complete_schedule_hash,
         "guest_artifacts": guest_artifacts,
         "guest_artifacts_sha256": guest_artifacts_sha256,
@@ -1882,6 +1970,8 @@ def prepare_calibration(
         **bridge_contract,
     }
     (run / "bridge").mkdir(parents=True)
+    (run / "controlled-manifest.toml").write_bytes(controlled_manifest.read_bytes())
+    (run / "controlled-manifest.sha256").write_text(controlled_hash + "\n")
     (run / "experiment.json").write_text(json.dumps(experiment, indent=2, sort_keys=True) + "\n")
     (run / "bridge" / "bridge-manifest.json").write_text(
         json.dumps(bridge, indent=2, sort_keys=True) + "\n"
@@ -2076,51 +2166,73 @@ def _network_values(values: list[str]) -> dict[str, str]:
 
 def cmd_prepare_corpus(args: argparse.Namespace) -> None:
     manifest = prepare_corpus(
-        corpus_root=args.corpus_root,
+        corpus_root=_resolve_repo_path(args.corpus_root, field_name="corpus_root"),
         l1_rpc_by_network=_network_values(args.l1_rpc),
         l2_rpc_by_network=_network_values(args.l2_rpc),
         chain_spec_hash_by_network=_network_values(args.chain_spec_hash),
         chain_spec_path_by_network={
-            network: pathlib.Path(path)
+            network: _resolve_repo_path(path, field_name="chain_spec_file")
             for network, path in _network_values(args.chain_spec_file).items()
         },
-        manifest_path=args.manifest,
+        manifest_path=(
+            _resolve_repo_path(args.manifest, field_name="manifest_path")
+            if args.manifest else None
+        ),
     )
     print(f"prepared {len(manifest['rows'])} final-validation GuestInputs")
 
 
 def cmd_publish_corpus(args: argparse.Namespace) -> None:
-    manifest = json.loads(args.manifest.read_text())
-    validate_manifest_for_publication(manifest, args.archive)
-    published = publish_corpus(args.archive, args.object_uri)
+    manifest_path = _resolve_repo_path(args.manifest, field_name="manifest_path")
+    archive = _resolve_repo_path(args.archive, field_name="archive")
+    manifest = json.loads(manifest_path.read_text())
+    validate_manifest_for_publication(manifest, archive)
+    published = publish_corpus(archive, args.object_uri)
     manifest.update(published)
-    args.manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"published corpus at {published['archive_uri']}")
 
 
 def cmd_prepare_integration_smoke(args: argparse.Namespace) -> None:
     smoke = prepare_integration_smoke(args.network, args.proposal_id, purpose=args.purpose)
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(smoke, indent=2, sort_keys=True) + "\n")
+        out = _resolve_repo_path(args.out, field_name="smoke_record")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(smoke, indent=2, sort_keys=True) + "\n")
     print(f"prepared {smoke['purpose']} {smoke['network']}/{smoke['proposal_id']}")
 
 
 def cmd_prepare_calibration(args: argparse.Namespace) -> None:
     experiment = prepare_calibration(
-        args.out, args.controlled_manifest, implementation_revision=args.implementation_revision
+        _resolve_repo_path(args.out, field_name="calibration_output"),
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+        implementation_revision=args.implementation_revision,
     )
     print(f"prepared calibration {experiment['calibration_id']}")
 
 
 def cmd_prepare_validation(args: argparse.Namespace) -> None:
-    validation = prepare_validation(args.out, args.run, args.corpus)
+    validation = prepare_validation(
+        _resolve_repo_path(args.out, field_name="validation_output"),
+        _resolve_repo_path(args.run, field_name="calibration_run"),
+        _resolve_repo_path(args.corpus, field_name="corpus_manifest"),
+    )
     print(f"prepared validation {validation['validation_id']}")
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
-    manifest = load_manifest(args.manifest)
-    written = generate_cases(manifest, args.out)
+    calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    manifest_path = _resolve_repo_path(args.manifest, field_name="controlled_manifest")
+    manifest, identity = verify_frozen_controlled_manifest(calibration_run, manifest_path)
+    written = generate_cases(
+        manifest,
+        _resolve_repo_path(args.out, field_name="generated_fixtures"),
+        provenance={
+            "calibration_id": calibration_run.name,
+            "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
+            "controlled_manifest_rows_sha256": identity["controlled_manifest_rows_sha256"],
+        },
+    )
     print(f"wrote {len(written)} case metadata files")
 
 
@@ -2151,6 +2263,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate = subcommands.add_parser("generate", help="generate opcode case metadata")
     generate.add_argument("--manifest", type=pathlib.Path, required=True)
+    generate.add_argument("--calibration-run", type=pathlib.Path, required=True)
     generate.add_argument("--out", type=pathlib.Path, required=True)
     generate.set_defaults(func=cmd_generate)
 
@@ -2175,6 +2288,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="opcode-lab",
         help="SP1 opcode lab stage to run for opcode fixtures",
     )
+    run.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    run.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     run.add_argument("--out", type=pathlib.Path, required=True)
     run.set_defaults(func=cmd_run)
 
@@ -2189,6 +2304,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_proposal.add_argument("--target-raw-gas", type=int, required=True)
     run_proposal.add_argument("--target-count", type=int, default=1)
     run_proposal.add_argument("--risc0-execution-po2", type=int, default=20)
+    run_proposal.add_argument("--purpose", choices=["ad_hoc", "integration_smoke"], default="ad_hoc")
+    run_proposal.add_argument("--smoke-record", type=pathlib.Path)
+    run_proposal.add_argument("--network")
+    run_proposal.add_argument("--proposal-id", type=int)
     run_proposal.add_argument("--out", type=pathlib.Path, required=True)
     run_proposal.set_defaults(func=cmd_run_proposal)
 
@@ -2254,10 +2373,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    args.out.parent.mkdir(parents=True, exist_ok=True)
+    calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    fixtures = _resolve_repo_path(args.fixtures, field_name="fixtures")
+    out = _resolve_repo_path(args.out, field_name="runs_output")
+    _, identity = verify_frozen_controlled_manifest(
+        calibration_run,
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
     cases_by_kind: dict[str, list[tuple[dict[str, Any], pathlib.Path]]] = {}
-    for case_path in sorted(args.fixtures.glob("**/case.json")):
+    for case_path in sorted(fixtures.glob("**/case.json")):
         case = json.loads(case_path.read_text())
+        if (
+            case.get("calibration_id") != calibration_run.name
+            or case.get("controlled_manifest_sha256") != identity["controlled_manifest_sha256"]
+            or case.get("controlled_manifest_rows_sha256")
+            != identity["controlled_manifest_rows_sha256"]
+        ):
+            raise ValueError("controlled manifest provenance does not match calibration identity")
         input_path = case_path.with_name("guest-input.json")
         if input_path.exists():
             cases_by_kind.setdefault(case.get("kind", "opcode"), []).append((case, input_path))
@@ -2272,7 +2405,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             )
         else:
             elf_path = args.elf if kind == "opcode" else args.precompile_elf
-        report_path = args.out.with_name(f"{args.out.stem}.{stage}.jsonl")
+        report_path = out.with_name(f"{out.stem}.{stage}.jsonl")
         run_guest_inputs(
             guest_launcher=args.guest_launcher,
             elf_path=elf_path,
@@ -2284,17 +2417,27 @@ def cmd_run(args: argparse.Namespace) -> None:
     case_by_input = {
         str(input_path): case for cases in cases_by_kind.values() for case, input_path in cases
     }
-    with args.out.open("w") as out:
+    with out.open("w") as output:
         ran = 0
         for report_path in report_paths:
             for report in iter_jsonl(report_path):
                 case = case_by_input[report["input"]]
-                out.write(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
+                output.write(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
                 ran += 1
     print(f"ran {ran} executable case(s)")
 
 
 def cmd_run_proposal(args: argparse.Namespace) -> None:
+    if args.purpose == "integration_smoke":
+        if args.smoke_record is None or args.network is None or args.proposal_id is None:
+            raise ValueError(
+                "run-proposal integration_smoke requires --smoke-record --network --proposal-id"
+            )
+        verify_prepared_integration_smoke(
+            _resolve_repo_path(args.smoke_record, field_name="smoke_record"),
+            network=args.network,
+            proposal_id=args.proposal_id,
+        )
     run_proposal_guest_input(
         guest_launcher=args.guest_launcher,
         guest_input=args.guest_input,

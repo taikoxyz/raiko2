@@ -184,6 +184,47 @@ with larger variants or a cleaner template before treating the slope as a candid
 
 ## Follow-Up TODO
 
+## Frozen SP1 Calibration Inputs
+
+`prepare-calibration` freezes a clean implementation revision and the controlled
+manifest before measurement. It creates an immutable bridge manifest alongside
+the calibration directory; the bridge may later be sealed as `insufficient_data`
+without changing the primary `proverGas` candidate.
+
+`prepare-corpus` selects the fixed 60-row V1 validation corpus (40 Hoodi, 20
+Mainnet) from the two checked-in 2026-09-02 fixture files before it contacts an
+RPC endpoint. It accepts only network-qualified RPC and chain-spec hash inputs,
+uses the fixed proposal IDs with discovery-only mode, and invokes preflight with
+the valueless `--validate` flag. It never substitutes a failed proposal. The
+saved GuestInputs are written below the ignored repository-relative corpus path
+and packed with deterministic tar metadata.
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-corpus \
+  --corpus-root experiments/opcode-gas/corpora/sp1-mainnet-hoodi-v1 \
+  --manifest experiments/opcode-gas/manifests/proposals/sp1-mainnet-hoodi-v1.json \
+  --l1-rpc taiko_hoodi=https://l1.example.invalid \
+  --l1-rpc taiko_mainnet=https://l1.example.invalid \
+  --l2-rpc taiko_hoodi=https://l2.example.invalid \
+  --l2-rpc taiko_mainnet=https://l2.example.invalid \
+  --chain-spec-hash taiko_hoodi=<sha256> \
+  --chain-spec-hash taiko_mainnet=<sha256>
+```
+
+The actual final acquisition belongs only to the later measurement step. To
+freeze an already-created archive, `publish-corpus` requires a single
+content-addressed `gs://.../<archive_sha256>.tar` destination. It uses GCS
+create-only upload, reads back the exact object generation, downloads that
+generation, and checks the archive hash before recording the URI, generation,
+and size in the manifest. `local_unpublished` corpora cannot enter validation.
+
+`prepare-validation` requires the independently sealed candidate and bridge
+digests, current `HEAD` equal to their shared `implementation_revision`, and a
+fully published 60-row corpus. It writes only below its new validation directory.
+Generated corpus, run, manifest, and validation output paths may remain dirty;
+any implementation, dependency, controlled-manifest, or guest-artifact change
+rejects the operation.
+
 - Add a Taiko/reth-context revm lab that keeps the `revm-opcode-lab` execution path but uses Taiko
   fork config, block env, and realistic tx env instead of fixed Prague/mainnet benchmark defaults.
 - Add stateful benchmark databases for account/storage opcodes, including warm/cold dimensions and

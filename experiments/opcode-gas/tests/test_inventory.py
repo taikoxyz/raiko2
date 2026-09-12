@@ -20,16 +20,30 @@ def fixture_schedule():
 
 class InventoryTests(unittest.TestCase):
     def test_load_uzen_schedule_invokes_xtask_exporter(self):
+        opcodes = [
+            {
+                "opcode": f"0x{opcode:02x}",
+                "multiplier": 7 if opcode == 1 else 65535,
+                "explicit": opcode == 1,
+            }
+            for opcode in range(256)
+        ]
         completed = mock.Mock(
             stdout=opcode_gas.json.dumps(
                 {
-                    "opcodes": [{"opcode": "0x01", "multiplier": 7}],
+                    "block_limit": 100000000,
+                    "failsafe_multiplier": 65535,
+                    "opcodes": opcodes,
                     "precompiles": [
                         {
                             "address": "0x0000000000000000000000000000000000000100",
                             "multiplier": 9,
+                            "explicit": True,
                         }
                     ],
+                    "precompile_fallback_multiplier": 65535,
+                    "spawn_estimates": {"call": 1, "callcode": 1, "delegatecall": 1, "staticcall": 1, "create": 1, "create2": 1},
+                    "tx_intrinsic_zk_gas": 243000,
                 }
             )
         )
@@ -54,7 +68,8 @@ class InventoryTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(schedule.opcode_multipliers, {0x01: 7})
+        self.assertEqual(schedule.opcode_multipliers[0x01], 7)
+        self.assertEqual(len(schedule.opcode_multipliers), 256)
         self.assertEqual(schedule.precompile_multipliers, {0x100: 9})
         with self.assertRaises(TypeError):
             schedule.opcode_multipliers[0x02] = 11

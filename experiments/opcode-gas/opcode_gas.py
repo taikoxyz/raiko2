@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import json
+import os
 import pathlib
 import statistics
 import subprocess
+import tarfile
+import tempfile
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
@@ -85,6 +89,13 @@ class InventoryRow:
 class UnzenSchedule:
     opcode_multipliers: Mapping[int, int]
     precompile_multipliers: Mapping[int, int]
+    opcode_explicit: Mapping[int, bool] = field(default_factory=dict)
+    precompile_explicit: Mapping[int, bool] = field(default_factory=dict)
+    precompile_fallback_multiplier: int | None = None
+    failsafe_multiplier: int | None = None
+    block_limit: int | None = None
+    tx_intrinsic_zk_gas: int | None = None
+    spawn_estimates: Mapping[str, int] = field(default_factory=dict)
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -350,23 +361,126 @@ def load_current_uzen_schedule() -> UnzenSchedule:
             f"Unzen schedule exporter did not return valid JSON: {detail}"
         ) from exc
     try:
-        opcode_multipliers = _parse_schedule_rows(
-            data,
-            rows_key="opcodes",
-            identifier_key="opcode",
-            max_identifier=0xFF,
-        )
-        precompile_multipliers = _parse_schedule_rows(
-            data,
-            rows_key="precompiles",
-            identifier_key="address",
-            max_identifier=(1 << 160) - 1,
-        )
+        return parse_complete_uzen_schedule(data)
     except ValueError as exc:
         raise RuntimeError(f"invalid Unzen schedule export: {exc}") from exc
-    return UnzenSchedule(
+
+
+def canonical_json(value: Any) -> bytes:
+    """Stable bytes for every content-addressed experiment artifact."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def parse_complete_uzen_schedule(data: Any) -> UnzenSchedule:
+    """Parse the full exporter contract, including failsafe identities.
+
+    The old exporter omitted failsafe opcodes, which made a schedule hash unable to
+    distinguish an explicitly priced entry from an inherited fail-safe value.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Unzen schedule export must be an object")
+    opcode_multipliers = _parse_schedule_rows(
+        data, rows_key="opcodes", identifier_key="opcode", max_identifier=0xFF
+    )
+    if len(opcode_multipliers) != 256:
+        raise ValueError("Unzen schedule export must contain all 256 opcode rows")
+    precompile_multipliers = _parse_schedule_rows(
+        data,
+        rows_key="precompiles",
+        identifier_key="address",
+        max_identifier=(1 << 160) - 1,
+    )
+    failsafe = data.get("failsafe_multiplier", data.get("precompile_fallback_multiplier"))
+    if isinstance(failsafe, bool) or not isinstance(failsafe, int) or failsafe < 0:
+        raise ValueError("Unzen schedule export is missing failsafe_multiplier")
+    fallback = data.get("precompile_fallback_multiplier", failsafe)
+    if fallback != failsafe:
+        raise ValueError("precompile fallback must equal failsafe multiplier")
+    for key in ("block_limit", "tx_intrinsic_zk_gas"):
+        if isinstance(data.get(key), bool) or not isinstance(data.get(key), int) or data[key] <= 0:
+            raise ValueError(f"Unzen schedule export has invalid {key}")
+    spawn = data.get("spawn_estimates")
+    expected_spawn = {"call", "callcode", "delegatecall", "staticcall", "create", "create2"}
+    if not isinstance(spawn, dict) or set(spawn) != expected_spawn or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in spawn.values()
+    ):
+        raise ValueError("Unzen schedule export has invalid spawn_estimates")
+    opcode_explicit = {}
+    for row in data["opcodes"]:
+        opcode = parse_opcode(row["opcode"])
+        explicit = row.get("explicit")
+        if not isinstance(explicit, bool):
+            raise ValueError("every opcode row must declare explicit identity")
+        if not explicit and row["multiplier"] != failsafe:
+            raise ValueError("non-explicit opcode must use failsafe multiplier")
+        opcode_explicit[opcode] = explicit
+    precompile_explicit = {}
+    for row in data["precompiles"]:
+        address = parse_opcode(row["address"])
+        explicit = row.get("explicit", True)
+        if not isinstance(explicit, bool) or not explicit:
+            raise ValueError("precompile rows must be explicit schedule entries")
+        precompile_explicit[address] = explicit
+    schedule = UnzenSchedule(
         opcode_multipliers=MappingProxyType(opcode_multipliers),
         precompile_multipliers=MappingProxyType(precompile_multipliers),
+        opcode_explicit=MappingProxyType(opcode_explicit),
+        precompile_explicit=MappingProxyType(precompile_explicit),
+        precompile_fallback_multiplier=fallback,
+        failsafe_multiplier=failsafe,
+        block_limit=data["block_limit"],
+        tx_intrinsic_zk_gas=data["tx_intrinsic_zk_gas"],
+        spawn_estimates=MappingProxyType(dict(spawn)),
+    )
+    exported_hash = data.get("schedule_sha256")
+    if exported_hash is not None:
+        if not isinstance(exported_hash, str) or exported_hash != schedule_sha256(schedule):
+            raise ValueError("Unzen schedule export has an invalid complete schedule hash")
+    return schedule
+
+
+def complete_schedule_identity(schedule: UnzenSchedule) -> dict[str, Any]:
+    if len(schedule.opcode_multipliers) != 256 or schedule.failsafe_multiplier is None:
+        raise ValueError("schedule is not a complete exported Unzen schedule")
+    return {
+        "block_limit": schedule.block_limit,
+        "failsafe_multiplier": schedule.failsafe_multiplier,
+        "opcodes": [
+            {
+                "explicit": bool(schedule.opcode_explicit.get(opcode)),
+                "opcode": f"0x{opcode:02x}",
+                "multiplier": schedule.opcode_multipliers[opcode],
+            }
+            for opcode in range(256)
+        ],
+        "precompile_fallback_multiplier": schedule.precompile_fallback_multiplier,
+        "precompiles": [
+            {
+                "explicit": bool(schedule.precompile_explicit.get(address)),
+                "address": f"0x{address:040x}",
+                "multiplier": multiplier,
+            }
+            for address, multiplier in sorted(schedule.precompile_multipliers.items())
+        ],
+        "spawn_estimates": dict(sorted(schedule.spawn_estimates.items())),
+        "tx_intrinsic_zk_gas": schedule.tx_intrinsic_zk_gas,
+    }
+
+
+def schedule_sha256(schedule: UnzenSchedule) -> str:
+    # The exporter uses this declared field order; vectors and maps above are
+    # sorted, so these compact bytes are stable across invocations and languages.
+    return sha256_bytes(
+        json.dumps(complete_schedule_identity(schedule), separators=(",", ":"), ensure_ascii=True).encode()
     )
 
 
@@ -1388,6 +1502,354 @@ def write_damage_markdown_report(
     path.write_text("\n".join(lines) + "\n")
 
 
+FINAL_CORPUS_FIXTURE_DIR = REPO_ROOT / "tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3"
+GENERATED_EXPERIMENT_PREFIXES = (
+    "experiments/opcode-gas/corpora/", "experiments/opcode-gas/manifests/proposals/",
+    "experiments/opcode-gas/runs/", "experiments/opcode-gas/validations/",
+)
+
+
+def _read_candidate_pool(paths: Iterable[pathlib.Path]) -> list[dict[str, Any]]:
+    rows, seen = [], set()
+    for path in paths:
+        for raw in iter_jsonl(path):
+            try:
+                row = {"network": str(raw["network"]), "proposal_id": int(raw["proposal_id"]), "block_count": int(raw["block_count"]), "total_zkgas": int(raw["total_zkgas"])}
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"invalid corpus candidate in {path}") from exc
+            key = row["network"], row["proposal_id"]
+            if key in seen or row["block_count"] <= 0 or row["total_zkgas"] <= 0:
+                raise ValueError(f"invalid or duplicate corpus candidate: {key}")
+            rows.append(row); seen.add(key)
+    counts = {network: sum(row["network"] == network for row in rows) for network in ("taiko_hoodi", "taiko_mainnet")}
+    if len(rows) != 140 or counts != {"taiko_hoodi": 120, "taiko_mainnet": 20}:
+        raise ValueError("final corpus candidate pool must contain exactly 120 Hoodi and 20 Mainnet rows")
+    return rows
+
+
+def select_final_validation_corpus(paths: Iterable[pathlib.Path] | None = None) -> list[dict[str, Any]]:
+    """Freeze V1's selection before controlled/proposal execution data exists."""
+    paths = paths or [FINAL_CORPUS_FIXTURE_DIR / "hoodi-fit.jsonl", FINAL_CORPUS_FIXTURE_DIR / "validation.jsonl"]
+    rows = _read_candidate_pool(paths)
+    key = lambda row: (row["block_count"], row["total_zkgas"], row["proposal_id"])
+    hoodi = sorted((row for row in rows if row["network"] == "taiko_hoodi"), key=key)
+    mainnet = sorted((row for row in rows if row["network"] == "taiko_mainnet"), key=key)
+    selected = [hoodi[k * 119 // 39] for k in range(40)] + mainnet
+    if len({(row["network"], row["proposal_id"]) for row in selected}) != 60:
+        raise ValueError("fixed final corpus selection produced duplicate rows")
+    return [{**row, "purpose": "final_validation"} for row in selected]
+
+
+def final_validation_membership(rows: Iterable[Mapping[str, Any]]) -> set[tuple[str, int]]:
+    return {(str(row["network"]), int(row["proposal_id"])) for row in rows if row.get("purpose") == "final_validation"}
+
+
+def assert_integration_smoke_is_disjoint(final_rows: Iterable[Mapping[str, Any]], network: str, proposal_id: int) -> None:
+    if (network, proposal_id) in final_validation_membership(final_rows):
+        raise ValueError("integration_smoke proposal is in the final_validation corpus")
+
+
+def freeze_smoke_row(row: Mapping[str, Any], *, purpose: str) -> dict[str, Any]:
+    if row.get("purpose") != "integration_smoke" or purpose != "integration_smoke":
+        raise ValueError("integration_smoke rows cannot be relabeled after execution")
+    return dict(row)
+
+
+def proposal_workload_id(guest_input_sha256: str) -> str:
+    if len(guest_input_sha256) != 64:
+        raise ValueError("guest_input_sha256 must be a SHA256 digest")
+    return sha256_bytes(canonical_json({"guest_input_sha256": guest_input_sha256, "kind": "proposal"}))
+
+
+def _discovery_rows(path: pathlib.Path) -> dict[int, Mapping[str, Any]]:
+    data = json.loads(path.read_text())
+    values = data if isinstance(data, list) else data.get("proposals", [])
+    if not isinstance(values, list):
+        raise ValueError("proposal discovery output must contain a list")
+    result = {int(row["proposal_id"]): row for row in values}
+    if len(result) != len(values):
+        raise ValueError("proposal discovery output has duplicate proposal IDs")
+    return result
+
+
+def _discovery_value(row: Mapping[str, Any], *names: str) -> int:
+    for name in names:
+        if name in row:
+            return int(row[name])
+    raise ValueError(f"discovery output missing one of {names}")
+
+
+def _guest_input_block_summary(path: pathlib.Path) -> tuple[int, int]:
+    guest_input = json.loads(path.read_text())
+    blocks = guest_input.get("blocks")
+    if blocks is None:
+        witnesses = guest_input.get("witnesses")
+        if isinstance(witnesses, list):
+            blocks = [item.get("block", {}).get("header", {}) for item in witnesses]
+    if not isinstance(blocks, list) or not blocks:
+        raise ValueError("GuestInput must contain blocks")
+    values = []
+    for block in blocks:
+        value = block.get("block_difficulty", block.get("difficulty"))
+        value = int(value, 0) if isinstance(value, str) else value
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("GuestInput has non-positive block difficulty")
+        values.append(value)
+    return len(values), sum(values)
+
+
+def write_deterministic_tar(corpus_root: pathlib.Path, archive: pathlib.Path) -> str:
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "w") as tar:
+        for path in sorted(item for item in corpus_root.rglob("*") if item.is_file()):
+            info = tar.gettarinfo(str(path), arcname=str(path.relative_to(corpus_root)))
+            info.uid = info.gid = info.mtime = 0; info.uname = info.gname = ""; info.mode = 0o644
+            with path.open("rb") as fh: tar.addfile(info, fh)
+    return sha256_file(archive)
+
+
+def prepare_corpus(*, rows: list[dict[str, Any]] | None = None, corpus_root: pathlib.Path, l1_rpc_by_network: Mapping[str, str], l2_rpc_by_network: Mapping[str, str], chain_spec_hash_by_network: Mapping[str, str], manifest_path: pathlib.Path | None = None) -> dict[str, Any]:
+    rows = rows or select_final_validation_corpus()
+    if any(row.get("purpose") != "final_validation" for row in rows):
+        raise ValueError("prepare-corpus accepts only final_validation rows")
+    corpus_root.mkdir(parents=True, exist_ok=True); final_rows = []
+    for network in sorted({str(row["network"]) for row in rows}):
+        selected = sorted((row for row in rows if row["network"] == network), key=lambda row: row["proposal_id"])
+        if not all(network in values for values in (l1_rpc_by_network, l2_rpc_by_network, chain_spec_hash_by_network)):
+            raise ValueError(f"missing RPC/chain-spec input for {network}")
+        with tempfile.TemporaryDirectory(prefix="opcode-gas-discovery-") as tmp:
+            discovery = pathlib.Path(tmp) / f"{network}.json"
+            subprocess.run([os.environ.get("PYTHON_BIN", str(pathlib.Path.home() / ".venv/bin/python")), "scripts/regression/stress_shasta_proposal.py", "--network", network, "--l1-rpc", l1_rpc_by_network[network], "--l2-rpc", l2_rpc_by_network[network], "--proposal-ids", ",".join(str(row["proposal_id"]) for row in selected), "--discover-only", "--proposal-out", str(discovery)], cwd=REPO_ROOT, check=True)
+            discovered = _discovery_rows(discovery)
+            for row in selected:
+                proposal_id = int(row["proposal_id"])
+                if proposal_id not in discovered: raise ValueError(f"acquisition did not discover fixed proposal {network}/{proposal_id}")
+                item, output = discovered[proposal_id], corpus_root / network / f"proposal_{proposal_id}.json"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                temporary_output = output.with_name(f".{output.name}.tmp")
+                subprocess.run(["target/release/preflight", "--network", network, "--rpc-url", l2_rpc_by_network[network], "--l1-rpc-url", l1_rpc_by_network[network], "--proposal-id", str(proposal_id), "--l1-inclusion-block-number", str(_discovery_value(item, "l1_inclusion_block_number", "inclusion_block")), "--last-anchor-block-number", str(_discovery_value(item, "last_anchor_block_number", "previous_anchor_block")), "--l2-start", str(_discovery_value(item, "l2_start", "l2_block_start")), "--l2-end", str(_discovery_value(item, "l2_end", "l2_block_end")), "--proof-type", "sp1", "--validate", "--output", str(temporary_output)], cwd=REPO_ROOT, check=True)
+                block_count, difficulty_sum = _guest_input_block_summary(temporary_output)
+                if block_count != row["block_count"] or difficulty_sum != row["total_zkgas"]:
+                    raise ValueError(f"GuestInput does not match fixed count/total for {network}/{proposal_id}")
+                os.replace(temporary_output, output)
+                guest_sha = sha256_file(output)
+                final_rows.append({**row, "fixture_path": str(output.relative_to(REPO_ROOT)) if output.is_relative_to(REPO_ROOT) else str(output), "guest_input_sha256": guest_sha, "workload_id": proposal_workload_id(guest_sha), "l1_inclusion_block_number": _discovery_value(item, "l1_inclusion_block_number", "inclusion_block"), "last_anchor_block_number": _discovery_value(item, "last_anchor_block_number", "previous_anchor_block"), "l2_start": _discovery_value(item, "l2_start", "l2_block_start"), "l2_end": _discovery_value(item, "l2_block_end", "l2_end"), "block_difficulty_sum": difficulty_sum, "acquisition_chain_spec_sha256": chain_spec_hash_by_network[network]})
+    final_rows.sort(key=lambda row: (row["network"], row["proposal_id"]))
+    archive = corpus_root.parent / "sp1-mainnet-hoodi-v1.tar"
+    manifest = {"schema_version": 1, "archive_uri": "local_unpublished", "archive_generation": None, "archive_size_bytes": None, "archive_sha256": write_deterministic_tar(corpus_root, archive), "rows": final_rows}
+    if manifest_path:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True); manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+def publish_corpus(archive: pathlib.Path, object_uri: str) -> dict[str, Any]:
+    digest = sha256_file(archive)
+    if not object_uri.startswith("gs://") or not object_uri.endswith(f"{digest}.tar"):
+        raise ValueError("GCS object name must end in <archive_sha256>.tar")
+    try:
+        subprocess.run(["gcloud", "storage", "cp", "--if-generation-match=0", "--print-created-message", str(archive), object_uri], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError:
+        pass
+    metadata = json.loads(subprocess.run(["gcloud", "storage", "objects", "describe", object_uri, "--format=json"], check=True, capture_output=True, text=True).stdout)
+    generation, size = int(metadata["generation"]), int(metadata["size"])
+    if generation <= 0 or size <= 0: raise ValueError("published corpus must have positive generation and size")
+    versioned = f"{object_uri}#{generation}"
+    with tempfile.TemporaryDirectory(prefix="opcode-gas-corpus-readback-") as tmp:
+        readback = pathlib.Path(tmp) / "corpus.tar"
+        subprocess.run(["gcloud", "storage", "cp", versioned, str(readback)], check=True)
+        if sha256_file(readback) != digest: raise ValueError("exact-generation GCS readback SHA256 mismatch")
+    return {"archive_uri": versioned, "archive_generation": generation, "archive_size_bytes": size, "archive_sha256": digest}
+
+
+def git_head(source_root: pathlib.Path = REPO_ROOT) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=source_root, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def git_worktree_status(source_root: pathlib.Path = REPO_ROOT) -> str:
+    return subprocess.run(["git", "status", "--porcelain"], cwd=source_root, check=True, capture_output=True, text=True).stdout
+
+
+def assert_generated_paths_only(status: str) -> None:
+    for line in status.splitlines():
+        if line and not any(line[3:].split(" -> ")[-1].startswith(prefix) for prefix in GENERATED_EXPERIMENT_PREFIXES):
+            raise ValueError(f"dirty implementation path is not an allowed generated output: {line[3:]}")
+
+
+def _toml_scalar_list(path: pathlib.Path, key: str) -> list[str]:
+    value = tomllib.loads(path.read_text()).get(key)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value): raise ValueError(f"controlled manifest requires nonempty {key}")
+    return value
+
+
+def prepare_calibration(
+    output_root: pathlib.Path,
+    controlled_manifest: pathlib.Path,
+    *,
+    implementation_revision: str | None = None,
+    complete_schedule_hash: str | None = None,
+) -> dict[str, Any]:
+    assert_generated_paths_only(git_worktree_status())
+    revision = implementation_revision or git_head()
+    if implementation_revision is not None and git_head() != revision:
+        raise ValueError("current HEAD does not match implementation_revision")
+    controlled_hash = sha256_file(controlled_manifest)
+    data = tomllib.loads(controlled_manifest.read_text())
+    if data.get("include_uzen_pure_opcodes") or data.get("include_uzen_precompile_bodies"):
+        raise ValueError("controlled manifest must not use implicit include flags")
+    bridge_key_ids = _toml_scalar_list(controlled_manifest, "bridge_key_ids")
+    normalization = data.get("normalization_reference_key")
+    if normalization != "opcode:0x01" or normalization not in bridge_key_ids:
+        raise ValueError("bridge_key_ids must include normalization_reference_key opcode:0x01")
+    if complete_schedule_hash is None:
+        complete_schedule_hash = schedule_sha256(current_uzen_schedule())
+    if len(complete_schedule_hash) != 64:
+        raise ValueError("complete_schedule_hash must be a SHA256 digest")
+    calibration_id = sha256_bytes(
+        canonical_json(
+            {
+                "implementation_revision": revision,
+                "controlled_manifest_sha256": controlled_hash,
+                "bridge_key_ids": bridge_key_ids,
+                "complete_schedule_sha256": complete_schedule_hash,
+            }
+        )
+    )[:24]
+    run = output_root / "runs" / calibration_id
+    if run.exists():
+        raise ValueError(f"calibration directory already exists: {run}")
+    workspace = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
+    alethia_revision = workspace["workspace"]["dependencies"]["alethia-reth-chainspec"]["rev"]
+    guest_artifacts = {
+        str(path.relative_to(REPO_ROOT)): sha256_file(path)
+        for path in sorted((REPO_ROOT / "crates/guests/elf").glob("sp1*"))
+        if path.is_file()
+    }
+    experiment = {
+        "schema_version": 1,
+        "calibration_id": calibration_id,
+        "implementation_revision": revision,
+        "dirty_state": False,
+        "alethia_reth_revision": alethia_revision,
+        "complete_schedule_sha256": complete_schedule_hash,
+        "controlled_manifest_sha256": controlled_hash,
+        "guest_artifacts": guest_artifacts,
+        "normalization_reference_key": normalization,
+        "primary_metric": "proverGas",
+        "sp1_execution_parameters": {
+            "mode": "execute",
+            "prover": "local",
+            "primary_api": "ExecutionReport::gas",
+        },
+        "sp1_instruction_count": "secondary_non_gating",
+        "workload_identity_schema_version": 1,
+        "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+        "primary_formulas": {
+            "candidate_cost": "g_p(k) / r(k)",
+            "candidate_multiplier": "c_p(k) / c_p(opcode:0x01)",
+        },
+        "out_of_fit_checkpoint": {
+            "mapping": "frozen_in_controlled_manifest",
+            "ape_max": 0.10,
+        },
+        "quality_gates": {"checkpoint_ape_max": 0.10},
+    }
+    bridge = {
+        "schema_version": 1,
+        "implementation_revision": revision,
+        "bridge_key_ids": bridge_key_ids,
+        "model": "through_origin_equal_key_median_kappa_sp1",
+        "controlled_ape_max": 0.10,
+        "proposal_ape_max": 0.10,
+        "missing_data": "insufficient_data_is_sealable_and_non_gating",
+    }
+    (run / "bridge").mkdir(parents=True)
+    (run / "experiment.json").write_text(json.dumps(experiment, indent=2, sort_keys=True) + "\n")
+    (run / "bridge" / "bridge-manifest.json").write_text(
+        json.dumps(bridge, indent=2, sort_keys=True) + "\n"
+    )
+    return experiment
+
+
+def _read_digest(path: pathlib.Path) -> str:
+    value = path.read_text().strip()
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value): raise ValueError(f"invalid SHA256 digest in {path}")
+    return value
+
+
+def _validate_frozen_corpus(corpus: Mapping[str, Any], revision: str) -> list[Mapping[str, Any]]:
+    if corpus.get("implementation_revision") not in (None, revision): raise ValueError("corpus implementation_revision does not match calibration")
+    if not isinstance(corpus.get("archive_uri"), str) or not corpus["archive_uri"].startswith("gs://") or "#" not in corpus["archive_uri"] or not isinstance(corpus.get("archive_generation"), int) or corpus["archive_generation"] <= 0 or not isinstance(corpus.get("archive_size_bytes"), int) or corpus["archive_size_bytes"] <= 0: raise ValueError("corpus is local_unpublished or has no exact archive identity")
+    rows = corpus.get("rows")
+    if not isinstance(rows, list) or len(rows) != 60: raise ValueError("validation requires exactly 60 completed GuestInputs")
+    counts = {"taiko_hoodi": 0, "taiko_mainnet": 0}
+    for row in rows:
+        if row.get("purpose") != "final_validation" or int(row.get("block_count", 0)) <= 0 or int(row.get("total_zkgas", 0)) <= 0 or row.get("workload_id") != proposal_workload_id(str(row.get("guest_input_sha256", ""))): raise ValueError("invalid final_validation corpus row")
+        if row.get("network") not in counts: raise ValueError("unexpected corpus network")
+        counts[row["network"]] += 1
+    if counts != {"taiko_hoodi": 40, "taiko_mainnet": 20}: raise ValueError("validation corpus must contain 40 Hoodi and 20 Mainnet rows")
+    return rows
+
+
+def prepare_validation(output_root: pathlib.Path, run: pathlib.Path, corpus_path: pathlib.Path) -> dict[str, Any]:
+    revision = str(json.loads((run / "experiment.json").read_text())["implementation_revision"])
+    if git_head() != revision: raise ValueError("current HEAD does not match implementation_revision")
+    assert_generated_paths_only(git_worktree_status())
+    candidate_sha, bridge_sha = _read_digest(run / "candidate" / "candidate.sha256"), _read_digest(run / "bridge" / "bridge.sha256")
+    candidate_manifest = json.loads((run / "candidate" / "candidate-manifest.json").read_text())
+    bridge_root = json.loads((run / "bridge" / "bridge-root.json").read_text())
+    if candidate_manifest.get("implementation_revision") != revision:
+        raise ValueError("candidate provenance does not match implementation_revision")
+    if bridge_root.get("implementation_revision") != revision:
+        raise ValueError("bridge provenance does not match implementation_revision")
+    corpus = json.loads(corpus_path.read_text()); _validate_frozen_corpus(corpus, revision)
+    identity = {"candidate_sha256": candidate_sha, "bridge_sha256": bridge_sha, "corpus_sha256": sha256_file(corpus_path), "implementation_revision": revision}; validation_id = sha256_bytes(canonical_json(identity))[:24]
+    output = output_root / "validations" / validation_id
+    if output.exists(): raise ValueError(f"validation directory already exists: {output}")
+    output.mkdir(parents=True); (output / "candidate-ref.json").write_text(json.dumps({"candidate_sha256": candidate_sha, "implementation_revision": revision}, indent=2, sort_keys=True) + "\n"); (output / "bridge-ref.json").write_text(json.dumps({"bridge_sha256": bridge_sha, "implementation_revision": revision}, indent=2, sort_keys=True) + "\n"); (output / "proposal-manifest.json").write_text(json.dumps(corpus, indent=2, sort_keys=True) + "\n")
+    return {"validation_id": validation_id, **identity}
+
+
+def _network_values(values: list[str]) -> dict[str, str]:
+    result = {}
+    for value in values:
+        network, separator, item = value.partition("=")
+        if not separator or not network or not item or network in result:
+            raise ValueError("network values must be unique NETWORK=VALUE pairs")
+        result[network] = item
+    return result
+
+
+def cmd_prepare_corpus(args: argparse.Namespace) -> None:
+    manifest = prepare_corpus(
+        corpus_root=args.corpus_root,
+        l1_rpc_by_network=_network_values(args.l1_rpc),
+        l2_rpc_by_network=_network_values(args.l2_rpc),
+        chain_spec_hash_by_network=_network_values(args.chain_spec_hash),
+        manifest_path=args.manifest,
+    )
+    print(f"prepared {len(manifest['rows'])} final-validation GuestInputs")
+
+
+def cmd_publish_corpus(args: argparse.Namespace) -> None:
+    published = publish_corpus(args.archive, args.object_uri)
+    manifest = json.loads(args.manifest.read_text())
+    manifest.update(published)
+    args.manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    print(f"published corpus at {published['archive_uri']}")
+
+
+def cmd_prepare_calibration(args: argparse.Namespace) -> None:
+    experiment = prepare_calibration(
+        args.out, args.controlled_manifest, implementation_revision=args.implementation_revision
+    )
+    print(f"prepared calibration {experiment['calibration_id']}")
+
+
+def cmd_prepare_validation(args: argparse.Namespace) -> None:
+    validation = prepare_validation(args.out, args.run, args.corpus)
+    print(f"prepared validation {validation['validation_id']}")
+
+
 def cmd_generate(args: argparse.Namespace) -> None:
     manifest = load_manifest(args.manifest)
     written = generate_cases(manifest, args.out)
@@ -1484,6 +1946,34 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("--manifest", type=pathlib.Path, required=True)
     inventory.add_argument("--out", type=pathlib.Path, required=True)
     inventory.set_defaults(func=cmd_inventory)
+
+    prepare_corpus_parser = subcommands.add_parser(
+        "prepare-corpus", help="acquire the preselected final-validation GuestInputs"
+    )
+    prepare_corpus_parser.add_argument("--corpus-root", type=pathlib.Path, required=True)
+    prepare_corpus_parser.add_argument("--manifest", type=pathlib.Path)
+    prepare_corpus_parser.add_argument("--l1-rpc", action="append", required=True, metavar="NETWORK=URL")
+    prepare_corpus_parser.add_argument("--l2-rpc", action="append", required=True, metavar="NETWORK=URL")
+    prepare_corpus_parser.add_argument("--chain-spec-hash", action="append", required=True, metavar="NETWORK=SHA256")
+    prepare_corpus_parser.set_defaults(func=cmd_prepare_corpus)
+
+    publish = subcommands.add_parser("publish-corpus", help="publish a sealed corpus archive")
+    publish.add_argument("--archive", type=pathlib.Path, required=True)
+    publish.add_argument("--object-uri", required=True)
+    publish.add_argument("--manifest", type=pathlib.Path, required=True)
+    publish.set_defaults(func=cmd_publish_corpus)
+
+    calibration = subcommands.add_parser("prepare-calibration", help="freeze controlled calibration provenance")
+    calibration.add_argument("--out", type=pathlib.Path, required=True)
+    calibration.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    calibration.add_argument("--implementation-revision")
+    calibration.set_defaults(func=cmd_prepare_calibration)
+
+    validation = subcommands.add_parser("prepare-validation", help="bind candidate, bridge, and frozen corpus")
+    validation.add_argument("--out", type=pathlib.Path, required=True)
+    validation.add_argument("--run", type=pathlib.Path, required=True)
+    validation.add_argument("--corpus", type=pathlib.Path, required=True)
+    validation.set_defaults(func=cmd_prepare_validation)
     return parser
 
 

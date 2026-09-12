@@ -1,23 +1,53 @@
 use alethia_reth_evm::zk_gas::{schedule::FAILSAFE_MULTIPLIER, unzen::UNZEN_ZK_GAS_SCHEDULE};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ScheduleExport {
+    block_limit: u64,
+    failsafe_multiplier: u16,
     opcodes: Vec<OpcodeMultiplier>,
+    precompile_fallback_multiplier: u16,
     precompiles: Vec<PrecompileMultiplier>,
+    schedule_sha256: String,
+    spawn_estimates: SpawnEstimates,
+    tx_intrinsic_zk_gas: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct OpcodeMultiplier {
+    explicit: bool,
     opcode: String,
     multiplier: u16,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct PrecompileMultiplier {
+    explicit: bool,
     address: String,
     multiplier: u16,
+}
+
+#[derive(Serialize, Clone)]
+struct SpawnEstimates {
+    call: u64,
+    callcode: u64,
+    create: u64,
+    create2: u64,
+    delegatecall: u64,
+    staticcall: u64,
+}
+
+#[derive(Serialize)]
+struct ScheduleHashInput<'a> {
+    block_limit: u64,
+    failsafe_multiplier: u16,
+    opcodes: &'a [OpcodeMultiplier],
+    precompile_fallback_multiplier: u16,
+    precompiles: &'a [PrecompileMultiplier],
+    spawn_estimates: &'a SpawnEstimates,
+    tx_intrinsic_zk_gas: u64,
 }
 
 fn build_schedule_export() -> Result<ScheduleExport> {
@@ -25,8 +55,8 @@ fn build_schedule_export() -> Result<ScheduleExport> {
         .opcode_multipliers
         .iter()
         .enumerate()
-        .filter(|(_, multiplier)| **multiplier != FAILSAFE_MULTIPLIER)
         .map(|(opcode, &multiplier)| OpcodeMultiplier {
+            explicit: multiplier != FAILSAFE_MULTIPLIER,
             opcode: format!("0x{opcode:02x}"),
             multiplier,
         })
@@ -35,6 +65,7 @@ fn build_schedule_export() -> Result<ScheduleExport> {
         .precompile_multipliers
         .iter()
         .map(|(address, multiplier)| PrecompileMultiplier {
+            explicit: true,
             address: format!("{address:#x}"),
             multiplier: *multiplier,
         })
@@ -44,10 +75,40 @@ fn build_schedule_export() -> Result<ScheduleExport> {
         !precompiles.is_empty(),
         "Unzen precompile schedule is empty"
     );
-    Ok(ScheduleExport {
+    let spawn_estimates = SpawnEstimates {
+        call: UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.call,
+        callcode: UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.callcode,
+        create: UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.create,
+        create2: UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.create2,
+        delegatecall: UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.delegatecall,
+        staticcall: UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.staticcall,
+    };
+    let mut output = ScheduleExport {
+        block_limit: UNZEN_ZK_GAS_SCHEDULE.block_limit,
+        failsafe_multiplier: FAILSAFE_MULTIPLIER,
         opcodes,
+        precompile_fallback_multiplier: FAILSAFE_MULTIPLIER,
         precompiles,
+        schedule_sha256: String::new(),
+        spawn_estimates,
+        tx_intrinsic_zk_gas: UNZEN_ZK_GAS_SCHEDULE.tx_intrinsic_zk_gas,
+    };
+    output.schedule_sha256 = schedule_sha256(&output)?;
+    Ok(output)
+}
+
+fn schedule_sha256(output: &ScheduleExport) -> Result<String> {
+    let canonical = serde_json::to_vec(&ScheduleHashInput {
+        block_limit: output.block_limit,
+        failsafe_multiplier: output.failsafe_multiplier,
+        opcodes: &output.opcodes,
+        precompile_fallback_multiplier: output.precompile_fallback_multiplier,
+        precompiles: &output.precompiles,
+        spawn_estimates: &output.spawn_estimates,
+        tx_intrinsic_zk_gas: output.tx_intrinsic_zk_gas,
     })
+    .context("serialize complete Unzen schedule identity")?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
 pub(crate) fn run() -> Result<()> {
@@ -92,10 +153,14 @@ mod tests {
             .opcode_multipliers
             .iter()
             .enumerate()
-            .filter(|(_, multiplier)| **multiplier != FAILSAFE_MULTIPLIER)
             .map(|(opcode, &multiplier)| (opcode, multiplier))
             .collect::<Vec<_>>();
         assert_eq!(exported_opcodes, expected_opcodes);
+        assert!(output.opcodes.iter().all(|row| {
+            let opcode = usize::from_str_radix(row.opcode.trim_start_matches("0x"), 16).unwrap();
+            row.explicit
+                == (UNZEN_ZK_GAS_SCHEDULE.opcode_multipliers[opcode] != FAILSAFE_MULTIPLIER)
+        }));
 
         let exported_precompiles = output
             .precompiles
@@ -121,6 +186,46 @@ mod tests {
             .map(|(address, multiplier)| (*address, *multiplier))
             .collect::<Vec<_>>();
         assert_eq!(exported_precompiles, expected_precompiles);
+        assert!(output.precompiles.iter().all(|row| row.explicit));
+    }
+
+    #[test]
+    fn export_preserves_complete_schedule_identity_and_hashes_all_fields() {
+        let output = build_schedule_export().unwrap();
+
+        assert_eq!(output.opcodes.len(), 256);
+        for (opcode, row) in output.opcodes.iter().enumerate() {
+            assert_eq!(row.opcode, format!("0x{opcode:02x}"));
+            assert_eq!(
+                row.explicit,
+                UNZEN_ZK_GAS_SCHEDULE.opcode_multipliers[opcode] != FAILSAFE_MULTIPLIER
+            );
+            assert_eq!(
+                row.multiplier,
+                UNZEN_ZK_GAS_SCHEDULE.opcode_multipliers[opcode]
+            );
+        }
+        assert_eq!(output.failsafe_multiplier, FAILSAFE_MULTIPLIER);
+        assert_eq!(output.precompile_fallback_multiplier, FAILSAFE_MULTIPLIER);
+        assert_eq!(output.block_limit, UNZEN_ZK_GAS_SCHEDULE.block_limit);
+        assert_eq!(
+            output.tx_intrinsic_zk_gas,
+            UNZEN_ZK_GAS_SCHEDULE.tx_intrinsic_zk_gas
+        );
+        assert_eq!(
+            output.spawn_estimates.call,
+            UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.call
+        );
+        assert_eq!(
+            output.spawn_estimates.create2,
+            UNZEN_ZK_GAS_SCHEDULE.spawn_estimates.create2
+        );
+
+        let canonical = serde_json::to_vec(&output).unwrap();
+        let mut changed = build_schedule_export().unwrap();
+        changed.block_limit += 1;
+        assert_ne!(canonical, serde_json::to_vec(&changed).unwrap());
+        assert_ne!(output.schedule_sha256, schedule_sha256(&changed).unwrap());
     }
 
     #[test]

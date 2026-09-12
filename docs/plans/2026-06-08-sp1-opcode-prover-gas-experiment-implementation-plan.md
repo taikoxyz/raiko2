@@ -977,7 +977,7 @@ For each network, `prepare-corpus` invokes
 `scripts/regression/stress_shasta_proposal.py` with `--proposal-ids`, `--discover-only`, and
 `--proposal-out` for the fixed proposal IDs, then invokes `target/release/preflight` with the
 discovered proposal tuple,
-`--proof-type sp1 --validate true`, network-specific L1/L2 RPC inputs, and an explicit `--output`.
+`--proof-type sp1 --validate`, network-specific L1/L2 RPC inputs, and an explicit `--output`.
 Write atomically under the ignored repository-relative directory:
 
 ```text
@@ -1019,13 +1019,13 @@ the Alethia revision and all guest code/artifacts are final.
 
 ### Step 4: Freeze Separate Calibration And Validation Identities
 
-Add `prepare-calibration` to write `runs/<calibration-id>/experiment.json` from source revision,
-dirty-state flag, Alethia/reth revisions, Rust/SP1 SDK versions, controlled manifest hash, SP1 ELF/VK
-hashes, SP1 execution parameters, complete schedule hash, ADD normalization reference, primary
-formulas and quality gates, the exact out-of-fit checkpoint mapping and threshold, the
-workload-identity schema/version and canonicalization rule, and the exact `bridge_key_ids`, bridge
-model, bridge thresholds, and missing-data rules. It also materializes the immutable
-`bridge-manifest.json` before any measurement.
+Add `prepare-calibration` to write `runs/<calibration-id>/experiment.json` from one clean
+`implementation_revision`, dirty-state flag, Alethia/reth revisions, Rust/SP1 SDK versions,
+controlled manifest hash, SP1 ELF/VK hashes, SP1 execution parameters, complete schedule hash, ADD
+normalization reference, primary formulas and quality gates, the exact out-of-fit checkpoint mapping
+and threshold, the workload-identity schema/version and canonicalization rule, and the exact
+`bridge_key_ids`, bridge model, bridge thresholds, and missing-data rules. It also materializes the
+immutable `bridge-manifest.json` before any measurement.
 Final calibration requires a clean source tree and a materialized manifest with no
 implicit include flags. Resume only rows whose complete calibration identity, backend, case identity,
 input hash, output, and schema match.
@@ -1037,6 +1037,12 @@ version-qualified proposal corpus identity. Acceptance requires the exact candid
 digests, 60 completed GuestInputs, 40 Hoodi and 20 Mainnet `final_validation` rows, positive per-block
 difficulty, recomputed proposal `workload_id` values, and the immutable archive checks above. Proposal
 execution may write only inside that validation directory.
+
+`prepare-validation` must require candidate, bridge, and validation provenance to name the same
+`implementation_revision`, and require current `HEAD` to remain that revision. After controlled
+measurement begins, only the declared run, corpus, proposal-manifest, and validation output paths may
+be dirty; any implementation, dependency, controlled-manifest, or guest-artifact change rejects the
+run. Generated outputs remain uncommitted until final verification completes.
 
 Final validation acceptance additionally requires positive proposal `proverGas`, matching trace/SP1
 public output, exact nonzero block reconciliation from Task 2, at least one `OperationExecuted` event,
@@ -1385,6 +1391,11 @@ proposal-purpose value other than `final_validation`; or when the candidate, bri
 provenance differ. Scan the implementation and output schema for forbidden proposal fit, model
 selection, threshold-selection, and calibration-write fields.
 
+Test that candidate, bridge, and validation all retain the original `implementation_revision` while
+generated experiment paths are dirty. Reject a changed `HEAD` or any dirty implementation,
+dependency, controlled-manifest, or guest-artifact path. No generated corpus or report commit occurs
+before final verification.
+
 ### Step 5: Verify
 
 ```bash
@@ -1421,9 +1432,11 @@ or unsealed bridge is not. No proposal fixture or result may be read during this
 Only after Step 1 has sealed `candidate.sha256` and `bridge.sha256`, invoke `prepare-corpus` with the
 final binaries and network RPC inputs, inspect its 60 `final_validation` rows, publish the
 content-addressed archive with `publish-corpus`, and read back its exact GCS generation and bytes.
-Commit only the version-qualified manifest while fixtures and the local archive remain ignored.
-`prepare-validation` binds the exact candidate and bridge digests, corpus generation, GuestInput
-hashes, SP1 guest identity, and source provenance to an immutable validation ID.
+Keep the version-qualified manifest and every generated experiment artifact uncommitted through
+final verification so `HEAD` remains the clean `implementation_revision`; fixtures and the local
+archive remain ignored. `prepare-validation` binds the exact candidate and bridge digests, corpus
+generation, GuestInput hashes, SP1 guest identity, and that implementation revision to an immutable
+validation ID.
 
 ### Step 3: Run Separate Proposal Validation Passes
 
@@ -1469,8 +1482,13 @@ cargo run -p xtask --features guest-tools -- guest-digests \
 Independently review the complete Alethia and raiko2 diffs. Independently rerun the observer A/B
 tests, one Mainnet and one Hoodi full trace-plus-SP1 reconciliation, both guest feature/artifact
 isolation checks, one exact-generation corpus download/hash check, and a fresh recomputation of both
-the candidate and validation reports from committed normalized rows. Investigate every material
+the candidate and validation reports from sealed normalized rows. Investigate every material
 finding and have the reviewer/tester re-check fixes before declaring the reports fixed.
+
+After those checks pass, commit the version-qualified corpus manifest and the declared calibration,
+validation, and report artifacts as experiment evidence. They continue to record the unchanged
+`implementation_revision`; the evidence commit is not substituted as the revision that executed the
+experiment.
 
 ### Step 6: Handoff Boundary
 

@@ -82,9 +82,10 @@ calibration or sealing barrier mean `final_validation` rows. The separately labe
 `integration_smoke` rows defined below may run earlier and never participate in calibration, bridge
 fitting, candidate construction, or final validation.
 
-1. **Implementation provenance**: exact raiko2 source revision used by the tooling, the Cargo-pinned
-   alethia-reth revision, the exported Unzen schedule hash, guest ELF/VK hashes, and relevant SDK
-   versions from that checkout.
+1. **Implementation provenance**: one clean `implementation_revision` captured before controlled
+   measurement, the Cargo-pinned alethia-reth revision, the exported Unzen schedule hash, guest
+   ELF/VK hashes, and relevant SDK versions from that checkout. Candidate, bridge, and validation
+   provenance all retain that same revision until the run is complete.
 2. **Measurement backend**: SP1 normalized software `proverGas` is the sole V1 candidate and
    validation metric. SP1 total instruction count is recorded alongside it as a non-gating secondary
    bridge input. RISC0 is not executed for V1 measurements; its guest is rebuilt and identity-checked
@@ -107,6 +108,15 @@ controlled-only fit, thresholds, and digest. Neither seal depends on the other s
 changed after that
 barrier creates a new calibration ID and requires a newly versioned validation corpus of previously
 unopened GuestInputs; the old proposal rows become regression-only evidence.
+
+Generated experiment data does not redefine `implementation_revision`. From the start of controlled
+measurement through final verification, `HEAD` remains that revision and no implementation,
+dependency, controlled-manifest, or guest-artifact file may change. Candidate, corpus-manifest,
+validation, and report outputs may exist only in their declared generated paths and remain
+uncommitted until validation finishes. They are committed afterward as experiment evidence while
+continuing to name the revision that actually executed them. This ordering prevents a corpus-data
+commit from being mistaken for a different implementation during candidate/validation provenance
+checks.
 
 These checks protect the integrity of offline experimental data only. They are not copied into the
 runtime or used to decide whether production may use an installed schedule.
@@ -862,7 +872,7 @@ The implementation is complete when:
 - SP1 execution is local execute-only, and V1 performs no RISC0 proposal execution;
 - fixed Mainnet and Hoodi trace/SP1 rows join by GuestInput hash and public output;
 - the report recomputes the `proverGas` prediction only from the frozen candidate and proposal ledger;
-- the report reproduces every primary proposal-validation metric from committed normalized
+- the report reproduces every primary proposal-validation metric from sealed normalized
   observations, reproduces the separate raw paired sampling artifact, and applies the sealed bridge
   formula to proposals without refitting or selection;
 - the diagnostic overhead cost table reports witness/input/blob/KZG observations and exclusion

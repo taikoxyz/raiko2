@@ -27,6 +27,12 @@ jobs:
       opcode_gas: ${{ steps.filter.outputs.opcode_gas }}
       zkgas_model: ${{ steps.filter.outputs.zkgas_model }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      quantifier_canary: ${{ steps.filter.outputs.quantifier_canary }}
+      # Single source of truth for lane admission. Every Rust lane `if:` and the `rust` gate read
+      # these two instead of restating the filter union, so a filter added to one lane cannot
+      # drift from the gate that observes it (that drift is how `opcode_gas` went unobserved).
+      rust_full: ${{ steps.filter.outputs.rust == 'true' || steps.filter.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' }}
+      rust_any: ${{ steps.filter.outputs.rust == 'true' || steps.filter.outputs.guest_artifacts == 'true' || steps.filter.outputs.opcode_gas == 'true' || steps.filter.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,27 +40,45 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
+          # Load-bearing for the `!crates/guests/elf/**` exclusion in `rust` below. The default
+          # quantifier (`some`) ORs every pattern of a filter together, and a negated pattern
+          # matches every file *outside* what it excludes -- which made `rust` unconditionally
+          # true for any change at all. `some-with-excludes` is the intended "matches at least
+          # one include and no exclude". Do not drop this while any filter uses a `!` pattern.
+          # The `quantifier_canary` filter below turns a lost or ignored input into a red `rust` gate.
+          predicate-quantifier: some-with-excludes
           filters: |
             rust:
               - '**/*.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              # `bin/raiko2`'s config tests parse and validate the canonical example config.
+              - 'config.example.toml'
               - 'crates/**'
+              # ELF-only changes match `guest_artifacts` instead and run only `rust-test-xtask`
+              # (provenance `all --check` and the guest-digests tests over the committed ELF/vk
+              # bytes). That deliberately skips `rust-test-prover`/`rust-test-pipeline`, whose
+              # tests also load these bytes; the `rust` gate's `FULL_RUST_LANES_REQUIRED` split
+              # expects exactly this routing.
               - '!crates/guests/elf/**'
               - 'bin/**'
               - 'guests/**'
               - 'xtask/**'
               - 'config/**'
-              # Guest toolchain Dockerfiles are hashed into the provenance
-              # source fingerprint; without this filter a docker-only change
-              # would skip `all --check` and merge stale provenance.
+              # Guest toolchain Dockerfiles are hashed into the provenance source fingerprint
+              # (without this a docker-only change would skip `all --check` and merge stale
+              # provenance), and the xtask TEE release tests assert on the root `Dockerfile.sgx`.
               - 'docker/**'
-              - 'test.json'
+              - 'Dockerfile*'
+              # `test/guest_inputs/**` is read by the prover's native-backend unit tests.
+              - 'test/**'
               - 'justfile'
-              # `boundless::estimation` include_str!s the zkGas validation fixture and pins its
-              # SHA-256, so a fixture-only edit must still run the prover tests.
-              - 'tests/fixtures/risc0-zkgas/**'
+              # Checked-in fixtures are embedded by tests in several lanes: the shared Shasta
+              # GuestInput fixture (primitives-shasta bincode roundtrip, fixture-server e2e) and
+              # the zkGas validation fixture that `boundless::estimation` include_str!s and pins by
+              # SHA-256. A fixture-only edit must still run those lanes.
+              - 'tests/**'
             guest_artifacts:
               - 'crates/guests/elf/**'
             opcode_gas:
@@ -69,6 +93,13 @@ jobs:
               - 'justfile'
             workflow:
               - '.github/workflows/ci.yml'
+            # Negated-only filter: under `some-with-excludes` it can never match, but under the
+            # default `some` quantifier picomatch inverts the pattern and it matches every changed
+            # file. The `rust` gate fails when it is true, so a lost or ignored
+            # `predicate-quantifier` input (key dropped, moved into this block, or renamed
+            # upstream) cannot silently revert `rust` to matching everything again.
+            quantifier_canary:
+              - '!__quantifier_canary_sentinel__'
 
   zkgas-model:
     needs: changes
@@ -104,7 +135,7 @@ jobs:
 
   rust-fmt:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -125,7 +156,7 @@ jobs:
 
   rust-clippy:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -177,7 +208,7 @@ jobs:
 
   rust-test-foundation:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -214,7 +245,7 @@ jobs:
 
   rust-test-pipeline:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -251,7 +282,7 @@ jobs:
 
   rust-test-runtime:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -296,7 +327,7 @@ jobs:
   # the light lanes so the heavy prover artifacts don't evict their shared cache.
   rust-test-prover:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -344,7 +375,7 @@ jobs:
 
   rust-test-xtask:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.opcode_gas == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust_any == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -418,13 +449,22 @@ jobs:
       - rust-test-runtime
       - rust-test-prover
       - rust-test-xtask
-    if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
+    # This gate is the required status check that observes the lanes which are not required on
+    # their own (rust-test-{pipeline,runtime,prover,xtask}; rust-fmt, rust-clippy and
+    # rust-test-foundation are required separately). It runs whenever any lane in `needs` could
+    # have run (`rust_any` is the union of every lane's admission), whenever the `changes` job did
+    # not succeed (its outputs are then empty, every lane is skipped, and a skipped required check
+    # reports Success -- so the gate must run and fail instead), and whenever the quantifier
+    # canary trips. Do not add a lane to `needs` without routing its admission through `rust_any`.
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust_any == 'true' || needs.changes.outputs.quantifier_canary == 'true')
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: verify rust lanes
         env:
-          FULL_RUST_LANES_REQUIRED: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUANTIFIER_CANARY: ${{ needs.changes.outputs.quantifier_canary }}
+          FULL_RUST_LANES_REQUIRED: ${{ needs.changes.outputs.rust_full }}
           FMT_RESULT: ${{ needs.rust-fmt.result }}
           CLIPPY_RESULT: ${{ needs.rust-clippy.result }}
           TEST_FOUNDATION_RESULT: ${{ needs.rust-test-foundation.result }}
@@ -433,6 +473,16 @@ jobs:
           TEST_PROVER_RESULT: ${{ needs.rust-test-prover.result }}
           TEST_XTASK_RESULT: ${{ needs.rust-test-xtask.result }}
         run: |
+          echo "changes=${CHANGES_RESULT} quantifier_canary=${QUANTIFIER_CANARY} full_rust_lanes_required=${FULL_RUST_LANES_REQUIRED}"
+          echo "fmt=${FMT_RESULT} clippy=${CLIPPY_RESULT} foundation=${TEST_FOUNDATION_RESULT} pipeline=${TEST_PIPELINE_RESULT} runtime=${TEST_RUNTIME_RESULT} prover=${TEST_PROVER_RESULT} xtask=${TEST_XTASK_RESULT}"
+          if [ "${CHANGES_RESULT}" != "success" ]; then
+            echo "::error::the changes job finished with '${CHANGES_RESULT}', so no lane was selected and nothing was tested"
+            exit 1
+          fi
+          if [ "${QUANTIFIER_CANARY}" = "true" ]; then
+            echo "::error::paths-filter predicate-quantifier is not in effect: a negated-only filter matched, so the rust filter's '!crates/guests/elf/**' exclusion is inverted and every change selects every Rust lane"
+            exit 1
+          fi
           test "${TEST_XTASK_RESULT}" = "success"
           if [ "${FULL_RUST_LANES_REQUIRED}" = "true" ]; then
             test "${FMT_RESULT}" = "success"

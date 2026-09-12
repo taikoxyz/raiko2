@@ -200,7 +200,10 @@ class RunManifestTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["publish-corpus", "--archive", "/tmp/a.tar", "--object-uri", "gs://bucket/x.tar", "--manifest", "/tmp/manifest.json"]).command, "publish-corpus")
         self.assertEqual(parser.parse_args(["prepare-calibration", "--out", "/tmp/out", "--controlled-manifest", "/tmp/control.toml"]).command, "prepare-calibration")
         self.assertEqual(parser.parse_args(["prepare-validation", "--out", "/tmp/out", "--run", "/tmp/run", "--corpus", "/tmp/corpus.json"]).command, "prepare-validation")
-        self.assertEqual(parser.parse_args(["prepare-integration-smoke", "--network", "taiko_hoodi", "--proposal-id", "1"]).command, "prepare-integration-smoke")
+        self.assertEqual(parser.parse_args([
+            "prepare-integration-smoke", "--network", "taiko_hoodi",
+            "--proposal-id", "1", "--guest-input", "smoke.json",
+        ]).command, "prepare-integration-smoke")
 
     def test_validation_rejects_duplicate_rows_missing_local_fixtures_and_unsealed_archive(self):
         revision = "a" * 40
@@ -401,6 +404,12 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             args = proposal_args(root, purpose="integration_smoke", smoke_record=root / "smoke.json")
+            args.guest_input.write_text(json.dumps({
+                "taiko": {
+                    "proposal_id": 1,
+                    "chain_spec": {"name": "taiko_hoodi"},
+                }
+            }) + "\n")
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
                 opcode_gas, "run_proposal_guest_input"
             ) as execute:
@@ -416,10 +425,47 @@ class RunManifestTests(unittest.TestCase):
                 execute.assert_not_called()
 
                 args.smoke_record.write_text(json.dumps({
-                    "network": "taiko_hoodi", "proposal_id": 1, "purpose": "integration_smoke"
+                    "network": "taiko_hoodi", "proposal_id": 1,
+                    "purpose": "integration_smoke",
+                    "fixture_sha256": opcode_gas.sha256_file(args.guest_input),
                 }))
                 opcode_gas.cmd_run_proposal(args)
                 execute.assert_called_once()
+
+    def test_run_proposal_smoke_record_must_bind_the_executed_guest_input_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            prepared_input = root / "prepared.json"
+            executed_input = root / "executed.json"
+            prepared_input.write_text(json.dumps({
+                "taiko": {
+                    "proposal_id": 1,
+                    "chain_spec": {"name": "taiko_hoodi"},
+                }
+            }) + "\n")
+            executed_input.write_text(json.dumps({
+                "taiko": {
+                    "proposal_id": 2,
+                    "chain_spec": {"name": "taiko_hoodi"},
+                }
+            }) + "\n")
+            smoke_record = root / "smoke.json"
+            smoke_record.write_text(json.dumps({
+                "network": "taiko_hoodi",
+                "proposal_id": 1,
+                "purpose": "integration_smoke",
+                "fixture_sha256": opcode_gas.sha256_file(prepared_input),
+            }))
+            args = proposal_args(
+                root, purpose="integration_smoke", smoke_record=smoke_record
+            )
+            args.guest_input = executed_input
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "select_final_validation_corpus", return_value=[]
+            ), mock.patch.object(opcode_gas, "run_proposal_guest_input") as execute:
+                with self.assertRaisesRegex(ValueError, "GuestInput"):
+                    opcode_gas.cmd_run_proposal(args)
+            execute.assert_not_called()
 
     def test_prepare_corpus_resolves_relative_actual_chain_spec_and_passes_it_to_preflight(self):
         rows = [{"network": "taiko_hoodi", "proposal_id": 7, "block_count": 1, "total_zkgas": 1, "purpose": "final_validation"}]
@@ -508,6 +554,49 @@ class RunManifestTests(unittest.TestCase):
                 opcode_gas, "run_guest_inputs"
             ) as execute:
                 with self.assertRaisesRegex(ValueError, "controlled manifest provenance"):
+                    opcode_gas.cmd_run(args)
+            execute.assert_not_called()
+
+    def test_controlled_run_rejects_changed_guest_input_before_guest_launcher(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run = write_controlled_run(root)
+            fixture_dir = root / "fixtures" / "case"
+            fixture_dir.mkdir(parents=True)
+            guest_input = fixture_dir / "guest-input.json"
+            guest_input.write_text('{"target_count":1}\n')
+            identity = json.loads((run / "experiment.json").read_text())[
+                "calibration_identity"
+            ]
+            (fixture_dir / "case.json").write_text(json.dumps({
+                "kind": "opcode",
+                "case": "add",
+                "target_count": 1,
+                "target_raw_gas": 3,
+                "calibration_id": "calibration",
+                "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
+                "controlled_manifest_rows_sha256": identity[
+                    "controlled_manifest_rows_sha256"
+                ],
+                "fixture_sha256": opcode_gas.sha256_file(guest_input),
+            }))
+            guest_input.write_text('{"target_count":2}\n')
+            args = types.SimpleNamespace(
+                fixtures=root / "fixtures",
+                guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                elf=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
+                precompile_elf=pathlib.Path(
+                    "crates/guests/elf/sp1_precompile_lab.elf"
+                ),
+                opcode_stage="opcode-lab",
+                out=root / "runs.jsonl",
+                calibration_run=run,
+                controlled_manifest=run / "controlled-manifest.toml",
+            )
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "run_guest_inputs"
+            ) as execute:
+                with self.assertRaisesRegex(ValueError, "GuestInput"):
                     opcode_gas.cmd_run(args)
             execute.assert_not_called()
 

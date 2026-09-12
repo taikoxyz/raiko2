@@ -201,6 +201,7 @@ class RunnerTests(unittest.TestCase):
                         "calibration_id": "calibration",
                         "controlled_manifest_sha256": "a" * 64,
                         "controlled_manifest_rows_sha256": "b" * 64,
+                        "fixture_sha256": opcode_gas.sha256_file(input_path),
                     }
                 )
                 + "\n"

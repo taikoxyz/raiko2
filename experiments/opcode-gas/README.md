@@ -254,11 +254,13 @@ match that run before starting guest execution. Repository-relative paths in
 these commands are resolved from the repository root and cannot escape it.
 
 For an `integration_smoke` proposal execution, first write the smoke record with
-`prepare-integration-smoke --out <record.json>`, then supply the same
-`--network`, `--proposal-id`, and `--smoke-record <record.json>` to
+`prepare-integration-smoke --guest-input <GuestInput.json> --out <record.json>`,
+then supply the same `--network`, `--proposal-id`, and
+`--smoke-record <record.json>` to
 `run-proposal --purpose integration_smoke`. The command validates that the
-record is still purpose-labelled `integration_smoke` and is disjoint from the
-frozen final 60 rows before invoking guest-launcher.
+record is still purpose-labelled `integration_smoke`, is disjoint from the
+frozen final 60 rows, and binds the exact GuestInput bytes and embedded
+network/proposal identity before invoking guest-launcher.
 
 - Add a Taiko/reth-context revm lab that keeps the `revm-opcode-lab` execution path but uses Taiko
   fork config, block env, and realistic tx env instead of fixed Prague/mainnet benchmark defaults.

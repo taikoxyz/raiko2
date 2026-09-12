@@ -1011,13 +1011,15 @@ def generate_cases(
                 }
             else:
                 raise ValueError(f"unknown case kind: {case.kind}")
+            guest_input_bytes = (
+                json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+            ).encode()
             if provenance:
                 payload.update(provenance)
+            payload["fixture_sha256"] = sha256_bytes(guest_input_bytes)
             path = case_dir / "case.json"
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            (case_dir / "guest-input.json").write_text(
-                json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
-            )
+            (case_dir / "guest-input.json").write_bytes(guest_input_bytes)
             written.append(path)
     return written
 
@@ -1563,18 +1565,59 @@ def freeze_smoke_row(row: Mapping[str, Any], *, purpose: str) -> dict[str, Any]:
     return dict(row)
 
 
-def prepare_integration_smoke(network: str, proposal_id: int, *, purpose: str = "integration_smoke") -> dict[str, Any]:
+def _proposal_guest_input_identity(guest_input: pathlib.Path) -> tuple[str, int, str]:
+    if not guest_input.is_file():
+        raise ValueError(f"GuestInput does not exist: {guest_input}")
+    try:
+        raw = json.loads(guest_input.read_text())
+        taiko = raw["taiko"]
+        network = taiko["chain_spec"]["name"]
+        proposal_id = taiko["proposal_id"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError("GuestInput is missing its Taiko network/proposal identity") from error
+    if not isinstance(network, str) or not network:
+        raise ValueError("GuestInput has an invalid Taiko network")
+    if not isinstance(proposal_id, int) or isinstance(proposal_id, bool):
+        raise ValueError("GuestInput has an invalid Taiko proposal ID")
+    return network, proposal_id, sha256_file(guest_input)
+
+
+def prepare_integration_smoke(
+    network: str,
+    proposal_id: int,
+    *,
+    guest_input: pathlib.Path | None = None,
+    purpose: str = "integration_smoke",
+) -> dict[str, Any]:
     """Freeze a smoke row before execution; it never joins final validation."""
     final_rows = select_final_validation_corpus()
     assert_integration_smoke_is_disjoint(final_rows, network, proposal_id)
+    if purpose != "integration_smoke":
+        raise ValueError("integration_smoke rows cannot be relabeled after execution")
+    if guest_input is None:
+        raise ValueError("integration_smoke requires a GuestInput")
+    input_network, input_proposal_id, fixture_sha256 = _proposal_guest_input_identity(
+        guest_input
+    )
+    if (input_network, input_proposal_id) != (network, proposal_id):
+        raise ValueError("GuestInput does not match integration_smoke identity")
     return freeze_smoke_row(
-        {"network": network, "proposal_id": proposal_id, "purpose": "integration_smoke"},
+        {
+            "network": network,
+            "proposal_id": proposal_id,
+            "purpose": "integration_smoke",
+            "fixture_sha256": fixture_sha256,
+        },
         purpose=purpose,
     )
 
 
 def verify_prepared_integration_smoke(
-    record_path: pathlib.Path, *, network: str, proposal_id: int
+    record_path: pathlib.Path,
+    *,
+    network: str,
+    proposal_id: int,
+    guest_input: pathlib.Path,
 ) -> dict[str, Any]:
     if not record_path.is_file():
         raise ValueError("run-proposal requires a prepared integration_smoke record")
@@ -1583,6 +1626,13 @@ def verify_prepared_integration_smoke(
         raise ValueError("integration_smoke rows cannot be relabeled after execution")
     if record.get("network") != network or record.get("proposal_id") != proposal_id:
         raise ValueError("prepared integration_smoke record does not match run-proposal identity")
+    input_network, input_proposal_id, fixture_sha256 = _proposal_guest_input_identity(
+        guest_input
+    )
+    if (input_network, input_proposal_id) != (network, proposal_id):
+        raise ValueError("GuestInput does not match run-proposal identity")
+    if record.get("fixture_sha256") != fixture_sha256:
+        raise ValueError("prepared integration_smoke record does not match GuestInput bytes")
     assert_integration_smoke_is_disjoint(
         select_final_validation_corpus(), network, proposal_id
     )
@@ -2194,7 +2244,12 @@ def cmd_publish_corpus(args: argparse.Namespace) -> None:
 
 
 def cmd_prepare_integration_smoke(args: argparse.Namespace) -> None:
-    smoke = prepare_integration_smoke(args.network, args.proposal_id, purpose=args.purpose)
+    smoke = prepare_integration_smoke(
+        args.network,
+        args.proposal_id,
+        guest_input=args.guest_input,
+        purpose=args.purpose,
+    )
     if args.out:
         out = _resolve_repo_path(args.out, field_name="smoke_record")
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -2348,6 +2403,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke = subcommands.add_parser("prepare-integration-smoke", help="freeze one disjoint integration smoke row")
     smoke.add_argument("--network", required=True)
     smoke.add_argument("--proposal-id", type=int, required=True)
+    smoke.add_argument("--guest-input", type=pathlib.Path, required=True)
     smoke.add_argument("--purpose", default="integration_smoke")
     smoke.add_argument("--out", type=pathlib.Path)
     smoke.set_defaults(func=cmd_prepare_integration_smoke)
@@ -2393,6 +2449,12 @@ def cmd_run(args: argparse.Namespace) -> None:
             raise ValueError("controlled manifest provenance does not match calibration identity")
         input_path = case_path.with_name("guest-input.json")
         if input_path.exists():
+            expected_input_sha256 = case.get("fixture_sha256")
+            if (
+                not _is_sha256(expected_input_sha256)
+                or sha256_file(input_path) != expected_input_sha256
+            ):
+                raise ValueError("controlled GuestInput does not match sealed case provenance")
             cases_by_kind.setdefault(case.get("kind", "opcode"), []).append((case, input_path))
     report_paths = []
     for kind, cases in sorted(cases_by_kind.items()):
@@ -2437,6 +2499,7 @@ def cmd_run_proposal(args: argparse.Namespace) -> None:
             _resolve_repo_path(args.smoke_record, field_name="smoke_record"),
             network=args.network,
             proposal_id=args.proposal_id,
+            guest_input=args.guest_input,
         )
     run_proposal_guest_input(
         guest_launcher=args.guest_launcher,

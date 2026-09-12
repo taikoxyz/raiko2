@@ -1507,6 +1507,8 @@ GENERATED_EXPERIMENT_PREFIXES = (
     "experiments/opcode-gas/corpora/", "experiments/opcode-gas/manifests/proposals/",
     "experiments/opcode-gas/runs/", "experiments/opcode-gas/validations/",
 )
+Q_FORMULA = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
+OUT_OF_FIT_CHECKPOINTS = {"4": 8, "16": 32, "64": 128, "256": 512, "1024": 2048}
 
 
 def _read_candidate_pool(paths: Iterable[pathlib.Path]) -> list[dict[str, Any]]:
@@ -1555,10 +1557,41 @@ def freeze_smoke_row(row: Mapping[str, Any], *, purpose: str) -> dict[str, Any]:
     return dict(row)
 
 
+def prepare_integration_smoke(network: str, proposal_id: int, *, purpose: str = "integration_smoke") -> dict[str, Any]:
+    """Freeze a smoke row before execution; it never joins final validation."""
+    final_rows = select_final_validation_corpus()
+    assert_integration_smoke_is_disjoint(final_rows, network, proposal_id)
+    return freeze_smoke_row(
+        {"network": network, "proposal_id": proposal_id, "purpose": "integration_smoke"},
+        purpose=purpose,
+    )
+
+
 def proposal_workload_id(guest_input_sha256: str) -> str:
     if len(guest_input_sha256) != 64:
         raise ValueError("guest_input_sha256 must be a SHA256 digest")
     return sha256_bytes(canonical_json({"guest_input_sha256": guest_input_sha256, "kind": "proposal"}))
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
+def _is_git_revision(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
+def _repo_relative_path(value: Any, *, field_name: str) -> pathlib.Path:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a repository-relative path")
+    path = pathlib.Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"{field_name} must be a repository-relative path")
+    return REPO_ROOT / path
 
 
 def _discovery_rows(path: pathlib.Path) -> dict[int, Mapping[str, Any]]:
@@ -1598,6 +1631,23 @@ def _guest_input_block_summary(path: pathlib.Path) -> tuple[int, int]:
     return len(values), sum(values)
 
 
+def _assert_guest_input_post_unzen(path: pathlib.Path, unzen_time: int) -> None:
+    guest_input = json.loads(path.read_text())
+    blocks = guest_input.get("blocks")
+    if blocks is None:
+        witnesses = guest_input.get("witnesses")
+        if isinstance(witnesses, list):
+            blocks = [item.get("block", {}).get("header", {}) for item in witnesses]
+    if not isinstance(blocks, list) or not blocks:
+        raise ValueError("GuestInput must contain blocks for post-Unzen validation")
+    for block in blocks:
+        timestamp = block.get("timestamp")
+        if isinstance(timestamp, str):
+            timestamp = int(timestamp, 0)
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < unzen_time:
+            raise ValueError("GuestInput is not post-Unzen under the acquisition chain spec")
+
+
 def write_deterministic_tar(corpus_root: pathlib.Path, archive: pathlib.Path) -> str:
     archive.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "w") as tar:
@@ -1608,15 +1658,31 @@ def write_deterministic_tar(corpus_root: pathlib.Path, archive: pathlib.Path) ->
     return sha256_file(archive)
 
 
-def prepare_corpus(*, rows: list[dict[str, Any]] | None = None, corpus_root: pathlib.Path, l1_rpc_by_network: Mapping[str, str], l2_rpc_by_network: Mapping[str, str], chain_spec_hash_by_network: Mapping[str, str], manifest_path: pathlib.Path | None = None) -> dict[str, Any]:
-    rows = rows or select_final_validation_corpus()
+def prepare_corpus(*, corpus_root: pathlib.Path, l1_rpc_by_network: Mapping[str, str], l2_rpc_by_network: Mapping[str, str], chain_spec_hash_by_network: Mapping[str, str], chain_spec_path_by_network: Mapping[str, pathlib.Path], implementation_revision: str | None = None, manifest_path: pathlib.Path | None = None) -> dict[str, Any]:
+    rows = select_final_validation_corpus()
     if any(row.get("purpose") != "final_validation" for row in rows):
         raise ValueError("prepare-corpus accepts only final_validation rows")
+    implementation_revision = implementation_revision or git_head()
+    if not _is_git_revision(implementation_revision):
+        raise ValueError("implementation_revision must be a git revision")
+    if git_head() != implementation_revision:
+        raise ValueError("current HEAD does not match implementation_revision")
+    assert_generated_paths_only(git_worktree_status())
+    if not corpus_root.is_relative_to(REPO_ROOT):
+        raise ValueError("corpus_root must be repository-relative")
     corpus_root.mkdir(parents=True, exist_ok=True); final_rows = []
     for network in sorted({str(row["network"]) for row in rows}):
         selected = sorted((row for row in rows if row["network"] == network), key=lambda row: row["proposal_id"])
-        if not all(network in values for values in (l1_rpc_by_network, l2_rpc_by_network, chain_spec_hash_by_network)):
+        if not all(network in values for values in (l1_rpc_by_network, l2_rpc_by_network, chain_spec_hash_by_network, chain_spec_path_by_network)):
             raise ValueError(f"missing RPC/chain-spec input for {network}")
+        expected_chain_spec_hash = chain_spec_hash_by_network[network]
+        chain_spec_path = chain_spec_path_by_network[network]
+        if not _is_sha256(expected_chain_spec_hash) or sha256_file(chain_spec_path) != expected_chain_spec_hash:
+            raise ValueError(f"chain-spec hash does not match {network} chain-spec file")
+        chain_spec = json.loads(chain_spec_path.read_text())
+        network_chain_spec = chain_spec.get(network, chain_spec)
+        if not isinstance(network_chain_spec, Mapping) or not isinstance(network_chain_spec.get("unzen_time"), int):
+            raise ValueError(f"chain-spec for {network} must declare unzen_time")
         with tempfile.TemporaryDirectory(prefix="opcode-gas-discovery-") as tmp:
             discovery = pathlib.Path(tmp) / f"{network}.json"
             subprocess.run([os.environ.get("PYTHON_BIN", str(pathlib.Path.home() / ".venv/bin/python")), "scripts/regression/stress_shasta_proposal.py", "--network", network, "--l1-rpc", l1_rpc_by_network[network], "--l2-rpc", l2_rpc_by_network[network], "--proposal-ids", ",".join(str(row["proposal_id"]) for row in selected), "--discover-only", "--proposal-out", str(discovery)], cwd=REPO_ROOT, check=True)
@@ -1629,6 +1695,7 @@ def prepare_corpus(*, rows: list[dict[str, Any]] | None = None, corpus_root: pat
                 temporary_output = output.with_name(f".{output.name}.tmp")
                 subprocess.run(["target/release/preflight", "--network", network, "--rpc-url", l2_rpc_by_network[network], "--l1-rpc-url", l1_rpc_by_network[network], "--proposal-id", str(proposal_id), "--l1-inclusion-block-number", str(_discovery_value(item, "l1_inclusion_block_number", "inclusion_block")), "--last-anchor-block-number", str(_discovery_value(item, "last_anchor_block_number", "previous_anchor_block")), "--l2-start", str(_discovery_value(item, "l2_start", "l2_block_start")), "--l2-end", str(_discovery_value(item, "l2_end", "l2_block_end")), "--proof-type", "sp1", "--validate", "--output", str(temporary_output)], cwd=REPO_ROOT, check=True)
                 block_count, difficulty_sum = _guest_input_block_summary(temporary_output)
+                _assert_guest_input_post_unzen(temporary_output, network_chain_spec["unzen_time"])
                 if block_count != row["block_count"] or difficulty_sum != row["total_zkgas"]:
                     raise ValueError(f"GuestInput does not match fixed count/total for {network}/{proposal_id}")
                 os.replace(temporary_output, output)
@@ -1636,7 +1703,7 @@ def prepare_corpus(*, rows: list[dict[str, Any]] | None = None, corpus_root: pat
                 final_rows.append({**row, "fixture_path": str(output.relative_to(REPO_ROOT)) if output.is_relative_to(REPO_ROOT) else str(output), "guest_input_sha256": guest_sha, "workload_id": proposal_workload_id(guest_sha), "l1_inclusion_block_number": _discovery_value(item, "l1_inclusion_block_number", "inclusion_block"), "last_anchor_block_number": _discovery_value(item, "last_anchor_block_number", "previous_anchor_block"), "l2_start": _discovery_value(item, "l2_start", "l2_block_start"), "l2_end": _discovery_value(item, "l2_block_end", "l2_end"), "block_difficulty_sum": difficulty_sum, "acquisition_chain_spec_sha256": chain_spec_hash_by_network[network]})
     final_rows.sort(key=lambda row: (row["network"], row["proposal_id"]))
     archive = corpus_root.parent / "sp1-mainnet-hoodi-v1.tar"
-    manifest = {"schema_version": 1, "archive_uri": "local_unpublished", "archive_generation": None, "archive_size_bytes": None, "archive_sha256": write_deterministic_tar(corpus_root, archive), "rows": final_rows}
+    manifest = {"schema_version": 1, "implementation_revision": implementation_revision, "corpus_root": str(corpus_root.relative_to(REPO_ROOT)), "archive_path": str(archive.relative_to(REPO_ROOT)), "archive_uri": "local_unpublished", "archive_generation": None, "archive_size_bytes": None, "archive_sha256": write_deterministic_tar(corpus_root, archive), "rows": final_rows}
     if manifest_path:
         manifest_path.parent.mkdir(parents=True, exist_ok=True); manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest
@@ -1653,6 +1720,8 @@ def publish_corpus(archive: pathlib.Path, object_uri: str) -> dict[str, Any]:
     metadata = json.loads(subprocess.run(["gcloud", "storage", "objects", "describe", object_uri, "--format=json"], check=True, capture_output=True, text=True).stdout)
     generation, size = int(metadata["generation"]), int(metadata["size"])
     if generation <= 0 or size <= 0: raise ValueError("published corpus must have positive generation and size")
+    if size != archive.stat().st_size:
+        raise ValueError("published corpus size does not match local archive")
     versioned = f"{object_uri}#{generation}"
     with tempfile.TemporaryDirectory(prefix="opcode-gas-corpus-readback-") as tmp:
         readback = pathlib.Path(tmp) / "corpus.tar"
@@ -1681,6 +1750,22 @@ def _toml_scalar_list(path: pathlib.Path, key: str) -> list[str]:
     return value
 
 
+def _locked_package_version(package_name: str) -> str:
+    lock = tomllib.loads((REPO_ROOT / "Cargo.lock").read_text())
+    versions = [
+        package.get("version")
+        for package in lock.get("package", [])
+        if package.get("name") == package_name and isinstance(package.get("version"), str)
+    ]
+    if len(set(versions)) != 1:
+        raise ValueError(f"Cargo.lock must contain one {package_name} version")
+    return versions[0]
+
+
+def _rust_version() -> str:
+    return subprocess.run(["rustc", "--version"], check=True, capture_output=True, text=True).stdout.strip()
+
+
 def prepare_calibration(
     output_root: pathlib.Path,
     controlled_manifest: pathlib.Path,
@@ -1697,49 +1782,55 @@ def prepare_calibration(
     if data.get("include_uzen_pure_opcodes") or data.get("include_uzen_precompile_bodies"):
         raise ValueError("controlled manifest must not use implicit include flags")
     bridge_key_ids = _toml_scalar_list(controlled_manifest, "bridge_key_ids")
+    q_formula = _toml_scalar_list(controlled_manifest, "q_formula")
     normalization = data.get("normalization_reference_key")
     if normalization != "opcode:0x01" or normalization not in bridge_key_ids:
         raise ValueError("bridge_key_ids must include normalization_reference_key opcode:0x01")
+    if q_formula != Q_FORMULA or any(key not in bridge_key_ids for key in Q_FORMULA):
+        raise ValueError("controlled manifest must freeze the exact Q_formula in bridge_key_ids")
     if complete_schedule_hash is None:
         complete_schedule_hash = schedule_sha256(current_uzen_schedule())
     if len(complete_schedule_hash) != 64:
         raise ValueError("complete_schedule_hash must be a SHA256 digest")
-    calibration_id = sha256_bytes(
-        canonical_json(
-            {
-                "implementation_revision": revision,
-                "controlled_manifest_sha256": controlled_hash,
-                "bridge_key_ids": bridge_key_ids,
-                "complete_schedule_sha256": complete_schedule_hash,
-            }
-        )
-    )[:24]
-    run = output_root / "runs" / calibration_id
-    if run.exists():
-        raise ValueError(f"calibration directory already exists: {run}")
     workspace = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
     alethia_revision = workspace["workspace"]["dependencies"]["alethia-reth-chainspec"]["rev"]
     guest_artifacts = {
         str(path.relative_to(REPO_ROOT)): sha256_file(path)
         for path in sorted((REPO_ROOT / "crates/guests/elf").glob("sp1*"))
-        if path.is_file()
+        if path.is_file() and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
     }
-    experiment = {
-        "schema_version": 1,
-        "calibration_id": calibration_id,
+    guest_artifacts_sha256 = sha256_bytes(canonical_json(guest_artifacts))
+    rust_version = _rust_version()
+    sp1_sdk_version = _locked_package_version("sp1-sdk")
+    execution_parameters = {
+        "mode": "execute",
+        "prover": "local",
+        "primary_api": "ExecutionReport::gas",
+    }
+    out_of_fit_checkpoint = {
+        "mapping": OUT_OF_FIT_CHECKPOINTS,
+        "ape_max": 0.10,
+    }
+    quality_gates = {"checkpoint_ape_max": 0.10}
+    bridge_contract = {
+        "bridge_key_ids": bridge_key_ids,
+        "model": "through_origin_equal_key_median_kappa_sp1",
+        "controlled_ape_max": 0.10,
+        "proposal_ape_max": 0.10,
+        "missing_data": "insufficient_data_is_sealable_and_non_gating",
+    }
+    calibration_identity = {
         "implementation_revision": revision,
-        "dirty_state": False,
         "alethia_reth_revision": alethia_revision,
-        "complete_schedule_sha256": complete_schedule_hash,
+        "rust_version": rust_version,
+        "sp1_sdk_version": sp1_sdk_version,
         "controlled_manifest_sha256": controlled_hash,
+        "complete_schedule_sha256": complete_schedule_hash,
         "guest_artifacts": guest_artifacts,
+        "guest_artifacts_sha256": guest_artifacts_sha256,
         "normalization_reference_key": normalization,
+        "sp1_execution_parameters": execution_parameters,
         "primary_metric": "proverGas",
-        "sp1_execution_parameters": {
-            "mode": "execute",
-            "prover": "local",
-            "primary_api": "ExecutionReport::gas",
-        },
         "sp1_instruction_count": "secondary_non_gating",
         "workload_identity_schema_version": 1,
         "workload_canonicalization": "sha256(canonical_json(workload_spec))",
@@ -1747,20 +1838,48 @@ def prepare_calibration(
             "candidate_cost": "g_p(k) / r(k)",
             "candidate_multiplier": "c_p(k) / c_p(opcode:0x01)",
         },
-        "out_of_fit_checkpoint": {
-            "mapping": "frozen_in_controlled_manifest",
-            "ape_max": 0.10,
+        "q_formula": q_formula,
+        "out_of_fit_checkpoint": out_of_fit_checkpoint,
+        "quality_gates": quality_gates,
+        "bridge": bridge_contract,
+    }
+    calibration_id = sha256_bytes(
+        canonical_json(calibration_identity)
+    )[:24]
+    run = output_root / "runs" / calibration_id
+    if run.exists():
+        raise ValueError(f"calibration directory already exists: {run}")
+    experiment = {
+        "schema_version": 1,
+        "calibration_id": calibration_id,
+        "implementation_revision": revision,
+        "dirty_state": False,
+        "calibration_identity": calibration_identity,
+        "alethia_reth_revision": alethia_revision,
+        "complete_schedule_sha256": complete_schedule_hash,
+        "controlled_manifest_sha256": controlled_hash,
+        "guest_artifacts": guest_artifacts,
+        "guest_artifacts_sha256": guest_artifacts_sha256,
+        "rust_version": rust_version,
+        "sp1_sdk_version": sp1_sdk_version,
+        "normalization_reference_key": normalization,
+        "primary_metric": "proverGas",
+        "sp1_execution_parameters": execution_parameters,
+        "sp1_instruction_count": "secondary_non_gating",
+        "workload_identity_schema_version": 1,
+        "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+        "primary_formulas": {
+            "candidate_cost": "g_p(k) / r(k)",
+            "candidate_multiplier": "c_p(k) / c_p(opcode:0x01)",
         },
-        "quality_gates": {"checkpoint_ape_max": 0.10},
+        "q_formula": q_formula,
+        "out_of_fit_checkpoint": out_of_fit_checkpoint,
+        "quality_gates": quality_gates,
     }
     bridge = {
         "schema_version": 1,
         "implementation_revision": revision,
-        "bridge_key_ids": bridge_key_ids,
-        "model": "through_origin_equal_key_median_kappa_sp1",
-        "controlled_ape_max": 0.10,
-        "proposal_ape_max": 0.10,
-        "missing_data": "insufficient_data_is_sealable_and_non_gating",
+        **bridge_contract,
     }
     (run / "bridge").mkdir(parents=True)
     (run / "experiment.json").write_text(json.dumps(experiment, indent=2, sort_keys=True) + "\n")
@@ -1777,35 +1896,171 @@ def _read_digest(path: pathlib.Path) -> str:
 
 
 def _validate_frozen_corpus(corpus: Mapping[str, Any], revision: str) -> list[Mapping[str, Any]]:
-    if corpus.get("implementation_revision") not in (None, revision): raise ValueError("corpus implementation_revision does not match calibration")
-    if not isinstance(corpus.get("archive_uri"), str) or not corpus["archive_uri"].startswith("gs://") or "#" not in corpus["archive_uri"] or not isinstance(corpus.get("archive_generation"), int) or corpus["archive_generation"] <= 0 or not isinstance(corpus.get("archive_size_bytes"), int) or corpus["archive_size_bytes"] <= 0: raise ValueError("corpus is local_unpublished or has no exact archive identity")
+    if corpus.get("implementation_revision") != revision:
+        raise ValueError("corpus implementation_revision does not match calibration")
+    archive_sha = corpus.get("archive_sha256")
+    if not _is_sha256(archive_sha):
+        raise ValueError("corpus must record archive_sha256")
+    uri = corpus.get("archive_uri")
+    if not isinstance(uri, str) or not uri.startswith("gs://") or uri.count("#") != 1:
+        raise ValueError("corpus is local_unpublished or has no exact archive identity")
+    object_uri, generation_text = uri.rsplit("#", 1)
+    if not generation_text.isdecimal() or int(generation_text) <= 0 or not object_uri.endswith(f"{archive_sha}.tar"):
+        raise ValueError("corpus archive URI is not content-addressed at an exact generation")
+    if corpus.get("archive_generation") != int(generation_text) or not isinstance(corpus.get("archive_size_bytes"), int) or corpus["archive_size_bytes"] <= 0:
+        raise ValueError("corpus is local_unpublished or has no exact archive identity")
+    corpus_root = _repo_relative_path(corpus.get("corpus_root"), field_name="corpus_root")
+    archive_path = _repo_relative_path(corpus.get("archive_path"), field_name="archive_path")
+    if not archive_path.is_file() or sha256_file(archive_path) != archive_sha:
+        raise ValueError("local corpus archive does not match archive_sha256")
+    if corpus["archive_size_bytes"] != archive_path.stat().st_size:
+        raise ValueError("local corpus archive size does not match archive_size_bytes")
     rows = corpus.get("rows")
-    if not isinstance(rows, list) or len(rows) != 60: raise ValueError("validation requires exactly 60 completed GuestInputs")
-    counts = {"taiko_hoodi": 0, "taiko_mainnet": 0}
+    expected = {
+        (row["network"], row["proposal_id"]): row
+        for row in select_final_validation_corpus()
+    }
+    if not isinstance(rows, list) or len(rows) != len(expected):
+        raise ValueError("validation requires exactly 60 completed GuestInputs")
+    seen = set()
     for row in rows:
-        if row.get("purpose") != "final_validation" or int(row.get("block_count", 0)) <= 0 or int(row.get("total_zkgas", 0)) <= 0 or row.get("workload_id") != proposal_workload_id(str(row.get("guest_input_sha256", ""))): raise ValueError("invalid final_validation corpus row")
-        if row.get("network") not in counts: raise ValueError("unexpected corpus network")
-        counts[row["network"]] += 1
-    if counts != {"taiko_hoodi": 40, "taiko_mainnet": 20}: raise ValueError("validation corpus must contain 40 Hoodi and 20 Mainnet rows")
+        key = row.get("network"), row.get("proposal_id")
+        if key in seen or key not in expected or any(
+            row.get(field) != expected[key][field] for field in ("block_count", "total_zkgas")
+        ):
+            raise ValueError("corpus rows must be the exact selected final_validation corpus")
+        seen.add(key)
+        if (
+            row.get("purpose") != "final_validation"
+            or not _is_sha256(row.get("guest_input_sha256"))
+            or not _is_sha256(row.get("acquisition_chain_spec_sha256"))
+        ):
+            raise ValueError("invalid final_validation corpus row")
+        fixture = _repo_relative_path(row.get("fixture_path"), field_name="fixture_path")
+        if not fixture.is_relative_to(corpus_root) or not fixture.is_file():
+            raise ValueError("final_validation fixture is missing from the local corpus")
+        if sha256_file(fixture) != row["guest_input_sha256"]:
+            raise ValueError("final_validation fixture hash does not match manifest")
+        block_count, difficulty_sum = _guest_input_block_summary(fixture)
+        if (
+            block_count != row["block_count"]
+            or difficulty_sum != row["total_zkgas"]
+            or row.get("block_difficulty_sum") != difficulty_sum
+        ):
+            raise ValueError("final_validation fixture does not reconcile per block")
+        if row.get("workload_id") != proposal_workload_id(row["guest_input_sha256"]):
+            raise ValueError("proposal workload_id does not match guest_input_sha256")
+    if seen != set(expected):
+        raise ValueError("corpus rows must be the exact selected final_validation corpus")
     return rows
+
+
+def validate_manifest_for_publication(manifest: Mapping[str, Any], archive: pathlib.Path) -> None:
+    archive_sha = sha256_file(archive)
+    if manifest.get("archive_sha256") != archive_sha:
+        raise ValueError("manifest archive_sha256 does not match the archive to publish")
+    corpus_root = _repo_relative_path(manifest.get("corpus_root"), field_name="corpus_root")
+    if not archive.is_relative_to(REPO_ROOT) or not archive.is_file():
+        raise ValueError("archive to publish must be a repository-local corpus archive")
+    if manifest.get("archive_path") != str(archive.relative_to(REPO_ROOT)):
+        raise ValueError("manifest archive_path does not match the archive to publish")
+    rows = manifest.get("rows")
+    expected = {
+        (row["network"], row["proposal_id"]): row
+        for row in select_final_validation_corpus()
+    }
+    if not isinstance(rows, list) or len(rows) != len(expected):
+        raise ValueError("manifest must contain the exact 60 final_validation rows")
+    seen = set()
+    for row in rows:
+        key = row.get("network"), row.get("proposal_id")
+        if key in seen or key not in expected or any(
+            row.get(field) != expected[key][field] for field in ("block_count", "total_zkgas")
+        ):
+            raise ValueError("manifest rows are not the exact final_validation corpus")
+        seen.add(key)
+        if row.get("purpose") != "final_validation" or not _is_sha256(row.get("guest_input_sha256")):
+            raise ValueError("manifest rows have invalid fixture identities")
+        fixture = _repo_relative_path(row.get("fixture_path"), field_name="fixture_path")
+        if not fixture.is_relative_to(corpus_root) or not fixture.is_file() or sha256_file(fixture) != row.get("guest_input_sha256"):
+            raise ValueError("manifest rows do not match local corpus fixtures")
+        block_count, difficulty_sum = _guest_input_block_summary(fixture)
+        if (
+            block_count != row["block_count"]
+            or difficulty_sum != row["total_zkgas"]
+            or row.get("block_difficulty_sum") != difficulty_sum
+            or not _is_sha256(row.get("acquisition_chain_spec_sha256"))
+        ):
+            raise ValueError("manifest rows do not reconcile completed local fixtures")
+    if seen != set(expected):
+        raise ValueError("manifest rows are not the exact final_validation corpus")
+    with tarfile.open(archive, "r") as tar:
+        files = [member for member in tar.getmembers() if member.isfile()]
+        members = {member.name: member for member in files}
+        expected_names = {
+            _repo_relative_path(row["fixture_path"], field_name="fixture_path")
+            .relative_to(corpus_root)
+            .as_posix()
+            for row in rows
+        }
+        if len(members) != len(files) or set(members) != expected_names:
+            raise ValueError("archive contents do not exactly match manifest fixtures")
+        for row in rows:
+            fixture = _repo_relative_path(row["fixture_path"], field_name="fixture_path")
+            member = members.get(fixture.relative_to(corpus_root).as_posix())
+            if member is None:
+                raise ValueError("archive does not contain every manifest fixture")
+            source = tar.extractfile(member)
+            if source is None or sha256_bytes(source.read()) != row["guest_input_sha256"]:
+                raise ValueError("archive fixture bytes do not match manifest")
+
+
+def _verify_seal(path: pathlib.Path, payload: Mapping[str, Any], *, label: str) -> str:
+    recorded = _read_digest(path)
+    actual = sha256_bytes(canonical_json(payload))
+    if recorded != actual:
+        raise ValueError(f"{label} seal does not match canonical manifest bytes")
+    return recorded
 
 
 def prepare_validation(output_root: pathlib.Path, run: pathlib.Path, corpus_path: pathlib.Path) -> dict[str, Any]:
     revision = str(json.loads((run / "experiment.json").read_text())["implementation_revision"])
-    if git_head() != revision: raise ValueError("current HEAD does not match implementation_revision")
+    if git_head() != revision:
+        raise ValueError("current HEAD does not match implementation_revision")
     assert_generated_paths_only(git_worktree_status())
-    candidate_sha, bridge_sha = _read_digest(run / "candidate" / "candidate.sha256"), _read_digest(run / "bridge" / "bridge.sha256")
     candidate_manifest = json.loads((run / "candidate" / "candidate-manifest.json").read_text())
     bridge_root = json.loads((run / "bridge" / "bridge-root.json").read_text())
     if candidate_manifest.get("implementation_revision") != revision:
         raise ValueError("candidate provenance does not match implementation_revision")
     if bridge_root.get("implementation_revision") != revision:
         raise ValueError("bridge provenance does not match implementation_revision")
-    corpus = json.loads(corpus_path.read_text()); _validate_frozen_corpus(corpus, revision)
-    identity = {"candidate_sha256": candidate_sha, "bridge_sha256": bridge_sha, "corpus_sha256": sha256_file(corpus_path), "implementation_revision": revision}; validation_id = sha256_bytes(canonical_json(identity))[:24]
+    candidate_sha = _verify_seal(
+        run / "candidate" / "candidate.sha256", candidate_manifest, label="candidate"
+    )
+    bridge_sha = _verify_seal(run / "bridge" / "bridge.sha256", bridge_root, label="bridge")
+    corpus = json.loads(corpus_path.read_text())
+    _validate_frozen_corpus(corpus, revision)
+    validate_manifest_for_publication(
+        corpus, _repo_relative_path(corpus["archive_path"], field_name="archive_path")
+    )
+    identity = {
+        "candidate_sha256": candidate_sha,
+        "bridge_sha256": bridge_sha,
+        "corpus_sha256": sha256_file(corpus_path),
+        "implementation_revision": revision,
+    }
+    validation_id = sha256_bytes(canonical_json(identity))[:24]
     output = output_root / "validations" / validation_id
-    if output.exists(): raise ValueError(f"validation directory already exists: {output}")
-    output.mkdir(parents=True); (output / "candidate-ref.json").write_text(json.dumps({"candidate_sha256": candidate_sha, "implementation_revision": revision}, indent=2, sort_keys=True) + "\n"); (output / "bridge-ref.json").write_text(json.dumps({"bridge_sha256": bridge_sha, "implementation_revision": revision}, indent=2, sort_keys=True) + "\n"); (output / "proposal-manifest.json").write_text(json.dumps(corpus, indent=2, sort_keys=True) + "\n")
+    if output.exists():
+        raise ValueError(f"validation directory already exists: {output}")
+    output.mkdir(parents=True)
+    (output / "candidate-ref.json").write_text(
+        json.dumps({"candidate_sha256": candidate_sha, "implementation_revision": revision}, indent=2, sort_keys=True) + "\n"
+    )
+    (output / "bridge-ref.json").write_text(
+        json.dumps({"bridge_sha256": bridge_sha, "implementation_revision": revision}, indent=2, sort_keys=True) + "\n"
+    )
+    (output / "proposal-manifest.json").write_text(json.dumps(corpus, indent=2, sort_keys=True) + "\n")
     return {"validation_id": validation_id, **identity}
 
 
@@ -1825,17 +2080,30 @@ def cmd_prepare_corpus(args: argparse.Namespace) -> None:
         l1_rpc_by_network=_network_values(args.l1_rpc),
         l2_rpc_by_network=_network_values(args.l2_rpc),
         chain_spec_hash_by_network=_network_values(args.chain_spec_hash),
+        chain_spec_path_by_network={
+            network: pathlib.Path(path)
+            for network, path in _network_values(args.chain_spec_file).items()
+        },
         manifest_path=args.manifest,
     )
     print(f"prepared {len(manifest['rows'])} final-validation GuestInputs")
 
 
 def cmd_publish_corpus(args: argparse.Namespace) -> None:
-    published = publish_corpus(args.archive, args.object_uri)
     manifest = json.loads(args.manifest.read_text())
+    validate_manifest_for_publication(manifest, args.archive)
+    published = publish_corpus(args.archive, args.object_uri)
     manifest.update(published)
     args.manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"published corpus at {published['archive_uri']}")
+
+
+def cmd_prepare_integration_smoke(args: argparse.Namespace) -> None:
+    smoke = prepare_integration_smoke(args.network, args.proposal_id, purpose=args.purpose)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(smoke, indent=2, sort_keys=True) + "\n")
+    print(f"prepared {smoke['purpose']} {smoke['network']}/{smoke['proposal_id']}")
 
 
 def cmd_prepare_calibration(args: argparse.Namespace) -> None:
@@ -1955,7 +2223,15 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_corpus_parser.add_argument("--l1-rpc", action="append", required=True, metavar="NETWORK=URL")
     prepare_corpus_parser.add_argument("--l2-rpc", action="append", required=True, metavar="NETWORK=URL")
     prepare_corpus_parser.add_argument("--chain-spec-hash", action="append", required=True, metavar="NETWORK=SHA256")
+    prepare_corpus_parser.add_argument("--chain-spec-file", action="append", required=True, metavar="NETWORK=PATH")
     prepare_corpus_parser.set_defaults(func=cmd_prepare_corpus)
+
+    smoke = subcommands.add_parser("prepare-integration-smoke", help="freeze one disjoint integration smoke row")
+    smoke.add_argument("--network", required=True)
+    smoke.add_argument("--proposal-id", type=int, required=True)
+    smoke.add_argument("--purpose", default="integration_smoke")
+    smoke.add_argument("--out", type=pathlib.Path)
+    smoke.set_defaults(func=cmd_prepare_integration_smoke)
 
     publish = subcommands.add_parser("publish-corpus", help="publish a sealed corpus archive")
     publish.add_argument("--archive", type=pathlib.Path, required=True)

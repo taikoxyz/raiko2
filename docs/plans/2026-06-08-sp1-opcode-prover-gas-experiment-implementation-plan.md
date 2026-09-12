@@ -243,6 +243,7 @@ PhaseEnd { phase }
 TransactionStart {
   tx_index, tx_hash, is_anchor,
   execution_class=native_value_transfer|contract_call|contract_create|no_code_no_value|other
+    # provisional; must not cause an observer-only database read
 }
 OperationExecuted {
   operation_id, phase, tx_index?,
@@ -265,6 +266,7 @@ TransactionEnd {
   tx_index,
   disposition=committed_success|committed_revert|filtered_zero_signer|
               filtered_invalid|filtered_block_gas_limit|filtered_zkgas_limit|fatal,
+  execution_class=native_value_transfer|contract_call|contract_create|no_code_no_value|other,
   observed_current_zkgas,
   committed_current_zkgas
 }
@@ -302,12 +304,16 @@ The host collector maintains transaction buffers with these exact rules:
 6. A fatal block/proposal discards the complete trace from final validation and writes an explicit failed
    row. Partial traces are never accepted.
 
-`started_transaction_count` is the number of `TransactionStart` events. A
-`native_value_transfer_count` increment requires `execution_class=native_value_transfer`, positive
-native value, no recipient code execution, and `committed_success`. The executor derives the class
-from structured transaction/state facts at its existing execution boundary. A free-text fixture name,
-empty calldata alone, or a transaction that never reaches `TransactionStart` cannot create this
-feature. These definitions are shared by controlled traces and proposal extraction.
+`started_transaction_count` is the number of `TransactionStart` events. The start event's class is
+provisional because opening the buffer must not add a recipient-account database read. After normal
+top-level frame initialization has loaded the recipient through the unchanged execution path,
+`TransactionEnd.execution_class` is authoritative. A `native_value_transfer_count` increment requires
+that authoritative class classification to be `native_value_transfer` and the disposition to be
+`committed_success`; the class itself proves positive native value and no recipient code execution.
+Filtered transactions cannot contribute this feature even when their provisional class looks like a
+transfer. A free-text fixture name, empty calldata alone, or a transaction that never reaches
+`TransactionStart` cannot create this feature. These definitions are shared by controlled traces and
+proposal extraction.
 
 For every successful block, the non-vacuous oracle is:
 
@@ -335,12 +341,17 @@ S_current(p) = sum q_current(a) over pre-execution system ChargeAttempt events
 ```
 
 For an opcode `OperationExecuted`, `interpreter_raw_gas` is the interpreter's actual step gas. For a
-precompile it is `native_gas`. CALL/CREATE execution is emitted at `step_end` before dispatch has
-resolved `spawned`; the later linked `ChargeAttempt` records that decision. The charge fields record
-the independent current-schedule basis: ordinary opcodes use `interpreter_delta`, spawned
-CALL/CREATE uses the fixed `spawn_estimate`, and precompiles use `precompile_native`. Its `multiplier`
-is the effective value selected by Alethia, including precompile fallback. The collector may verify
-these fields against the exported schedule but must not recompute a different selection rule.
+precompile it is `native_gas`. At CALL/CREATE `step_end`, the production interpreter has already
+selected its action but has not dispatched it. `NewFrame` is therefore the authoritative
+`spawned=true` decision; every other action is `spawned=false`. Emit the opcode
+`OperationExecuted` and its linked `ChargeAttempt` immediately at that boundary. The wrapper charge
+must complete before child-frame or precompile dispatch, matching the production plain loop. A
+completed precompile later emits its own `OperationExecuted` followed by its separate native-gas
+charge. The charge fields record the independent current-schedule basis: ordinary and non-spawned
+opcodes use `interpreter_delta`, spawned CALL/CREATE uses the fixed `spawn_estimate`, and precompiles
+use `precompile_native`. Its `multiplier` is the effective value selected by Alethia, including
+precompile fallback. The collector may verify these fields against the exported schedule but must not
+recompute a different selection rule.
 
 Every multiplication is checked as `u64`; overflow invalidates the report. The current ledger proves
 that feature extraction follows the production transaction/filter/reset semantics and records which
@@ -1098,15 +1109,19 @@ observer executions produce identical receipts, committed transactions, state ro
 zkGas. Assert that an opcode/precompile emits `OperationExecuted` before `ChargeAttempt`, both share
 one block-unique monotonic `operation_id`, and a later `limit_exceeded` or `arithmetic_overflow` does
 not erase the executed event. Assert that an intrinsic/pre-validation failure and the unattempted
-truncation tail emit no operation event. For spawned CALL/CREATE, assert that
-`OperationExecuted` is emitted at `step_end` without guessing `spawned`, while the linked
-`ChargeAttempt` records `spawned=true` and keeps `interpreter_raw_gas` distinct from
-`charge_raw_gas` with source `spawn_estimate`.
+truncation tail emit no operation event. For spawned CALL/CREATE, assert that `step_end` reads the
+already-selected `NewFrame` action, emits `OperationExecuted`, and immediately emits the linked
+`ChargeAttempt` with `spawned=true` before the child or precompile body executes. Keep
+`interpreter_raw_gas` distinct from `charge_raw_gas` with source `spawn_estimate`. Cover the inverse
+non-spawn action with source `interpreter_delta`, wrapper limit rejection before dispatch, and native
+precompile-charge rejection after the precompile body's own operation event.
 
 Add structured transaction-classification tests for a committed positive-value transfer to an
-account with no executable code, zero-value/no-code transaction, contract call, contract creation,
-failed transaction, and unattempted tail. Only the first increments `native_value_transfer_count`;
-every emitted `TransactionStart` increments `started_transaction_count` exactly once.
+account with no executable code, zero-value/no-code transaction, cold and already-loaded contract
+calls, contract creation, failed transaction, and unattempted tail. Prove that observer mode adds no
+database reads, and use the authoritative `TransactionEnd.execution_class` for committed feature
+extraction. Only the positive-value no-code success increments `native_value_transfer_count`; every
+emitted `TransactionStart` increments `started_transaction_count` exactly once.
 
 ### Step 2: Implement One Alethia Source Of Truth
 
@@ -1114,8 +1129,11 @@ Emit `OperationExecuted` after the ordinary opcode step or precompile body has e
 subsequent current-schedule charge result is known. Emit `ChargeAttempt` at the meter/adapter point
 that already selects interpreter gas, spawn estimates, precompile gas, multipliers, and checked
 outcomes; correlate operation charges by `operation_id` and leave intrinsic charges uncorrelated.
-For CALL/CREATE, allocate and emit the execution event at `step_end`, carry its `operation_id` in the
-deferred step, and emit the charge event only after dispatch resolves `spawned`.
+For CALL/CREATE, read the production interpreter action at `step_end`: `NewFrame` selects the fixed
+spawn estimate and every other action selects the interpreter delta. Allocate and emit the execution
+event, then emit its linked charge at that same pre-dispatch boundary. If the wrapper charge fails,
+replace the pending action with the dedicated fatal halt before REVM can dispatch child work. Do not
+maintain a parallel deferred-step state machine.
 Emit phase, transaction, disposition, reset, commit, and truncation events in the executor that
 already owns those decisions. Expose `execute_derived_block_with_observer`; keep
 `execute_derived_block` delegating to the normal no-observer path. Do not create a second executor or

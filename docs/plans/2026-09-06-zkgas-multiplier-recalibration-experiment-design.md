@@ -172,6 +172,14 @@ controlled trace must prove that the generated case actually exercised the decla
 execution basis, and spawned context. The free-text `scenario` field is descriptive only and can
 never establish identity, context, or basis.
 
+The Alethia event ordering is frozen to the production interpreter decision. For CALL/CREATE,
+`step_end` runs after the interpreter has selected an action but before it has dispatched child work.
+`NewFrame` means `spawned=true`; every other action means `spawned=false`. The opcode
+`OperationExecuted` and linked wrapper `ChargeAttempt` are emitted at this boundary, so a failed
+wrapper charge prevents the child contract or precompile body from executing. If a precompile does
+run, its completed body is a separate operation followed by its own native-gas charge. This ordering
+is part of the execution ledger contract and must remain identical to the observer-free metered path.
+
 The candidate artifacts contain every accepted `c_p(k)` and `m_p(k)` at full decimal precision in a
 schedule-shaped map with explicit missing/rejected entries. Together with the accepted `o_p(q)`
 values, these form the experiment's only V1 candidate. They are not rounded to the current
@@ -322,6 +330,10 @@ frozen `TransactionStart` boundary; its controlled coefficient is the common per
 residual after modeled block, transfer, opcode, and precompile work is removed. It does not claim that
 all of that work occurs before the event. `native_value_transfer` is an additional exclusive residual
 for a non-create transaction whose recipient executes no code and whose positive native value is applied.
+The start event may carry only a provisional execution class because observation must not add an account
+database read. The authoritative class is finalized at `TransactionEnd` from recipient facts loaded by
+normal top-level execution; only `committed_success` with authoritative class `native_value_transfer`
+contributes to this feature.
 It excludes `tx_base`, block work, and all observed opcode/precompile work. The trace must emit this
 classification from structured execution/state facts; calldata shape or a free-text scenario name is
 not sufficient. Signer-recovery failures and transactions after the truncation boundary do not

@@ -1434,8 +1434,10 @@ Operator notes:
   observation has five children. That older cohort measured about 175 mcycles at one child and
   817-818 at five: 900 mcycles is 10.02-10.16% high at five, and extrapolating the observed trend
   approaches roughly 12% overquote at larger counts. The shipped aggregation guest has not been
-  measured successfully. Its artifact ELF SHA-256 is
-  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
+  measured successfully. The artifact pins aggregation ELF SHA-256
+  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, which predates the
+  aggregation guest rebuilt for the checkpoint-layout probe (raiko2 #116), so the shipped
+  `crates/guests/elf/risc0_shasta_aggregation.elf` no longer hashes to that value; its
   `disable-dev-mode` build rejects the development-receipt probe and the artifact image ID is null;
   its actual error direction is unknown. With the committed scalar and v4 limit,
   multiplication/conversion overflow cannot occur. A configured
@@ -1463,11 +1465,17 @@ Operator notes:
   review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
 - The committed artifact pins proposal ELF SHA-256
   `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the proposal
-  guest rebuilt by raiko2 #242; the shipped `crates/guests/elf/risc0_shasta_proposal.elf` no longer
-  hashes to that value. The calibration therefore describes a guest that is not the one being
-  proved. This release-pairing drift is known and explicitly accepted for quote-price and timeout
-  sizing when the release selects `estimated`; it does not affect proof validity. Select
-  `evaluated` instead when the running guest's exact local cycle count is required.
+  guest rebuilt by raiko2 #242, and aggregation ELF SHA-256
+  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, which predates the
+  aggregation guest rebuilt for the checkpoint-layout probe (raiko2 #116); neither shipped
+  `crates/guests/elf/risc0_shasta_*.elf` hashes to its pinned value. The calibration therefore
+  describes guests that are not the ones being proved. Nothing in the repository compares the model
+  pins with the shipped ELFs: the provenance check covers only `crates/guests/elf/*.provenance.json`,
+  the `zkgas-model` CI lane does not run on ELF-only changes, and the request path only checks the
+  pins' format. This release-pairing drift is known and explicitly accepted for quote-price and
+  timeout sizing when the release selects `estimated`; it does not affect proof validity. Select
+  `evaluated` instead when the running guest's exact local cycle count is required, and refresh the
+  model after any guest rebuild before relying on `estimated` again.
 - `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.

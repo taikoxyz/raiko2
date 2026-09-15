@@ -5,7 +5,8 @@
 Ready for implementation. This is the authoritative plan for the offline V1 experiment. V1 removes
 every proposal-derived normalization, coefficient, residual fit, feature-selection, and
 model-selection path. It calibrates one SP1 `proverGas` candidate on controlled fixtures:
-opcode/precompile multipliers plus proposal-startup, block-base, transaction-base, and
+raw-gas opcode/precompile multipliers, fixed spawned-wrapper event costs, plus proposal-startup,
+block-base, transaction-base, and
 native-value-transfer costs. It seals that candidate and uses proposals only for final forward
 validation. SP1 instruction count is sampled alongside `proverGas` and evaluated by an independently
 sealed, non-gating V1 bridge sidecar. Production integer encoding, cross-backend/RISC0 bridge
@@ -13,23 +14,27 @@ validation, and table installation remain separate work.
 
 > **For agentic workers:** Use `superpowers:executing-plans` for this plan and
 > `superpowers:test-driven-development` for each behavioral change. Task 2 changes consensus
-> metering code even though the observer is opt-in, so it also requires an independent adversarial
-> review and an independent behavioral verification pass.
+> metering timing in Alethia and adds a second host execution path in raiko2, so it also requires an
+> independent adversarial review and an independent behavioral verification pass.
 
 **Goal:** Reuse the existing experiment foundation to produce a reproducible SP1-native `proverGas`
-multiplier table plus explicit startup, block, transaction, and native-transfer costs, then validate
+raw-gas multiplier table plus explicit spawned-wrapper, startup, block, transaction, and
+native-transfer costs, then validate
 the completely frozen candidate on one Mainnet/Hoodi proposal corpus while independently fitting and
 validating a non-gating SP1 instruction-count-to-`proverGas` sidecar.
 
 **Architecture:** First run isolated opcode/precompile and non-opcode controlled suites, using
-normalized SP1 `proverGas` as the sole V1 candidate metric. Build one schedule-shaped native and
-ADD-normalized multiplier table plus four required fixed/base costs, then seal a content digest. SP1
+normalized SP1 `proverGas` as the sole V1 candidate metric. Build one schedule-shaped raw-gas native
+and ADD-normalized multiplier table, a fixed spawned-wrapper event table, and four required fixed/base
+costs, then seal a content digest. SP1
 total instruction count is captured from the same executions. Before proposal output is visible,
 freeze an independent through-origin median bridge, eligibility, and 10% thresholds; it never gates
 the candidate. Only after sealing both roots, measure each proposal with the normal SP1 guest and trace the
 identical GuestInput in a separate host-native pass; validation applies the frozen `proverGas`
 formula and separately validates the frozen bridge without fitting or selecting any proposal-derived
-value. A later experiment may measure RISC0 costs independently under every bridge conclusion; only
+value. The trace schema and collector live in a host-only raiko2 crate; Alethia receives only the
+minimal CALL/CREATE inspector-parity fix needed to make traced and plain execution stop at the same
+pre-dispatch boundary. A later experiment may measure RISC0 costs independently under every bridge conclusion; only
 direct reuse of the SP1 scalar transport requires `bridge_conclusion = supported`.
 
 **Tech stack:** Rust/revm for authoritative tracing, the existing `guest-launcher`, Python 3.11
@@ -53,7 +58,7 @@ JSON/JSONL/Markdown artifacts.
   `<= 0.10`; fixed `proposal_startup` is exempt.
 - Experiment commands never modify the production schedule, runtime, Boundless configuration, or
   generated guest artifacts.
-- The measured SP1 guest never enables the host-only Alethia observer.
+- The measured SP1 guest and RISC0 guest never depend on the host-only raiko2 trace crate.
 
 Unless explicitly qualified otherwise, references below to proposal results or output in a
 calibration or sealing barrier mean `final_validation` rows. The separately labeled
@@ -93,14 +98,15 @@ Use these names consistently in code and artifacts:
 - `r`: raw EVM gas charged for one synthetic target operation;
 - `g_p(k)` and `g_s(k)`: controlled marginal `proverGas / operation` and secondary
   `SP1 instruction count / operation`;
-- `c_p(k) = g_p(k)/r(k)`: the V1 backend-native proving-gas multiplier per raw EVM gas;
+- `basis(k)`: frozen `raw_gas_slope|fixed_per_event` pricing basis;
+- `c_p(k) = g_p(k)/r(k)`: the V1 backend-native proving-gas multiplier per raw EVM gas for
+  `raw_gas_slope` keys;
+- `f_p(k) = g_p(k)`: V1 proving-gas cost per event for `fixed_per_event` keys;
 - `m_p(k)`: the corresponding dimensionless multiplier normalized to
   `normalization_reference_key = "opcode:0x01"`;
 - `o_p(q)`: controlled proving-gas cost per declared non-opcode unit `q`;
-- `c_s(k) = g_s(k)/r(k)` and `o_s(q)`: optional secondary instruction-count slopes stored only in
-  the cycle-cost sampling artifact;
-- `q_current(e)`: current-schedule zkGas charge for one frozen ledger event `e`, used only for
-  exact trace reconciliation and coverage;
+- `c_s(k) = g_s(k)/r(k)`, `f_s(k) = g_s(k)` for fixed-event keys, and `o_s(q)`: optional secondary
+  instruction-count costs stored only in the cycle-cost sampling artifact;
 - `fixture_sha256`: SHA256 of the saved JSON file bytes;
 - `guest_input_sha256`: SHA256 of `bincode::serialize(GuestInput)`, which is the exact byte vector
   inserted into the first proposal SP1 stdin buffer;
@@ -128,9 +134,10 @@ V1 performs no RISC0 proposal execution.
 
 The controlled manifest freezes ADD (`opcode:0x01`) as the dimensionless normalization reference.
 The ADD key must pass the primary `proverGas` gates. Emit `m_p(k)=c_p(k)/c_p(ADD)` without rounding
-while preserving raw `c_p`. This reference exposes the SP1 vector shape and is not the protocol
-integer scale. Do not combine these values with the
-current intrinsic charge, spawn estimates, failsafe value, or 100M block cap.
+for `raw_gas_slope` keys while preserving raw `c_p`. Preserve `fixed_per_event` values as `f_p`
+without ADD normalization. This reference exposes the raw-gas SP1 vector shape and is not the
+protocol integer scale. Do not combine these values with the current intrinsic charge, spawn
+estimates, failsafe value, or 100M block cap.
 
 Persist paired controlled and proposal `(sp1_instruction_count, proverGas)` observations, workload
 identity, and `c_s/o_s` diagnostics under digests independent from the candidate. The controlled
@@ -210,155 +217,111 @@ object keys and fixed array order. Export all 256 opcode entries, including `0`,
 distinction between an explicit value and the `65535` failsafe. Python must not contain another
 production schedule table.
 
-### Frozen Workload Ledger
+### Host-Native Trace Boundary
 
-Alethia owns one feature-gated `execution-observer` interface. The interface is observational and
-infallible:
+Alethia does not own an experiment observer. PR #239 is reduced to one production-parity fix in the
+existing `ZkGasInspector`: CALL/CREATE spawn detection and wrapper charging occur at `step_end`, after
+the interpreter selects `NewFrame` and before child dispatch, exactly as in `run_metered_plain`. A
+failed wrapper charge clears the pending frame action and halts before child code can run. The change
+does not add event types, serialization, transaction lifecycle hooks, derived-block entrypoints, or
+feature flags.
 
-```rust
-pub trait ExecutionObserver: Send + Sync {
-    fn on_event(&self, event: ExecutionEvent);
-}
+All offline instrumentation lives in the host-only `raiko2-zkgas-trace` crate. It uses Alethia's
+existing public `TaikoEvmFactory::create_evm_with_inspector` and
+`TaikoBlockExecutor::execute_block_with_committed_transactions` APIs. It does not reproduce the
+schedule, meter formula, transaction filters, retry/reset rules, commit loop, or block truncation
+logic. The crate is a dependency of `guest-launcher` only; `raiko2-guest-common`, the SP1 guest, and
+the RISC0 guest do not depend on it.
 
-pub type SharedExecutionObserver = Arc<dyn ExecutionObserver>;
-```
-
-The feature is disabled by default. Normal constructors keep the existing no-observer path;
-feature-gated `*_with_observer` constructors accept `Option<SharedExecutionObserver>`. Observer
-callbacks return `()` and cannot alter an execution result. A callback panic fails the host tracing
-process; it is never caught and converted into an execution decision.
-
-`operation_id` is unique and monotonically increasing within a block. Every opcode/precompile
-`ChargeAttempt` must reference exactly one earlier `OperationExecuted`; transaction intrinsic charges
-have no `operation_id`. The observer may distinguish checked-arithmetic overflow from an ordinary
-budget exceedance in its event, but the existing consensus-facing execution result remains
-`ZkGasOutcome::LimitExceeded` in both cases.
-
-`ExecutionEvent` is an owned, serializable enum with this minimum schema:
+The raiko2-local serialized schema contains execution facts, not charge reconstruction:
 
 ```text
-BlockStart { block_index, block_number, expected_difficulty, block_limit, recovered_tx_count }
-PhaseStart { phase=pre_execution_system|transactions }
-PhaseEnd { phase }
-TransactionStart {
-  tx_index, tx_hash, is_anchor,
-  execution_class=native_value_transfer|contract_call|contract_create|no_code_no_value|other
-    # provisional; must not cause an observer-only database read
+ProposalTrace {
+  guest_input_sha256, status=complete|failed, public_output?,
+  blocks[], recovery_failures[], failure?
 }
-OperationExecuted {
-  operation_id, phase, tx_index?,
-  component=opcode{opcode,interpreter_raw_gas}|
-            precompile{address,native_gas}
+RecoveryFailure {
+  block_index, manifest_index, signed_transaction_hash,
+  outcome=signer_recovery_failed
 }
-ChargeAttempt {
-  operation_id?,
-  phase, tx_index?,
-  component=tx_intrinsic{amount}|
-            opcode{opcode,spawned}|
-            precompile{address},
-  charge_raw_gas?,
-  raw_gas_source=intrinsic_fixed|interpreter_delta|spawn_estimate|precompile_native,
-  multiplier?,
-  requested_current_zkgas?,
-  outcome=applied|limit_exceeded|arithmetic_overflow
+TraceFailure {
+  block_index?, stage=ordinary|traced|parity, error,
+  partial_block_diagnostics?
 }
-TransactionEnd {
-  tx_index,
-  disposition=committed_success|committed_revert|filtered_zero_signer|
-              filtered_invalid|filtered_block_gas_limit|filtered_zkgas_limit|fatal,
-  execution_class=native_value_transfer|contract_call|contract_create|no_code_no_value|other,
-  observed_current_zkgas,
-  committed_current_zkgas
+BlockTrace {
+  block_index, block_number, input_transaction_count,
+  started_transaction_count, committed_transaction_hashes,
+  attempted_transaction_hashes, unattempted_transaction_hashes,
+  native_value_transfer_count, finalized_block_zkgas,
+  transactions[], operations[]
 }
-BlockStop { reason=complete|zk_gas_truncated|fatal, first_unattempted_tx_index? }
-BlockEnd { finalized_current_zkgas }
+OperationTrace {
+  operation_id, phase=system|transaction, tx_index?, frame_depth,
+  component=opcode {
+      opcode,
+      pricing_basis?=raw_gas_slope|fixed_per_event,
+      interpreter_raw_gas?,
+      spawned?,
+      dispatch_status=not_applicable|confirmed|selected_not_dispatched
+    } | precompile {
+      address,
+      pricing_basis=raw_gas_slope,
+      native_gas
+    }
+}
+TransactionTrace {
+  recovered_index, started_tx_index?, manifest_index?, tx_hash, is_anchor,
+  disposition=committed_success|committed_failure|attempted|unattempted,
+  execution_class?=native_value_transfer|contract_call|contract_create|no_code_no_value|other
+}
 ```
 
-Raiko2 separately emits derivation events from `build_derived_block` for each manifest transaction:
+`OperationTrace` rows are emitted by the local REVM inspector. Before the transaction iterator yields
+its first item, inspector callbacks are classified as `system`. Each iterator yield sets the current
+transaction index and records one started transaction. After Alethia returns, the collector joins
+those occurrences with the returned committed transaction list and aligned receipts using an
+ordered, one-use subsequence match. Hash equality alone or set membership is invalid because the same
+signed transaction can occur more than once. A yielded but
+uncommitted transaction is `attempted`; an input transaction never yielded is `unattempted`. This is
+an observation of Alethia's existing loop, not a second implementation of its rejection reasons.
+A fatal execution writes a failed trace row and never promotes its partial ledger.
+For every block,
+`input_transaction_count == transactions.len() + recovery_failures_for_block.len()`; the transaction
+array includes the anchor and every successfully recovered manifest occurrence exactly once.
 
-```text
-DerivationTransaction { manifest_index, tx_hash, outcome=recovered|signer_recovery_failed }
-```
+The structured native-transfer class is derived after the join from the original non-create
+transaction's positive value, the top-level frame/code-execution and precompile-dispatch facts already
+visible to the inspector, committed membership, and successful receipt. Trace collection must not add
+a database read. A precompile recipient is never a native transfer. Empty calldata or a fixture label
+alone is insufficient. Only a committed successful
+`native_value_transfer` increments that feature; every yielded transaction increments
+`started_transaction_count` exactly once.
 
-This is the only raiko2-owned admission observation: signer recovery happens before Alethia receives
-the recovered candidate. Raiko2 must not copy Alethia's zero-signer, invalid-transaction, block-gas,
-zkGas-limit, commit, or reset state machine.
+Ordinary and non-spawned opcodes record the interpreter step gas and use `raw_gas_slope`.
+Precompiles record their completed native gas and use `raw_gas_slope`. At `step_end`, `NewFrame`
+creates a pending wrapper row with `selected_not_dispatched` and no `pricing_basis`; it is promoted to
+`dispatch_status=confirmed` and `fixed_per_event` only when the following local `call`/`create`
+callback proves Alethia actually dispatched that action after charging. A charge rejection clears the
+action and leaves an explicit unmeasured `selected_not_dispatched` row. It must not resolve to a
+successful fixed-event key. The manifest resolver rejects every row without `pricing_basis` before
+candidate math or coverage resolution. Confirmed wrappers omit `interpreter_raw_gas` from all candidate math:
+that value includes forwarded child gas, while child execution appears as independent operation rows.
+Non-spawned, confirmed-spawn, and rejected-spawn rows therefore remain distinct. The current
+schedule's spawn estimate is exported only for provenance and is never used as the measured
+fixed-event cost.
 
-The host collector maintains transaction buffers with these exact rules:
+Every accepted controlled or proposal trace passes a mandatory fresh-state A/B gate:
 
-1. Pre-execution system-call execution and charge attempts go directly to the `system` ledger and
-   never to difficulty.
-2. `TransactionStart` opens an empty buffer. An `OperationExecuted` event is appended after the
-   opcode/precompile body executes and before its current-schedule charge result is known. The
-   event records only execution facts known at that point. Any later corresponding `ChargeAttempt`
-   uses the same `operation_id`; an intrinsic charge has no operation.
-3. `committed_success` and EVM `committed_revert` move the buffer to `committed`; both contribute to
-   `header.difficulty` because both transactions committed at the block level.
-4. Every `filtered_*` disposition moves the buffer to `attempted`; Alethia then resets its in-flight
-   meter. Already-emitted operation events remain attempted work even when their charge returned
-   `limit_exceeded` or `arithmetic_overflow`. Intrinsic or pre-execution validation failure can have
-   no operation events because EVM execution never began.
-5. `zk_gas_truncated` records the first unattempted transaction. The tail is classified as
-   `unattempted_after_truncation` and contributes no operation work because the guest did not execute
-   it.
-6. A fatal block/proposal discards the complete trace from final validation and writes an explicit failed
-   row. Partial traces are never accepted.
+1. Execute the ordinary stateless reconstruction with a fresh witness-backed database.
+2. Execute the traced reconstruction from the same input bytes with a second fresh database.
+3. Require identical committed transaction hashes, receipts/execution result, hashed post-state and
+   state root, finalized block zkGas, assembled block, canonical validation result, and proposal
+   public output.
 
-`started_transaction_count` is the number of `TransactionStart` events. The start event's class is
-provisional because opening the buffer must not add a recipient-account database read. After normal
-top-level frame initialization has loaded the recipient through the unchanged execution path,
-`TransactionEnd.execution_class` is authoritative. A `native_value_transfer_count` increment requires
-that authoritative class classification to be `native_value_transfer` and the disposition to be
-`committed_success`; the class itself proves positive native value and no recipient code execution.
-Filtered transactions cannot contribute this feature even when their provisional class looks like a
-transfer. A free-text fixture name, empty calldata alone, or a transaction that never reaches
-`TransactionStart` cannot create this feature. These definitions are shared by controlled traces and
-proposal extraction.
-
-For every successful block, the non-vacuous oracle is:
-
-```text
-sum(applied current-schedule ChargeAttempt values in committed buffers)
-    == finalized_current_zkgas
-    == u64::try_from(block.header.difficulty), rejecting out-of-range values
-block.header.difficulty > 0
-```
-
-All-zero equality fails corpus validation. Attempted and system ledgers are not added to difficulty,
-but remain in the frozen workload because the SP1 guest performed that work.
-
-For a frozen `ChargeAttempt` event `a` under the active schedule:
-
-```text
-q_current(a) = a.component.amount
-    if a.component = tx_intrinsic
-q_current(a) = a.charge_raw_gas * a.multiplier
-    if a.component = opcode or precompile
-
-C_current(p) = sum q_current(a) over applied committed ChargeAttempt events
-A_current(p) = sum q_current(a) over attempted ChargeAttempt events, including a limit trigger
-S_current(p) = sum q_current(a) over pre-execution system ChargeAttempt events
-```
-
-For an opcode `OperationExecuted`, `interpreter_raw_gas` is the interpreter's actual step gas. For a
-precompile it is `native_gas`. At CALL/CREATE `step_end`, the production interpreter has already
-selected its action but has not dispatched it. `NewFrame` is therefore the authoritative
-`spawned=true` decision; every other action is `spawned=false`. Emit the opcode
-`OperationExecuted` and its linked `ChargeAttempt` immediately at that boundary. The wrapper charge
-must complete before child-frame or precompile dispatch, matching the production plain loop. A
-completed precompile later emits its own `OperationExecuted` followed by its separate native-gas
-charge. The charge fields record the independent current-schedule basis: ordinary and non-spawned
-opcodes use `interpreter_delta`, spawned CALL/CREATE uses the fixed `spawn_estimate`, and precompiles
-use `precompile_native`. Its `multiplier` is the effective value selected by Alethia, including
-precompile fallback. The collector may verify these fields against the exported schedule but must not
-recompute a different selection rule.
-
-Every multiplication is checked as `u64`; overflow invalidates the report. The current ledger proves
-that feature extraction follows the production transaction/filter/reset semantics and records which
-accepted candidate keys occur in each validation network. It is not converted into a prediction by
-mixing current intrinsic/spawn/cap values with measured costs. Cycle and proving-gas execution terms
-derive from `OperationExecuted`, never from a charge outcome. The exact committed, attempted, system,
-and unattempted classifications are frozen before final validation.
+The trace pass also requires positive finalized zkGas and exact equality to the assembled block's
+`header.difficulty`. A mismatch, zero-valued reconciliation, duplicate operation ID, missing
+transaction association, or ambiguous event match rejects the sample. This A/B oracle verifies that
+the local inspector did not alter behavior without copying Alethia's charge ledger.
 
 ### Controlled Acceptance And SP1 Candidate Tables
 
@@ -371,6 +334,7 @@ keys with this canonical shape:
 id = "opcode:0x01"
 production_schedule_key = "opcode:0x01"
 event_match = { component = "opcode", opcode = "0x01" }
+pricing_basis = "raw_gas_slope"
 required_case_ids = ["add"]
 diagnostic_case_ids = []
 
@@ -382,6 +346,14 @@ scenario = "arithmetic"
 execution_basis = "interpreter_raw_gas"
 template = "stack_binary"
 target_raw_gas = 3
+
+[[measurement_keys]]
+id = "opcode:0xf1:spawned"
+production_schedule_key = "opcode:0xf1"
+event_match = { component = "opcode", opcode = "0xf1", spawned = true, dispatch_status = "confirmed" }
+pricing_basis = "fixed_per_event"
+required_case_ids = ["call_spawned"]
+diagnostic_case_ids = []
 
 [[overhead_keys]]
 id = "block_base"
@@ -446,17 +418,20 @@ residual rule, not a count sweep.
 Extend the Python manifest model with these typed fields:
 
 ```text
-CaseSpec.execution_basis: interpreter_raw_gas|native_gas
+CaseSpec.execution_basis: interpreter_raw_gas|native_gas|fixed_per_event
 CaseSpec.spawned: bool?                         # CALL/CREATE only
+CaseSpec.dispatch_status: confirmed?             # required for spawned=true fixed-event cases
 MeasurementKeySpec.id: str
 MeasurementKeySpec.production_schedule_key: str
 MeasurementKeySpec.event_match: EventMatchSpec
+MeasurementKeySpec.pricing_basis: raw_gas_slope|fixed_per_event
 MeasurementKeySpec.required_case_ids: tuple[str, ...]
 MeasurementKeySpec.diagnostic_case_ids: tuple[str, ...]
 EventMatchSpec.component: opcode|precompile
 EventMatchSpec.opcode: int?                     # opcode only, 0..255
 EventMatchSpec.address: int?                    # precompile only, nonnegative
 EventMatchSpec.spawned: bool?                   # CALL/CREATE only
+EventMatchSpec.dispatch_status: confirmed?       # required for spawned=true fixed-event keys
 Manifest.measurement_keys: tuple[MeasurementKeySpec, ...]
 Manifest.normalization_reference_key: str
 Manifest.bridge_key_ids: tuple[str, ...]
@@ -484,13 +459,16 @@ Manifest.overhead_cases: tuple[OverheadCaseSpec, ...]
 Precompile matches use `component = "precompile"` and canonical lowercase `address`; opcode matches
 use canonical lowercase `opcode`. Final `CaseSpec` rows materialize `kind`, exactly one of
 `opcode|address`, `execution_basis`, and optional `spawned`; the existing `scenario` string remains
-descriptive only. Opcode cases require `execution_basis = "interpreter_raw_gas"`; precompile cases
-require `execution_basis = "native_gas"`. `spawned` is the only V1 scenario discriminator read from a
-linked `ChargeAttempt`, and every CALL/CREATE measurement key and case must declare it. Other
-opcodes and all precompiles must omit it. A non-CALL/CREATE measurement key without `spawned` matches
-from `OperationExecuted` alone. Do not add warm/cold, state shape, input-size bucket, or another
-discriminator unless Task 2's frozen event schema contains the exact field and the proposal collector
-validates it.
+descriptive only. Ordinary and non-spawned opcode cases require
+`pricing_basis = "raw_gas_slope"` and `execution_basis = "interpreter_raw_gas"`; precompile cases
+require `pricing_basis = "raw_gas_slope"` and `execution_basis = "native_gas"`. Spawned
+CALL/CREATE cases require `pricing_basis = execution_basis = "fixed_per_event"` and
+`dispatch_status = "confirmed"`. `spawned` and confirmed dispatch are the only V1 scenario
+discriminators read from the local inspector, and every CALL/CREATE measurement key and case must
+declare the applicable values. Other opcodes and all precompiles must omit them. A
+`selected_not_dispatched` row is always unmeasured in V1. Do not add
+warm/cold, state shape, input-size bucket, or another discriminator unless Task 2's local trace schema
+contains the exact field and the proposal collector validates it.
 
 Reject the manifest unless measurement-key and overhead-key IDs are unique, every
 `production_schedule_key` exists in the exported schedule, every required set is nonempty, and every
@@ -534,23 +512,26 @@ integer equality on absolute feature counts before using the compound parent fea
 Parse `production_schedule_key` into `(component, identifier)` rather than comparing an opaque string.
 For each measurement key, require that tuple to equal the `event_match` component plus opcode/address.
 For every referenced required or diagnostic case, require its `kind` and opcode/address to equal the
-same tuple. Require the case's `execution_basis` to match its component, and for CALL/CREATE require
-`case.spawned == event_match.spawned`; a missing value is not a wildcard. Reject structured context
-on components that do not support it. The native controlled trace must also assert that generated
-execution actually matches the declared opcode/address, execution basis, and spawned context. Never
-use the free-text `scenario` field in these checks. Freeze the validated mapping in the
-controlled-manifest hash before any run.
+same tuple. Require the case's `execution_basis` and key's `pricing_basis` to match the rules above,
+and for CALL/CREATE require `case.spawned == event_match.spawned` and identical required dispatch
+status; a missing value is not a wildcard.
+Reject structured context on components that do not support it. The native controlled trace must also
+assert that generated execution actually matches the declared opcode/address, pricing basis,
+execution basis, and spawned context. A spawned event with forwarded interpreter gas is invalid if
+that gas enters slope fitting, ADD normalization, proposal prediction, or coverage. Never use the
+free-text `scenario` field in these checks. Freeze the validated mapping in the controlled-manifest
+hash before any run.
 
 The existing `sp1-smoke.toml` include flags remain smoke-only conveniences. The final
 `sp1-calibration-v1.toml` materializes every generated case, measurement key, overhead key, event
 match, unit, and required/diagnostic assignment explicitly. It must be reviewed and hashed before
 collecting any controlled or proposal result; result-dependent regeneration is forbidden.
 
-Define `resolve_measurement_key(e)` over one `OperationExecuted` plus its optional linked
-`ChargeAttempt`. It returns a key only when exactly one frozen `event_match` succeeds. A match that
-requires `spawned` fails when the linked charge context is absent. Zero or multiple matches classify
-the operation as unmeasured; report `no_measurement_key` or `ambiguous_measurement_key` rather than
-falling back to the production schedule key.
+Define `resolve_measurement_key(e)` over one raiko2-local `OperationTrace`. It returns a key only when
+exactly one frozen `event_match` and pricing basis succeed. A match that requires `spawned` fails when
+the local action context is absent. Zero or multiple matches classify the operation as unmeasured;
+report `no_measurement_key` or `ambiguous_measurement_key` rather than falling back to the production
+schedule key.
 
 For every exact `(case, target_count, lane=target|control)` run three local SP1 execute repeats.
 Require identical `case_input_sha256`, exit code, public values, and `proverGas` across all three
@@ -559,7 +540,8 @@ non-deterministic instead of averaging it away. Also record
 `repeat_noise_s = max(s)-min(s)`. Nonzero or missing secondary instruction-count data marks that
 cycle-cost sample unavailable but does not reject an otherwise valid `proverGas` case.
 
-An opcode slope is eligible only when a host-native REVM trace of the exact synthetic bytecode proves
+An ordinary/non-spawned raw-gas opcode slope is eligible only when a host-native REVM trace of the
+exact synthetic bytecode proves
 that, across variants, the target's executed raw gas is exactly `x*r` while all non-target executed
 opcode/precompile counts and raw gas, bytecode length, calldata length, transaction envelope, and
 setup state remain fixed. Keep the static bytecode layout fixed and vary only the immediate or input
@@ -582,6 +564,25 @@ This prevents growing helper bytecode and per-iteration lab overhead from being 
 target multiplier. A missing or mismatched control rejects the precompile case.
 `response_repeat_noise_p` and `response_repeat_noise_s` are the target repeat ranges for an opcode and
 the sum of target/control repeat ranges for a precompile.
+
+A `fixed_per_event` spawned wrapper uses a paired target/control fixture and is measured only after
+all induced child opcode/precompile and nested-wrapper keys have been accepted. The trace must show
+exactly `x` additional target wrapper events and enumerate every other operation delta. Subtract each
+non-target delta in its own accepted basis exactly once:
+
+```text
+z_p,spawn(x) = p_target(x) - p_control(x)
+             - sum(delta_raw_operation_gas(k, x) * c_p(k))
+             - sum(delta_fixed_operation_count(k, x) * f_p(k) for k != target_key)
+z_s,spawn(x) = s_target(x) - s_control(x)
+             - sum(delta_raw_operation_gas(k, x) * c_s(k))
+             - sum(delta_fixed_operation_count(k, x) * f_s(k) for k != target_key)
+```
+
+The target wrapper's forwarded gas is never one of those deltas. An unresolved, recursive, or
+rejected dependency makes the case `confounded_template`. Freeze a topological measurement order for
+spawn keys and reject cycles. Apply the same slope, repeat, consistency, and out-of-fit checkpoint
+gates to `z_p,spawn`; its accepted slope is `f_p` in `proverGas / event`.
 
 Evaluate cumulative count prefixes in this fixed order:
 
@@ -661,7 +662,7 @@ calibration. Do not extend the sweep ad hoc after seeing results. For the select
 prefix, evaluate the same secondary signal, R2, slope-error, and residual thresholds and store its
 status, but do not search for a different prefix or alter the primary decision on behalf of `s`.
 
-For an accepted case with declared per-operation raw gas `r > 0`:
+For an accepted `raw_gas_slope` case with declared per-operation raw gas `r > 0`:
 
 ```text
 c_p = g_p / r                     # proverGas per raw EVM gas
@@ -669,29 +670,34 @@ c_s = g_s / r                     # secondary SP1 instruction count per raw EVM 
 ```
 
 Zero, overflow, non-finite primary values, and invalid raw gas reject that case. A bad `c_s` rejects
-only the secondary sample. For measurement key `k`, let `C_required(k)` be the exact
-manifest-declared `required_case_ids`. The key enters the candidate table only when every member
-produced an accepted `c_p` value and the primary consistency check passes:
+only the secondary sample. For an accepted `fixed_per_event` case, set `f_p = g_p` and optional
+`f_s = g_s`; raw gas is neither required nor consumed. For measurement key `k`, let
+`C_required(k)` be the exact manifest-declared `required_case_ids` and let `v_p(case)` be `c_p(case)`
+for `raw_gas_slope` or `f_p(case)` for `fixed_per_event`. The key enters the candidate table only
+when every member produced an accepted value in the same frozen basis and the primary consistency
+check passes:
 
 ```text
-max(c_p(case) for case in C_required(k)) /
-min(c_p(case) for case in C_required(k)) - 1 <= 0.05
+max(v_p(case) for case in C_required(k)) /
+min(v_p(case) for case in C_required(k)) - 1 <= 0.05
 
 ```
 
-Use the one required value when there is one; otherwise take the exact arithmetic mean as `c_p(k)`.
-Compute and store `c_s(k)` only when every corresponding secondary case is available and passes the
-same 5% consistency diagnostic. A missing, failed, rejected, or `confounded_template` primary case classifies
-the entire key as `required_case_incomplete`; a primary consistency failure classifies it as
-`scenario_dependent`. The candidate receives no value for that key. A failed secondary-only check
-marks the sampling row unavailable and leaves `c_p(k)` unchanged. Accepted diagnostic cases are
-reported separately and never define, rescue, or veto a candidate value. Proposal-ledger occurrence
-does not remove a valid controlled measurement.
+Use the one required value when there is one; otherwise take the exact arithmetic mean as `c_p(k)` or
+`f_p(k)` according to the frozen basis. Compute and store the matching secondary value only when every
+corresponding secondary case is available and passes the same 5% consistency diagnostic. A missing,
+failed, rejected, or `confounded_template` primary case classifies the entire key as
+`required_case_incomplete`; a primary consistency failure classifies it as `scenario_dependent`.
+The candidate receives no value for that key. A failed secondary-only check marks the sampling row
+unavailable and leaves the primary value unchanged. Accepted diagnostic cases are reported separately
+and never define, rescue, or veto a candidate value. Proposal-ledger occurrence does not remove a
+valid controlled measurement.
 
 ### Controlled Non-Opcode Overhead Acceptance
 
 Measure `proposal_startup`, `block_base`, `tx_base`, and `native_value_transfer` as the four required
-V1 non-operation costs. One `tx_base` unit is counted per `TransactionStart`, and its coefficient is
+V1 non-operation costs. One `tx_base` unit is counted per transaction yielded to Alethia's executor,
+and its coefficient is
 the common per-started-transaction residual after modeled work is removed; it is not limited to work
 that occurs before that event. `native_value_transfer` is the additional exclusive cost for a
 committed positive-value transaction that executes no recipient code. Measure
@@ -699,7 +705,7 @@ the block residual only after subtracting transaction, transfer, opcode, and pre
 Witness-byte, witness-node, stdin-byte, blob-byte, and KZG-invocation cases may be collected only as
 V1 diagnostics. These raw features can overlap, so the manifest freezes a residualization DAG rather
 than assuming every other quantity can remain physically constant. Each run records every changed
-feature count and operation-gas delta.
+feature count plus raw-gas and fixed-event operation deltas.
 
 Run the same three deterministic repeats, cumulative-prefix fit, frozen checkpoint mapping, and 10%
 out-of-fit APE gate for primary `p` responses.
@@ -708,11 +714,13 @@ resolved operation delta, and every already-accepted descendant cost exactly onc
 
 ```text
 z_p,q(x) = p_target(x) - p_control(x)
-         - sum(delta_operation_gas(k, x) * c_p(k))
+         - sum(delta_raw_operation_gas(k, x) * c_p(k))
+         - sum(delta_fixed_operation_count(k, x) * f_p(k))
          - sum(delta_feature(t, x) * o_p(t) for t in subtract_closure(q))
 
 z_s,q(x) = s_target(x) - s_control(x)
-         - sum(delta_operation_gas(k, x) * c_s(k))
+         - sum(delta_raw_operation_gas(k, x) * c_s(k))
+         - sum(delta_fixed_operation_count(k, x) * f_s(k))
          - sum(delta_feature(t, x) * o_s(t) for t in subtract_closure(q))
 
 o_p(q) = OLS slope of z_p,q(x) against target-unit count x
@@ -739,7 +747,8 @@ startup_residual_p(h) = p(h)
                       - block_count(h) * o_p(block_base)
                       - started_transaction_count(h) * o_p(tx_base)
                       - native_value_transfer_count(h) * o_p(native_value_transfer)
-                      - sum(operation_raw_evm_gas(e) * c_p(resolve_measurement_key(e)) for e in h)
+                      - sum(raw_operation_gas(e) * c_p(resolve_measurement_key(e)) for e in h)
+                      - sum(f_p(resolve_measurement_key(e)) for fixed_per_event e in h)
 
 max(startup_residual_p(h)) / min(startup_residual_p(h)) - 1 <= 0.05
 o_p(proposal_startup) = arithmetic_mean(startup_residual_p(h))
@@ -824,7 +833,8 @@ directory. `bridge-ref.json` binds the sealed bridge digest before any proposal 
 The calibration run emits and seals these review artifacts before any proposal result exists:
 
 - raw controlled rows and all rejected/unmeasured reasons;
-- `c_p(k)` for every accepted opcode/precompile key;
+- `c_p(k)` for every accepted raw-gas opcode/precompile key;
+- `f_p(k)` for every accepted spawned CALL/CREATE fixed-event key;
 - exact ADD-normalized `m_p(k)` while preserving raw costs;
 - `o_p(q)` for the four accepted V1 fixed/base overheads;
 - the independently hashed controlled sample, diagnostic overhead table, and bridge sidecar roots;
@@ -858,10 +868,13 @@ or holdout proposal splits. The proposal ledger resolves executed operations to 
 measurement keys, and the proposal feature extractor uses the exact controlled overhead units:
 
 ```text
-execution_raw_evm_gas(e) = e.interpreter_raw_gas for an opcode OperationExecuted
-execution_raw_evm_gas(e) = e.native_gas for a precompile OperationExecuted
+execution_raw_evm_gas(e) = e.interpreter_raw_gas for a raw_gas_slope opcode OperationTrace
+execution_raw_evm_gas(e) = e.native_gas for a raw_gas_slope precompile OperationTrace
 
-p_hat(j) = sum(execution_raw_evm_gas(e) * c_p(resolve_measurement_key(e)))
+p_hat(j) = sum(execution_raw_evm_gas(e) * c_p(resolve_measurement_key(e))
+               for e where basis(resolve_measurement_key(e)) == raw_gas_slope)
+         + sum(f_p(resolve_measurement_key(e))
+               for e where basis(resolve_measurement_key(e)) == fixed_per_event)
          + sum(controlled_feature(j, q) * o_p(q) for q in Q_formula)
 
 APE_main(j) = abs(p_hat(j) - p(j)) / p(j)
@@ -869,18 +882,19 @@ APE_main(j) = abs(p_hat(j) - p(j)) / p(j)
 
 `Q_formula` is exactly `[proposal_startup, block_base, tx_base, native_value_transfer]` in canonical
 order. Their proposal feature counts are respectively one, successful block count,
-`TransactionStart` count, and committed structured native-value-transfer count. Every key and
+started transaction iterator-yield count, and committed structured native-value-transfer count.
+Every key and
 transitive subtraction dependency must be accepted before sealing. Diagnostic
 or bundled keys never appear independently in the sum. This same exclusive feature basis is used in
 controlled fixtures and proposal extraction, so witness/blob bytes are not also charged as full stdin
 bytes and block/transaction features do not repeat operation work.
 
 The execution sums include resolved operations in committed, attempted, and pre-execution system
-work, even when a later charge exceeds the current zkGas limit or overflows. They exclude intrinsic
-or pre-validation failures, the unattempted truncation tail, and missing/rejected/ambiguous keys.
-Spawned CALL/CREATE is included only when the frozen event match and execution basis resolve exactly.
+work. They exclude intrinsic or pre-validation failures, the unattempted truncation tail, and
+missing/rejected/ambiguous keys. Spawned CALL/CREATE is included only as one `fixed_per_event` term
+when the frozen event match and basis resolve exactly; its forwarded interpreter gas is never added.
 Current intrinsic charges, spawn estimates, failsafe values, block cap, and current multipliers remain
-trace/coverage metadata and never enter the prediction.
+provenance metadata and never enter the prediction.
 
 The extractor records raw diagnostics including input/started/committed/attempted/unattempted
 transaction counts, structured native-value-transfer count, total stdin bytes, typed witness bytes/
@@ -894,9 +908,12 @@ from the frozen trace event representing the controlled KZG unit. Raw overlaps r
 only the exclusive `Q_formula` features enter predictions. Missing a required feature is a validation
 error, not a fitting opportunity.
 
-For every proposal, report operation-count and execution-raw-gas coverage over all executed
-operations with a valid execution basis. A zero denominator is `coverage_unavailable`, never 100%.
-Coverage is descriptive: unsupported keys remain visible and are not priced with the current table.
+For every proposal, report operation-count coverage over all executed operations, execution-raw-gas
+coverage over only raw-gas-basis events, and spawned-event count coverage over only fixed-event
+wrappers. Forwarded gas never enters a denominator. A zero family denominator is
+`coverage_unavailable`, never 100%; an absent optional family does not fail the proposal. Overall
+operation-count and raw-gas denominators must remain positive. Coverage is descriptive: unsupported
+keys remain visible and are not priced with the current table.
 
 For `p_hat` against observed `p`, compute every per-proposal APE, combined/per-network MAPE, maximum
 error, and the 10% pass/fail decision from `APE_main` with 50-digit `Decimal` arithmetic. MAPE is the
@@ -1056,8 +1073,8 @@ be dirty; any implementation, dependency, controlled-manifest, or guest-artifact
 run. Generated outputs remain uncommitted until final verification completes.
 
 Final validation acceptance additionally requires positive proposal `proverGas`, matching trace/SP1
-public output, exact nonzero block reconciliation from Task 2, at least one `OperationExecuted` event,
-and positive coverage denominators in every proposal. Record a missing or non-positive SP1
+public output, exact nonzero A/B block reconciliation from Task 2, at least one `OperationTrace` row,
+and positive required coverage denominators in every proposal. Record a missing or non-positive SP1
 instruction count as an unavailable secondary sample without changing primary acceptance. Rows are
 never replaced after measurement, and validation never updates the calibration run.
 
@@ -1072,87 +1089,142 @@ env PYTHONDONTWRITEBYTECODE=1 ~/.venv/bin/python -m unittest discover \
 Expected: tests pass; acquisition and publication themselves run only when RPC and GCS inputs are
 explicitly supplied.
 
-## Task 2: Land The Authoritative Observer And Host-Native Trace
+## Task 2: Land Minimal Spawn Parity And Add The Host-Only Trace Crate
 
-This is the high-risk implementation unit. Land and review the Alethia prerequisite before updating
-the raiko2 revision or writing the raiko2 collector.
+This is the high-risk implementation unit. First shrink Alethia PR #239 to the minimal existing-
+inspector parity fix and merge that reviewed change into Alethia `main`. Then pin raiko2 to that
+commit and add all experiment tracing in raiko2. Never pin a PR branch or retain the removed Alethia
+observer surface as a compatibility path.
 
 **Alethia files:**
 
-- Create: `crates/evm/src/zk_gas/observer.rs`
-- Modify: `crates/evm/src/zk_gas/{mod.rs,meter.rs,adapter.rs}`
-- Modify: `crates/evm/Cargo.toml`
-- Modify: `crates/block/src/{executor.rs,derived_block.rs,factory.rs,lib.rs}`
-- Modify: `crates/block/Cargo.toml`
-- Add focused tests beside the changed meter, adapter, executor, and derived-block modules
+- Modify: `crates/evm/src/zk_gas/{adapter.rs,runtime.rs,tests.rs}`
+- Do not retain changes to `meter.rs`, `alloy.rs`, factory code, block code, or Cargo features
+- Delete/revert from PR #239: observer modules, event schema, block-executor lifecycle wiring,
+  observed derived-block entrypoints, observer feature flags, and serialization documentation
 
 **Raiko2 files after the Alethia merge:**
 
 - Modify: every direct Alethia/reth `rev` pin in root, crate, xtask, and guest manifests
-- Modify: `Cargo.lock`, `guests/sp1/Cargo.lock`, and `guests/risc0/Cargo.lock`
+- Modify: `Cargo.toml`, `Cargo.lock`, `guests/sp1/Cargo.lock`, and `guests/risc0/Cargo.lock`
 - Regenerate, never hand-edit: SP1 ELF/VK and RISC0 ELF plus both provenance files under
   `crates/guests/elf/`
-- Create: `crates/stateless/src/zkgas_trace.rs`
+- Create: `crates/zkgas-trace/Cargo.toml`
+- Create: `crates/zkgas-trace/src/{lib.rs,inspector.rs,transactions.rs,reconstruct.rs}`
+- Create: `crates/zkgas-trace/tests/{inspector.rs,reconstruction.rs}`
 - Modify: `crates/stateless/src/{lib.rs,validation.rs}`
-- Modify: `crates/stateless/Cargo.toml`
+- Modify: `crates/guest-common/src/lib.rs`
 - Modify: `bin/guest-launcher/{Cargo.toml,src/main.rs}`
-- Create: `crates/stateless/tests/zkgas_trace.rs`
+- Create: `bin/guest-launcher/tests/proposal_trace.rs`
 - Modify: `experiments/opcode-gas/opcode_gas.py`
 
-### Step 1: Add Failing Alethia Observer Tests
+### Step 1: Write The Failing Alethia Parity Tests
 
-Cover ordinary and dynamic opcodes, spawn/non-spawn CALL/CREATE, precompile dispatch without wrapper
-double-counting, intrinsic charge, arithmetic/limit rejection, pre-execution system calls,
-zero-signer filtering, invalid and block-gas filtering, zkGas truncation and tail index, committed EVM
-revert, transaction reset, block commit, and fatal execution. Add an A/B test proving no-observer and
-observer executions produce identical receipts, committed transactions, state root, and finalized
-zkGas. Assert that an opcode/precompile emits `OperationExecuted` before `ChargeAttempt`, both share
-one block-unique monotonic `operation_id`, and a later `limit_exceeded` or `arithmetic_overflow` does
-not erase the executed event. Assert that an intrinsic/pre-validation failure and the unattempted
-truncation tail emit no operation event. For spawned CALL/CREATE, assert that `step_end` reads the
-already-selected `NewFrame` action, emits `OperationExecuted`, and immediately emits the linked
-`ChargeAttempt` with `spawned=true` before the child or precompile body executes. Keep
-`interpreter_raw_gas` distinct from `charge_raw_gas` with source `spawn_estimate`. Cover the inverse
-non-spawn action with source `interpreter_delta`, wrapper limit rejection before dispatch, and native
-precompile-charge rejection after the precompile body's own operation event.
+Add focused tests for CALL, CALLCODE, DELEGATECALL, STATICCALL, CREATE, and CREATE2. For each family,
+cover `NewFrame` and non-spawn actions. Prove that the plain metered path and the existing
+`ZkGasInspector` path select the same raw-gas source at the same `step_end` boundary, before child or
+precompile dispatch. At a near-limit boundary, prove a rejected spawned wrapper clears/replaces the
+pending `NewFrame`, produces the same fatal outcome in both paths, and executes no child work. Cover
+a successful child, precompile dispatch plus its separate native charge, an ordinary dynamic opcode,
+and a custom inner inspector so the existing public composition contract remains intact.
 
-Add structured transaction-classification tests for a committed positive-value transfer to an
-account with no executable code, zero-value/no-code transaction, cold and already-loaded contract
-calls, contract creation, failed transaction, and unattempted tail. Prove that observer mode adds no
-database reads, and use the authoritative `TransactionEnd.execution_class` for committed feature
-extraction. Only the positive-value no-code success increments `native_value_transfer_count`; every
-emitted `TransactionStart` increments `started_transaction_count` exactly once.
+These tests assert execution and finalized zkGas parity only. They introduce no observer callbacks,
+event schema, transaction lifecycle, serialization, or new feature matrix.
 
-### Step 2: Implement One Alethia Source Of Truth
+### Step 2: Reduce Alethia PR #239 To The Parity Fix
 
-Emit `OperationExecuted` after the ordinary opcode step or precompile body has executed, before the
-subsequent current-schedule charge result is known. Emit `ChargeAttempt` at the meter/adapter point
-that already selects interpreter gas, spawn estimates, precompile gas, multipliers, and checked
-outcomes; correlate operation charges by `operation_id` and leave intrinsic charges uncorrelated.
-For CALL/CREATE, read the production interpreter action at `step_end`: `NewFrame` selects the fixed
-spawn estimate and every other action selects the interpreter delta. Allocate and emit the execution
-event, then emit its linked charge at that same pre-dispatch boundary. If the wrapper charge fails,
-replace the pending action with the dedicated fatal halt before REVM can dispatch child work. Do not
-maintain a parallel deferred-step state machine.
-Emit phase, transaction, disposition, reset, commit, and truncation events in the executor that
-already owns those decisions. Expose `execute_derived_block_with_observer`; keep
-`execute_derived_block` delegating to the normal no-observer path. Do not create a second executor or
-filtering loop.
+In `ZkGasInspector::step_end`, inspect the already-selected interpreter action. Charge the fixed
+production spawn estimate immediately for `NewFrame`; otherwise charge the actual interpreter step
+gas. On failure, use one shared helper that removes the pending frame action before invoking the fatal
+halt. Use the same helper in `run_metered_plain` so debug and release behavior match. Remove deferred
+CALL/CREATE tracking and any observer-only formula copy; the existing meter remains the only schedule
+and arithmetic source of truth.
 
-The `execution-observer` feature is default-off and forwarded from `alethia-reth-block` to
-`alethia-reth-evm`. Merge this work into Alethia `main` and record the reviewed commit. Do not pin
-raiko2 to a PR branch.
+Remove every #239 addition outside this boundary, including `ExecutionObserver`, `ExecutionEvent`,
+executor transaction classifications, phase/block events, observed derived-block functions, serde
+types, and `execution-observer` Cargo features. Restore the original lazy transaction iteration; do
+not retain the observer branch's eager `collect`, because the raiko2 tracing iterator uses each
+`next()` call as the existing executor's started-transaction boundary. Run formatting, the focused
+zkGas tests, and clippy for every feature combination touched by the final small diff. Commit the
+scope reduction normally; do
+not force-push or rewrite PR history without separate authorization. Update the PR title/body to
+describe only spawn timing and halt parity, then obtain review and merge it into Alethia `main`.
 
-### Step 3: Update Raiko2 To The Reviewed Revision
+### Step 3: Update The Pin And Add The Shared Reconstruction Seam
 
-Update every direct Alethia pin and the compatible direct reth pins as one dependency revision,
-regenerate all tracked lockfiles, and inspect `cargo tree -d`. In particular verify the production
-SP1 guest path `raiko2-guest-sp1 -> raiko2-guest-common -> alethia-reth-block` and the corresponding
-RISC0 guest path both use the reviewed revision. Do not hide an incompatible mixed dependency graph
-with a raiko2-side adapter.
+Only after the Alethia merge, update every direct pin to the resulting `main` commit, regenerate all
+tracked lockfiles, and inspect `cargo tree -d`. Verify both production guest paths resolve that exact
+commit. Do not hide an incompatible mixed graph with a local path override or raiko2-side adapter.
 
-Both built guests use that same Alethia revision with `execution-observer` disabled, although only
-SP1 is a V1 measurement backend. Verify the separation explicitly:
+Write failing `raiko2-stateless` tests, then add one narrow injection seam: the current public
+reconstruction function uses an internal default implementation of a public `DerivedBlockExecutor`
+trait, while a sibling
+`reconstruct_block_from_transactions_with_executor_and_witness_resources` accepts another
+implementation. The trait's generic `execute<DB: Database + Debug>` method receives the prepared
+parent header, derived block, witness-backed database, and `TaikoEvmConfig`, and returns Alethia's
+existing `DerivedBlockExecutionOutcome`. This keeps sparse-state creation, state-root calculation,
+block assembly, and consensus/post-state validation in their current single implementation.
+
+```rust
+pub trait DerivedBlockExecutor {
+    fn execute<DB: Database + Debug>(
+        &mut self,
+        evm_config: &TaikoEvmConfig,
+        parent_header: &SealedHeader,
+        derived_block: &RecoveredBlock<Block>,
+        db: DB,
+    ) -> Result<DerivedBlockExecutionOutcome, BlockExecutionError>;
+}
+```
+
+The sibling reconstruction function receives `executor: &mut E where E: DerivedBlockExecutor`;
+all other arguments and its `FilteredBlockExecutionOutcome` result match the existing function.
+
+Write failing `raiko2-guest-common` tests, then refactor the already-existing Shasta block-verifier
+seam into one narrow public callback API:
+
+```rust
+pub struct ShastaBlockReconstruction<'a> {
+    pub index: usize,
+    pub anchor_tx: Recovered<TransactionSigned>,
+    pub transactions: Vec<TransactionSigned>,
+    pub block_env: TaikoNextBlockEnvAttributes,
+    pub witness: &'a ExecutionWitness,
+    pub ancestor_headers: &'a [WitnessHeader],
+    pub shared_state_nodes: &'a [WitnessStateNode],
+    pub chain_spec: &'a Arc<TaikoChainSpec>,
+    pub evm_config: &'a TaikoEvmConfig,
+}
+
+pub fn prove_shasta_proposal_with_reconstructor<R>(
+    guest_input: &GuestInput,
+    reconstruct: R,
+) -> Result<B256>
+where
+    R: for<'a> FnMut(ShastaBlockReconstruction<'a>)
+        -> Result<FilteredBlockExecutionOutcome>;
+```
+
+The wrapper, not the callback, continues to own Shasta derivation, manifest transaction conversion,
+canonical-block comparison, ancestor-window update, and public-output construction. Default
+`prove_shasta_proposal` calls it with the ordinary stateless reconstructor. Add tests proving the
+default path returns identical errors and outputs and that a callback cannot bypass canonical
+comparison.
+
+After those shared guest-path changes pass their behavior tests, complete every Cargo-graph edit
+required by the host-only trace integration before recording the artifact baseline: register
+`raiko2-zkgas-trace` as a workspace member, declare all of its workspace dependencies, add the
+guest-launcher dependency, regenerate the root lockfile, and create the minimal compilable crate
+shell. Confirm that neither guest dependency tree contains the new crate. No `Cargo.toml`, lockfile,
+workspace-member, or workspace-dependency edit may occur after this point without taking a new
+baseline.
+
+This ordering is required because guest provenance unconditionally fingerprints the root
+`Cargo.toml`, even when a new workspace member is absent from the guest dependency graph. Build both
+guests and record the post-manifest baseline. Then add only trace-crate implementation/test source,
+guest-launcher source/tests, and experiment analysis code. Because those later files remain outside
+the guest provenance input set, build both guests again and require byte-identical ELF/VK, image-ID,
+and provenance results:
 
 ```bash
 cargo tree --manifest-path guests/sp1/Cargo.toml -e features
@@ -1164,44 +1236,105 @@ sha256sum crates/guests/elf/sp1_shasta_proposal.elf \
   crates/guests/elf/risc0_shasta_proposal.elf \
   crates/guests/elf/sp1.provenance.json \
   crates/guests/elf/risc0.provenance.json
-cargo run -p xtask --features guest-tools -- guest-digests \
-  --output target/zkgas-guest-digests.json
 ```
 
-Neither feature tree may contain `execution-observer`. Record the SP1 ELF/VK identity and RISC0 ELF/
-proposal image ID, build and test the host observer path, rebuild both unchanged guests, and require
-all recorded hashes/image IDs to remain identical across those two builds. Equality with the
-pre-revision artifacts is not required: the dependency revision itself legitimately changes guest
-code.
+Equality with artifacts from the older Alethia revision or before the shared seam refactor is not
+required. The shared seam instead has behavior/output compatibility tests. Byte equality is required
+only between the post-seam baseline and the later trace-crate/guest-launcher-only change.
 
-### Step 4: Add The Raiko2 Derivation Observer And Collector
+### Step 4: Write Failing Raiko2 Trace Tests
 
-Write tests first for signer-recovery success/failure without changing `build_derived_block` results.
-The ordinary function delegates to a no-observer helper; only the host trace command records the
-derivation events.
+In `raiko2-zkgas-trace`, write failing tests for:
 
-Add `guest-launcher proposal-trace` to deserialize the sealed GuestInput and call the same Shasta
-manifest reconstruction used by `prove_shasta_proposal`, but with Alethia's observer enabled. It
-emits the transactional ledger above, exact bincode/input-size features, canonical output hash, and
-`guest_input_sha256`. It must validate the generated blocks against canonical blocks exactly as the
-guest path does.
+- ordinary and dynamic opcode gas, precompile native gas, and all six spawned/non-spawned families;
+- spawned wrappers serialized as `fixed_per_event` with no usable raw-gas field;
+- confirmed child/precompile dispatch promoting a pending `NewFrame` wrapper, while near-limit charge
+  rejection leaves `selected_not_dispatched` with no `pricing_basis`, unmeasured, and executes no child work;
+- child and precompile work emitted independently without wrapper double-counting;
+- system operations before the first iterator yield, transaction index changes, committed success,
+  committed failure (revert or halt), attempted work, and unattempted tail classification;
+- two adjacent transactions with distinct opcode traces, proving iterator consumption remains
+  interleaved with execution rather than eagerly collected;
+- positive-value no-code success as the only native-transfer class, with no trace-only DB read;
+  explicitly reject contract, create, precompile, reverted, attempted, and zero-value rows;
+- deterministic monotonic operation IDs and exact event-match fields;
+- duplicate signed-transaction hashes joined as an ordered one-use subsequence, including the pattern
+  attempted duplicate, intervening commit, then committed duplicate;
+- fatal execution retaining diagnostics but rejecting the partial trace;
+- fresh-state ordinary/traced equality for committed hashes, receipts/result, hashed state and state
+  root, finalized zkGas, assembled/canonical block, and public output;
+- deliberate inspector perturbation making the A/B gate fail.
 
-The normal SP1 proposal run remains uninstrumented. The launcher adds only host-computed
-`guest_input_sha256` and encoded input length before invoking SP1. Join trace and SP1 rows only on
-that hash and matching public output; reject proposal-ID-only matches. Do not add a RISC0 proposal
-execution step to V1.
+### Step 5: Implement The Host-Only Trace Crate
 
-### Step 5: Verify Alethia And Raiko2
+Implement `TraceInspector` around a shared in-memory sink. Snapshot opcode and remaining gas in
+`step`, compute ordinary step gas in `step_end`, and read `InterpreterAction::NewFrame` there. Emit a
+raw-gas operation for ordinary/non-spawned opcodes. Keep `NewFrame` wrappers pending by frame depth;
+promote one to a fixed-event operation only from its following `call`/`create` callback. Clear an
+unconfirmed pending row as `selected_not_dispatched` with `pricing_basis = None` at the next step,
+frame end, transaction boundary, or fatal finalization. Never serialize forwarded gas as a candidate
+input. Record completed
+precompile native gas through the existing inspector callbacks as a separate operation.
 
-Run the focused upstream tests required by Alethia, then in raiko2:
+Implement `TracingTransactions<I>` over the exact recovered transaction iterator passed to Alethia.
+Its `next` method finalizes pending state for the preceding occurrence, sets the shared transaction
+index, and records one started `(recovered_index, manifest_index, hash)` occurrence. Unattempted rows
+retain `recovered_index` but have no `started_tx_index`. After the unchanged Alethia
+executor returns, scan started occurrences and the ordered committed list with a single committed
+cursor. Consume a committed occurrence and its aligned receipt only when it is the next subsequence
+match; otherwise classify that started occurrence as attempted. Reject an unconsumed committed row or
+receipt-count mismatch. The untouched input suffix is unattempted. Preserve every signer-recovery
+failure as a proposal-level `RecoveryFailure` before reconstruction. Do not invent Alethia rejection
+reasons.
+
+Implement `TracingDerivedBlockExecutor` using `TaikoEvmFactory::create_evm_with_inspector`,
+`TaikoBlockExecutor::new`, and
+`execute_block_with_committed_transactions(TracingTransactions::new(...))`. Reuse the same
+environment/context construction and outcome finalization as the ordinary Alethia helper. The crate
+may reproduce this thin EVM-construction adapter; it must not copy the transaction/filter/reset/commit
+loop or any schedule/meter formula.
+
+Implement `trace_shasta_proposal` as two complete calls to
+`prove_shasta_proposal_with_reconstructor` from identical GuestInput bytes and fresh witness state.
+Each callback projects its returned `FilteredBlockExecutionOutcome` into this in-memory typed equality
+record; no debug formatting, map serialization, or implementation-defined digest is allowed:
+
+```text
+ExecutionParityRecord {
+  committed_transaction_hashes: Vec<B256>,
+  execution_result: BlockExecutionResult<Receipt>,
+  hashed_state: HashedPostState,
+  assembled_block: Block,
+  assembled_senders: Vec<Address>,
+  state_root: B256,
+  finalized_block_zkgas: u64
+}
+```
+
+The first callback uses the ordinary reconstructor; the second uses `TracingDerivedBlockExecutor` and
+also records trace rows. Compare every field with Rust typed equality in block order, and compare the
+two final public outputs, before returning normalized trace JSON. Persist only the explicit A/B pass
+status and mismatch field names, not a made-up parity hash. Add `guest-launcher proposal-trace` to emit
+that JSON plus exact bincode input length,
+`guest_input_sha256`, and public output. The normal local SP1 execution remains uninstrumented. Join
+trace and SP1 rows only on GuestInput hash and matching public output; reject proposal-ID-only joins.
+
+### Step 6: Verify Alethia And Raiko2
+
+Run the focused upstream Alethia tests and supported-feature clippy checks, then in raiko2:
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p raiko2-stateless --test zkgas_trace
+cargo test -p raiko2-stateless
+cargo test -p raiko2-guest-common proposal
+cargo test -p raiko2-zkgas-trace
 cargo test -p guest-launcher proposal_trace
-cargo clippy -p raiko2-stateless -p guest-launcher -- -D warnings
+cargo clippy -p raiko2-stateless -p raiko2-guest-common \
+  -p raiko2-zkgas-trace -p guest-launcher -- -D warnings
 just build-guest sp1
 just build-guest risc0
+cargo run -p xtask --features guest-tools -- guest-digests \
+  --output target/zkgas-guest-digests.json
 ```
 
 Before the final corpus is sealed, acquire one temporary post-Unzen candidate from each network for
@@ -1211,8 +1344,8 @@ selection; choose another unexecuted smoke candidate before running instead. Do 
 files or results to the final manifest, candidate, bridge, or report, and never relabel them
 `final_validation`. Run both through the trace and SP1 passes. Require matching GuestInput hashes and
 canonical/public outputs, identical pre/post host-feature guest identities for both zkVM builds,
-positive `p`, recorded secondary `s` status, and exact nonzero reconciliation for every block. The
-RISC0 requirement here is build/artifact isolation, not proposal execution.
+positive `p`, recorded secondary `s` status, and exact nonzero A/B reconciliation for every block.
+The RISC0 requirement here is build/artifact isolation, not proposal execution.
 
 ## Task 3: Build And Seal The Controlled SP1 ProverGas Candidate
 
@@ -1237,7 +1370,10 @@ Write failing manifest tests for duplicate measurement-key IDs, missing producti
 empty or unknown required case IDs, a case listed twice or as both required and diagnostic, unsupported
 event-match fields, overlapping matches, and `spawned` on a non-CALL/CREATE opcode. Prove that a
 generic CALL/CREATE match without `spawned` is rejected and that explicit `spawned=true` and
-`spawned=false` matches are disjoint.
+`spawned=false` matches are disjoint. Reject a missing/unknown pricing basis, raw-gas basis on a
+spawned key, fixed-event basis on an ordinary opcode or precompile, and any raw-gas field attached to
+a fixed-event proposal term. Require `dispatch_status=confirmed` on every `spawned=true`
+fixed-event key/case and reject any key that attempts to price `selected_not_dispatched`.
 
 Add separate rejection fixtures for every three-way coherence failure: case opcode differs from the
 event match, case precompile address differs, case component differs, production schedule key differs
@@ -1291,16 +1427,18 @@ the same `guest_input_sha256` must produce the same `workload_id` across validat
 
 ### Step 2: Test High-Precision Primary Construction And Secondary Sampling
 
-Cover exact `g_p/r` conversion without integer rounding and primary zero/non-finite/overflow
-rejection. For one measurement key, test all required primary cases accepted within the 5%
-consistency gate, the exact mean, one required case missing/rejected/confounded, and a primary value
-outside the consistency gate. The latter cases exclude the complete key as
+Cover exact `g_p/r` conversion without integer rounding for raw-gas keys, exact `f_p=g_p` for
+fixed-event keys, and primary zero/non-finite/overflow rejection. For one measurement key in each
+basis, test all required primary cases accepted within the 5% consistency gate, the exact mean, one
+required case missing/rejected/confounded, and a primary value outside the consistency gate. The
+latter cases exclude the complete key as
 `required_case_incomplete` or `scenario_dependent`; no successful sibling case may enter alone. Test
 that accepted/rejected diagnostic cases remain reported but do not define, rescue, or veto the
 primary value.
 
 Assert that ADD is the frozen normalization reference, that a failed primary ADD measurement prevents
-candidate sealing, and that exact `m_p(k)=c_p(k)/c_p(ADD)` preserves raw `c_p`. Test the four required
+candidate sealing, that exact `m_p(k)=c_p(k)/c_p(ADD)` preserves raw `c_p`, and that no `f_p` is ADD
+normalized. Test the four required
 `o_p` values and exact fixed-startup residual averaging. Separately test that `g_s/c_s/o_s`, repeat
 noise, and failed secondary diagnostics are serialized to the cycle-cost sample artifact; no
 secondary status changes `c_p`, `m_p`, `o_p`, the candidate digest, or the validation classification.
@@ -1331,8 +1469,9 @@ costs, normalization, primary prediction, and serialized-string reproduction.
 
 Add only the next declared count level when the current prefix fails a quality gate. Persist all
 repeats and decisions so resume cannot silently choose a different prefix. Emit exact primary `g_p`,
-per-case `c_p`, every frozen measurement key and event match, required/diagnostic membership,
-selected per-key `c_p(k)`, ADD-normalized `m_p`, checkpoint observations/predictions/APE/status,
+per-case `c_p|f_p`, every frozen measurement key, pricing basis, and event match,
+required/diagnostic membership, selected per-key `c_p(k)|f_p(k)`, raw-gas-only ADD-normalized `m_p`,
+checkpoint observations/predictions/APE/status,
 accepted/rejected evidence, and coverage gaps. Run
 the controlled overhead cases and emit exact `o_p`, including the fixed startup residual. Write the
 simultaneously observed `s` values and available `g_s/c_s/o_s` diagnostics to the separately hashed
@@ -1342,7 +1481,7 @@ and independent digest. Emit the separately hashed diagnostic overhead cost tabl
 integer schedule or Rust table. Materialize and review
 `sp1-calibration-v1.toml` without the
 smoke manifest's implicit include flags before running any measurement. Changing the synthetic lab
-guest is allowed for isolation/control scenarios; it does not enable the Alethia observer in the
+guest is allowed for isolation/control scenarios; it does not add the host trace crate to the
 measured proposal guest. Freeze the final SP1 artifacts only after these changes are complete.
 
 Implement one canonical structured identity parser and one `EventMatchSpec` matcher. Manifest
@@ -1366,17 +1505,17 @@ referenced by `candidate-manifest.json`.
 
 ### Step 4: Test The Immutable Proposal Validation Boundary
 
-Write failing tests for ledger transaction boundaries, attempted/system/committed recomputation,
-current difficulty parity, checked overflow, exact trace/SP1 GuestInput and public-output joins, and
-positive `p`. Record missing/non-positive `s` as a secondary-sample failure. Cover prediction
-inclusion for executed committed/attempted/system operations, including an
-operation whose later charge returns `limit_exceeded` or `arithmetic_overflow`. Cover exclusion for
-intrinsic/pre-validation failure, unattempted work, unmeasured keys, and spawn-basis mismatch. Reject
-any use of current zkGas multipliers or fixed spawn estimates as proving-gas coefficients.
+Write failing tests for transaction iterator boundaries, attempted/system/committed recomputation,
+ordinary/traced difficulty and complete A/B parity, exact trace/SP1 GuestInput and public-output
+joins, and positive `p`. Record missing/non-positive `s` as a secondary-sample failure. Cover
+prediction inclusion for executed committed/attempted/system operations and exclusion for intrinsic/
+pre-validation failure, unattempted work, unmeasured keys, and pricing-basis mismatch. Reject any use
+of current zkGas multipliers, fixed spawn estimates, or spawned forwarded gas as proving-gas
+coefficients.
 
-Test exact measurement-key resolution from `OperationExecuted` plus its optional linked
-`ChargeAttempt`: one match enters the fixed prediction; no match and missing required linked context
-enter unmeasured coverage; ambiguous matches reject the manifest before execution. With two disjoint
+Test exact measurement-key resolution from one local `OperationTrace`: one match enters the frozen
+prediction; no match, missing required spawn context, and `selected_not_dispatched` enter unmeasured
+coverage; ambiguous matches reject the manifest before execution. With two disjoint
 CALL/CREATE spawned/non-spawned measurement keys, prove that failure of one required set excludes only
 that measurement key. Separately prove the required P1 case: when two required scenarios share one
 unresolvable measurement key and one is accepted while the other is rejected, the complete key stays
@@ -1386,8 +1525,9 @@ Test exact feature extraction for proposal startup, block base, started transact
 native-value transfers, plus diagnostic blob-byte and KZG-invocation counts. Test the fixed `p_hat`
 formula and exact `APE_main = abs(p_hat-p)/p` denominator using 50-digit `Decimal`. Prove MAPE is the
 arithmetic mean of proposal APE values rather than aggregate-gas error. Test metric signs,
-per-network aggregation, worst-row ordering, operation-count and execution-raw-gas coverage,
-zero-denominator rejection, the exact 10% boundary, the two primary validation classifications, and
+per-network aggregation, worst-row ordering, operation-count, raw-gas, and spawned-event coverage,
+required zero-denominator rejection, optional absent-family handling, the exact 10% boundary, the two
+primary validation classifications, and
 deterministic report recomputation. A deliberately wrong controlled value must fail the
 absolute-percentage-error gate; no proposal
 coefficient, feature selection, normalization, fallback, or repair is permitted.
@@ -1440,7 +1580,8 @@ just build-guest sp1
 Require a clean implementation revision, exact source/dependency/SP1 identities, complete schedule
 identity, materialized controlled manifest, and an empty calibration directory. Print the immutable
 calibration ID, run all opcode/precompile and non-opcode controlled suites, accept or reject every
-declared required key, build the native and ADD-normalized `proverGas` views, write the separate
+declared required key, build the raw-gas native and ADD-normalized views plus fixed spawn-event
+`proverGas` costs, write the separate
 controlled cycle-cost samples and diagnostic overhead cost table, build the controlled bridge, and
 seal the independent candidate and bridge digests. An `insufficient_data` bridge is allowed; a missing
 or unsealed bridge is not. No proposal fixture or result may be read during this step.
@@ -1470,9 +1611,10 @@ not change primary validation.
 
 ### Step 4: Apply The Frozen Candidate And Report
 
-Apply the sealed `c_p` and `o_p` values directly to every frozen proposal ledger and feature row. Emit
-the exact predicted/observed `proverGas`, per-key required/diagnostic outcomes, operation-count and
-execution-raw-gas coverage, missing-key and feature diagnostics, classification, rejection reasons,
+Apply the sealed `c_p`, `f_p`, and `o_p` values directly to every frozen proposal ledger and feature
+row. Emit the exact predicted/observed `proverGas`, per-key required/diagnostic outcomes,
+operation-count, raw-gas, and spawned-event coverage, missing-key and feature diagnostics,
+classification, rejection reasons,
 and worst proposals in JSON and Markdown. Recompute
 and verify the candidate digest before and after validation; any changed calibration byte fails the
 run. Separately emit the paired observed proposal instruction-count/`proverGas` samples under their
@@ -1489,16 +1631,20 @@ env PYTHONDONTWRITEBYTECODE=1 ~/.venv/bin/python -m unittest discover \
   -s experiments/opcode-gas/tests -p 'test_*.py'
 cargo fmt --all -- --check
 cargo test -p raiko2-stateless
+cargo test -p raiko2-guest-common proposal
+cargo test -p raiko2-zkgas-trace
 cargo test -p guest-launcher
-cargo clippy -p raiko2-stateless -p guest-launcher -- -D warnings
+cargo clippy -p raiko2-stateless -p raiko2-guest-common \
+  -p raiko2-zkgas-trace -p guest-launcher -- -D warnings
 just build-guest sp1
 just build-guest risc0
 cargo run -p xtask --features guest-tools -- guest-digests \
   --output target/zkgas-guest-digests.json
 ```
 
-Independently review the complete Alethia and raiko2 diffs. Independently rerun the observer A/B
-tests, one Mainnet and one Hoodi full trace-plus-SP1 reconciliation, both guest feature/artifact
+Independently review the complete Alethia and raiko2 diffs. Independently rerun the Alethia spawn
+parity tests, the raiko2 fresh-state A/B tests, one Mainnet and one Hoodi full trace-plus-SP1
+reconciliation, both guest feature/artifact
 isolation checks, one exact-generation corpus download/hash check, and a fresh recomputation of both
 the candidate and validation reports from sealed normalized rows. Investigate every material
 finding and have the reviewer/tester re-check fixes before declaring the reports fixed.
@@ -1512,7 +1658,8 @@ experiment.
 
 The handoff contains the calibration and validation IDs, candidate digest, exact source/dependency/
 SP1/schedule/corpus identities, the RISC0 release-consistency artifact identity, commands and results,
-raw and ADD-normalized `proverGas` table, controlled fixed/base costs, separately hashed controlled
+raw and ADD-normalized `proverGas` table, fixed spawn-event costs, controlled fixed/base costs,
+separately hashed controlled
 and proposal cycle-cost samples, the diagnostic overhead cost table, controlled and proposal bridge
 diagnostics/statuses/final conclusion, backend-independent workload identities, measured/unmeasured
 proposal coverage, primary proposal-validation metrics, required and diagnostic case outcomes,

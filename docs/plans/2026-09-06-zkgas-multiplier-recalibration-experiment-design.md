@@ -13,7 +13,8 @@ designs. This document is the authoritative contract for a complete multiplier r
 
 Produce one high-precision SP1-native zkGas cost model in normalized `proverGas` units. Its required
 V1 components are proposal-startup fixed cost, per-block base cost, per-transaction base cost,
-native-value-transfer cost, opcode multipliers, and precompile multipliers. Freeze every candidate
+native-value-transfer cost, raw-gas opcode/precompile multipliers, and fixed spawned CALL/CREATE
+wrapper costs. Freeze every candidate
 value before opening proposal results, then use a fixed Mainnet/Hoodi proposal corpus only as the
 final validation of that frozen model.
 
@@ -38,8 +39,9 @@ model, and thresholds before proposal output is visible, fits only on controlled
 the proposal corpus only for validation. Its result cannot block or promote the `proverGas`
 candidate.
 
-The result is an SP1-native high-precision opcode/precompile multiplier table, an explicit
-fixed/base-cost table, proposal-validation evidence at explicitly reported coverage, and the separate
+The result is an SP1-native high-precision raw-gas opcode/precompile multiplier table, a fixed
+spawn-event table, an explicit fixed/base-cost table, proposal-validation evidence at explicitly
+reported coverage, and the separate
 SP1 instruction-count-to-`proverGas` bridge report. A developer
 separately decides how to encode those backend-native results into a production alethia-reth/REVM
 schedule. A later experiment may independently measure RISC0 opcode/user-cycle costs regardless of
@@ -130,24 +132,29 @@ Use these exact controlled-measurement quantities:
   it is a secondary cycle proxy and is not RISC0 user cycles;
 - `r(k)`: raw EVM gas for one controlled operation represented by measurement key `k`;
 - `g_p(k)`: marginal `proverGas / operation` fitted only from controlled case `k`;
-- `c_p(k) = g_p(k) / r(k)`: proving-gas multiplier in `proverGas / raw EVM gas`;
+- `basis(k)`: either `raw_gas_slope` or `fixed_per_event`, frozen in the controlled manifest;
+- `c_p(k) = g_p(k) / r(k)`: proving-gas multiplier in `proverGas / raw EVM gas` for
+  `raw_gas_slope` keys only;
+- `f_p(k) = g_p(k)`: proving-gas cost per executed event for `fixed_per_event` keys;
 - `o_p(q)`: controlled proving-gas cost for a non-opcode workload dimension `q`;
-- `g_s(k)` and `o_s(q)`: optional secondary marginal instruction-count observations for the same
-  controlled workload identities. They remain in the sampling artifact and never enter V1 candidate
-  acceptance, normalization, prediction, or validation.
+- `g_s(k)`, `c_s(k) = g_s(k)/r(k)`, `f_s(k) = g_s(k)` for fixed-event keys, and `o_s(q)`: optional
+  secondary marginal instruction-count observations for the same controlled workload identities.
+  They remain in the sampling artifact and never enter V1 candidate acceptance, normalization,
+  prediction, or validation.
 
 The controlled manifest freezes `normalization_reference_key = "opcode:0x01"` (ADD) before any
 measurement. The reference must pass every required case and the `proverGas` gates. Emit the
-dimensionless candidate view without rounding:
+dimensionless candidate view for `raw_gas_slope` keys without rounding:
 
 ```text
 m_p(k) = c_p(k) / c_p(opcode:0x01)
 ```
 
-Preserve raw `c_p` alongside the relative multiplier. ADD normalization makes the SP1 vector shape
-reviewable; it does not define the production integer zkGas scale. If the reference key or a required
-fixed/base-cost dependency is unavailable, the candidate cannot be sealed and proposals are not
-executed.
+Preserve raw `c_p` alongside the relative multiplier. Preserve every `fixed_per_event` `f_p` at full
+precision in a separate candidate component; it has units of `proverGas / event` and is never divided
+by ADD. ADD normalization makes the raw-gas vector shape reviewable; it does not define the
+production integer zkGas scale. If the reference key or a required fixed/base-cost dependency is
+unavailable, the candidate cannot be sealed and proposals are not executed.
 
 The run manifest pins the SP1 SDK and records that `p` is returned by its normalized API. In SP1
 6.3.0 that API performs the version-compatibility `raw_gas * 10 / 191` integer normalization. The
@@ -158,32 +165,48 @@ diagnostics without allowing them to veto a valid `proverGas` measurement.
 
 A measurement key is an immutable event-match tuple: opcode or precompile identity plus only scenario
 dimensions that the frozen proposal trace can resolve exactly. Its controlled-manifest entry declares
-a nonempty `required_case_ids` set before measurement. Several measurement keys may map to one
-production schedule key only when their event matches are disjoint; for example, a linked
-`ChargeAttempt` can resolve CALL/CREATE `spawned=true|false`. Warm/cold state or other context absent
-from the event schema cannot be guessed from a free-text synthetic scenario name.
+a nonempty `required_case_ids` set and one pricing basis before measurement. Several measurement keys
+may map to one production schedule key only when their event matches are disjoint; for example, the
+host inspector can resolve CALL/CREATE `spawned=true|false` from the selected interpreter action.
+Warm/cold state or other context absent from the local trace schema cannot be guessed from a free-text
+synthetic scenario name.
 
 The manifest validator derives a structured operation identity from all three sources: the parsed
 production schedule key, the proposal `event_match`, and every referenced required or diagnostic
-case. Their component and opcode/precompile address must be identical. Each case also declares an
-execution basis: opcode cases use `interpreter_raw_gas`, while precompile cases use `native_gas`.
-Every CALL/CREATE measurement key and case declares the same structured `spawned` boolean. The
-controlled trace must prove that the generated case actually exercised the declared identity,
-execution basis, and spawned context. The free-text `scenario` field is descriptive only and can
-never establish identity, context, or basis.
+case. Their component and opcode/precompile address must be identical. Ordinary and non-spawned
+opcode cases use `raw_gas_slope` with `interpreter_raw_gas`; precompile cases use `raw_gas_slope`
+with `native_gas`; spawned CALL/CREATE cases use `fixed_per_event`. Every CALL/CREATE measurement key
+and case declares the same structured `spawned` boolean; a fixed-event key additionally requires
+`dispatch_status=confirmed`. `NewFrame` selected but never dispatched after a charge rejection is an
+explicit unmeasured context, not a match for the successful-spawn key. The controlled trace must
+prove that the generated case actually exercised the declared identity, pricing basis, execution-gas
+source where applicable, and dispatch context. The free-text `scenario` field is descriptive only
+and can never establish identity, context, or basis.
 
-The Alethia event ordering is frozen to the production interpreter decision. For CALL/CREATE,
-`step_end` runs after the interpreter has selected an action but before it has dispatched child work.
-`NewFrame` means `spawned=true`; every other action means `spawned=false`. The opcode
-`OperationExecuted` and linked wrapper `ChargeAttempt` are emitted at this boundary, so a failed
-wrapper charge prevents the child contract or precompile body from executing. If a precompile does
-run, its completed body is a separate operation followed by its own native-gas charge. This ordering
-is part of the execution ledger contract and must remain identical to the observer-free metered path.
+The Alethia prerequisite is deliberately narrow. For CALL/CREATE, `step_end` runs after the
+interpreter has selected an action but before it dispatches child work. `NewFrame` means
+`spawned=true`; every other action means `spawned=false`. Both Alethia's plain metered path and its
+existing inspector wrapper must make the spawn-metering decision and halt a rejected wrapper at this
+same boundary. Alethia exposes no experiment observer, event schema, transaction ledger, or trace
+serialization.
 
-The candidate artifacts contain every accepted `c_p(k)` and `m_p(k)` at full decimal precision in a
-schedule-shaped map with explicit missing/rejected entries. Together with the accepted `o_p(q)`
-values, these form the experiment's only V1 candidate. They are not rounded to the current
-integer zkGas representation and do not choose a production block-budget scale.
+Raiko2 owns the host-only execution trace. Its local REVM inspector records the selected opcode,
+ordinary interpreter gas or precompile native gas, frame depth, and spawn/dispatch decision. A
+`NewFrame` becomes a priced `fixed_per_event` wrapper only when a following `call`/`create` callback
+confirms actual dispatch; otherwise it remains explicit unmeasured work. A confirmed wrapper's
+interpreter gas includes forwarded child gas and therefore must never be used as a raw-gas slope or
+proposal prediction term: child execution is traced and priced independently. A completed precompile
+is a separate `raw_gas_slope` event keyed by its native gas.
+
+An unconfirmed `NewFrame` trace row has no pricing basis. Only a confirmed dispatch may promote it to
+`fixed_per_event`; the resolver rejects basis-less rows before candidate math or measured-coverage
+accounting. This keeps charge-rejected wrapper selection observable without assigning it a cost from
+a successful spawn measurement.
+
+The candidate artifacts contain every accepted raw-gas `c_p(k)` and `m_p(k)`, every accepted fixed
+spawn `f_p(k)`, and explicit missing/rejected entries at full decimal precision. Together with the
+accepted `o_p(q)` values, these form the experiment's only V1 candidate. They are not rounded to the
+current integer zkGas representation and do not choose a production block-budget scale.
 
 Write the simultaneously observed `(s, p)` values, controlled `g_s/o_s` slopes, repeat ranges, and
 workload identities to separately hashed controlled/proposal cycle-cost sample files. These files and
@@ -220,7 +243,10 @@ non-gating for the `proverGas` candidate.
 Before reading any proposal result, seal the complete forward prediction formula:
 
 ```text
-p_hat(j) = sum(execution_raw_evm_gas(e) * c_p(resolve_measurement_key(e)))
+p_hat(j) = sum(execution_raw_evm_gas(e) * c_p(resolve_measurement_key(e))
+               for e where basis(resolve_measurement_key(e)) == raw_gas_slope)
+         + sum(f_p(resolve_measurement_key(e))
+               for e where basis(resolve_measurement_key(e)) == fixed_per_event)
          + sum(controlled_feature(j, q) * o_p(q) for q in Q_formula)
 
 APE_main(j) = abs(p_hat(j) - p(j)) / p(j)
@@ -235,21 +261,28 @@ proposal-fitted intercept, residual model, global rescale, feature selection, ca
 model selection. The proposal trace only supplies the counts and byte quantities consumed by the
 already-frozen formula.
 
-Execution and current-schedule charging are separate observations. Include executed work from
-committed transactions, attempted transactions before reset, and system execution even when the
-subsequent current-schedule charge returns `limit_exceeded` or `arithmetic_overflow`. Exclude only
-work that never began, such as intrinsic/pre-validation failure and the unattempted tail after block
-truncation. Keep missing or unmeasured keys in explicit coverage fields instead of assigning them a
-current-schedule value or a proposal-fitted value.
+Include traced work from committed transactions, attempted transactions before reset, and system
+execution. Exclude only work that never began, such as intrinsic/pre-validation failure and the
+unattempted tail after block truncation. Raiko2 derives these categories from the transaction
+iterator, committed transaction list, receipts, and trace events produced by the same Alethia
+executor. The trace contract requires the existing lazy, interleaved iterator consumption and tests
+it with adjacent transactions carrying distinct operation traces; eager pre-collection is not
+compatible. Raiko2 does not duplicate Alethia's filter/reset/commit state machine. Keep missing or
+unmeasured keys in explicit coverage fields instead of assigning them a current-schedule value or a
+proposal-fitted value.
 
 Define operation-count coverage as measured executed opcode/precompile events divided by all executed
-opcode/precompile events. Define execution-raw-gas coverage using the analogous sums of interpreter
-opcode gas and native precompile gas. Report both per proposal and as ratio-of-sums per network; a
-zero denominator is unavailable, not 100%, and prevents a positive classification. V1 declares no
-arbitrary minimum coverage percentage. Its positive classification is therefore
+opcode/precompile events. Define execution-raw-gas coverage only over `raw_gas_slope`-eligible
+events, using interpreter opcode gas and native precompile gas. Separately report spawned-event count
+coverage for `fixed_per_event` wrappers; forwarded gas is never placed in a coverage denominator.
+Report these per proposal and as ratio-of-sums per network; a zero denominator is unavailable, not
+100%, but does not fail a proposal when that event family is absent. Overall operation-count and
+raw-gas denominators must be positive. V1 declares no arbitrary minimum coverage percentage. Its
+positive classification is therefore
 `candidate_table_validated_at_reported_coverage`, not “all operation costs validated.” Emit it only
 if every proposal has finite positive actual `p(j)`, finite `p_hat(j)`, and `APE_main(j) <= 0.10`,
-and every coverage value is reported with a positive denominator. Per-proposal error, per-network and
+and every required coverage value is reported with a positive denominator. Per-proposal error,
+per-network and
 combined MAPE, maximum error, and the 10% pass/fail decision all use this formula with 50-digit
 `Decimal` arithmetic. MAPE is the arithmetic mean of proposal APE values, not a ratio of aggregate
 gas totals. Otherwise emit `candidate_table_not_validated` with the exact failed rows and components.
@@ -305,13 +338,16 @@ predicted_sp1_prover_gas =
   + block_count * block_base_cost
   + started_transaction_count * tx_base_cost
   + native_value_transfer_count * native_value_transfer_cost
-  + sum(operation_raw_evm_gas_i * controlled_cost_per_raw_evm_gas_i)
+  + sum(raw_gas_operation_i * controlled_cost_per_raw_evm_gas_i)
+  + sum(spawned_wrapper_event_i * controlled_fixed_cost_per_event_i)
 ```
 
 `Q_formula` therefore contains the four required V1 non-operation identities
 `proposal_startup`, `block_base`, `tx_base`, and `native_value_transfer`. The startup feature count is
-exactly one per proposal guest invocation and is not added a second time. Opcode and precompile work
-is represented only by the operation sum.
+exactly one per proposal guest invocation and is not added a second time. Ordinary opcode and
+precompile work is represented by the raw-gas operation sum. A successfully spawned CALL/CREATE
+wrapper is represented by the fixed-event sum; the child opcode/precompile work is represented by its
+own events and forwarded gas is never priced twice.
 
 Their frozen subtraction DAG is:
 
@@ -325,15 +361,16 @@ proposal_startup        -> [block_base]
 Transitive subtraction is deduplicated, so `tx_base` is removed exactly once from a block or startup
 residual even though it is also a dependency of native transfer.
 
-`tx_base` and `native_value_transfer` are deliberately distinct. One `tx_base` unit is counted at the
-frozen `TransactionStart` boundary; its controlled coefficient is the common per-started-transaction
-residual after modeled block, transfer, opcode, and precompile work is removed. It does not claim that
-all of that work occurs before the event. `native_value_transfer` is an additional exclusive residual
-for a non-create transaction whose recipient executes no code and whose positive native value is applied.
-The start event may carry only a provisional execution class because observation must not add an account
-database read. The authoritative class is finalized at `TransactionEnd` from recipient facts loaded by
-normal top-level execution; only `committed_success` with authoritative class `native_value_transfer`
-contributes to this feature.
+`tx_base` and `native_value_transfer` are deliberately distinct. One `tx_base` unit is counted when
+Alethia's existing executor pulls a recovered transaction from the raiko2 tracing iterator; its
+controlled coefficient is the common per-started-transaction residual after modeled block, transfer,
+opcode, and precompile work is removed. It does not claim that all of that work occurs before the
+iterator boundary. `native_value_transfer` is an additional exclusive residual for a non-create
+transaction whose recipient executes no code and whose positive native value is applied. After
+execution, the collector joins the original transaction facts, top-level frame facts observed without
+an extra database read, precompile-dispatch facts, the committed transaction hashes, and aligned
+receipt status. A precompile recipient is never a native transfer. Only a committed successful row
+with the exact structured classification `native_value_transfer` contributes to this feature.
 It excludes `tx_base`, block work, and all observed opcode/precompile work. The trace must emit this
 classification from structured execution/state facts; calldata shape or a free-text scenario name is
 not sufficient. Signer-recovery failures and transactions after the truncation boundary do not
@@ -377,7 +414,8 @@ subtract every already-accepted descendant cost exactly once before fitting the 
 
 ```text
 delta_p_exclusive(q) = p_target - p_control
-                     - sum(delta_operation_gas(k) * c_p(k))
+                     - sum(delta_raw_operation_gas(k) * c_p(k))
+                     - sum(delta_fixed_operation_count(k) * f_p(k))
                      - sum(delta_feature(t) * o_p(t) for t in subtract_closure(q))
 
 delta_s_sample(q) = s_target - s_control
@@ -431,8 +469,10 @@ The experiment reads the current Cargo-pinned
 `alethia_reth_evm::zk_gas::unzen::UNZEN_ZK_GAS_SCHEDULE` through the existing xtask exporter. Python
 must not contain another hand-maintained copy of the production table.
 
-The exported schedule is the exact current-charge reconciliation oracle and coverage inventory. Its
-normalized content hash is stored in the run manifest; it is not converted into a PGU table.
+The exported schedule is the exact production identity and coverage inventory. Its normalized
+content hash is stored in the run manifest; it is not converted into a PGU table or recomputed by the
+trace collector. Trace-versus-production equivalence is established by the A/B execution gate below,
+not by duplicating the production charge formula.
 
 ### 2. SP1 Synthetic Microbenchmarks
 
@@ -460,6 +500,14 @@ The final calibration manifest materializes these sets explicitly before results
 Schedule-driven include flags may generate a smoke suite, but they cannot remain as hidden expansion
 rules in the frozen calibration manifest. Changing a required set, diagnostic assignment, or event
 match creates a new manifest and run identity.
+
+Spawned CALL/CREATE fixed-event keys use paired target/control fixtures measured after their induced
+child operation dependencies. The host trace must prove exactly `x` additional target wrapper events
+with `dispatch_status=confirmed` and enumerate every other operation delta. Subtract accepted child
+raw-gas and fixed-event costs once before fitting the wrapper slope. Forwarded gas is never a
+subtraction or target feature. Freeze the dependency order before measurement; an unresolved child,
+unconfirmed dispatch, recursion, or cycle makes the wrapper key unmeasured rather than allowing child
+work into `f_p(k)`.
 
 Proposal events may use a successful measurement key only through its exact frozen event match. No
 match, more than one match, or missing linked context is unmeasured coverage. A successful case must
@@ -535,9 +583,26 @@ use them only through the independently sealed, non-gating bridge sidecar.
 
 ### 4. Fixed Proposal Feature Extraction
 
-For every saved proposal GuestInput in the corpus, execute the same proposal workload through an
-instrumented host/revm path to extract opcode, precompile, block, started-transaction, structured
-native-value-transfer, witness, input, and blob features.
+For every saved proposal GuestInput in the corpus, execute the same proposal workload through the
+host-only `raiko2-zkgas-trace` crate to extract opcode, precompile, block, started-transaction,
+structured native-value-transfer, witness, input, and blob features. The crate installs a local REVM
+inspector through Alethia's existing public `create_evm_with_inspector` path and runs Alethia's normal
+`TaikoBlockExecutor::execute_block_with_committed_transactions`; it never copies Alethia's
+transaction filtering, reset, commit, or zkGas schedule logic.
+
+The normalized proposal trace contains block-scoped transaction rows, operation rows, derived
+native-transfer counts, proposal-level signer-recovery failures, and an explicit complete/failed
+status with fatal-stage diagnostics. Input, recovered, started, attempted, committed, and unattempted
+occurrences reconcile exactly; repeated transaction hashes remain distinct ordered occurrences.
+
+Tracing is a second execution pass over a fresh witness-backed database. For every accepted
+controlled or proposal fixture, first run the ordinary stateless path and then run the traced path
+from identical bytes and independent fresh state. Require identical committed transaction hashes,
+receipts/result, hashed post-state and state root, finalized block zkGas, assembled block, canonical
+validation result, and public output. These are compared field-by-field with Rust typed equality; the
+experiment does not invent a debug-string or unordered-map digest. A mismatch rejects the complete
+sample. Trace rows describe
+execution facts only; they do not contain a locally reconstructed charge-attempt ledger.
 
 Feature extraction and backend measurement are joined by the SHA256 of the exact GuestInput bytes,
 not merely by proposal ID. A proposal ID is human-readable provenance; the hash is the experiment
@@ -550,8 +615,8 @@ unattributed work instead of dropping it when a feature is unavailable.
 
 Execute each exact GuestInput locally with the SP1 proposal guest and record actual `proverGas` plus
 the available instruction, syscall, cycle-tracker, and timing diagnostics. The measured SP1 guest
-uses the same Alethia revision as the host trace, while the host observer feature remains disabled in
-the guest path.
+uses the same Alethia revision as the host trace, but has no dependency on
+`raiko2-zkgas-trace` and enables no tracing or custom inspector path.
 
 V1 does not execute the RISC0 guest. If the shared Alethia revision changes, build both guests and
 record both artifact identities to prove the repository remains release-consistent; that build check
@@ -663,6 +728,7 @@ experiments/opcode-gas/
       bridge.sha256
     costs/
       sp1-opcode-precompile-costs.json
+      sp1-spawn-event-costs.json
       sp1-controlled-overheads.json
     candidate/
       candidate-manifest.json
@@ -686,15 +752,16 @@ experiments/opcode-gas/
 ```
 
 `candidate-manifest.json` is the canonical root of the candidate. It contains the SHA256 and schema
-identity of every normalized primary raw and cost file, the accepted/rejected status of every
-controlled key, `Q_formula`, the residualization DAG, normalization anchor, exact prediction formula,
-thresholds, the frozen prefix-to-checkpoint mapping, and review-only provenance. The hashed primary
-artifacts contain the checkpoint count, observed and predicted delta, APE, and status for every
-candidate-referenced slope-derived cost. Diagnostic slope costs store equivalent checkpoint evidence
-under their independent artifact digest. `candidate.sha256` is the SHA256 of the canonical compact
-bytes of that manifest, so every formula input is transitively covered. A formula-referenced key
-without an accepted artifact, or an accepted slope-derived cost without a passing checkpoint,
-prevents sealing.
+identity of every normalized primary raw and cost file, the accepted/rejected status and pricing
+basis of every controlled key, `Q_formula`, the residualization DAG, normalization anchor, exact
+prediction formula, thresholds, the frozen prefix-to-checkpoint mapping, and review-only provenance.
+The hashed primary artifacts contain the checkpoint count, observed and predicted delta, APE, and
+status for every candidate-referenced slope-derived cost. `sp1-spawn-event-costs.json` stores
+full-precision per-event costs separately from raw-gas multipliers. Diagnostic slope costs store
+equivalent checkpoint evidence under their independent artifact digest. `candidate.sha256` is the
+SHA256 of the canonical compact bytes of that manifest, so every formula input is transitively
+covered. A formula-referenced key without an accepted artifact, or an accepted slope-derived cost
+without a passing checkpoint, prevents sealing.
 
 `controlled-prover-gas.jsonl` is a primary-only projection and contains no instruction-count field.
 The controlled and proposal cycle-cost sample files each have their own digest and contain paired
@@ -825,10 +892,11 @@ environment or install packages implicitly.
 ## Production Boundary And Promotion
 
 Experiment calibration, validation, and report commands never modify the production schedule,
-runtime configuration, or
-Boundless configuration. Task 2's upstream, feature-gated Alethia observer is offline instrumentation
-and must not change metering behavior when disabled. Guest artifacts change only through the normal
-reviewed `just build-guest` workflow when the shared pinned Alethia revision changes. The experiment
+runtime configuration, or Boundless configuration. Task 2's Alethia prerequisite changes only the
+existing inspector wrapper so its spawn decision timing and halt behavior match the production plain
+metered path. All trace schema, collection, and serialization live in the host-only
+`raiko2-zkgas-trace` crate. Guest artifacts change only through the normal reviewed
+`just build-guest` workflow when the shared pinned Alethia revision changes. The experiment
 emits a high-precision SP1-native `proverGas` multiplier table, fixed/base costs, and validation
 evidence, not a production table write. It also emits a separate non-gating cycle-cost sampling
 artifact, a frozen SP1 instruction-count/`proverGas` bridge report, and a diagnostic overhead cost
@@ -852,7 +920,12 @@ The implementation is complete when:
 - controlled generation is deterministic for a fixed manifest;
 - every measurement key freezes a nonempty required case set and an unambiguous proposal event match;
 - every required/diagnostic case, event match, and production schedule key has the same structured
-  component, opcode/address, execution context, and raw-gas basis;
+  component, opcode/address, execution context, and pricing basis;
+- spawned CALL/CREATE keys use fixed per-event costs, while their forwarded gas never enters a slope,
+  prediction, normalization, or coverage denominator;
+- Alethia contains no experiment observer or transaction ledger; the raiko2 trace crate uses the
+  existing public inspector and executor interfaces without duplicating filtering/reset/commit logic;
+- every accepted trace passes the fresh-state ordinary-versus-traced A/B equality gate;
 - one failed required case excludes the complete measurement key and moves matching proposal work to
   unmeasured coverage;
 - `Q_formula` contains exactly proposal startup, block base, started-transaction base, and native
@@ -868,8 +941,8 @@ The implementation is complete when:
 - every required overhead residual subtracts its deduplicated transitive closure exactly once, every
   induced operation resolves to an accepted key, and every bundled ratio matches in controlled and
   proposal rows;
-- the candidate contains only the SP1-native `proverGas` multiplier table and required controlled
-  fixed/base costs under one canonical root manifest and immutable digest;
+- the candidate contains only the SP1-native raw-gas multiplier table, fixed spawn-event costs, and
+  required controlled fixed/base costs under one canonical root manifest and immutable digest;
 - the exact bridge key set, through-origin equal-key median model, 10% controlled/proposal thresholds,
   controlled result, and digest are frozen before proposal output is visible;
 - paired instruction-count/`proverGas` observations and bridge results are stored under separate
@@ -889,12 +962,12 @@ The implementation is complete when:
   formula to proposals without refitting or selection;
 - the diagnostic overhead cost table reports witness/input/blob/KZG observations and exclusion
   reasons without adding those dimensions to `Q_formula`, the candidate, or the bridge;
-- executed operation work remains in the prediction after a later charge failure, while intrinsic/
+- executed operation work in attempted transactions remains in the prediction, while intrinsic/
   pre-validation failures and unattempted work enter neither prediction;
 - no proposal row participates in fitting, normalization, feature selection, model selection, or
   candidate repair;
-- operation-count and execution-raw-gas coverage are reported per proposal and network, and the final
-  label claims only frozen-candidate accuracy at that reported coverage;
+- operation-count, raw-gas-basis, and spawned-event count coverage are reported per proposal and
+  network, and the final label claims only frozen-candidate accuracy at that reported coverage;
 - missing, modified, failed, or duplicate fixtures prevent a final report;
 - no experiment command modifies the production table or runtime configuration;
 - tests cover deterministic artifacts, provenance mismatch, resume, report recomputation, candidate

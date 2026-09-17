@@ -85,6 +85,11 @@ Run the adaptive controlled opcode, precompile, and production-proposal overhead
 regenerates and reruns one complete frozen footprint; resume verifies the sealed round decisions and
 never mixes rows from different generator maxima:
 
+If a required primary overhead has not passed, every dependent overhead is recorded as rejected with
+`unmeasured_overhead_dependency` and the missing dependency IDs. The round expands to the next frozen
+footprint instead of attempting residualization or aborting; secondary dependency status remains an
+independent `unresidualized_dependencies` diagnostic.
+
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-controlled \
   --fixtures experiments/opcode-gas/runs/<calibration-id>/fixtures \

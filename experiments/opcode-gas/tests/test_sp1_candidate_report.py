@@ -488,6 +488,39 @@ class CandidateConstructionTests(unittest.TestCase):
             artifact,
         )
 
+        rejected_rows = copy.deepcopy(rows)
+        for row in rejected_rows:
+            if (
+                row["case"]
+                in {"tx_base_no_code_no_value", "tx_base_minimal_contract_call"}
+                and row["lane"] == "target"
+                and row["target_count"] == 8
+            ):
+                row["gas"] = 100_000
+        rejected = opcode_gas.fit_controlled_overheads(
+            controlled_manifest(), rejected_rows, [], generator_max_count=8
+        )
+        native = next(
+            result
+            for result in rejected["case_results"]
+            if result["case_id"] == "native_transfer_positive_vs_zero"
+        )
+        self.assertEqual(native["status"], "rejected")
+        self.assertIn("unmeasured_overhead_dependency", native["reasons"])
+        self.assertEqual(native["dependency_ids"], ["tx_base"])
+        self.assertEqual(
+            native["secondary"],
+            {
+                "status": "failed",
+                "reason": "unresidualized_dependencies",
+                "dependency_ids": ["tx_base"],
+            },
+        )
+        self.assertEqual(
+            opcode_gas.controlled_round_decision(rejected["case_results"], 8),
+            "expand_next_round",
+        )
+
     def test_overhead_round_runs_every_point_three_times_and_startup_only_once(self):
         calls = []
 
@@ -931,20 +964,30 @@ class CandidateConstructionTests(unittest.TestCase):
         def fake_fit(_manifest, rows):
             footprints = {row["generator_max_count"] for row in rows}
             fitted_footprints.append(footprints)
-            if footprints == {8}:
-                return [{"status": "rejected", "reasons": ["exhausted_sweep"]}]
             return [{"status": "accepted"}]
 
         def fake_overhead_run(*, out, **_kwargs):
             out.write_text("{}\n")
 
         def fake_overhead_fit(_manifest, _rows, _results, *, generator_max_count):
+            if generator_max_count == 8:
+                case_results = [
+                    {
+                        "status": "rejected",
+                        "reasons": ["unmeasured_overhead_dependency"],
+                        "dependency_ids": ["tx_base"],
+                    }
+                ]
+                status = "rejected"
+            else:
+                case_results = [{"status": "accepted"}]
+                status = "accepted"
             return {
                 "schema_version": 1,
                 "generator_max_count": generator_max_count,
-                "status": "accepted",
+                "status": status,
                 "o_p": {key: "1" for key in opcode_gas.Q_FORMULA},
-                "case_results": [{"status": "accepted"}],
+                "case_results": case_results,
             }
 
         with tempfile.TemporaryDirectory() as tmp:

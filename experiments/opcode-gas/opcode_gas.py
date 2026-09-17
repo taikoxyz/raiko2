@@ -5204,7 +5204,25 @@ def fit_controlled_overheads(
         required_values = []
         key_case_results = []
         for case_id in key.required_case_ids:
-            if any(
+            missing_dependencies = sorted(
+                child
+                for child in manifest.subtract_closure.get(key.id, ())
+                if child not in accepted
+            )
+            if missing_dependencies:
+                result = {
+                    "case_id": case_id,
+                    "overhead_key_id": key.id,
+                    "status": "rejected",
+                    "reasons": ["unmeasured_overhead_dependency"],
+                    "dependency_ids": missing_dependencies,
+                    "secondary": {
+                        "status": "failed",
+                        "reason": "unresidualized_dependencies",
+                        "dependency_ids": missing_dependencies,
+                    },
+                }
+            elif any(
                 row.get("case") == case_id and row.get("status") == "rejected"
                 for row in row_list
             ):
@@ -5300,6 +5318,28 @@ def fit_controlled_overheads(
     startup_secondary_residuals = []
     startup_complete = True
     for case_id in startup.required_case_ids:
+        missing_dependencies = sorted(
+            child
+            for child in manifest.subtract_closure.get("proposal_startup", ())
+            if child not in accepted
+        )
+        if missing_dependencies:
+            startup_complete = False
+            case_results.append(
+                {
+                    "case_id": case_id,
+                    "overhead_key_id": "proposal_startup",
+                    "status": "rejected",
+                    "reasons": ["unmeasured_overhead_dependency"],
+                    "dependency_ids": missing_dependencies,
+                    "secondary": {
+                        "status": "failed",
+                        "reason": "unresidualized_dependencies",
+                        "dependency_ids": missing_dependencies,
+                    },
+                }
+            )
+            continue
         case_rows = [
             row
             for row in row_list
@@ -5441,9 +5481,10 @@ def controlled_round_decision(
     results = list(case_results)
     if not results:
         raise ValueError("controlled round produced no case results")
+    expansion_reasons = {"exhausted_sweep", "unmeasured_overhead_dependency"}
     needs_larger_footprint = any(
         result.get("status") == "rejected"
-        and "exhausted_sweep" in result.get("reasons", [])
+        and expansion_reasons.intersection(result.get("reasons", []))
         for result in results
     )
     if needs_larger_footprint and generator_max_count != CONTROLLED_GENERATOR_ROUNDS[-1]:

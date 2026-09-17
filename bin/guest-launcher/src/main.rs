@@ -1,11 +1,15 @@
+pub mod controlled_workload;
+
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use flate2::{Compression, write::GzEncoder};
 use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::{
@@ -104,12 +108,16 @@ enum ProofType {
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum Stage {
     Proposal,
+    #[value(name = "proposal-trace")]
+    ProposalTrace,
     #[value(name = "opcode-lab")]
     OpcodeLab,
     #[value(name = "revm-opcode-lab")]
     RevmOpcodeLab,
     #[value(name = "precompile-lab")]
     PrecompileLab,
+    #[value(name = "controlled-overhead")]
+    ControlledOverhead,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -164,6 +172,8 @@ struct BenchReport {
     mode: &'static str,
     proof_mode: &'static str,
     input: String,
+    guest_input_sha256: Option<String>,
+    guest_input_bincode_length: Option<usize>,
     public_values: String,
     wall_time_ms: u64,
     primary_workload_metric: Option<BenchCountEntry>,
@@ -184,6 +194,26 @@ struct BenchReport {
     opcode_counts: Vec<BenchCountEntry>,
     syscall_counts: Vec<BenchCountEntry>,
     memory_snapshots: Vec<BenchMemoryEntry>,
+    controlled_trace: Option<controlled_workload::ControlledTrace>,
+    controlled_overhead: Option<ControlledOverheadRunResult>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ControlledOverheadRunSpec {
+    target_count: u64,
+    #[serde(default)]
+    include_startup: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ControlledOverheadRunResult {
+    status: &'static str,
+    target_count: u64,
+    reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation: Option<controlled_workload::ControlledOverheadObservation>,
 }
 
 impl BenchReport {
@@ -198,6 +228,8 @@ impl BenchReport {
             mode,
             proof_mode,
             input,
+            guest_input_sha256: None,
+            guest_input_bincode_length: None,
             public_values: String::new(),
             wall_time_ms: 0,
             primary_workload_metric: None,
@@ -218,6 +250,8 @@ impl BenchReport {
             opcode_counts: Vec::new(),
             syscall_counts: Vec::new(),
             memory_snapshots: Vec::new(),
+            controlled_trace: None,
+            controlled_overhead: None,
         }
     }
 
@@ -271,9 +305,11 @@ impl Stage {
     const fn as_str(self) -> &'static str {
         match self {
             Stage::Proposal => "proposal",
+            Stage::ProposalTrace => "proposal-trace",
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
             Stage::PrecompileLab => "precompile-lab",
+            Stage::ControlledOverhead => "controlled-overhead",
         }
     }
 }
@@ -450,7 +486,12 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
             after_execute_run: "revm-opcode-lab:after_execute_run",
             after_apply_execution_metadata: "revm-opcode-lab:after_apply_execution_metadata",
         },
-        Stage::Proposal | Stage::PrecompileLab => unreachable!("not an opcode lab stage"),
+        Stage::Proposal
+        | Stage::ProposalTrace
+        | Stage::PrecompileLab
+        | Stage::ControlledOverhead => {
+            unreachable!("not an opcode lab stage")
+        }
     }
 }
 
@@ -522,6 +563,12 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     args.validate_standard_guest_artifacts()?;
 
+    if args.stage == Stage::ProposalTrace {
+        return run_proposal_trace(args);
+    }
+    if args.stage == Stage::ControlledOverhead {
+        return run_controlled_overhead(args).await;
+    }
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
         return run_opcode_lab(args).await;
     }
@@ -532,6 +579,82 @@ async fn main() -> Result<()> {
         return run_aggregation(args).await;
     }
     run_proposal(args).await
+}
+
+fn run_proposal_trace(args: Args) -> Result<()> {
+    if args.proof_type != ProofType::Native {
+        bail!("proposal-trace supports only --proof-type native");
+    }
+    if args.mode != Mode::Execute {
+        bail!("proposal-trace supports only --mode execute");
+    }
+    if !args.aggregate.is_empty() {
+        bail!("proposal-trace does not support --aggregate proofs");
+    }
+    if args.input_list.is_some() {
+        bail!("proposal-trace does not support --input-list");
+    }
+    if args.elf.is_some() {
+        bail!("proposal-trace does not support --elf");
+    }
+    if args.output.is_some() {
+        bail!("proposal-trace does not produce --output proof files");
+    }
+    if args.jsonl_out.is_some() {
+        bail!("proposal-trace does not support --jsonl-out");
+    }
+
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let input = read_input(input_path, ProofType::Sp1)?;
+    let trace = raiko2_zkgas_trace::trace_shasta_proposal(&input)?;
+    if let Some(path) = &args.json_out {
+        write_proposal_trace_outputs(path, &trace)?;
+    } else {
+        let stdout = io::stdout();
+        let mut output = stdout.lock();
+        serde_json::to_writer(&mut output, &trace).context("serialize proposal trace")?;
+        output.write_all(b"\n").context("write proposal trace")?;
+    }
+    Ok(())
+}
+
+fn proposal_trace_summary_path(trace_path: &Path) -> PathBuf {
+    let name = trace_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("proposal-trace");
+    let stem = name.strip_suffix(".json.gz").unwrap_or(name);
+    trace_path.with_file_name(format!("{stem}.summary.json"))
+}
+
+fn write_proposal_trace_outputs(
+    trace_path: &Path,
+    trace: &raiko2_zkgas_trace::ProposalTrace,
+) -> Result<()> {
+    let trace_file =
+        fs::File::create(trace_path).with_context(|| format!("create {}", trace_path.display()))?;
+    let mut encoder = GzEncoder::new(BufWriter::new(trace_file), Compression::default());
+    serde_json::to_writer(&mut encoder, trace).context("serialize compressed proposal trace")?;
+    let mut trace_output = encoder
+        .finish()
+        .context("finish compressed proposal trace")?;
+    trace_output
+        .flush()
+        .context("flush compressed proposal trace")?;
+
+    let summary_path = proposal_trace_summary_path(trace_path);
+    let summary_file = fs::File::create(&summary_path)
+        .with_context(|| format!("create {}", summary_path.display()))?;
+    let mut summary_output = BufWriter::new(summary_file);
+    serde_json::to_writer(&mut summary_output, &trace.summary())
+        .context("serialize proposal trace summary")?;
+    summary_output
+        .write_all(b"\n")
+        .context("write proposal trace summary")?;
+    summary_output
+        .flush()
+        .context("flush proposal trace summary")?;
+    Ok(())
 }
 
 fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
@@ -610,6 +733,7 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
     record_memory_snapshot(&mut report, labels.start);
 
     let input = read_opcode_lab_input(&input_path)?;
+    apply_controlled_opcode_trace(&mut report, args.stage, &input)?;
     record_memory_snapshot(&mut report, labels.after_read_input);
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
@@ -663,7 +787,8 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
     }
     let elf = fs::read(&elf_path).with_context(|| format!("read {}", elf_path.display()))?;
     let sp1_config = args.sp1_config()?;
-    let runs = execute_opcode_lab_batch_blocking(sp1_config.prover, elf, inputs).await?;
+    let runs =
+        execute_opcode_lab_batch_blocking(sp1_config.prover, elf, inputs, args.stage).await?;
 
     let mut output = String::new();
     for run in runs {
@@ -675,6 +800,7 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
         );
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
+        report.controlled_trace = run.controlled_trace;
         apply_execution_metadata(&mut report, &run.execution_report);
         println!(
             "input: {} public_values: {}",
@@ -717,6 +843,7 @@ async fn run_precompile_lab(args: Args) -> Result<()> {
     record_memory_snapshot(&mut report, "precompile-lab:start");
 
     let input = read_precompile_lab_input(&input_path)?;
+    apply_controlled_precompile_trace(&mut report, &input)?;
     record_memory_snapshot(&mut report, "precompile-lab:after_read_input");
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
@@ -782,6 +909,7 @@ async fn run_precompile_lab_batch(args: Args) -> Result<()> {
         );
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
+        report.controlled_trace = run.controlled_trace;
         apply_execution_metadata(&mut report, &run.execution_report);
         println!(
             "input: {} public_values: {}",
@@ -807,6 +935,10 @@ async fn run_proposal(args: Args) -> Result<()> {
     );
     record_memory_snapshot(&mut report, "proposal:start");
     let input = read_input(&input_path, args.proof_type)?;
+    let (guest_input_sha256, guest_input_bincode_length) =
+        raiko2_zkgas_trace::guest_input_identity(&input)?;
+    report.guest_input_sha256 = Some(guest_input_sha256);
+    report.guest_input_bincode_length = Some(guest_input_bincode_length);
     record_memory_snapshot(&mut report, "proposal:after_read_input");
 
     match args.proof_type {
@@ -814,6 +946,108 @@ async fn run_proposal(args: Args) -> Result<()> {
         ProofType::Native => run_native_proposal(args, input_path, input, report).await,
         ProofType::Risc0 => run_risc0_proposal(args, input_path, input, report).await,
     }
+}
+
+async fn run_controlled_overhead(args: Args) -> Result<()> {
+    if args.proof_type != ProofType::Sp1 || args.mode != Mode::Execute {
+        bail!("controlled-overhead supports only SP1 execute mode");
+    }
+    if args.elf.is_some() || args.input_list.is_some() || !args.aggregate.is_empty() {
+        bail!("controlled-overhead always uses the production SP1 proposal guest");
+    }
+    if args.output.is_some() || args.json_out.is_some() {
+        bail!("controlled-overhead writes only --jsonl-out benchmark rows");
+    }
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args
+        .jsonl_out
+        .as_ref()
+        .context("controlled-overhead requires --jsonl-out")?;
+    let spec: ControlledOverheadRunSpec = serde_json::from_slice(
+        &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
+    )
+    .context("parse controlled-overhead input")?;
+    if spec.target_count.saturating_add(1) > 768 {
+        let mut report = BenchReport::new(
+            "controlled-overhead",
+            "execute",
+            "compressed",
+            input_path.display().to_string(),
+        );
+        report.controlled_overhead = Some(ControlledOverheadRunResult {
+            status: "rejected",
+            target_count: spec.target_count,
+            reasons: vec!["generation_failure".into(), "protocol_block_bound".into()],
+            error: Some("block_base target requires more than 768 source blocks".into()),
+            observation: None,
+        });
+        fs::write(output_path, serde_json::to_string(&report)? + "\n")
+            .with_context(|| format!("write {}", output_path.display()))?;
+        return Ok(());
+    }
+    let mut fixtures = controlled_workload::build_required_overhead_fixtures(spec.target_count)?;
+    if !spec.include_startup {
+        fixtures.retain(|fixture| fixture.overhead_key_id != "proposal_startup");
+    }
+    let observations = controlled_workload::validate_required_overhead_fixtures(&fixtures)?;
+    let sp1_config = args.sp1_config()?;
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load production SP1 Shasta guest ELFs")?;
+    let prover = Sp1Prover::new(sp1_config);
+    let mut output = String::new();
+    for (fixture, observation) in fixtures.into_iter().zip(observations) {
+        let lane = serde_json::to_value(fixture.lane)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+        let mut report = BenchReport::new(
+            "controlled-overhead",
+            "execute",
+            "compressed",
+            format!("{}:{lane}:{}", fixture.case_id, fixture.target_count),
+        );
+        report.guest_input_sha256 = Some(observation.guest_input_sha256.clone());
+        report.guest_input_bincode_length = Some(observation.guest_input_bincode_length);
+        record_memory_snapshot(&mut report, "controlled-overhead:before_sp1_prover");
+        let start = Instant::now();
+        let proof = prover
+            .prove(fixture.guest_input, &serde_json::Value::Null, &backend)
+            .await
+            .with_context(|| {
+                format!(
+                    "production SP1 proposal failed for {} {lane}",
+                    fixture.case_id
+                )
+            })?;
+        report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let metadata_value = proof
+            .extra_data
+            .as_ref()
+            .and_then(|extra_data| extra_data.get("sp1"))
+            .cloned()
+            .context("controlled-overhead SP1 execute is missing production metadata")?;
+        let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
+            .context("parse controlled-overhead SP1 execution metadata")?;
+        apply_sp1_metadata(&mut report, &metadata);
+        if report.public_values != format!("{:#x}", observation.public_output).to_lowercase() {
+            bail!(
+                "controlled-overhead trace/SP1 public output mismatch for {} {lane}",
+                fixture.case_id
+            );
+        }
+        report.controlled_overhead = Some(ControlledOverheadRunResult {
+            status: "accepted",
+            target_count: spec.target_count,
+            reasons: Vec::new(),
+            error: None,
+            observation: Some(observation),
+        });
+        output.push_str(&serde_json::to_string(&report)?);
+        output.push('\n');
+    }
+    fs::write(output_path, output).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
 }
 
 async fn run_aggregation(args: Args) -> Result<()> {
@@ -915,6 +1149,30 @@ struct OpcodeLabExecution {
     public_values: String,
     wall_time_ms: u64,
     execution_report: ExecutionReport,
+    controlled_trace: Option<controlled_workload::ControlledTrace>,
+}
+
+fn apply_controlled_opcode_trace(
+    report: &mut BenchReport,
+    stage: Stage,
+    input: &OpcodeLabInput,
+) -> Result<()> {
+    if stage == Stage::RevmOpcodeLab {
+        report.controlled_trace = Some(controlled_workload::ControlledTrace::RevmOpcode(
+            controlled_workload::trace_revm_opcode_workload(input)?,
+        ));
+    }
+    Ok(())
+}
+
+fn apply_controlled_precompile_trace(
+    report: &mut BenchReport,
+    input: &PrecompileLabInput,
+) -> Result<()> {
+    report.controlled_trace = Some(controlled_workload::ControlledTrace::Precompile(
+        controlled_workload::trace_precompile_workload(input)?,
+    ));
+    Ok(())
 }
 
 struct Risc0ProposalExecution {
@@ -1010,15 +1268,16 @@ async fn execute_opcode_lab_batch_blocking(
     prover_mode: Sp1ProverMode,
     elf: Vec<u8>,
     inputs: Vec<(PathBuf, OpcodeLabInput)>,
+    stage: Stage,
 ) -> Result<Vec<OpcodeLabExecution>> {
     tokio::task::spawn_blocking(move || match prover_mode {
         Sp1ProverMode::Mock => {
             let prover = BlockingProverClient::builder().mock().build();
-            execute_opcode_lab_batch_local(&prover, &elf, inputs)
+            execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
         }
         Sp1ProverMode::Local => {
             let prover = BlockingProverClient::builder().cpu().build();
-            execute_opcode_lab_batch_local(&prover, &elf, inputs)
+            execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
         }
         Sp1ProverMode::Network => {
             anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
@@ -1032,12 +1291,20 @@ fn execute_opcode_lab_batch_local<P>(
     prover: &P,
     elf: &[u8],
     inputs: Vec<(PathBuf, OpcodeLabInput)>,
+    stage: Stage,
 ) -> Result<Vec<OpcodeLabExecution>>
 where
     P: BlockingProver<ProvingKey = SP1ProvingKey>,
 {
     let mut outputs = Vec::with_capacity(inputs.len());
     for (input_path, input) in inputs {
+        let controlled_trace = if stage == Stage::RevmOpcodeLab {
+            Some(controlled_workload::ControlledTrace::RevmOpcode(
+                controlled_workload::trace_revm_opcode_workload(&input)?,
+            ))
+        } else {
+            None
+        };
         let mut stdin = SP1Stdin::new();
         stdin.write(&input);
         let start = Instant::now();
@@ -1047,6 +1314,7 @@ where
             public_values: public_values.raw(),
             wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             execution_report,
+            controlled_trace,
         });
     }
     Ok(outputs)
@@ -1084,6 +1352,9 @@ where
 {
     let mut outputs = Vec::with_capacity(inputs.len());
     for (input_path, input) in inputs {
+        let controlled_trace = Some(controlled_workload::ControlledTrace::Precompile(
+            controlled_workload::trace_precompile_workload(&input)?,
+        ));
         let mut stdin = SP1Stdin::new();
         stdin.write(&input);
         let start = Instant::now();
@@ -1093,6 +1364,7 @@ where
             public_values: public_values.raw(),
             wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             execution_report,
+            controlled_trace,
         });
     }
     Ok(outputs)
@@ -1268,16 +1540,42 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage,
-        apply_risc0_execution_metadata, apply_sp1_metadata, read_input, read_opcode_lab_input_list,
-        risc0_padded_cycles,
+        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage, apply_controlled_opcode_trace,
+        apply_controlled_precompile_trace, apply_risc0_execution_metadata, apply_sp1_metadata,
+        read_input, read_opcode_lab_input_list, risc0_padded_cycles,
     };
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
-    use raiko2_primitives::{ProofType as RaikoProofType, SupportedChainSpecs};
+    use raiko2_primitives::{
+        OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, ProofType as RaikoProofType,
+        SupportedChainSpecs,
+    };
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use std::fs;
+
+    #[test]
+    fn parses_controlled_overhead_production_proposal_stage() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-overhead",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--input",
+            "controlled-overhead.json",
+            "--jsonl-out",
+            "controlled-overhead-runs.jsonl",
+        ])
+        .expect("parse args");
+
+        assert_eq!(args.stage, Stage::ControlledOverhead);
+        assert!(args.elf.is_none(), "production proposal ELF is built in");
+    }
 
     #[test]
     fn parses_opcode_lab_stage_with_explicit_elf() {
@@ -1513,6 +1811,59 @@ mod tests {
         assert_eq!(report.public_values, "0x12");
         assert_eq!(report.gas, Some(7));
         assert_eq!(report.total_instruction_count, Some(11));
+    }
+
+    #[test]
+    fn revm_opcode_report_contains_the_host_executed_trace_identity() {
+        let input = OpcodeLabInput {
+            case: "add".into(),
+            scenario: "arithmetic".into(),
+            opcode: 0x01,
+            target_count: 1,
+            target_raw_gas: 3,
+            bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+            generator_max_count: Some(8),
+            fixed_bytecode_len: Some(6),
+        };
+        let mut report =
+            BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());
+
+        apply_controlled_opcode_trace(&mut report, Stage::RevmOpcodeLab, &input).unwrap();
+
+        let serialized = serde_json::to_value(report).unwrap();
+        let trace = serialized["controlled_trace"].as_object().unwrap();
+        assert_eq!(trace["executed_target_count"], 1);
+        assert_eq!(trace["executed_target_raw_gas"], 3);
+        assert_eq!(trace["backend_input_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(trace["workload_id"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn precompile_report_contains_typed_pair_and_backend_input_identities() {
+        let input = PrecompileLabInput {
+            case: "identity".into(),
+            scenario: "free text".into(),
+            lane: PrecompileLabLane::Control,
+            address: 4,
+            target_count: 2,
+            input_size: 4,
+            target_raw_gas: 18,
+            expected_output_size: Some(4),
+            input: vec![1, 2, 3, 4],
+        };
+        let mut report = BenchReport::new("precompile-lab", "execute", "core", "input.json".into());
+
+        apply_controlled_precompile_trace(&mut report, &input).unwrap();
+
+        let serialized = serde_json::to_value(report).unwrap();
+        let trace = serialized["controlled_trace"].as_object().unwrap();
+        assert_eq!(trace["kind"], "precompile");
+        assert_eq!(trace["lane"], "control");
+        assert_eq!(trace["address"], 4);
+        assert_eq!(trace["output_len"], 4);
+        assert_eq!(trace["workload_id"].as_str().unwrap().len(), 64);
+        assert_eq!(trace["pair_id"].as_str().unwrap().len(), 64);
+        assert_eq!(trace["backend_input_sha256"].as_str().unwrap().len(), 64);
     }
 
     #[test]

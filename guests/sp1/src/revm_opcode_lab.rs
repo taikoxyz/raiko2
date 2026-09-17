@@ -8,18 +8,24 @@ use raiko2_guest_sp1::revm_opcode_lab_impl::execute_revm_bytecode;
 use raiko2_primitives::OpcodeLabInput;
 use sp1_zkvm::io;
 
-const GAS_LIMIT_OVERHEAD: u64 = 1_000_000;
-
 pub fn main() {
     let input = io::read::<OpcodeLabInput>();
-    let gas_limit = input
-        .target_raw_gas
-        .saturating_mul(input.target_count)
-        .saturating_add(GAS_LIMIT_OVERHEAD);
+    input
+        .validate_controlled_contract()
+        .expect("valid revm opcode controlled-workload contract");
+    let gas_limit = input.execution_gas_limit();
 
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-start: revm_opcode_lab_execute");
-    let accumulator = execute_revm_bytecode(&input.bytecode, gas_limit);
+    let mut accumulator = 0u64;
+    for program in input
+        .execution_programs()
+        .expect("valid fixed-footprint microprogram framing")
+    {
+        accumulator = accumulator
+            .wrapping_mul(31)
+            .wrapping_add(execute_revm_bytecode(program, gas_limit));
+    }
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-end: revm_opcode_lab_execute");
 

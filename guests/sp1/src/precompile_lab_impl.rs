@@ -1,5 +1,5 @@
 use crate::crypto::install_guest_crypto;
-use raiko2_primitives::PrecompileLabInput;
+use raiko2_primitives::{PrecompileLabInput, PrecompileLabLane};
 use revm_precompile::{
     blake2, bls12_381,
     bls12_381_const::{
@@ -19,103 +19,88 @@ const BLS12_MAP_FP2_TO_G2: u8 = MAP_FP2_TO_G2_ADDRESS.into_array()[19];
 
 pub fn execute_precompile(input: &PrecompileLabInput) -> u64 {
     install_guest_crypto();
-    assert_eq!(
-        input.input.len(),
-        usize::try_from(input.input_size).expect("input size too large"),
-        "precompile input length does not match input_size"
-    );
+    input
+        .validate_controlled_contract()
+        .expect("valid precompile controlled-workload contract");
 
     let mut accumulator = 0u64;
     for _ in 0..input.target_count {
+        if input.lane == PrecompileLabLane::Control {
+            let output_size = usize::try_from(
+                input
+                    .expected_output_size
+                    .expect("validated control output size"),
+            )
+            .expect("control output size too large");
+            fold_output_parts(
+                &mut accumulator,
+                input.target_raw_gas,
+                &vec![0; output_size],
+            );
+            continue;
+        }
         let gas_limit = input.target_raw_gas;
-        match input.address {
-            0x01 => fold_precompile_output(
-                &mut accumulator,
-                secp256k1::ec_recover_run(&input.input, gas_limit).expect("ecrecover failed"),
-            ),
-            0x02 => fold_precompile_output(
-                &mut accumulator,
-                hash::sha256_run(&input.input, gas_limit).expect("sha256 failed"),
-            ),
-            0x03 => fold_precompile_output(
-                &mut accumulator,
-                hash::ripemd160_run(&input.input, gas_limit).expect("ripemd160 failed"),
-            ),
-            0x04 => fold_precompile_output(
-                &mut accumulator,
-                identity::identity_run(&input.input, gas_limit).expect("identity failed"),
-            ),
-            0x05 => fold_precompile_output(
-                &mut accumulator,
-                modexp::osaka_run(&input.input, gas_limit).expect("modexp failed"),
-            ),
-            0x06 => fold_precompile_output(
-                &mut accumulator,
+        let output = match input.address {
+            0x01 => secp256k1::ec_recover_run(&input.input, gas_limit).expect("ecrecover failed"),
+            0x02 => hash::sha256_run(&input.input, gas_limit).expect("sha256 failed"),
+            0x03 => hash::ripemd160_run(&input.input, gas_limit).expect("ripemd160 failed"),
+            0x04 => identity::identity_run(&input.input, gas_limit).expect("identity failed"),
+            0x05 => modexp::osaka_run(&input.input, gas_limit).expect("modexp failed"),
+            0x06 => {
                 bn254::run_add(&input.input, bn254::add::ISTANBUL_ADD_GAS_COST, gas_limit)
-                    .expect("bn254 add failed"),
-            ),
-            0x07 => fold_precompile_output(
-                &mut accumulator,
+                    .expect("bn254 add failed")
+            }
+            0x07 => {
                 bn254::run_mul(&input.input, bn254::mul::ISTANBUL_MUL_GAS_COST, gas_limit)
-                    .expect("bn254 mul failed"),
-            ),
-            0x08 => fold_precompile_output(
-                &mut accumulator,
-                bn254::run_pair(
+                    .expect("bn254 mul failed")
+            }
+            0x08 => bn254::run_pair(
                     &input.input,
                     bn254::pair::ISTANBUL_PAIR_PER_POINT,
                     bn254::pair::ISTANBUL_PAIR_BASE,
                     gas_limit,
                 )
                 .expect("bn254 pairing failed"),
-            ),
-            0x09 => fold_precompile_output(
-                &mut accumulator,
-                blake2::run(&input.input, gas_limit).expect("blake2f failed"),
-            ),
-            0x0A => fold_precompile_output(
-                &mut accumulator,
-                kzg_point_evaluation::run(&input.input, gas_limit).expect("kzg point eval failed"),
-            ),
-            BLS12_G1ADD => fold_precompile_output(
-                &mut accumulator,
-                bls12_381::g1_add::g1_add(&input.input, gas_limit).expect("bls12 g1add failed"),
-            ),
-            BLS12_G1MSM => fold_precompile_output(
-                &mut accumulator,
-                bls12_381::g1_msm::g1_msm(&input.input, gas_limit).expect("bls12 g1msm failed"),
-            ),
-            BLS12_G2ADD => fold_precompile_output(
-                &mut accumulator,
-                bls12_381::g2_add::g2_add(&input.input, gas_limit).expect("bls12 g2add failed"),
-            ),
-            BLS12_G2MSM => fold_precompile_output(
-                &mut accumulator,
-                bls12_381::g2_msm::g2_msm(&input.input, gas_limit).expect("bls12 g2msm failed"),
-            ),
-            BLS12_PAIRING => fold_precompile_output(
-                &mut accumulator,
-                bls12_381::pairing::pairing(&input.input, gas_limit).expect("bls12 pairing failed"),
-            ),
-            BLS12_MAP_FP_TO_G1 => fold_precompile_output(
-                &mut accumulator,
-                bls12_381::map_fp_to_g1::map_fp_to_g1(&input.input, gas_limit)
-                    .expect("bls12 map fp to g1 failed"),
-            ),
-            BLS12_MAP_FP2_TO_G2 => fold_precompile_output(
-                &mut accumulator,
+            0x09 => blake2::run(&input.input, gas_limit).expect("blake2f failed"),
+            0x0A => kzg_point_evaluation::run(&input.input, gas_limit)
+                .expect("kzg point eval failed"),
+            BLS12_G1ADD => bls12_381::g1_add::g1_add(&input.input, gas_limit)
+                .expect("bls12 g1add failed"),
+            BLS12_G1MSM => bls12_381::g1_msm::g1_msm(&input.input, gas_limit)
+                .expect("bls12 g1msm failed"),
+            BLS12_G2ADD => bls12_381::g2_add::g2_add(&input.input, gas_limit)
+                .expect("bls12 g2add failed"),
+            BLS12_G2MSM => bls12_381::g2_msm::g2_msm(&input.input, gas_limit)
+                .expect("bls12 g2msm failed"),
+            BLS12_PAIRING => bls12_381::pairing::pairing(&input.input, gas_limit)
+                .expect("bls12 pairing failed"),
+            BLS12_MAP_FP_TO_G1 => bls12_381::map_fp_to_g1::map_fp_to_g1(&input.input, gas_limit)
+                .expect("bls12 map fp to g1 failed"),
+            BLS12_MAP_FP2_TO_G2 => {
                 bls12_381::map_fp2_to_g2::map_fp2_to_g2(&input.input, gas_limit)
-                    .expect("bls12 map fp2 to g2 failed"),
-            ),
+                    .expect("bls12 map fp2 to g2 failed")
+            }
             address => panic!("unsupported precompile address 0x{address:02x}"),
+        };
+        if let Some(expected_output_size) = input.expected_output_size {
+            assert_eq!(
+                u64::try_from(output.bytes.len()).expect("precompile output too large"),
+                expected_output_size,
+                "precompile output length differs from frozen paired-control shape"
+            );
         }
+        fold_precompile_output(&mut accumulator, output);
     }
     accumulator
 }
 
 fn fold_precompile_output(accumulator: &mut u64, output: revm_precompile::EthPrecompileOutput) {
-    fold_bytes(accumulator, &output.gas_used.to_be_bytes());
-    fold_bytes(accumulator, &output.bytes);
+    fold_output_parts(accumulator, output.gas_used, &output.bytes);
+}
+
+fn fold_output_parts(accumulator: &mut u64, gas_used: u64, output: &[u8]) {
+    fold_bytes(accumulator, &gas_used.to_be_bytes());
+    fold_bytes(accumulator, output);
 }
 
 fn fold_bytes(accumulator: &mut u64, bytes: &[u8]) {
@@ -132,17 +117,19 @@ mod tests {
         execute_precompile, BLS12_G1ADD, BLS12_G1MSM, BLS12_G2ADD, BLS12_G2MSM,
         BLS12_MAP_FP2_TO_G2, BLS12_MAP_FP_TO_G1, BLS12_PAIRING,
     };
-    use raiko2_primitives::PrecompileLabInput;
+    use raiko2_primitives::{PrecompileLabInput, PrecompileLabLane};
 
     #[test]
     fn executes_identity_precompile() {
         let input = PrecompileLabInput {
             case: "identity".to_string(),
             scenario: "precompile".to_string(),
+            lane: PrecompileLabLane::Target,
             address: 0x04,
             target_count: 2,
             input_size: 4,
             target_raw_gas: 18,
+            expected_output_size: Some(4),
             input: vec![1, 2, 3, 4],
         };
 
@@ -154,14 +141,45 @@ mod tests {
         let input = PrecompileLabInput {
             case: "sha256".to_string(),
             scenario: "precompile".to_string(),
+            lane: PrecompileLabLane::Target,
             address: 0x02,
             target_count: 2,
             input_size: 4,
             target_raw_gas: 72,
+            expected_output_size: Some(32),
             input: vec![1, 2, 3, 4],
         };
 
         assert_ne!(execute_precompile(&input), 0);
+    }
+
+    #[test]
+    fn typed_lane_not_scenario_selects_target_or_control_execution() {
+        let target = PrecompileLabInput {
+            case: "identity".to_string(),
+            scenario: "control".to_string(),
+            lane: PrecompileLabLane::Target,
+            address: 0x04,
+            target_count: 2,
+            input_size: 4,
+            target_raw_gas: 18,
+            expected_output_size: Some(4),
+            input: vec![1, 2, 3, 4],
+        };
+        let target_with_different_text = PrecompileLabInput {
+            scenario: "anything else".to_string(),
+            ..target.clone()
+        };
+        assert_eq!(
+            execute_precompile(&target),
+            execute_precompile(&target_with_different_text)
+        );
+
+        let control = PrecompileLabInput {
+            lane: PrecompileLabLane::Control,
+            ..target
+        };
+        assert_ne!(execute_precompile(&control), execute_precompile(&target_with_different_text));
     }
 
     #[test]
@@ -222,10 +240,12 @@ mod tests {
             let input = PrecompileLabInput {
                 case: case.to_string(),
                 scenario: "precompile".to_string(),
+                lane: PrecompileLabLane::Target,
                 address,
                 target_count: 1,
                 input_size: input.len() as u64,
                 target_raw_gas,
+                expected_output_size: None,
                 input,
             };
 

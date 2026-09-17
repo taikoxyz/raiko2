@@ -12,14 +12,36 @@ path = "src/main.rs"
 anyhow.workspace = true
 bincode.workspace = true
 clap.workspace = true
-raiko2-primitives.workspace = true
+flate2.workspace = true
+raiko2-primitives = { workspace = true, features = ["kzg-host"] }
 raiko2-pipeline.workspace = true
 raiko2-primitives-shasta.workspace = true
+raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
+raiko2-stateless.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 risc0-zkvm.workspace = true
 sp1-sdk.workspace = true
 alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-signer = { version = "2.0", default-features = false }
+alloy-signer-local = { version = "2.0", default-features = false }
+alloy-trie.workspace = true
+alloy-rlp.workspace = true
+alloy-sol-types.workspace = true
+alethia-reth-block.workspace = true
 raiko2-prover.workspace = true
+raiko2-zkgas-trace.workspace = true
+revm.workspace = true
+reth-ethereum-primitives.workspace = true
+risc0-ethereum-trie.workspace = true
+taiko-client-protocol.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+raiko2-guest-common.workspace = true
+tempfile = "3"

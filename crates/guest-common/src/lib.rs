@@ -36,7 +36,7 @@ use raiko2_protocol_shasta::shasta::{
 };
 use raiko2_stateless::{
     read_parent_storage_with_witness_resources,
-    reconstruct_block_from_transactions_with_witness_resources,
+    reconstruct_block_from_transactions_with_witness_resources, FilteredBlockExecutionOutcome,
 };
 use std::sync::Arc;
 use taiko_client_protocol::FixedKSigner;
@@ -767,6 +767,7 @@ fn shasta_block_env_attributes(
             .header
             .base_fee_per_gas()
             .context("missing base fee per gas in Shasta block header")?,
+        parent_beacon_block_root: block.header.parent_beacon_block_root,
     })
 }
 
@@ -1026,7 +1027,31 @@ where
     Ok(output)
 }
 
-pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
+/// Inputs prepared by the Shasta proposal wrapper for one block reconstruction.
+pub struct ShastaBlockReconstruction<'a> {
+    pub index: usize,
+    pub anchor_tx:
+        alloy_consensus::transaction::Recovered<reth_ethereum_primitives::TransactionSigned>,
+    pub transactions: Vec<reth_ethereum_primitives::TransactionSigned>,
+    pub block_env: TaikoNextBlockEnvAttributes,
+    pub witness: &'a raiko2_primitives::ExecutionWitness,
+    pub ancestor_headers: &'a [WitnessHeader],
+    pub shared_state_nodes: &'a [raiko2_primitives::WitnessStateNode],
+    pub chain_spec: &'a Arc<TaikoChainSpec>,
+    pub evm_config: &'a TaikoEvmConfig,
+}
+
+/// Proves a Shasta proposal with an injected block reconstruction callback.
+///
+/// The wrapper retains proposal derivation, manifest conversion, canonical comparison, ancestor
+/// window updates, and public-output construction.
+pub fn prove_shasta_proposal_with_reconstructor<R>(
+    guest_input: &GuestInput,
+    mut reconstruct: R,
+) -> Result<B256>
+where
+    R: for<'a> FnMut(ShastaBlockReconstruction<'a>) -> Result<FilteredBlockExecutionOutcome>,
+{
     prove_shasta_proposal_with_block_verifier(
         guest_input,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
@@ -1041,17 +1066,17 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
                 .context("missing canonical anchor transaction")?
                 .try_into_recovered()
                 .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
-            let outcome = reconstruct_block_from_transactions_with_witness_resources(
+            let outcome = reconstruct(ShastaBlockReconstruction {
+                index,
                 anchor_tx,
-                manifest_transactions_for_reconstruction(expected_block)?,
-                shasta_block_env_attributes(stateless_input)?,
-                &stateless_input.witness,
+                transactions: manifest_transactions_for_reconstruction(expected_block)?,
+                block_env: shasta_block_env_attributes(stateless_input)?,
+                witness: &stateless_input.witness,
                 ancestor_headers,
-                guest_input.proposal_state_nodes(),
-                &runtime.chain_spec,
-                &runtime.evm_config,
-            )
-            .map_err(|e| anyhow::anyhow!(e))
+                shared_state_nodes: guest_input.proposal_state_nodes(),
+                chain_spec: &runtime.chain_spec,
+                evm_config: &runtime.evm_config,
+            })
             .with_context(|| format!("failed to reconstruct Shasta block at index {index}"))?;
             let generated_block = outcome.filtered_block.into_block();
             validate_generated_block_matches_canonical(&generated_block, &stateless_input.block)
@@ -1059,6 +1084,22 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
             Ok(generated_block.header.hash_slow())
         },
     )
+}
+
+pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
+    prove_shasta_proposal_with_reconstructor(guest_input, |request| {
+        reconstruct_block_from_transactions_with_witness_resources(
+            request.anchor_tx,
+            request.transactions,
+            request.block_env,
+            request.witness,
+            request.ancestor_headers,
+            request.shared_state_nodes,
+            request.chain_spec,
+            request.evm_config,
+        )
+        .map_err(anyhow::Error::from)
+    })
 }
 
 pub fn prove_shasta_proposal_with_validator<V>(
@@ -1158,6 +1199,9 @@ mod tests {
     use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::TaikoManifest;
+    use reth_execution_types::BlockExecutionResult;
+    use reth_primitives_traits::{Block as _, RecoveredBlock};
+    use reth_trie_common::HashedPostState;
     use risc0_ethereum_trie::Trie;
     use taiko_client_protocol::FixedKSigner;
 
@@ -1492,6 +1536,40 @@ mod tests {
         guest_input
     }
 
+    fn guest_input_with_derived_manifest() -> GuestInput {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.taiko.proposal_event.proposal.sources =
+            vec![raiko2_protocol_shasta::shasta::DerivationSource::default()];
+        guest_input.taiko.data_sources = vec![raiko2_protocol::InputDataSource::default()];
+        let runtime = TaikoRuntime::from_chain_id(guest_input.taiko.chain_spec.chain_id)
+            .expect("test runtime");
+        let parent_anchor_block_number = verified_parent_anchor_block_number(&guest_input)
+            .expect("verified parent anchor block number");
+        let expected_blocks =
+            derive_expected_shasta_blocks(&guest_input, &runtime, parent_anchor_block_number)
+                .expect("derive expected blocks")
+                .expect("nonempty sources");
+        let expected_block = expected_blocks.blocks.first().expect("one expected block");
+        let parent_header =
+            last_full_header(&guest_input.proposal_ancestor_headers).expect("full parent header");
+        let canonical_header = &mut guest_input.witnesses[0].block.header;
+        canonical_header.timestamp = expected_block.timestamp;
+        canonical_header.beneficiary = expected_block.coinbase;
+        canonical_header.gas_limit = expected_block.gas_limit.saturating_add(ANCHOR_GAS_LIMIT);
+        canonical_header.extra_data = encode_extra_data(
+            guest_input.taiko.proposal_event.proposal.basefeeSharingPctg,
+            guest_input.taiko.proposal_id,
+        );
+        canonical_header.mix_hash = calculate_shasta_difficulty(
+            B256::from(parent_header.difficulty.to_be_bytes::<32>()),
+            canonical_header.number,
+        );
+        guest_input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
+                .expect("build carry data");
+        guest_input
+    }
+
     fn error_chain_contains(err: &anyhow::Error, expected: &str) -> bool {
         err.chain()
             .map(ToString::to_string)
@@ -1526,6 +1604,70 @@ mod tests {
             subproof_input_hash,
             hash_shasta_subproof_input(&proof_carry_data)
         );
+    }
+
+    #[test]
+    fn reconstruction_callback_preserves_default_pre_reconstruction_errors() {
+        let guest_input = GuestInput::default();
+        let default_error = prove_shasta_proposal(&guest_input)
+            .expect_err("empty proposal must fail before reconstruction");
+        let callback_error = prove_shasta_proposal_with_reconstructor(&guest_input, |_| {
+            panic!("reconstructor must not run for an invalid proposal")
+        })
+        .expect_err("empty proposal must fail before reconstruction");
+
+        assert_eq!(format!("{default_error:#}"), format!("{callback_error:#}"));
+    }
+
+    #[test]
+    fn reconstruction_callback_cannot_bypass_canonical_block_comparison() {
+        let guest_input = guest_input_with_derived_manifest();
+
+        let error = prove_shasta_proposal_with_reconstructor(&guest_input, |_| {
+            Ok(raiko2_stateless::FilteredBlockExecutionOutcome {
+                filtered_block: RecoveredBlock::new_unhashed(
+                    reth_ethereum_primitives::Block::default(),
+                    Vec::new(),
+                ),
+                execution_result: BlockExecutionResult::default(),
+                hashed_state: HashedPostState::default(),
+            })
+        })
+        .expect_err("a mismatched callback block must be rejected by the wrapper");
+
+        assert!(
+            error_chain_contains(&error, "generated Shasta block mismatch at index 0"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn reconstruction_callback_preserves_successful_public_output() {
+        let guest_input = guest_input_with_derived_manifest();
+        let expected = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect("identity validation should produce public output");
+        let canonical = guest_input.witnesses[0]
+            .block
+            .clone()
+            .try_into_recovered()
+            .expect("canonical transactions recover");
+        let mut canonical = Some(canonical);
+
+        let actual = prove_shasta_proposal_with_reconstructor(&guest_input, |_| {
+            Ok(raiko2_stateless::FilteredBlockExecutionOutcome {
+                filtered_block: canonical.take().expect("one reconstruction callback"),
+                execution_result: BlockExecutionResult::default(),
+                hashed_state: HashedPostState::default(),
+            })
+        })
+        .expect("canonical callback output should be accepted");
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

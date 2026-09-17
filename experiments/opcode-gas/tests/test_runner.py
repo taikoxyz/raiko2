@@ -124,6 +124,138 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(raw_run["workload_value"], 4096)
         self.assertEqual(raw_run["risc0_padded_cycles"], 4096)
 
+    def test_raw_run_promotes_real_host_trace_to_isolation_evidence(self):
+        case = {
+            "case": "add",
+            "opcode": "0x01",
+            "target_count": 1,
+            "target_raw_gas": 3,
+        }
+        report = {
+            "gas": 160,
+            "controlled_trace": {
+                "schema_version": 1,
+                "workload_id": "a" * 64,
+                "backend_input_sha256": "b" * 64,
+                "backend_input_len": 48,
+                "target_opcode": 1,
+                "declared_target_count": 1,
+                "declared_target_raw_gas": 3,
+                "executed_target_count": 1,
+                "executed_target_raw_gas": 3,
+                "non_target_counts": {"opcode:0x60": 2, "opcode:0x00": 1},
+                "non_target_raw_gas": 6,
+                "total_raw_gas": 9,
+                "bytecode_len": 6,
+            },
+        }
+
+        raw_run = opcode_gas.raw_run_from_report(case, report)
+
+        self.assertEqual(raw_run["workload_id"], "a" * 64)
+        self.assertEqual(raw_run["backend_input_sha256"], "b" * 64)
+        self.assertEqual(
+            raw_run["isolation"],
+            {
+                "status": "passed",
+                "bytecode_size": 6,
+                "input_size": 48,
+                "non_target_counts": {"opcode:0x60": 2, "opcode:0x00": 1},
+                "non_target_raw_gas": 6,
+            },
+        )
+
+    def test_raw_run_rejects_host_trace_that_does_not_match_case_identity(self):
+        case = {
+            "case": "add",
+            "opcode": "0x01",
+            "target_count": 1,
+            "target_raw_gas": 3,
+        }
+        report = {
+            "controlled_trace": {
+                "workload_id": "a" * 64,
+                "backend_input_sha256": "b" * 64,
+                "target_opcode": 2,
+                "declared_target_count": 1,
+                "declared_target_raw_gas": 3,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "controlled trace identity"):
+            opcode_gas.raw_run_from_report(case, report)
+
+    def test_raw_run_promotes_typed_paired_precompile_identity_and_shape(self):
+        case = {
+            "case": "identity",
+            "kind": "precompile",
+            "address": "0x04",
+            "lane": "control",
+            "pair_id": "c" * 64,
+            "target_count": 2,
+            "target_raw_gas": 18,
+            "input_size": 4,
+            "expected_output_size": 4,
+        }
+        report = {
+            "gas": 160,
+            "controlled_trace": {
+                "kind": "precompile",
+                "workload_id": "a" * 64,
+                "pair_id": "c" * 64,
+                "backend_input_sha256": "b" * 64,
+                "backend_input_len": 96,
+                "address": 4,
+                "target_count": 2,
+                "target_raw_gas": 18,
+                "lane": "control",
+                "input_len": 4,
+                "output_len": 4,
+                "loop_iterations": 2,
+                "folded_bytes_per_iteration": 12,
+            },
+        }
+
+        raw_run = opcode_gas.raw_run_from_report(case, report)
+
+        self.assertEqual(raw_run["workload_id"], "a" * 64)
+        self.assertEqual(raw_run["backend_input_sha256"], "b" * 64)
+        self.assertEqual(raw_run["pair_id"], "c" * 64)
+        self.assertEqual(
+            raw_run["isolation"],
+            {
+                "status": "passed",
+                "input_size": 4,
+                "output_size": 4,
+                "loop_iterations": 2,
+                "folded_bytes_per_iteration": 12,
+            },
+        )
+
+    def test_raw_run_rejects_precompile_pair_or_lane_mismatch(self):
+        case = {
+            "case": "identity",
+            "kind": "precompile",
+            "address": "0x04",
+            "lane": "target",
+            "pair_id": "c" * 64,
+            "target_count": 2,
+            "target_raw_gas": 18,
+        }
+        trace = {
+            "kind": "precompile",
+            "workload_id": "a" * 64,
+            "pair_id": "d" * 64,
+            "backend_input_sha256": "b" * 64,
+            "address": 4,
+            "target_count": 2,
+            "target_raw_gas": 18,
+            "lane": "control",
+        }
+
+        with self.assertRaisesRegex(ValueError, "controlled trace identity"):
+            opcode_gas.raw_run_from_report(case, {"controlled_trace": trace})
+
     def test_parser_accepts_damage_command(self):
         args = opcode_gas.build_parser().parse_args(
             [
@@ -281,6 +413,88 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(raw_run["target_raw_gas"], 30_000_000)
         self.assertEqual(raw_run["workload_metric"], "risc0_padded_cycles")
         self.assertEqual(raw_run["workload_value"], 4096)
+
+    def test_join_proposal_trace_requires_guest_input_hash_and_public_output(self):
+        trace = {
+            "status": "complete",
+            "guest_input_sha256": "0x" + "ab" * 32,
+            "public_output": "0x1234",
+            "parity_passed": True,
+            "block_count": 1,
+            "partial_block_count": 0,
+        }
+        report = {
+            "guest_input_sha256": "0x" + "ab" * 32,
+            "public_values": "1234",
+        }
+
+        joined = opcode_gas.join_proposal_trace_and_sp1(trace, report)
+        self.assertEqual(joined["guest_input_sha256"], "0x" + "ab" * 32)
+        self.assertEqual(joined["public_output"], "0x1234")
+        self.assertEqual(joined["trace_block_count"], 1)
+
+        with self.assertRaisesRegex(ValueError, "GuestInput hash"):
+            opcode_gas.join_proposal_trace_and_sp1(trace, {"public_values": "1234"})
+        with self.assertRaisesRegex(ValueError, "GuestInput hash"):
+            opcode_gas.join_proposal_trace_and_sp1(
+                trace,
+                {**report, "guest_input_sha256": "0x" + "cd" * 32},
+            )
+        with self.assertRaisesRegex(ValueError, "public output"):
+            opcode_gas.join_proposal_trace_and_sp1(
+                trace,
+                {**report, "public_values": "0x5678"},
+            )
+
+    def test_run_sp1_proposal_executes_trace_first_and_joins_exact_identities(self):
+        calls = []
+        guest_hash = "0x" + "ab" * 32
+
+        def fake_run(cmd, check):
+            calls.append(cmd)
+            json_out = pathlib.Path(cmd[cmd.index("--json-out") + 1])
+            if cmd[cmd.index("--stage") + 1] == "proposal-trace":
+                self.assertEqual(json_out.suffixes[-2:], [".json", ".gz"])
+                json_out.write_bytes(b"\x1f\x8bfull-trace-must-not-be-read")
+                summary_out = json_out.with_name(
+                    json_out.name.removesuffix(".json.gz") + ".summary.json"
+                )
+                summary_out.write_text(opcode_gas.json.dumps({
+                    "status": "complete",
+                    "guest_input_sha256": guest_hash,
+                    "public_output": "0x1234",
+                    "parity_passed": True,
+                    "block_count": 1,
+                    "partial_block_count": 0,
+                }))
+            else:
+                json_out.write_text(opcode_gas.json.dumps({
+                    "guest_input_sha256": guest_hash,
+                    "public_values": "1234",
+                    "gas": 99,
+                }))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            output = root / "runs.jsonl"
+            with mock.patch.object(opcode_gas.subprocess, "run", fake_run):
+                opcode_gas.run_proposal_guest_input(
+                    guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                    guest_input=root / "guest-input.json",
+                    proof_type="sp1",
+                    case_name="proposal-1",
+                    target_raw_gas=1,
+                    target_count=1,
+                    out=output,
+                )
+            row = opcode_gas.json.loads(output.read_text())
+
+        self.assertEqual(calls[0][calls[0].index("--stage") + 1], "proposal-trace")
+        self.assertEqual(calls[1][calls[1].index("--stage") + 1], "proposal")
+        self.assertEqual(row["guest_input_sha256"], guest_hash)
+        self.assertEqual(row["public_output"], "0x1234")
+        self.assertTrue(row["trace_ab_passed"])
+        self.assertTrue(row["proposal_trace"].endswith(".json.gz"))
 
     def test_parser_accepts_inventory_command(self):
         args = opcode_gas.build_parser().parse_args(

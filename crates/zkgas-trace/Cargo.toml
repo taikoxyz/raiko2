@@ -1,0 +1,40 @@
+[package]
+name = "raiko2-zkgas-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alethia-reth-block.workspace = true
+alethia-reth-chainspec.workspace = true
+alethia-reth-consensus.workspace = true
+alethia-reth-evm.workspace = true
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
+hex.workspace = true
+raiko2-guest-common.workspace = true
+raiko2-primitives.workspace = true
+raiko2-primitives-shasta.workspace = true
+raiko2-protocol-shasta.workspace = true
+raiko2-stateless.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-evm.workspace = true
+reth-execution-types.workspace = true
+reth-primitives-traits.workspace = true
+reth-revm.workspace = true
+reth-trie-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+alloy-rlp.workspace = true
+alloy-signer-local.workspace = true
+risc0-ethereum-trie.workspace = true

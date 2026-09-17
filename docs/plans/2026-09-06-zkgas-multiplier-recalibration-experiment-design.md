@@ -244,9 +244,11 @@ Before reading any proposal result, seal the complete forward prediction formula
 
 ```text
 p_hat(j) = sum(execution_raw_evm_gas(e) * c_p(resolve_measurement_key(e))
-               for e where basis(resolve_measurement_key(e)) == raw_gas_slope)
+               for non-Anchor transaction-phase e
+               where basis(resolve_measurement_key(e)) == raw_gas_slope)
          + sum(f_p(resolve_measurement_key(e))
-               for e where basis(resolve_measurement_key(e)) == fixed_per_event)
+               for non-Anchor transaction-phase e
+               where basis(resolve_measurement_key(e)) == fixed_per_event)
          + sum(controlled_feature(j, q) * o_p(q) for q in Q_formula)
 
 APE_main(j) = abs(p_hat(j) - p(j)) / p(j)
@@ -261,8 +263,10 @@ proposal-fitted intercept, residual model, global rescale, feature selection, ca
 model selection. The proposal trace only supplies the counts and byte quantities consumed by the
 already-frozen formula.
 
-Include traced work from committed transactions, attempted transactions before reset, and system
-execution. Exclude only work that never began, such as intrinsic/pre-validation failure and the
+Include traced work from committed and attempted non-Anchor transactions before reset. V1 assigns
+pre-transaction system execution and the Anchor transaction exclusively to `block_base`, along with
+the fixed per-block MPT/trie/Merkle/host-hash baseline. This is a double-counting boundary: those
+operations cannot also enter the execution sums. Exclude work that never began, such as intrinsic/pre-validation failure and the
 unattempted tail after block truncation. Raiko2 derives these categories from the transaction
 iterator, committed transaction list, receipts, and trace events produced by the same Alethia
 executor. The trace contract requires the existing lazy, interleaved iterator consumption and tests
@@ -336,7 +340,7 @@ Proposal workload is validated in SP1 `proverGas` with this decomposition:
 predicted_sp1_prover_gas =
     startup_fixed_cost
   + block_count * block_base_cost
-  + started_transaction_count * tx_base_cost
+  + started_non_anchor_transaction_count * tx_base_cost
   + native_value_transfer_count * native_value_transfer_cost
   + sum(raw_gas_operation_i * controlled_cost_per_raw_evm_gas_i)
   + sum(spawned_wrapper_event_i * controlled_fixed_cost_per_event_i)
@@ -362,8 +366,9 @@ Transitive subtraction is deduplicated, so `tx_base` is removed exactly once fro
 residual even though it is also a dependency of native transfer.
 
 `tx_base` and `native_value_transfer` are deliberately distinct. One `tx_base` unit is counted when
-Alethia's existing executor pulls a recovered transaction from the raiko2 tracing iterator; its
-controlled coefficient is the common per-started-transaction residual after modeled block, transfer,
+Alethia's existing executor pulls a non-Anchor candidate transaction from the raiko2 tracing iterator;
+the Anchor transaction belongs exclusively to `block_base`. Its controlled coefficient is the common
+per-started-non-Anchor-transaction residual after modeled block, transfer,
 opcode, and precompile work is removed. It does not claim that all of that work occurs before the
 iterator boundary. `native_value_transfer` is an additional exclusive residual for a non-create
 transaction whose recipient executes no code and whose positive native value is applied. After
@@ -377,10 +382,12 @@ not sufficient. Signer-recovery failures and transactions after the truncation b
 silently receive either cost; any guest work they caused remains explicitly unmeasured until a later
 controlled component models it.
 
-`block_base` is the exclusive per-successful-block residual after transaction, native-transfer,
-opcode, and precompile contributions are subtracted. It includes the controlled block-loop/header and
-block-finalization work that remains under that definition; it must not absorb a variable component
-that the trace declares separately. `proposal_startup` is not fitted as an ordinary operation slope.
+`block_base` is the exclusive per-successful-block residual after non-Anchor transaction,
+native-transfer, opcode, and precompile contributions are subtracted. It includes system/Anchor
+execution plus the controlled block-loop/header, block-finalization, and fixed MPT/trie/hash work
+that remains under that definition. Witness bytes/nodes, unique accesses, and dirty-state entries
+remain diagnostic/unmeasured and do not enter `Q_formula`, the candidate, or the bridge. A future V2
+may split these actions only after defining independently controlled units. `proposal_startup` is not fitted as an ordinary operation slope.
 It is the repeat-stable residual of a frozen minimal proposal panel after all block, transaction,
 transfer, opcode, and precompile terms have been subtracted. It is never a proposal-corpus intercept.
 

@@ -15,8 +15,12 @@ import tarfile
 import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, InvalidOperation, getcontext
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
+
+
+getcontext().prec = 50
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,51 @@ class CaseSpec:
     opcode: int | None = None
     address: int | None = None
     input_size: int | None = None
+    execution_basis: str | None = None
+    spawned: bool | None = None
+    dispatch_status: str | None = None
+    paired: bool = False
+    expected_output_size: int | None = None
+
+
+@dataclass(frozen=True)
+class EventMatchSpec:
+    component: str
+    opcode: int | None = None
+    address: int | None = None
+    spawned: bool | None = None
+    dispatch_status: str | None = None
+
+
+@dataclass(frozen=True)
+class MeasurementKeySpec:
+    id: str
+    production_schedule_key: str
+    event_match: EventMatchSpec
+    pricing_basis: str
+    required_case_ids: tuple[str, ...]
+    diagnostic_case_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OverheadCaseSpec:
+    name: str
+    overhead_key_id: str
+    target_template: str
+    control_template: str
+    expected_changed_feature_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OverheadKeySpec:
+    id: str
+    unit: str
+    formula_role: str
+    subtract_keys: tuple[str, ...]
+    bundled_keys: tuple[str, ...]
+    bundled_ratios: Mapping[str, tuple[int, int]]
+    required_case_ids: tuple[str, ...]
+    diagnostic_case_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -37,6 +86,18 @@ class Manifest:
     backend: str
     variants: list[int]
     cases: list[CaseSpec]
+    measurement_keys: tuple[MeasurementKeySpec, ...] = ()
+    normalization_reference_key: str | None = None
+    system_operation_ownership: str | None = None
+    anchor_operation_ownership: str | None = None
+    bridge_key_ids: tuple[str, ...] = ()
+    bridge_model: str | None = None
+    bridge_controlled_max_ape: Decimal | None = None
+    bridge_proposal_max_ape: Decimal | None = None
+    overhead_keys: tuple[OverheadKeySpec, ...] = ()
+    overhead_cases: tuple[OverheadCaseSpec, ...] = ()
+    q_formula: tuple[str, ...] = ()
+    subtract_closure: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -520,8 +581,484 @@ def current_uzen_schedule() -> UnzenSchedule:
     return load_current_uzen_schedule()
 
 
+def _canonical_schedule_key(component: str, identifier: int) -> str:
+    if component == "opcode":
+        return f"opcode:0x{identifier:02x}"
+    if component == "precompile":
+        return f"precompile:0x{identifier:02x}"
+    raise ValueError(f"unsupported component: {component}")
+
+
+def _parse_schedule_key(value: Any) -> tuple[str, int]:
+    if not isinstance(value, str) or ":" not in value:
+        raise ValueError("production schedule key must be component:identifier")
+    component, raw_identifier = value.split(":", 1)
+    if component not in {"opcode", "precompile"}:
+        raise ValueError("production schedule key has unsupported component")
+    identifier = parse_opcode(raw_identifier)
+    if value != _canonical_schedule_key(component, identifier):
+        raise ValueError("production schedule key must be canonical lowercase hex")
+    if component == "opcode" and not 0 <= identifier <= 0xFF:
+        raise ValueError("production schedule key opcode is out of range")
+    return component, identifier
+
+
+def _unique_case_ids(
+    required: Any,
+    diagnostic: Any,
+    *,
+    label: str,
+    required_nonempty: bool,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(required, list) or not all(isinstance(value, str) for value in required):
+        raise ValueError(f"{label} required_case_ids must be a list of strings")
+    if required_nonempty and not required:
+        raise ValueError(f"{label} required_case_ids must not be empty")
+    if not isinstance(diagnostic, list) or not all(isinstance(value, str) for value in diagnostic):
+        raise ValueError(f"{label} diagnostic_case_ids must be a list of strings")
+    if len(set(required)) != len(required) or len(set(diagnostic)) != len(diagnostic):
+        raise ValueError(f"{label} contains a duplicate case")
+    overlap = set(required) & set(diagnostic)
+    if overlap:
+        raise ValueError(f"{label} case appears as both required and diagnostic")
+    return tuple(required), tuple(diagnostic)
+
+
+def _parse_event_match(item: Any) -> EventMatchSpec:
+    if not isinstance(item, Mapping):
+        raise ValueError("event_match must be an object")
+    supported = {"component", "opcode", "address", "spawned", "dispatch_status"}
+    unknown = set(item) - supported
+    if unknown:
+        raise ValueError(f"unsupported event-match field: {sorted(unknown)[0]}")
+    component = item.get("component")
+    if component not in {"opcode", "precompile"}:
+        raise ValueError("event_match component must be opcode or precompile")
+    opcode = parse_opcode(item["opcode"]) if "opcode" in item else None
+    address = parse_opcode(item["address"]) if "address" in item else None
+    spawned = item.get("spawned")
+    dispatch_status = item.get("dispatch_status")
+    if spawned is not None and not isinstance(spawned, bool):
+        raise ValueError("event_match spawned must be boolean")
+    if component == "opcode":
+        if opcode is None or address is not None or not 0 <= opcode <= 0xFF:
+            raise ValueError("opcode event_match requires only an opcode")
+        if spawned is not None and opcode not in SPAWN_WRAPPER_OPCODES:
+            raise ValueError("spawned context is supported only for CALL/CREATE opcodes")
+        if opcode in SPAWN_WRAPPER_OPCODES and spawned is None:
+            raise ValueError("CALL/CREATE event_match must declare spawned")
+    else:
+        if address is None or opcode is not None:
+            raise ValueError("precompile event_match requires only an address")
+        if spawned is not None or dispatch_status is not None:
+            raise ValueError("precompile event_match cannot declare spawned context")
+    if spawned is True:
+        if dispatch_status != "confirmed":
+            raise ValueError("spawned=true event_match requires dispatch_status=confirmed")
+    elif dispatch_status is not None:
+        raise ValueError("dispatch_status is valid only for spawned=true")
+    return EventMatchSpec(
+        component=component,
+        opcode=opcode,
+        address=address,
+        spawned=spawned,
+        dispatch_status=dispatch_status,
+    )
+
+
+def _event_matches_overlap(left: EventMatchSpec, right: EventMatchSpec) -> bool:
+    if left.component != right.component:
+        return False
+    if left.opcode != right.opcode or left.address != right.address:
+        return False
+    if left.spawned is not None and right.spawned is not None and left.spawned != right.spawned:
+        return False
+    if (
+        left.dispatch_status is not None
+        and right.dispatch_status is not None
+        and left.dispatch_status != right.dispatch_status
+    ):
+        return False
+    return True
+
+
+def _parse_positive_ratio(value: Any, *, label: str) -> tuple[int, int]:
+    if isinstance(value, Mapping):
+        if set(value) != {"numerator", "denominator"}:
+            raise ValueError(
+                f"{label} bundled ratio must contain canonical numerator and denominator"
+            )
+        numerator = value["numerator"]
+        denominator = value["denominator"]
+        if (
+            isinstance(numerator, bool)
+            or isinstance(denominator, bool)
+            or not isinstance(numerator, int)
+            or not isinstance(denominator, int)
+        ):
+            raise ValueError(f"{label} bundled ratio must use canonical integers")
+        if numerator <= 0 or denominator <= 0:
+            raise ValueError(f"{label} bundled ratio must be positive")
+        return numerator, denominator
+    if not isinstance(value, str) or "/" not in value:
+        raise ValueError(f"{label} bundled ratio must be canonical numerator/denominator")
+    numerator_text, denominator_text = value.split("/", 1)
+    if (
+        not numerator_text.isdecimal()
+        or not denominator_text.isdecimal()
+        or numerator_text.startswith("0")
+        or denominator_text.startswith("0")
+    ):
+        raise ValueError(f"{label} bundled ratio must use positive canonical integers")
+    numerator, denominator = int(numerator_text), int(denominator_text)
+    if numerator <= 0 or denominator <= 0:
+        raise ValueError(f"{label} bundled ratio must be positive")
+    return numerator, denominator
+
+
+def _subtract_closures(overheads: tuple[OverheadKeySpec, ...]) -> dict[str, tuple[str, ...]]:
+    by_id = {item.id: item for item in overheads}
+    for item in overheads:
+        for child in (*item.subtract_keys, *item.bundled_keys):
+            if child not in by_id:
+                raise ValueError(f"missing dependency {child} for overhead {item.id}")
+        if set(item.subtract_keys) & set(item.bundled_keys):
+            raise ValueError(f"overhead {item.id} has overlapping subtract and bundled keys")
+        if set(item.bundled_ratios) != set(item.bundled_keys):
+            raise ValueError(f"overhead {item.id} bundled ratios do not match bundled_keys")
+
+    visiting: set[str] = set()
+    complete: dict[str, set[str]] = {}
+
+    def visit(key: str) -> set[str]:
+        if key in visiting:
+            raise ValueError("overhead subtraction graph contains a cycle")
+        if key in complete:
+            return complete[key]
+        visiting.add(key)
+        closure: set[str] = set()
+        for child in by_id[key].subtract_keys:
+            closure.add(child)
+            closure.update(visit(child))
+        visiting.remove(key)
+        complete[key] = closure
+        return closure
+
+    result = {key: tuple(sorted(visit(key))) for key in by_id}
+    owners: dict[str, str] = {}
+    for item in overheads:
+        for child in item.bundled_keys:
+            previous = owners.setdefault(child, item.id)
+            if previous != item.id:
+                raise ValueError(f"bundled key {child} has two parents")
+            if child in result[item.id]:
+                raise ValueError(f"bundled key {child} is reachable by subtraction")
+    return result
+
+
+def parse_controlled_manifest(
+    data: Mapping[str, Any], *, schedule_keys: set[str]
+) -> Manifest:
+    """Parse and validate the frozen V1 controlled-calibration contract."""
+    if data.get("include_uzen_pure_opcodes") or data.get("include_uzen_precompile_bodies"):
+        raise ValueError("controlled manifest must not use implicit include flags")
+    cases: list[CaseSpec] = []
+    for item in data.get("cases", []):
+        if not isinstance(item, Mapping):
+            raise ValueError("controlled case must be an object")
+        cases.append(
+            CaseSpec(
+                name=item["name"],
+                scenario=item.get("scenario", ""),
+                template=item["template"],
+                target_raw_gas=int(item["target_raw_gas"]) if "target_raw_gas" in item else 0,
+                kind=item.get("kind", "opcode"),
+                opcode=parse_opcode(item["opcode"]) if "opcode" in item else None,
+                address=parse_opcode(item["address"]) if "address" in item else None,
+                input_size=int(item["input_size"]) if "input_size" in item else None,
+                execution_basis=item.get("execution_basis"),
+                spawned=item.get("spawned"),
+                dispatch_status=item.get("dispatch_status"),
+                paired=bool(item.get("paired", False)),
+                expected_output_size=(
+                    int(item["expected_output_size"])
+                    if "expected_output_size" in item
+                    else None
+                ),
+            )
+        )
+    case_by_id = {case.name: case for case in cases}
+    if len(case_by_id) != len(cases):
+        raise ValueError("duplicate controlled case ID")
+
+    measurement_keys: list[MeasurementKeySpec] = []
+    for item in data.get("measurement_keys", []):
+        if not isinstance(item, Mapping):
+            raise ValueError("measurement key must be an object")
+        required, diagnostic = _unique_case_ids(
+            item.get("required_case_ids"),
+            item.get("diagnostic_case_ids", []),
+            label=f"measurement key {item.get('id')}",
+            required_nonempty=True,
+        )
+        production_key = item.get("production_schedule_key")
+        component, identifier = _parse_schedule_key(production_key)
+        if production_key not in schedule_keys:
+            raise ValueError(f"unknown production schedule key: {production_key}")
+        event_match = _parse_event_match(item.get("event_match"))
+        event_identifier = event_match.opcode if component == "opcode" else event_match.address
+        if component != event_match.component or identifier != event_identifier:
+            raise ValueError("production schedule key differs from event identity")
+        basis = item.get("pricing_basis")
+        if basis not in {"raw_gas_slope", "fixed_per_event"}:
+            raise ValueError("missing or unknown pricing basis")
+        if event_match.spawned is True and basis != "fixed_per_event":
+            raise ValueError("raw_gas_slope is invalid on a spawned key")
+        if event_match.spawned is not True and basis != "raw_gas_slope":
+            raise ValueError("fixed_per_event is invalid for an ordinary opcode or precompile")
+        measurement_keys.append(
+            MeasurementKeySpec(
+                id=item["id"],
+                production_schedule_key=production_key,
+                event_match=event_match,
+                pricing_basis=basis,
+                required_case_ids=required,
+                diagnostic_case_ids=diagnostic,
+            )
+        )
+    if len({item.id for item in measurement_keys}) != len(measurement_keys):
+        raise ValueError("duplicate measurement key ID")
+    for index, left in enumerate(measurement_keys):
+        for right in measurement_keys[index + 1 :]:
+            if _event_matches_overlap(left.event_match, right.event_match):
+                raise ValueError(f"overlapping event matches: {left.id}, {right.id}")
+
+    claimed_cases: set[str] = set()
+    for key in measurement_keys:
+        component, identifier = _parse_schedule_key(key.production_schedule_key)
+        for case_id in (*key.required_case_ids, *key.diagnostic_case_ids):
+            case = case_by_id.get(case_id)
+            if case is None:
+                raise ValueError(f"unknown case {case_id} in measurement key {key.id}")
+            if case_id in claimed_cases:
+                raise ValueError(f"duplicate case assignment: {case_id}")
+            claimed_cases.add(case_id)
+            if case.kind != component:
+                raise ValueError(f"case component differs for {case_id}")
+            if component == "opcode" and case.opcode != identifier:
+                raise ValueError(f"case opcode differs for {case_id}")
+            if component == "precompile" and case.address != identifier:
+                raise ValueError(f"case precompile address differs for {case_id}")
+            expected_execution_basis = (
+                "fixed_per_event"
+                if key.pricing_basis == "fixed_per_event"
+                else "interpreter_raw_gas"
+                if component == "opcode"
+                else "native_gas"
+            )
+            if case.execution_basis != expected_execution_basis:
+                raise ValueError(f"execution basis differs for {case_id}")
+            if component == "opcode" and identifier in SPAWN_WRAPPER_OPCODES:
+                if case.spawned is None or case.spawned != key.event_match.spawned:
+                    raise ValueError(f"CALL/CREATE spawned context differs for {case_id}")
+                if case.spawned is True:
+                    if case.dispatch_status != "confirmed":
+                        raise ValueError(f"spawned case {case_id} requires dispatch_status=confirmed")
+                    if case.target_raw_gas:
+                        raise ValueError("fixed-event case cannot contain a raw-gas field")
+            elif case.spawned is not None or case.dispatch_status is not None:
+                raise ValueError("spawned context is supported only for CALL/CREATE cases")
+            if component == "precompile" and (
+                not case.paired
+                or case.expected_output_size is None
+                or case.expected_output_size < 0
+            ):
+                raise ValueError(
+                    f"precompile case {case_id} requires paired target/control output shape"
+                )
+
+    overheads: list[OverheadKeySpec] = []
+    valid_units = {
+        "proposal",
+        "block",
+        "started_non_anchor_transaction",
+        "native_value_transfer",
+        "witness_byte",
+        "witness_node",
+        "stdin_byte",
+        "blob_byte",
+        "kzg_invocation",
+        "unique_state_access",
+        "dirty_state_entry",
+    }
+    for item in data.get("overhead_keys", []):
+        if item.get("unit") not in valid_units:
+            raise ValueError(f"unknown overhead unit for {item.get('id')}")
+        if item.get("formula_role") not in {"required", "diagnostic"}:
+            raise ValueError(f"unknown formula_role for {item.get('id')}")
+        required, diagnostic = _unique_case_ids(
+            item.get("required_case_ids", []),
+            item.get("diagnostic_case_ids", []),
+            label=f"overhead key {item.get('id')}",
+            required_nonempty=item.get("formula_role") == "required",
+        )
+        ratios = {
+            key: _parse_positive_ratio(value, label=f"overhead {item.get('id')}")
+            for key, value in item.get("bundled_ratios", {}).items()
+        }
+        overheads.append(
+            OverheadKeySpec(
+                id=item["id"],
+                unit=item["unit"],
+                formula_role=item["formula_role"],
+                subtract_keys=tuple(item.get("subtract_keys", [])),
+                bundled_keys=tuple(item.get("bundled_keys", [])),
+                bundled_ratios=MappingProxyType(ratios),
+                required_case_ids=required,
+                diagnostic_case_ids=diagnostic,
+            )
+        )
+    if len({item.id for item in overheads}) != len(overheads):
+        raise ValueError("duplicate overhead key ID")
+    overhead_tuple = tuple(overheads)
+    subtract_closure = _subtract_closures(overhead_tuple)
+    required_overheads = tuple(item.id for item in overheads if item.formula_role == "required")
+    if set(required_overheads) != set(Q_FORMULA) or len(required_overheads) != len(Q_FORMULA):
+        raise ValueError("V1 manifest requires exactly the four frozen overhead identities")
+    q_formula = tuple(data.get("q_formula", []))
+    if q_formula != tuple(Q_FORMULA):
+        raise ValueError("Q_formula must equal the four frozen identities in canonical order")
+    by_overhead = {item.id: item for item in overheads}
+    for item in overheads:
+        if item.formula_role == "required":
+            for child in subtract_closure[item.id]:
+                if by_overhead[child].formula_role != "required" or child not in q_formula:
+                    raise ValueError("required overhead has a non-required transitive dependency")
+
+    overhead_cases: list[OverheadCaseSpec] = []
+    overhead_case_names: set[str] = set()
+    for item in data.get("overhead_cases", []):
+        name = item["name"]
+        if name in overhead_case_names:
+            raise ValueError(f"duplicate overhead case {name}")
+        overhead_case_names.add(name)
+        key_id = item["overhead_key_id"]
+        if key_id not in by_overhead:
+            raise ValueError(f"unknown overhead key {key_id} for case {name}")
+        expected = tuple(item.get("expected_changed_feature_keys", []))
+        allowed = {
+            key_id,
+            *subtract_closure[key_id],
+            *by_overhead[key_id].bundled_keys,
+        }
+        if (
+            key_id not in expected
+            or not set(expected).issubset(allowed)
+            or len(expected) != len(set(expected))
+        ):
+            raise ValueError(f"changed feature declaration differs for overhead case {name}")
+        overhead_cases.append(
+            OverheadCaseSpec(
+                name=name,
+                overhead_key_id=key_id,
+                target_template=item["target_template"],
+                control_template=item["control_template"],
+                expected_changed_feature_keys=expected,
+            )
+        )
+    case_owner: dict[str, str] = {}
+    for key in overheads:
+        for case_id in (*key.required_case_ids, *key.diagnostic_case_ids):
+            if case_id not in overhead_case_names:
+                raise ValueError(f"unknown overhead case {case_id}")
+            if case_id in case_owner:
+                raise ValueError(f"duplicate overhead case assignment {case_id}")
+            case_owner[case_id] = key.id
+    for case in overhead_cases:
+        if case_owner.get(case.name) != case.overhead_key_id:
+            raise ValueError(f"overhead case {case.name} is not owned by its overhead key")
+
+    system_operation_ownership = data.get("system_operation_ownership")
+    if system_operation_ownership != "block_base":
+        raise ValueError("V1 system operation ownership must be block_base")
+    anchor_operation_ownership = data.get("anchor_operation_ownership")
+    if anchor_operation_ownership != "block_base":
+        raise ValueError("V1 anchor operation ownership must be block_base")
+    normalization = data.get("normalization_reference_key")
+    if normalization != "opcode:0x01" or normalization not in {item.id for item in measurement_keys}:
+        raise ValueError("normalization reference must be the ADD measurement key opcode:0x01")
+    bridge_keys = data.get("bridge_key_ids")
+    if not isinstance(bridge_keys, list) or not bridge_keys:
+        raise ValueError("bridge_key_ids must be nonempty")
+    if len(set(bridge_keys)) != len(bridge_keys):
+        raise ValueError("duplicate bridge key ID")
+    allowed_bridge = {item.id for item in measurement_keys} | set(Q_FORMULA)
+    diagnostic_overheads = {item.id for item in overheads if item.formula_role == "diagnostic"}
+    for key in bridge_keys:
+        if key in diagnostic_overheads:
+            raise ValueError("diagnostic-only overhead key cannot enter bridge_key_ids")
+        if key not in allowed_bridge:
+            raise ValueError(f"unknown bridge key: {key}")
+    if normalization not in bridge_keys or any(key not in bridge_keys for key in Q_FORMULA):
+        raise ValueError("bridge_key_ids must include normalization and every Q_formula key")
+    other_opcodes = {
+        item.id
+        for item in measurement_keys
+        if item.event_match.component == "opcode" and item.id != normalization
+    }
+    precompiles = {
+        item.id for item in measurement_keys if item.event_match.component == "precompile"
+    }
+    if not set(bridge_keys) & other_opcodes:
+        raise ValueError("bridge_key_ids must include an additional opcode")
+    if not set(bridge_keys) & precompiles:
+        raise ValueError("bridge_key_ids must include a precompile")
+    if data.get("bridge_model") != "through_origin_equal_key_median":
+        raise ValueError("bridge model must be through_origin_equal_key_median")
+    try:
+        controlled_threshold = Decimal(str(data.get("bridge_controlled_max_ape")))
+        proposal_threshold = Decimal(str(data.get("bridge_proposal_max_ape")))
+    except InvalidOperation as exc:
+        raise ValueError("bridge thresholds must equal exactly 0.10") from exc
+    if controlled_threshold != Decimal("0.10") or proposal_threshold != Decimal("0.10"):
+        raise ValueError("bridge thresholds must equal exactly 0.10")
+
+    return Manifest(
+        name=str(data["name"]),
+        backend=str(data.get("backend", "sp1")),
+        variants=[int(value) for value in data.get("variants", [])],
+        cases=cases,
+        measurement_keys=tuple(measurement_keys),
+        normalization_reference_key=normalization,
+        system_operation_ownership=system_operation_ownership,
+        anchor_operation_ownership=anchor_operation_ownership,
+        bridge_key_ids=tuple(bridge_keys),
+        bridge_model=data["bridge_model"],
+        bridge_controlled_max_ape=controlled_threshold,
+        bridge_proposal_max_ape=proposal_threshold,
+        overhead_keys=overhead_tuple,
+        overhead_cases=tuple(overhead_cases),
+        q_formula=q_formula,
+        subtract_closure=MappingProxyType(subtract_closure),
+    )
+
+
 def load_manifest(path: pathlib.Path, schedule: UnzenSchedule | None = None) -> Manifest:
     data = tomllib.loads(path.read_text())
+    if "measurement_keys" in data or "overhead_keys" in data:
+        if schedule is None:
+            schedule = current_uzen_schedule()
+        schedule_keys = {
+            *(
+                _canonical_schedule_key("opcode", opcode)
+                for opcode in schedule.opcode_multipliers
+            ),
+            *(
+                _canonical_schedule_key("precompile", address)
+                for address in schedule.precompile_multipliers
+            ),
+        }
+        return parse_controlled_manifest(data, schedule_keys=schedule_keys)
     cases = [
         CaseSpec(
             name=item["name"],
@@ -665,6 +1202,151 @@ def build_bytecode(case: CaseSpec, target_count: int) -> GeneratedBytecode:
     else:
         raise ValueError(f"unknown template: {case.template}")
     return GeneratedBytecode(bytes_hex=bytecode.hex(), opcode_counts=count_opcodes(bytecode))
+
+
+def _fixed_push(value: int, *, target_opcode: int) -> bytes:
+    opcode = 0x7E if target_opcode == 0x7F else 0x7F
+    size = opcode - 0x5F
+    return bytes([opcode]) + value.to_bytes(size, "big")
+
+
+def _fixed_target_instruction(case: CaseSpec) -> bytes:
+    if case.opcode is None:
+        raise ValueError(f"opcode case {case.name} is missing opcode")
+    if 0x60 <= case.opcode <= 0x7F:
+        return bytes([case.opcode]) + bytes(case.opcode - 0x5F)
+    return bytes([case.opcode])
+
+
+def _fixed_memory_warmup(case: CaseSpec) -> bytes:
+    assert case.opcode is not None
+    return b"".join(
+        _fixed_push(value, target_opcode=case.opcode) for value in (32, 0, 0)
+    ) + bytes([0x37])
+
+
+FIXED_MICROPROGRAM_MAGIC = bytes([0xEF, 0x4D, 0x50, 0x01])
+
+
+def encode_fixed_microprograms(programs: Iterable[bytes]) -> bytes:
+    rows = list(programs)
+    out = bytearray(FIXED_MICROPROGRAM_MAGIC)
+    out.extend(len(rows).to_bytes(4, "big"))
+    for program in rows:
+        out.extend(len(program).to_bytes(4, "big"))
+        out.extend(program)
+    return bytes(out)
+
+
+def decode_fixed_microprograms(encoded: bytes) -> list[bytes]:
+    if not encoded.startswith(FIXED_MICROPROGRAM_MAGIC):
+        return [encoded]
+    if len(encoded) < 8:
+        raise ValueError("truncated fixed-microprogram header")
+    count = int.from_bytes(encoded[4:8], "big")
+    cursor = 8
+    programs = []
+    for _ in range(count):
+        if cursor + 4 > len(encoded):
+            raise ValueError("truncated fixed-microprogram length")
+        length = int.from_bytes(encoded[cursor : cursor + 4], "big")
+        cursor += 4
+        if cursor + length > len(encoded):
+            raise ValueError("truncated fixed microprogram")
+        programs.append(encoded[cursor : cursor + length])
+        cursor += length
+    if cursor != len(encoded) or not programs:
+        raise ValueError("invalid fixed-microprogram framing")
+    return programs
+
+
+def _fixed_slot(case: CaseSpec, *, active: bool) -> bytes:
+    assert case.opcode is not None
+    setup = bytearray()
+
+    def push(value: int = 0) -> None:
+        setup.extend(_fixed_push(value, target_opcode=case.opcode or 0))
+
+    if case.template == "stack_binary":
+        push()
+        push()
+    elif case.template == "stack_exp":
+        push(2)
+        push(2)
+    elif case.template == "stack_ternary":
+        push()
+        push()
+        push()
+    elif case.template == "stack_unary":
+        push(1)
+    elif case.template == "keccak_32":
+        setup.extend(_fixed_memory_warmup(case))
+        push(32)
+        push()
+    elif case.template == "memory_load_32":
+        setup.extend(_fixed_memory_warmup(case))
+        push()
+    elif case.template in {"memory_store_32", "memory_store8"}:
+        setup.extend(_fixed_memory_warmup(case))
+        push(1)
+        push()
+    elif case.template == "stack_pop":
+        push(1)
+    elif case.template == "stack_push":
+        pass
+    elif case.template == "stack_dup":
+        for value in range(1, case.opcode - 0x7F + 1):
+            push(value)
+    elif case.template == "stack_swap":
+        for value in range(1, case.opcode - 0x8F + 2):
+            push(value)
+    elif case.template in {"stack_unary_producer", "jumpdest_chain"}:
+        pass
+    elif case.template == "memory_copy_32":
+        setup.extend(_fixed_memory_warmup(case))
+        for value in (32, 0, 0):
+            push(value)
+    elif case.template in {"jump_chain", "jumpi_chain"}:
+        pushes = 2 if case.template == "jumpi_chain" else 1
+        setup_len = pushes * 33
+        destination = setup_len + 1
+        if case.template == "jumpi_chain":
+            push(1)
+        push(destination)
+        if active:
+            return bytes(setup) + bytes([case.opcode, 0x5B, 0x00])
+        return bytes(setup) + bytes([0x5B, 0x00, case.opcode])
+    else:
+        raise ValueError(f"no fixed-footprint construction for template: {case.template}")
+
+    instruction = _fixed_target_instruction(case)
+    return (
+        bytes(setup) + instruction + bytes([0x00])
+        if active
+        else bytes(setup) + bytes([0x00]) + instruction
+    )
+
+
+def build_fixed_footprint_bytecode(
+    case: CaseSpec, target_count: int, generator_max_count: int
+) -> GeneratedBytecode:
+    """Build one fixed-size sweep member whose executed helper work is count-invariant."""
+    if target_count < 0 or generator_max_count < 0 or target_count > generator_max_count:
+        raise ValueError("target_count exceeds generator_max_count")
+    if case.opcode is None:
+        raise ValueError(f"opcode case {case.name} is missing opcode")
+    programs = [
+        _fixed_slot(case, active=index < target_count)
+        for index in range(generator_max_count)
+    ]
+    if len({len(program) for program in programs}) > 1:
+        raise AssertionError("fixed microprogram slots must have one byte length")
+    encoded = encode_fixed_microprograms(programs)
+    counts: dict[int, int] = {}
+    for program in programs:
+        for opcode, count in count_opcodes(program).items():
+            counts[opcode] = counts.get(opcode, 0) + count
+    return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
 
 
 def build_stack_binary_bytecode(opcode: int, target_count: int) -> bytes:
@@ -946,16 +1628,26 @@ def generate_cases(
     manifest: Manifest,
     out_dir: pathlib.Path,
     provenance: Mapping[str, Any] | None = None,
+    generator_max_count: int | None = None,
 ) -> list[pathlib.Path]:
     written = []
+    controlled_max = (
+        8 if manifest.measurement_keys and generator_max_count is None else generator_max_count
+    )
     for case in manifest.cases:
         for variant in manifest.variants:
+            if controlled_max is not None and variant > controlled_max:
+                continue
             case_dir = out_dir / manifest.name / case.name / f"count-{variant}"
-            case_dir.mkdir(parents=True, exist_ok=True)
             if case.kind == "opcode":
+                case_dir.mkdir(parents=True, exist_ok=True)
                 if case.opcode is None:
                     raise ValueError(f"opcode case {case.name} is missing opcode")
-                generated = build_bytecode(case, variant)
+                generated = (
+                    build_fixed_footprint_bytecode(case, variant, controlled_max)
+                    if controlled_max is not None
+                    else build_bytecode(case, variant)
+                )
                 payload = {
                     "suite": manifest.name,
                     "backend": manifest.backend,
@@ -981,34 +1673,78 @@ def generate_cases(
                     "target_raw_gas": case.target_raw_gas,
                     "bytecode": "0x" + generated.bytes_hex,
                 }
+                if controlled_max is not None:
+                    fixed_len = len(bytes.fromhex(generated.bytes_hex))
+                    payload["generator_max_count"] = controlled_max
+                    payload["fixed_bytecode_len"] = fixed_len
+                    guest_input["generator_max_count"] = controlled_max
+                    guest_input["fixed_bytecode_len"] = fixed_len
             elif case.kind == "precompile":
                 if case.address is None:
                     raise ValueError(f"precompile case {case.name} is missing address")
                 precompile_input = build_precompile_input(case)
-                payload = {
-                    "suite": manifest.name,
-                    "backend": manifest.backend,
-                    "kind": case.kind,
-                    "case": case.name,
-                    "address": f"0x{case.address:02x}",
-                    "scenario": case.scenario,
-                    "template": case.template,
+                lanes = ("target", "control") if case.paired else ("target",)
+                pair_spec = {
+                    "schema_version": 1,
+                    "key_id": f"precompile:0x{case.address:02x}",
+                    "case_id": case.name,
                     "target_count": variant,
-                    "input_size": case.input_size,
-                    "target_raw_gas": case.target_raw_gas,
-                    "target_feature": variant * case.target_raw_gas,
-                    "input": precompile_input,
-                    "guest_input_status": "precompile_lab_guest_input",
+                    "input": {
+                        "address": case.address,
+                        "calldata": precompile_input,
+                        "target_raw_gas": case.target_raw_gas,
+                        "expected_output_size": case.expected_output_size,
+                    },
                 }
-                guest_input = {
-                    "case": case.name,
-                    "scenario": case.scenario,
-                    "address": case.address,
-                    "target_count": variant,
-                    "input_size": case.input_size,
-                    "target_raw_gas": case.target_raw_gas,
-                    "input": precompile_input,
-                }
+                pair_id = sha256_bytes(
+                    canonical_json({"kind": "controlled_precompile_pair", "pair_spec": pair_spec})
+                )
+                for lane in lanes:
+                    lane_dir = case_dir / lane if case.paired else case_dir
+                    lane_dir.mkdir(parents=True, exist_ok=True)
+                    payload = {
+                        "suite": manifest.name,
+                        "backend": manifest.backend,
+                        "kind": case.kind,
+                        "case": case.name,
+                        "address": f"0x{case.address:02x}",
+                        "scenario": case.scenario,
+                        "template": case.template,
+                        "lane": lane,
+                        "pair_id": pair_id,
+                        "target_count": variant,
+                        "input_size": case.input_size,
+                        "expected_output_size": case.expected_output_size,
+                        "target_raw_gas": case.target_raw_gas,
+                        "target_feature": variant * case.target_raw_gas,
+                        "input": precompile_input,
+                        "guest_input_status": "precompile_lab_guest_input",
+                    }
+                    guest_input = {
+                        "case": case.name,
+                        "scenario": case.scenario,
+                        "lane": lane,
+                        "address": case.address,
+                        "target_count": variant,
+                        "input_size": case.input_size,
+                        "target_raw_gas": case.target_raw_gas,
+                        "expected_output_size": case.expected_output_size,
+                        "input": precompile_input,
+                    }
+                    if controlled_max is not None:
+                        payload["generator_max_count"] = controlled_max
+                        guest_input["generator_max_count"] = controlled_max
+                    guest_input_bytes = (
+                        json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+                    ).encode()
+                    if provenance:
+                        payload.update(provenance)
+                    payload["fixture_sha256"] = sha256_bytes(guest_input_bytes)
+                    path = lane_dir / "case.json"
+                    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+                    (lane_dir / "guest-input.json").write_bytes(guest_input_bytes)
+                    written.append(path)
+                continue
             else:
                 raise ValueError(f"unknown case kind: {case.kind}")
             guest_input_bytes = (
@@ -1097,6 +1833,27 @@ def run_proposal_guest_input(
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     report_path = out.with_name(f"{out.stem}.guest-launcher.json")
+    trace_path = out.with_name(f"{out.stem}.proposal-trace.json.gz")
+    trace_summary_path = out.with_name(f"{out.stem}.proposal-trace.summary.json")
+    trace = None
+    if proof_type == "sp1":
+        subprocess.run(
+            [
+                str(guest_launcher),
+                "--stage",
+                "proposal-trace",
+                "--proof-type",
+                "native",
+                "--mode",
+                "execute",
+                "--input",
+                str(guest_input),
+                "--json-out",
+                str(trace_path),
+            ],
+            check=True,
+        )
+        trace = json.loads(trace_summary_path.read_text())
     cmd = [
         str(guest_launcher),
         "--stage",
@@ -1127,11 +1884,109 @@ def run_proposal_guest_input(
         "target_count": target_count,
         "target_raw_gas": target_raw_gas,
     }
+    if trace is not None:
+        case.update(join_proposal_trace_and_sp1(trace, report))
+        case["proposal_trace"] = str(trace_path)
+        case["proposal_trace_summary"] = str(trace_summary_path)
     out.write_text(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
+
+
+def _normalized_hex(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a hex string")
+    normalized = value.lower()
+    if not normalized.startswith("0x"):
+        normalized = "0x" + normalized
+    try:
+        bytes.fromhex(normalized[2:])
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a hex string") from exc
+    return normalized
+
+
+def join_proposal_trace_and_sp1(
+    trace: Mapping[str, Any], report: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the only supported trace/SP1 join keys and return a compact summary."""
+    trace_hash = trace.get("guest_input_sha256")
+    report_hash = report.get("guest_input_sha256")
+    if (
+        not isinstance(trace_hash, str)
+        or len(trace_hash) != 66
+        or not isinstance(report_hash, str)
+        or trace_hash != report_hash
+    ):
+        raise ValueError("trace/SP1 GuestInput hash mismatch or missing hash")
+    if trace.get("status") != "complete" or trace.get("parity_passed") is not True:
+        raise ValueError("proposal trace did not pass the ordinary/traced A/B gate")
+    if trace.get("partial_block_count") != 0:
+        raise ValueError("proposal trace contains rejected partial block diagnostics")
+    trace_output = _normalized_hex(trace.get("public_output"), field_name="trace public output")
+    sp1_output = _normalized_hex(report.get("public_values"), field_name="SP1 public output")
+    if trace_output != sp1_output:
+        raise ValueError("trace/SP1 public output mismatch")
+    block_count = trace.get("block_count")
+    if not isinstance(block_count, int) or block_count <= 0:
+        raise ValueError("complete proposal trace must contain block rows")
+    return {
+        "guest_input_sha256": trace_hash,
+        "public_output": trace_output,
+        "trace_ab_passed": True,
+        "trace_block_count": block_count,
+    }
 
 
 def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     raw_run = {**case, **report}
+    controlled_trace = raw_run.get("controlled_trace")
+    if isinstance(controlled_trace, Mapping):
+        trace_kind = controlled_trace.get("kind", "revm_opcode")
+        if trace_kind == "precompile":
+            identity_fields = (
+                (controlled_trace.get("address"), parse_opcode(case.get("address"))),
+                (controlled_trace.get("target_count"), case.get("target_count")),
+                (controlled_trace.get("target_raw_gas"), case.get("target_raw_gas")),
+                (controlled_trace.get("lane"), case.get("lane")),
+                (controlled_trace.get("pair_id"), case.get("pair_id")),
+            )
+        elif trace_kind == "revm_opcode":
+            identity_fields = (
+                (controlled_trace.get("target_opcode"), parse_opcode(case.get("opcode"))),
+                (controlled_trace.get("declared_target_count"), case.get("target_count")),
+                (
+                    controlled_trace.get("declared_target_raw_gas"),
+                    case.get("target_raw_gas"),
+                ),
+            )
+        else:
+            raise ValueError("unknown controlled trace kind")
+        if any(actual != expected for actual, expected in identity_fields):
+            raise ValueError("controlled trace identity does not match case")
+        workload_id = controlled_trace.get("workload_id")
+        backend_input_sha256 = controlled_trace.get("backend_input_sha256")
+        if not _is_sha256(workload_id) or not _is_sha256(backend_input_sha256):
+            raise ValueError("controlled trace identity is missing a canonical SHA256")
+        raw_run["workload_id"] = workload_id
+        raw_run["backend_input_sha256"] = backend_input_sha256
+        if trace_kind == "precompile":
+            raw_run["pair_id"] = controlled_trace["pair_id"]
+            raw_run["isolation"] = {
+                "status": "passed",
+                "input_size": controlled_trace.get("input_len"),
+                "output_size": controlled_trace.get("output_len"),
+                "loop_iterations": controlled_trace.get("loop_iterations"),
+                "folded_bytes_per_iteration": controlled_trace.get(
+                    "folded_bytes_per_iteration"
+                ),
+            }
+        else:
+            raw_run["isolation"] = {
+                "status": "passed",
+                "bytecode_size": controlled_trace.get("bytecode_len"),
+                "input_size": controlled_trace.get("backend_input_len"),
+                "non_target_counts": controlled_trace.get("non_target_counts"),
+                "non_target_raw_gas": controlled_trace.get("non_target_raw_gas"),
+            }
     if "prover_gas" not in raw_run and "gas" in raw_run:
         raw_run["prover_gas"] = raw_run["gas"]
     primary_metric = raw_run.get("primary_workload_metric")
@@ -1517,6 +2372,1389 @@ GENERATED_EXPERIMENT_PREFIXES = (
 )
 Q_FORMULA = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
 OUT_OF_FIT_CHECKPOINTS = {"4": 8, "16": 32, "64": 128, "256": 512, "1024": 2048}
+CONTROLLED_PREFIXES = (
+    (0, 1, 2, 4),
+    (0, 1, 2, 4, 8, 16),
+    (0, 1, 2, 4, 8, 16, 32, 64),
+    (0, 1, 2, 4, 8, 16, 32, 64, 128, 256),
+    (0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
+)
+
+
+def _decimal(value: Any, *, label: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a finite decimal")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite decimal") from exc
+    if not result.is_finite():
+        raise ValueError(f"{label} must be a finite decimal")
+    return result
+
+
+def _decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def controlled_workload_id(workload_spec: Mapping[str, Any], **_ignored: Any) -> str:
+    return sha256_bytes(
+        canonical_json({"kind": "controlled", "workload_spec": workload_spec})
+    )
+
+
+def controlled_execution_row_id(
+    workload_id: str,
+    *,
+    backend: str,
+    run_id: str,
+    repeat_index: int,
+    backend_input_sha256: str,
+) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {
+                "backend": backend,
+                "backend_input_sha256": backend_input_sha256,
+                "kind": "controlled_execution",
+                "repeat_index": repeat_index,
+                "run_id": run_id,
+                "workload_id": workload_id,
+            }
+        )
+    )
+
+
+def event_matches(spec: EventMatchSpec, operation: Mapping[str, Any]) -> bool:
+    component = operation.get("kind", operation.get("component"))
+    if component != spec.component:
+        return False
+    if spec.component == "opcode":
+        try:
+            identifier = parse_opcode(operation.get("opcode"))
+        except (TypeError, ValueError):
+            return False
+        if identifier != spec.opcode:
+            return False
+        if spec.spawned is not None and operation.get("spawned") is not spec.spawned:
+            return False
+        if (
+            spec.dispatch_status is not None
+            and operation.get("dispatch_status") != spec.dispatch_status
+        ):
+            return False
+    else:
+        try:
+            identifier = parse_opcode(operation.get("address"))
+        except (TypeError, ValueError):
+            return False
+        if identifier != spec.address:
+            return False
+    return True
+
+
+def resolve_measurement_key(
+    manifest: Manifest, operation: Mapping[str, Any]
+) -> tuple[str | None, str]:
+    if operation.get("dispatch_status") == "selected_not_dispatched":
+        return None, "selected_not_dispatched"
+    matches = [
+        key
+        for key in manifest.measurement_keys
+        if event_matches(key.event_match, operation)
+        and operation.get("pricing_basis") == key.pricing_basis
+    ]
+    if not matches:
+        return None, "no_measurement_key"
+    if len(matches) != 1:
+        return None, "ambiguous_measurement_key"
+    return matches[0].id, "measured"
+
+
+def _validate_repeat_point(point: Mapping[str, Any]) -> tuple[Decimal, Decimal | None, list[str]]:
+    reasons: list[str] = []
+    identity_fields = (
+        "case_input_sha256_repeats",
+        "exit_code_repeats",
+        "public_values_repeats",
+    )
+    for field_name in identity_fields:
+        values = point.get(field_name)
+        if not isinstance(values, list) or len(values) != 3 or len(set(map(str, values))) != 1:
+            reasons.append("repeat_identity")
+    exit_codes = point.get("exit_code_repeats")
+    if isinstance(exit_codes, list) and any(value != 0 for value in exit_codes):
+        reasons.append("repeat_identity")
+    gas_repeats = point.get("prover_gas_repeats")
+    if not isinstance(gas_repeats, list) or len(gas_repeats) != 3:
+        reasons.append("repeat_identity")
+        gas = Decimal(0)
+    else:
+        gas_values = [_decimal(value, label="proverGas repeat") for value in gas_repeats]
+        if max(gas_values) - min(gas_values) != 0:
+            reasons.append("repeat_noise_p")
+        gas = gas_values[0]
+    secondary_repeats = point.get("instruction_count_repeats")
+    secondary: Decimal | None = None
+    if isinstance(secondary_repeats, list) and len(secondary_repeats) == 3:
+        secondary_values = [
+            _decimal(value, label="instruction-count repeat") for value in secondary_repeats
+        ]
+        if max(secondary_values) - min(secondary_values) == 0:
+            secondary = secondary_values[0]
+    return gas, secondary, list(dict.fromkeys(reasons))
+
+
+def _fit_decimal(xs: list[Decimal], ys: list[Decimal]) -> dict[str, Decimal | list[str]]:
+    count = Decimal(len(xs))
+    mean_x = sum(xs) / count
+    mean_y = sum(ys) / count
+    denominator = sum((value - mean_x) ** 2 for value in xs)
+    if denominator == 0:
+        return {"reasons": ["primary_slope"]}
+    slope = sum(
+        (x_value - mean_x) * (y_value - mean_y)
+        for x_value, y_value in zip(xs, ys)
+    ) / denominator
+    intercept = mean_y - slope * mean_x
+    predicted = [intercept + slope * value for value in xs]
+    residuals = [actual - estimate for actual, estimate in zip(ys, predicted)]
+    ss_res = sum(value * value for value in residuals)
+    ss_total = sum((value - mean_y) ** 2 for value in ys)
+    signal = max(ys) - min(ys)
+    reasons = []
+    if slope <= 0:
+        reasons.append("primary_slope")
+    if signal < max(Decimal(1000), abs(ys[0]) * Decimal("0.01")):
+        reasons.append("primary_signal")
+    if ss_total == 0:
+        r2 = Decimal(0)
+        reasons.append("primary_r2")
+    else:
+        r2 = Decimal(1) - ss_res / ss_total
+        if r2 < Decimal("0.995"):
+            reasons.append("primary_r2")
+    if len(xs) <= 2:
+        stderr = Decimal("Infinity")
+        reasons.append("primary_slope_stderr")
+    else:
+        stderr = (ss_res / Decimal(len(xs) - 2) / denominator).sqrt()
+        if slope <= 0 or stderr / slope > Decimal("0.05"):
+            reasons.append("primary_slope_stderr")
+    max_residual = max(abs(value) for value in residuals)
+    if signal <= 0 or max_residual > signal * Decimal("0.02"):
+        reasons.append("primary_residual")
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r2": r2,
+        "stderr": stderr,
+        "signal": signal,
+        "max_residual": max_residual,
+        "reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def _isolation_reasons(points: list[Mapping[str, Any]]) -> list[str]:
+    identities = []
+    for point in points:
+        isolation = point.get("isolation")
+        if not isinstance(isolation, Mapping) or isolation.get("status") != "passed":
+            return ["confounded_template"]
+        identities.append(
+            canonical_json(
+                {
+                    "bytecode_size": isolation.get("bytecode_size"),
+                    "input_size": isolation.get("input_size"),
+                    "non_target_counts": isolation.get("non_target_counts"),
+                    "non_target_raw_gas": isolation.get("non_target_raw_gas"),
+                }
+            )
+        )
+    return [] if len(set(identities)) == 1 else ["confounded_template"]
+
+
+def evaluate_controlled_sweep(
+    observations: Iterable[Mapping[str, Any]],
+    *,
+    pricing_basis: str,
+    target_raw_gas: int | None,
+    generator_max_count: int,
+) -> dict[str, Any]:
+    observation_list = list(observations)
+    points = {int(point["count"]): point for point in observation_list}
+    if len(points) != len(observation_list):
+        return {"status": "rejected", "reasons": ["duplicate_count"]}
+    parsed: dict[int, tuple[Decimal, Decimal | None, list[str]]] = {
+        count: _validate_repeat_point(point) for count, point in points.items()
+    }
+    repeat_reasons = [reason for _, _, reasons in parsed.values() for reason in reasons]
+    if repeat_reasons:
+        return {
+            "status": "rejected",
+            "reasons": list(dict.fromkeys(repeat_reasons)),
+        }
+    selected: tuple[int, ...] | None = None
+    fit: dict[str, Any] | None = None
+    last_reasons: list[str] = []
+    for prefix in CONTROLLED_PREFIXES:
+        if max(prefix) > generator_max_count or any(count not in points for count in prefix):
+            continue
+        isolation_reasons = _isolation_reasons([points[count] for count in prefix])
+        if isolation_reasons:
+            return {"status": "rejected", "reasons": isolation_reasons}
+        fit = _fit_decimal(
+            [Decimal(count) for count in prefix],
+            [parsed[count][0] for count in prefix],
+        )
+        last_reasons = list(fit["reasons"])
+        if not last_reasons:
+            selected = prefix
+            break
+    if selected is None or fit is None:
+        return {
+            "status": "rejected",
+            "reasons": list(dict.fromkeys(last_reasons + ["exhausted_sweep"])),
+        }
+    checkpoint_count = OUT_OF_FIT_CHECKPOINTS[str(max(selected))]
+    if checkpoint_count > generator_max_count:
+        return {
+            "status": "rejected",
+            "selected_counts": list(selected),
+            "reasons": ["checkpoint_generator_bound"],
+        }
+    checkpoint = points.get(checkpoint_count)
+    if checkpoint is None:
+        return {
+            "status": "rejected",
+            "selected_counts": list(selected),
+            "reasons": ["checkpoint_missing"],
+        }
+    isolation_reasons = _isolation_reasons(
+        [points[count] for count in selected] + [checkpoint]
+    )
+    if isolation_reasons:
+        return {
+            "status": "rejected",
+            "selected_counts": list(selected),
+            "reasons": isolation_reasons,
+        }
+    base = parsed[0][0]
+    observed_delta = parsed[checkpoint_count][0] - base
+    predicted_delta = fit["slope"] * Decimal(checkpoint_count)
+    if observed_delta <= 0 or predicted_delta <= 0:
+        return {
+            "status": "rejected",
+            "selected_counts": list(selected),
+            "reasons": ["checkpoint_nonpositive"],
+        }
+    ape = abs(predicted_delta - observed_delta) / observed_delta
+    checkpoint_record = {
+        "count": checkpoint_count,
+        "observed_delta_p": _decimal_text(observed_delta),
+        "predicted_delta_p": _decimal_text(predicted_delta),
+        "ape_p": _decimal_text(ape),
+        "status": "passed" if ape <= Decimal("0.10") else "failed",
+    }
+    if ape > Decimal("0.10"):
+        return {
+            "status": "rejected",
+            "selected_counts": list(selected),
+            "checkpoint": checkpoint_record,
+            "reasons": ["extrapolation_check_failed"],
+        }
+    slope = fit["slope"]
+    result = {
+        "status": "accepted",
+        "selected_counts": list(selected),
+        "ols_counts": list(selected),
+        "g_p": _decimal_text(slope),
+        "intercept_p": _decimal_text(fit["intercept"]),
+        "r2_p": _decimal_text(fit["r2"]),
+        "slope_stderr_p": _decimal_text(fit["stderr"]),
+        "signal_p": _decimal_text(fit["signal"]),
+        "max_residual_p": _decimal_text(fit["max_residual"]),
+        "checkpoint": checkpoint_record,
+    }
+    if pricing_basis == "raw_gas_slope":
+        if target_raw_gas is None or target_raw_gas <= 0:
+            return {"status": "rejected", "reasons": ["invalid_raw_gas"]}
+        result["c_p"] = _decimal_text(slope / Decimal(target_raw_gas))
+    elif pricing_basis == "fixed_per_event":
+        if target_raw_gas not in (None, 0):
+            return {"status": "rejected", "reasons": ["fixed_event_raw_gas"]}
+        result["f_p"] = _decimal_text(slope)
+    else:
+        return {"status": "rejected", "reasons": ["pricing_basis"]}
+    secondary_values = [parsed[count][1] for count in selected]
+    if any(value is None for value in secondary_values):
+        result["secondary"] = {"status": "failed", "reason": "repeat_noise_s"}
+    else:
+        secondary_fit = _fit_decimal(
+            [Decimal(count) for count in selected],
+            [value for value in secondary_values if value is not None],
+        )
+        result["secondary"] = {
+            "status": "available" if not secondary_fit["reasons"] else "failed",
+            "g_s": _decimal_text(secondary_fit["slope"]),
+            "reasons": secondary_fit["reasons"],
+        }
+    return result
+
+
+def evaluate_paired_precompile_sweep(
+    observations: Iterable[Mapping[str, Any]],
+    *,
+    target_raw_gas: int,
+    generator_max_count: int,
+) -> dict[str, Any]:
+    synthesized = []
+    expected_shape: bytes | None = None
+    for row in observations:
+        shape = canonical_json(row.get("shape"))
+        if expected_shape is None:
+            expected_shape = shape
+        if shape != expected_shape:
+            return {"status": "rejected", "reasons": ["confounded_template"]}
+        target = row["target"]
+        control = row["control"]
+        target_gas, target_secondary, target_reasons = _validate_repeat_point(target)
+        control_gas, control_secondary, control_reasons = _validate_repeat_point(control)
+        if target_reasons or control_reasons:
+            return {
+                "status": "rejected",
+                "reasons": list(dict.fromkeys(target_reasons + control_reasons)),
+            }
+        point = {
+            "count": row["count"],
+            "prover_gas_repeats": [_decimal_text(target_gas - control_gas)] * 3,
+            "instruction_count_repeats": (
+                [_decimal_text(target_secondary - control_secondary)] * 3
+                if target_secondary is not None and control_secondary is not None
+                else []
+            ),
+            "case_input_sha256_repeats": ["0" * 64] * 3,
+            "exit_code_repeats": [0, 0, 0],
+            "public_values_repeats": ["paired"] * 3,
+            "isolation": {
+                "status": "passed",
+                "bytecode_size": 0,
+                "input_size": row.get("shape", {}).get("input_size"),
+                "non_target_counts": row.get("shape"),
+                "non_target_raw_gas": "0",
+            },
+        }
+        synthesized.append(point)
+    return evaluate_controlled_sweep(
+        synthesized,
+        pricing_basis="raw_gas_slope",
+        target_raw_gas=target_raw_gas,
+        generator_max_count=generator_max_count,
+    )
+
+
+def case_primary_value(case_result: Mapping[str, Any]) -> tuple[str, Decimal]:
+    if case_result.get("status") != "accepted":
+        raise ValueError("case is not accepted")
+    slope = _decimal(case_result.get("g_p"), label="g_p")
+    if slope <= 0:
+        raise ValueError("primary slope must be positive")
+    basis = case_result.get("pricing_basis")
+    if basis == "raw_gas_slope":
+        raw_gas = _decimal(case_result.get("target_raw_gas"), label="target raw gas")
+        if raw_gas <= 0:
+            raise ValueError("target raw gas must be positive")
+        return "c_p", slope / raw_gas
+    if basis == "fixed_per_event":
+        if case_result.get("target_raw_gas") not in (None, 0, "0"):
+            raise ValueError("fixed-event primary value cannot consume raw gas")
+        return "f_p", slope
+    raise ValueError("unknown pricing basis")
+
+
+def residualize_overhead_delta(
+    manifest: Manifest,
+    overhead_key_id: str,
+    *,
+    target_minus_control: Any,
+    feature_deltas: Mapping[str, int],
+    accepted_costs: Mapping[str, Any],
+) -> Decimal:
+    overheads = {item.id: item for item in manifest.overhead_keys}
+    key = overheads.get(overhead_key_id)
+    if key is None:
+        raise ValueError(f"unknown overhead key: {overhead_key_id}")
+    closure = set(manifest.subtract_closure.get(overhead_key_id, ()))
+    declared = {overhead_key_id, *closure, *key.bundled_keys}
+    if set(feature_deltas) != declared:
+        raise ValueError("controlled overhead has an undeclared changed feature")
+    own_units = feature_deltas[overhead_key_id]
+    if own_units <= 0:
+        raise ValueError("controlled overhead target units must be positive")
+    residual = _decimal(target_minus_control, label="overhead target/control delta")
+    for child in sorted(closure):
+        if child not in accepted_costs:
+            raise ValueError(f"failed required dependency: {child}")
+        residual -= Decimal(feature_deltas[child]) * _decimal(
+            accepted_costs[child], label=f"accepted overhead {child}"
+        )
+    for bundled in key.bundled_keys:
+        numerator, denominator = key.bundled_ratios[bundled]
+        if feature_deltas[bundled] * denominator != own_units * numerator:
+            raise ValueError(f"controlled-mismatched bundled ratio for {bundled}")
+    return residual / Decimal(own_units)
+
+
+def fixed_startup_residual(panel_repeat_residuals: Iterable[Iterable[Any]]) -> Decimal:
+    case_values = []
+    for repeats in panel_repeat_residuals:
+        values = [
+            _decimal(value, label="startup repeat residual") for value in repeats
+        ]
+        if len(values) != 3 or max(values) != min(values):
+            raise ValueError("startup requires a repeat-stable residual for every panel case")
+        case_values.append(values[0])
+    if not case_values:
+        raise ValueError("startup residual panel is empty")
+    return sum(case_values) / Decimal(len(case_values))
+
+
+def construct_measurement_values(
+    manifest: Manifest, case_results: Iterable[Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    by_case = {str(result.get("case_id")): result for result in case_results}
+    values: dict[str, dict[str, Any]] = {}
+    for key in manifest.measurement_keys:
+        required = [by_case.get(case_id) for case_id in key.required_case_ids]
+        diagnostic = [
+            {
+                field_name: field_value
+                for field_name, field_value in by_case[case_id].items()
+                if field_name != "secondary"
+                and "instruction" not in field_name
+                and field_name not in {"g_s", "c_s", "f_s", "o_s"}
+            }
+            for case_id in key.diagnostic_case_ids
+            if case_id in by_case
+        ]
+        if any(result is None or result.get("status") != "accepted" for result in required):
+            values[key.id] = {
+                "status": "required_case_incomplete",
+                "pricing_basis": key.pricing_basis,
+                "required_case_ids": list(key.required_case_ids),
+                "diagnostic_results": diagnostic,
+            }
+            continue
+        typed_values = [case_primary_value(result) for result in required if result is not None]
+        value_names = {name for name, _ in typed_values}
+        if value_names != {"c_p" if key.pricing_basis == "raw_gas_slope" else "f_p"}:
+            raise ValueError(f"case basis differs from measurement key {key.id}")
+        primary_values = [value for _, value in typed_values]
+        minimum, maximum = min(primary_values), max(primary_values)
+        if minimum <= 0 or maximum / minimum - Decimal(1) > Decimal("0.05"):
+            values[key.id] = {
+                "status": "scenario_dependent",
+                "pricing_basis": key.pricing_basis,
+                "required_case_ids": list(key.required_case_ids),
+                "diagnostic_results": diagnostic,
+            }
+            continue
+        value = sum(primary_values) / Decimal(len(primary_values))
+        field_name = typed_values[0][0]
+        values[key.id] = {
+            "status": "accepted",
+            "pricing_basis": key.pricing_basis,
+            field_name: _decimal_text(value),
+            "required_case_ids": list(key.required_case_ids),
+            "diagnostic_results": diagnostic,
+            "checkpoint_evidence": {
+                result["case_id"]: result.get("checkpoint") for result in required
+            },
+        }
+    reference = values.get(manifest.normalization_reference_key or "")
+    if reference is not None and reference.get("status") == "accepted":
+        anchor = _decimal(reference["c_p"], label="ADD c_p")
+        for value in values.values():
+            if value.get("status") == "accepted" and "c_p" in value:
+                value["m_p"] = _decimal_text(
+                    _decimal(value["c_p"], label="c_p") / anchor
+                )
+    return values
+
+
+def build_component_cost_ledger(
+    manifest: Manifest,
+    measurements: Mapping[str, Mapping[str, Any]],
+    overhead_values: Mapping[str, Any],
+    schedule: UnzenSchedule,
+) -> dict[str, Any]:
+    """Build a complete review ledger without inventing units for host-only work."""
+    by_schedule_key: dict[str, list[MeasurementKeySpec]] = {}
+    for key in manifest.measurement_keys:
+        by_schedule_key.setdefault(key.production_schedule_key, []).append(key)
+    primary_rows: list[dict[str, Any]] = []
+    for component, rows in (
+        ("opcode", schedule.opcode_multipliers),
+        ("precompile", schedule.precompile_multipliers),
+    ):
+        for identifier, multiplier in sorted(rows.items()):
+            schedule_key = _canonical_schedule_key(component, identifier)
+            keys = by_schedule_key.get(schedule_key) or [None]
+            for key in keys:
+                value = measurements.get(key.id, {}) if key is not None else {}
+                row = {
+                    "component_id": key.id if key is not None else schedule_key,
+                    "production_schedule_key": schedule_key,
+                    "component": component,
+                    "raw_gas_unit": (
+                        "interpreter_raw_gas"
+                        if component == "opcode"
+                        else "native_gas"
+                    ),
+                    "current_zkgas_multiplier": multiplier,
+                    "measurement_key_id": key.id if key is not None else None,
+                    "status": value.get("status", "unmeasured"),
+                    "marginal_prover_gas": value.get("c_p"),
+                    "cost_index": value.get("m_p"),
+                    "index_kind": "add_normalized_prover_gas_per_raw_gas",
+                }
+                if key is not None and key.pricing_basis == "fixed_per_event":
+                    opcode_name = UZEN_OPCODE_NAMES.get(identifier)
+                    row.update(
+                        {
+                            "raw_gas_unit": None,
+                            "current_zkgas_multiplier": None,
+                            "current_zkgas_fixed_charge": (
+                                schedule.spawn_estimates.get(opcode_name)
+                                if opcode_name is not None
+                                else None
+                            ),
+                            "marginal_prover_gas": value.get("f_p"),
+                            "cost_index": value.get("f_p"),
+                            "index_kind": "prover_gas_per_event_not_add_normalized",
+                        }
+                    )
+                primary_rows.append(row)
+    overhead_units = {key.id: key.unit for key in manifest.overhead_keys}
+    for key in Q_FORMULA:
+        current_charge = (
+            schedule.tx_intrinsic_zk_gas if key == "tx_base" else None
+        )
+        value = overhead_values.get(key)
+        primary_rows.append(
+            {
+                "component_id": key,
+                "component": "controlled_overhead",
+                "unit": overhead_units.get(key),
+                "raw_gas_unit": None,
+                "current_zkgas_multiplier": None,
+                "current_zkgas_fixed_charge": current_charge,
+                "marginal_prover_gas": (
+                    _decimal_text(_decimal(value, label=f"overhead {key}"))
+                    if value is not None
+                    else None
+                ),
+                "cost_index": (
+                    _decimal_text(_decimal(value, label=f"overhead {key}"))
+                    if value is not None
+                    else None
+                ),
+                "index_kind": "prover_gas_per_declared_unit",
+                "status": "accepted" if value is not None else "unmeasured",
+            }
+        )
+    diagnostic_rows = [
+        {
+            "component_id": key.id,
+            "component": "diagnostic_overhead",
+            "unit": key.unit,
+            "raw_gas_unit": None,
+            "current_zkgas_multiplier": None,
+            "marginal_prover_gas": None,
+            "cost_index": None,
+            "status": "unmeasured",
+            "reason": "diagnostic_controlled_result_not_supplied",
+        }
+        for key in manifest.overhead_keys
+        if key.formula_role == "diagnostic"
+    ]
+    diagnostic_rows.extend(
+        {
+            "component_id": component_id,
+            "component": "host_guest_internal_action",
+            "unit": None,
+            "raw_gas_unit": None,
+            "current_zkgas_multiplier": None,
+            "marginal_prover_gas": None,
+            "cost_index": None,
+            "status": "unmeasured",
+            "reason": "no_independent_controlled_observable_unit",
+        }
+        for component_id in (
+            "host_action:block_header_hash",
+            "host_action:trie_merkle_hash",
+            "host_action:witness_processing",
+        )
+    )
+    payload = {
+        "schema_version": 1,
+        "primary_rows": primary_rows,
+        "diagnostic_rows": diagnostic_rows,
+        "unit_policy": (
+            "never divide host-only or fixed/base work by EVM raw gas; "
+            "unisolated actions remain explicit unmeasured coverage"
+        ),
+    }
+    return {**payload, "sha256": sha256_bytes(canonical_json(payload))}
+
+
+def _primary_case_projection(case_results: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    projection = []
+    for row in case_results:
+        projection.append(
+            {
+                key: value
+                for key, value in row.items()
+                if key != "secondary"
+                and "instruction" not in key
+                and key not in {"g_s", "c_s", "f_s", "o_s"}
+            }
+        )
+    return sorted(projection, key=lambda row: str(row.get("case_id")))
+
+
+def build_candidate_components(
+    manifest: Manifest,
+    case_results: Iterable[Mapping[str, Any]],
+    overhead_values: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    schedule: UnzenSchedule | None = None,
+) -> dict[str, Any]:
+    rows = list(case_results)
+    measurements = construct_measurement_values(manifest, rows)
+    add = measurements.get(manifest.normalization_reference_key or "")
+    if add is None or add.get("status") != "accepted":
+        raise ValueError("ADD measurement is required before candidate sealing")
+    missing_q = [key for key in Q_FORMULA if key not in overhead_values]
+    if missing_q:
+        raise ValueError(f"Q_formula value is missing: {missing_q[0]}")
+    primary_overheads = {}
+    for key in Q_FORMULA:
+        value = _decimal(overhead_values[key], label=f"overhead {key}")
+        if value <= 0:
+            raise ValueError(f"Q_formula value must be positive: {key}")
+        primary_overheads[key] = _decimal_text(value)
+    for key_id, value in measurements.items():
+        if value.get("status") != "accepted":
+            continue
+        evidence = value.get("checkpoint_evidence")
+        if not isinstance(evidence, Mapping) or any(
+            not isinstance(item, Mapping) or item.get("status") != "passed"
+            for item in evidence.values()
+        ):
+            raise ValueError(f"checkpoint evidence is missing or failed for {key_id}")
+    primary_rows = _primary_case_projection(rows)
+    normalized = {
+        "schema_version": 1,
+        "measurements": measurements,
+        "overheads": primary_overheads,
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "system_operation_ownership": manifest.system_operation_ownership,
+        "anchor_operation_ownership": manifest.anchor_operation_ownership,
+    }
+    observations = {"schema_version": 1, "rows": primary_rows}
+    normalized_sha = sha256_bytes(canonical_json(normalized))
+    observations_sha = sha256_bytes(canonical_json(observations))
+    component_hashes = {
+        "normalized-primary.json": normalized_sha,
+        "primary-observations.json": observations_sha,
+    }
+    component_ledger = None
+    primary_ledger = None
+    diagnostic_ledger = None
+    if schedule is not None:
+        component_ledger = build_component_cost_ledger(
+            manifest, measurements, primary_overheads, schedule
+        )
+        primary_ledger = {
+            "schema_version": component_ledger["schema_version"],
+            "rows": component_ledger["primary_rows"],
+            "unit_policy": component_ledger["unit_policy"],
+        }
+        diagnostic_ledger = {
+            "schema_version": component_ledger["schema_version"],
+            "rows": component_ledger["diagnostic_rows"],
+            "unit_policy": component_ledger["unit_policy"],
+        }
+        component_hashes["primary-component-ledger.json"] = sha256_bytes(
+            canonical_json(primary_ledger)
+        )
+    root = {
+        "schema_version": 1,
+        "implementation_revision": provenance.get(
+            "implementation_revision", provenance.get("revision")
+        ),
+        "status": "sealed_controlled_candidate",
+        "review_only": True,
+        "production_write": False,
+        "integer_schedule_emitted": False,
+        "components": component_hashes,
+        "q_formula": list(Q_FORMULA),
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "system_operation_ownership": manifest.system_operation_ownership,
+        "anchor_operation_ownership": manifest.anchor_operation_ownership,
+        "residualization_dag": {
+            key.id: list(key.subtract_keys) for key in manifest.overhead_keys
+        },
+        "formula": (
+            "p_hat=sum(raw_gas*c_p)+sum(events*f_p)+proposal_startup+"
+            "blocks*block_base+started_non_anchor_transactions*tx_base+"
+            "native_value_transfers*native_value_transfer"
+        ),
+        "thresholds": {
+            "required_case_consistency_max": "0.05",
+            "checkpoint_ape_max": "0.10",
+            "proposal_ape_max": "0.10",
+        },
+        "normalization_reference_key": manifest.normalization_reference_key,
+        "out_of_fit_checkpoint_mapping": OUT_OF_FIT_CHECKPOINTS,
+        "provenance": dict(provenance),
+    }
+    candidate_sha = sha256_bytes(canonical_json(root))
+    cycle_samples = {
+        "schema_version": 1,
+        "rows": [
+            {
+                "case_id": row.get("case_id"),
+                "secondary": row.get("secondary", {"status": "missing"}),
+            }
+            for row in sorted(rows, key=lambda item: str(item.get("case_id")))
+        ],
+    }
+    return {
+        "candidate_manifest": root,
+        "candidate_sha256": candidate_sha,
+        "normalized_primary": normalized,
+        "primary_observations": observations,
+        "primary_component_ledger": primary_ledger,
+        "diagnostic_component_ledger": diagnostic_ledger,
+        "diagnostic_component_ledger_sha256": (
+            sha256_bytes(canonical_json(diagnostic_ledger))
+            if diagnostic_ledger is not None
+            else None
+        ),
+        "cycle_samples": cycle_samples,
+        "cycle_sample_sha256": sha256_bytes(canonical_json(cycle_samples)),
+        "c_p": {
+            key: value["c_p"]
+            for key, value in measurements.items()
+            if value.get("status") == "accepted" and "c_p" in value
+        },
+        "f_p": {
+            key: value["f_p"]
+            for key, value in measurements.items()
+            if value.get("status") == "accepted" and "f_p" in value
+        },
+        "o_p": primary_overheads,
+    }
+
+
+def build_controlled_bridge(
+    manifest: Manifest, samples: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    rows: dict[str, dict[str, Any]] = {}
+    ratios: list[Decimal] = []
+    missing: list[str] = []
+    for key in manifest.bridge_key_ids:
+        sample = samples.get(key)
+        if sample is None or sample.get("status") == "unavailable":
+            missing.append(key)
+            rows[key] = {
+                "status": "missing",
+                "reason": (
+                    sample.get("reason", "missing")
+                    if isinstance(sample, Mapping)
+                    else "missing"
+                ),
+            }
+            continue
+        prover_gas = _decimal(sample.get("prover_gas"), label=f"{key} proverGas")
+        instruction_count = _decimal(
+            sample.get("instruction_count"), label=f"{key} instruction count"
+        )
+        if prover_gas <= 0 or instruction_count <= 0:
+            missing.append(key)
+            rows[key] = {"status": "nonpositive"}
+            continue
+        ratio = prover_gas / instruction_count
+        ratios.append(ratio)
+        rows[key] = {
+            "status": "available",
+            "prover_gas": _decimal_text(prover_gas),
+            "instruction_count": _decimal_text(instruction_count),
+            "rho": _decimal_text(ratio),
+        }
+    kappa: Decimal | None = None
+    status = "insufficient_data"
+    if not missing:
+        ordered = sorted(ratios)
+        middle = len(ordered) // 2
+        kappa = (
+            ordered[middle]
+            if len(ordered) % 2
+            else (ordered[middle - 1] + ordered[middle]) / Decimal(2)
+        )
+        stable = True
+        for key, row in rows.items():
+            actual = _decimal(row["prover_gas"], label=f"{key} proverGas")
+            prediction = _decimal(
+                row["instruction_count"], label=f"{key} instruction count"
+            ) * kappa
+            ape = abs(prediction - actual) / actual
+            row["predicted_prover_gas"] = _decimal_text(prediction)
+            row["ape"] = _decimal_text(ape)
+            stable = stable and ape <= Decimal("0.10")
+        status = "stable_controlled" if stable else "not_stable_controlled"
+    result = {
+        "schema_version": 1,
+        "model": manifest.bridge_model,
+        "threshold": _decimal_text(manifest.bridge_controlled_max_ape or Decimal("0.10")),
+        "bridge_key_ids": list(manifest.bridge_key_ids),
+        "keys": rows,
+        "missing_keys": missing,
+        "kappa_sp1": _decimal_text(kappa) if kappa is not None else None,
+        "status": status,
+    }
+    result["bridge_sha256"] = sha256_bytes(canonical_json(result))
+    return result
+
+
+def build_controlled_cycle_cost_samples(
+    manifest: Manifest,
+    case_results: Iterable[Mapping[str, Any]],
+    overhead_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project controlled fits into same-unit marginal proverGas/instruction pairs."""
+    rows = list(case_results)
+    operation_costs = _operation_costs(manifest, rows)
+    overhead_primary = overhead_artifact.get("o_p", {})
+    overhead_secondary = overhead_artifact.get("o_s", {})
+    if not isinstance(overhead_primary, Mapping) or not isinstance(
+        overhead_secondary, Mapping
+    ):
+        raise ValueError("controlled overhead artifact has invalid marginal mappings")
+    samples: dict[str, dict[str, Any]] = {}
+    for key_id in manifest.bridge_key_ids:
+        if key_id in operation_costs:
+            cost = operation_costs[key_id]
+            if "secondary_cost" in cost:
+                samples[key_id] = {
+                    "status": "available",
+                    "unit": cost["pricing_basis"],
+                    "prover_gas": _decimal_text(cost["cost"]),
+                    "instruction_count": _decimal_text(cost["secondary_cost"]),
+                }
+            else:
+                samples[key_id] = {
+                    "status": "unavailable",
+                    "reason": "secondary_operation_cost_unavailable",
+                }
+        elif key_id in Q_FORMULA and key_id in overhead_primary:
+            if key_id in overhead_secondary:
+                samples[key_id] = {
+                    "status": "available",
+                    "unit": next(
+                        key.unit for key in manifest.overhead_keys if key.id == key_id
+                    ),
+                    "prover_gas": _decimal_text(
+                        _decimal(overhead_primary[key_id], label=f"overhead {key_id}")
+                    ),
+                    "instruction_count": _decimal_text(
+                        _decimal(
+                            overhead_secondary[key_id],
+                            label=f"secondary overhead {key_id}",
+                        )
+                    ),
+                }
+            else:
+                samples[key_id] = {
+                    "status": "unavailable",
+                    "reason": "secondary_overhead_cost_unavailable",
+                }
+        else:
+            samples[key_id] = {
+                "status": "unavailable",
+                "reason": "primary_controlled_cost_unavailable",
+            }
+    return {
+        "schema_version": 1,
+        "bridge_key_ids": list(manifest.bridge_key_ids),
+        "samples": samples,
+        "operation_case_results": rows,
+        "overhead_case_results": list(overhead_artifact.get("case_results", [])),
+        "secondary_policy": (
+            "marginal c_p/c_s or f_p/f_s for operations and o_p/o_s for overheads; "
+            "unresidualized secondary dependencies remain unavailable"
+        ),
+    }
+
+
+def build_diagnostic_overheads(
+    manifest: Manifest, rows: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    diagnostic_keys = {
+        key.id for key in manifest.overhead_keys if key.formula_role == "diagnostic"
+    }
+    output_rows = []
+    for row in rows:
+        key_id = row.get("overhead_key_id")
+        if key_id not in diagnostic_keys:
+            raise ValueError(f"non-diagnostic overhead in diagnostic artifact: {key_id}")
+        output_rows.append(dict(row))
+    payload = {
+        "schema_version": 1,
+        "q_formula": list(Q_FORMULA),
+        "diagnostic_key_ids": sorted(diagnostic_keys),
+        "rows": sorted(
+            output_rows,
+            key=lambda row: (
+                str(row.get("overhead_key_id")),
+                str(row.get("case_id")),
+            ),
+        ),
+    }
+    return {**payload, "sha256": sha256_bytes(canonical_json(payload))}
+
+
+def bridge_validation_outcome(controlled_status: str, proposal_status: str) -> str:
+    if controlled_status == "insufficient_data":
+        return "inconclusive"
+    if controlled_status == "not_stable_controlled":
+        return "not_supported"
+    if controlled_status != "stable_controlled":
+        raise ValueError("unknown controlled bridge status")
+    if proposal_status == "not_evaluable_on_proposals":
+        return "inconclusive"
+    return "supported" if proposal_status == "validated_on_proposals" else "not_supported"
+
+
+def _is_block_owned_operation(operation: Mapping[str, Any]) -> bool:
+    return (
+        operation.get("phase") == "system"
+        or operation.get("disposition") == "system"
+        or operation.get("is_anchor") is True
+        or operation.get("operation_ownership") == "block_base"
+    )
+
+
+def predict_operations_from_trace(
+    manifest: Manifest,
+    candidate: Mapping[str, Any],
+    operations: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    predicted = Decimal(0)
+    measured_count = 0
+    unmeasured: list[dict[str, Any]] = []
+    measured_raw_gas = Decimal(0)
+    unmeasured_raw_gas = Decimal(0)
+    block_owned_system_operation_count = 0
+    for operation in operations:
+        if _is_block_owned_operation(operation):
+            block_owned_system_operation_count += 1
+            continue
+        if operation.get("disposition") not in {"attempted", "committed", "system"}:
+            continue
+        key_id, resolution = resolve_measurement_key(manifest, operation)
+        if key_id is None:
+            raw_gas = operation.get(
+                "interpreter_raw_gas", operation.get("native_gas", 0)
+            )
+            if raw_gas is not None:
+                unmeasured_raw_gas += _decimal(
+                    raw_gas, label="unmeasured operation raw gas"
+                )
+            unmeasured.append(
+                {
+                    "operation_id": operation.get("operation_id"),
+                    "reason": resolution,
+                }
+            )
+            continue
+        key = next(item for item in manifest.measurement_keys if item.id == key_id)
+        if key.pricing_basis == "raw_gas_slope":
+            coefficient = candidate.get("c_p", {}).get(key_id)
+            raw_gas = (
+                operation.get("interpreter_raw_gas")
+                if key.event_match.component == "opcode"
+                else operation.get("native_gas")
+            )
+            if coefficient is None or raw_gas is None:
+                unmeasured.append(
+                    {
+                        "operation_id": operation.get("operation_id"),
+                        "reason": "accepted_measurement_missing_candidate_value",
+                    }
+                )
+                continue
+            raw_value = _decimal(raw_gas, label=f"operation raw gas for {key_id}")
+            if raw_value < 0:
+                raise ValueError("operation raw gas cannot be negative")
+            predicted += raw_value * _decimal(
+                coefficient, label=f"candidate c_p {key_id}"
+            )
+            measured_raw_gas += raw_value
+        else:
+            coefficient = candidate.get("f_p", {}).get(key_id)
+            if coefficient is None:
+                unmeasured.append(
+                    {
+                        "operation_id": operation.get("operation_id"),
+                        "reason": "accepted_measurement_missing_candidate_value",
+                    }
+                )
+                continue
+            if operation.get("interpreter_raw_gas") is not None or operation.get(
+                "forwarded_gas"
+            ) is not None:
+                raise ValueError(
+                    "spawned forwarded/interpreter gas cannot enter proposal prediction"
+                )
+            predicted += _decimal(coefficient, label=f"candidate f_p {key_id}")
+        measured_count += 1
+    return {
+        "predicted_prover_gas": _decimal_text(predicted),
+        "measured_operation_count": measured_count,
+        "unmeasured_operation_count": len(unmeasured),
+        "measured_raw_gas": _decimal_text(measured_raw_gas),
+        "unmeasured_raw_gas": _decimal_text(unmeasured_raw_gas),
+        "block_owned_system_operation_count": block_owned_system_operation_count,
+        "unmeasured": unmeasured,
+    }
+
+
+def validate_sealed_candidate(
+    candidate: Mapping[str, Any], proposal_rows: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    threshold = _decimal(
+        candidate.get("thresholds", {}).get("proposal_ape_max"),
+        label="proposal APE threshold",
+    )
+    result_rows = []
+    for proposal in proposal_rows:
+        actual = _decimal(proposal.get("actual_prover_gas"), label="actual proverGas")
+        if actual <= 0:
+            raise ValueError("proposal actual proverGas must be positive")
+        predicted = Decimal(0)
+        measured_operations = 0
+        unmeasured_operations = 0
+        measured_raw_gas = Decimal(0)
+        block_owned_system_operations = 0
+        validation_errors = []
+        for field_name in (
+            "trace_ab_passed",
+            "guest_input_join",
+            "public_output_join",
+            "difficulty_reconciled",
+        ):
+            if proposal.get(field_name) is not True:
+                validation_errors.append(field_name)
+        for operation in proposal.get("operations", []):
+            if _is_block_owned_operation(operation):
+                block_owned_system_operations += 1
+                continue
+            if operation.get("disposition") not in {"committed", "attempted", "system"}:
+                continue
+            key = operation.get("measurement_key_id")
+            basis = operation.get("basis")
+            if basis == "raw_gas_slope" and key in candidate.get("c_p", {}):
+                raw_gas = _decimal(operation.get("raw_gas"), label="operation raw gas")
+                predicted += raw_gas * _decimal(
+                    candidate["c_p"][key], label=f"candidate c_p {key}"
+                )
+                measured_raw_gas += raw_gas
+                measured_operations += 1
+            elif basis == "fixed_per_event" and key in candidate.get("f_p", {}):
+                if operation.get("forwarded_gas") is not None:
+                    raise ValueError("spawned forwarded gas cannot be a proving-gas coefficient")
+                predicted += _decimal(candidate["f_p"][key], label=f"candidate f_p {key}")
+                measured_operations += 1
+            else:
+                unmeasured_operations += 1
+        features = proposal.get("features", {})
+        for key in Q_FORMULA:
+            if key not in features:
+                validation_errors.append(f"missing_feature:{key}")
+            predicted += Decimal(int(features.get(key, 0))) * _decimal(
+                candidate.get("o_p", {}).get(key), label=f"candidate overhead {key}"
+            )
+        denominators = proposal.get("coverage_denominators", {})
+        operation_denominator = denominators.get("operation_count")
+        raw_gas_denominator = denominators.get("raw_gas")
+        spawned_denominator = denominators.get("spawned_event")
+        if (
+            isinstance(operation_denominator, bool)
+            or not isinstance(operation_denominator, int)
+            or operation_denominator <= 0
+        ):
+            validation_errors.append("operation_count_coverage_denominator")
+        if (
+            isinstance(raw_gas_denominator, bool)
+            or not isinstance(raw_gas_denominator, int)
+            or raw_gas_denominator <= 0
+        ):
+            validation_errors.append("raw_gas_coverage_denominator")
+        if (
+            isinstance(spawned_denominator, bool)
+            or not isinstance(spawned_denominator, int)
+            or spawned_denominator < 0
+        ):
+            validation_errors.append("spawned_event_coverage_denominator")
+        if predicted <= 0:
+            validation_errors.append("nonpositive_prediction")
+        ape = abs(predicted - actual) / actual
+        result_rows.append(
+            {
+                "network": proposal.get("network"),
+                "proposal_id": proposal.get("proposal_id"),
+                "actual_prover_gas": _decimal_text(actual),
+                "predicted_prover_gas": _decimal_text(predicted),
+                "ape": _decimal_text(ape),
+                "measured_operation_count": measured_operations,
+                "unmeasured_operation_count": unmeasured_operations,
+                "measured_raw_gas": _decimal_text(measured_raw_gas),
+                "block_owned_system_operation_count": block_owned_system_operations,
+                "coverage_denominators": denominators,
+                "validation_errors": validation_errors,
+            }
+        )
+    if not result_rows:
+        raise ValueError("proposal validation requires rows")
+    network_mapes = {}
+    for network in sorted({row["network"] for row in result_rows}):
+        apes = [_decimal(row["ape"], label="proposal APE") for row in result_rows if row["network"] == network]
+        network_mapes[network] = _decimal_text(sum(apes) / Decimal(len(apes)))
+    combined = sum(_decimal(row["ape"], label="proposal APE") for row in result_rows) / Decimal(len(result_rows))
+    classification = (
+        "candidate_table_validated_at_reported_coverage"
+        if all(
+            _decimal(row["ape"], label="proposal APE") <= threshold
+            and not row["validation_errors"]
+            for row in result_rows
+        )
+        else "candidate_table_not_validated"
+    )
+    result_rows.sort(key=lambda row: (-_decimal(row["ape"], label="proposal APE"), str(row["network"]), int(row["proposal_id"])))
+    return {
+        "schema_version": 1,
+        "candidate_sha256": candidate.get("candidate_sha256"),
+        "classification": classification,
+        "combined_mape": _decimal_text(combined),
+        "network_mape": network_mapes,
+        "underprediction_count": sum(
+            _decimal(row["predicted_prover_gas"], label="prediction")
+            < _decimal(row["actual_prover_gas"], label="actual")
+            for row in result_rows
+        ),
+        "rows": result_rows,
+    }
+
+
+def seal_candidate_directory(
+    run: pathlib.Path,
+    manifest: Manifest,
+    case_results: Iterable[Mapping[str, Any]],
+    overhead_values: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    schedule: UnzenSchedule | None = None,
+    controlled_cycle_samples: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if any(run.glob("**/proposal*.json*")):
+        raise ValueError("proposal result already exists in calibration directory")
+    components = build_candidate_components(
+        manifest, case_results, overhead_values, provenance, schedule
+    )
+    if controlled_cycle_samples is not None:
+        components["cycle_samples"] = dict(controlled_cycle_samples)
+        components["cycle_sample_sha256"] = sha256_bytes(
+            canonical_json(controlled_cycle_samples)
+        )
+    candidate_dir = run / "candidate"
+    samples_dir = run / "samples"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        candidate_dir / "normalized-primary.json": components["normalized_primary"],
+        candidate_dir / "primary-observations.json": components["primary_observations"],
+        candidate_dir / "candidate-manifest.json": components["candidate_manifest"],
+        samples_dir / "controlled-cycle-cost-samples.json": components["cycle_samples"],
+    }
+    if components["primary_component_ledger"] is not None:
+        artifacts[candidate_dir / "primary-component-ledger.json"] = components[
+            "primary_component_ledger"
+        ]
+    if components["diagnostic_component_ledger"] is not None:
+        diagnostic_dir = run / "diagnostics"
+        diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        artifacts[diagnostic_dir / "component-ledger.json"] = components[
+            "diagnostic_component_ledger"
+        ]
+    for path, payload in artifacts.items():
+        path.write_bytes(canonical_json(payload))
+    (candidate_dir / "candidate.sha256").write_text(
+        components["candidate_sha256"] + "\n"
+    )
+    return components
+
+
+def seal_bridge_directory(
+    run: pathlib.Path,
+    manifest: Manifest,
+    controlled_samples: Mapping[str, Mapping[str, Any]],
+    controlled_sample_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if any(run.glob("**/proposal*.json*")):
+        raise ValueError("proposal result already exists in calibration directory")
+    experiment = json.loads((run / "experiment.json").read_text())
+    revision = experiment.get("implementation_revision")
+    bridge_dir = run / "bridge"
+    frozen_manifest_path = bridge_dir / "bridge-manifest.json"
+    frozen_manifest = json.loads(frozen_manifest_path.read_text())
+    expected_contract = {
+        "schema_version": 1,
+        "implementation_revision": revision,
+        "bridge_key_ids": list(manifest.bridge_key_ids),
+        "model": manifest.bridge_model,
+        "controlled_ape_max": "0.10",
+        "proposal_ape_max": "0.10",
+        "missing_data": "insufficient_data_is_sealable_and_non_gating",
+    }
+    if frozen_manifest != expected_contract:
+        raise ValueError("premeasurement bridge manifest does not match experiment contract")
+    controlled_bridge = build_controlled_bridge(manifest, controlled_samples)
+    samples_payload = dict(controlled_sample_artifact) if controlled_sample_artifact else {
+        "schema_version": 1,
+        "bridge_key_ids": list(manifest.bridge_key_ids),
+        "samples": dict(controlled_samples),
+    }
+    if samples_payload.get("samples") != dict(controlled_samples):
+        raise ValueError("controlled sample artifact differs from bridge samples")
+    samples_dir = run / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    samples_path = samples_dir / "controlled-cycle-cost-samples.json"
+    samples_path.write_bytes(canonical_json(samples_payload))
+    controlled_path = bridge_dir / "controlled-bridge.json"
+    controlled_path.write_bytes(canonical_json(controlled_bridge))
+    bridge_root = {
+        "schema_version": 1,
+        "implementation_revision": revision,
+        "components": {
+            "bridge-manifest.json": sha256_bytes(canonical_json(frozen_manifest)),
+            "controlled-cycle-cost-samples.json": sha256_bytes(
+                canonical_json(samples_payload)
+            ),
+            "controlled-bridge.json": sha256_bytes(
+                canonical_json(controlled_bridge)
+            ),
+        },
+        "component_schemas": {
+            "bridge-manifest.json": 1,
+            "controlled-cycle-cost-samples.json": 1,
+            "controlled-bridge.json": 1,
+        },
+        "status": controlled_bridge["status"],
+    }
+    if controlled_sample_artifact is not None:
+        calibration_id = samples_payload.get("calibration_id")
+        candidate_sha256 = samples_payload.get("candidate_sha256")
+        if not isinstance(calibration_id, str) or not _is_sha256(candidate_sha256):
+            raise ValueError("controlled sample artifact has no candidate/run identity")
+        bridge_root["calibration_id"] = calibration_id
+        bridge_root["candidate_sha256"] = candidate_sha256
+    (bridge_dir / "bridge-root.json").write_bytes(canonical_json(bridge_root))
+    bridge_sha = sha256_bytes(canonical_json(bridge_root))
+    (bridge_dir / "bridge.sha256").write_text(bridge_sha + "\n")
+    return {
+        "bridge_root": bridge_root,
+        "bridge_sha256": bridge_sha,
+        "controlled_bridge": controlled_bridge,
+    }
+
+
+def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
+    candidate_dir = run / "candidate"
+    manifest_path = candidate_dir / "candidate-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    recorded = _read_digest(candidate_dir / "candidate.sha256")
+    actual = sha256_bytes(canonical_json(manifest))
+    if recorded != actual:
+        raise ValueError("candidate root digest does not match canonical bytes")
+    if (
+        manifest.get("q_formula") != Q_FORMULA
+        or manifest.get("status") != "sealed_controlled_candidate"
+        or manifest.get("review_only") is not True
+        or manifest.get("production_write") is not False
+        or manifest.get("integer_schedule_emitted") is not False
+        or manifest.get("thresholds", {}).get("proposal_ape_max") != "0.10"
+    ):
+        raise ValueError("candidate root contract differs from frozen V1 contract")
+    components = manifest.get("components")
+    if not isinstance(components, Mapping) or not components:
+        raise ValueError("candidate root has no components")
+    for relative, expected in components.items():
+        if relative not in {
+            "normalized-primary.json",
+            "primary-observations.json",
+            "primary-component-ledger.json",
+        }:
+            raise ValueError(f"candidate root references unknown component: {relative}")
+        path = candidate_dir / relative
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"candidate component is unreadable: {relative}") from exc
+        if sha256_bytes(canonical_json(payload)) != expected:
+            raise ValueError(f"candidate component digest mismatch: {relative}")
+    return {
+        "candidate_sha256": recorded,
+        "candidate_manifest": manifest,
+    }
+
+
+def verify_bridge_directory(run: pathlib.Path) -> dict[str, Any]:
+    bridge_dir = run / "bridge"
+    root = json.loads((bridge_dir / "bridge-root.json").read_text())
+    recorded = _read_digest(bridge_dir / "bridge.sha256")
+    if recorded != sha256_bytes(canonical_json(root)):
+        raise ValueError("bridge root digest does not match canonical bytes")
+    if root.get("status") not in {
+        "stable_controlled",
+        "not_stable_controlled",
+        "insufficient_data",
+    }:
+        raise ValueError("bridge root has an invalid controlled status")
+    expected_paths = {
+        "bridge-manifest.json": bridge_dir / "bridge-manifest.json",
+        "controlled-cycle-cost-samples.json": run
+        / "samples"
+        / "controlled-cycle-cost-samples.json",
+        "controlled-bridge.json": bridge_dir / "controlled-bridge.json",
+    }
+    components = root.get("components")
+    if not isinstance(components, Mapping) or set(components) != set(expected_paths):
+        raise ValueError("bridge root component set differs from frozen V1 contract")
+    for name, path in expected_paths.items():
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"bridge component is unreadable: {name}") from exc
+        if sha256_bytes(canonical_json(payload)) != components[name]:
+            raise ValueError(f"bridge component digest mismatch: {name}")
+    return {"bridge_sha256": recorded, "bridge_root": root}
 
 
 def _read_candidate_pool(paths: Iterable[pathlib.Path]) -> list[dict[str, Any]]:
@@ -1869,13 +4107,7 @@ def _rust_version() -> str:
 
 def controlled_manifest_rows_sha256(path: pathlib.Path) -> str:
     data = tomllib.loads(path.read_text())
-    rows = {
-        "name": data.get("name"),
-        "backend": data.get("backend", "sp1"),
-        "variants": data.get("variants", []),
-        "cases": data.get("cases", []),
-    }
-    return sha256_bytes(canonical_json(rows))
+    return sha256_bytes(canonical_json(data))
 
 
 def verify_frozen_controlled_manifest(
@@ -1900,6 +4132,64 @@ def verify_frozen_controlled_manifest(
     if controlled_manifest_rows_sha256(supplied_manifest) != expected_rows:
         raise ValueError("controlled manifest rows do not match calibration identity")
     return load_manifest(frozen), identity
+
+
+EXPERIMENT_IDENTITY_DUPLICATE_FIELDS = (
+    "implementation_revision",
+    "alethia_reth_revision",
+    "complete_schedule_sha256",
+    "controlled_manifest_sha256",
+    "guest_artifacts",
+    "guest_artifacts_sha256",
+    "rust_version",
+    "sp1_sdk_version",
+    "normalization_reference_key",
+    "primary_metric",
+    "sp1_execution_parameters",
+    "sp1_instruction_count",
+    "workload_identity_schema_version",
+    "workload_canonicalization",
+    "primary_formulas",
+    "q_formula",
+    "out_of_fit_checkpoint",
+    "quality_gates",
+)
+
+
+def experiment_provenance_declaration(
+    experiment: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the caller-visible provenance declaration frozen by experiment.json."""
+    identity = experiment.get("calibration_identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError("calibration run has no calibration_identity")
+    calibration_id = experiment.get("calibration_id")
+    expected_calibration_id = sha256_bytes(canonical_json(identity))[:24]
+    if calibration_id != expected_calibration_id:
+        raise ValueError("experiment has a stale content-addressed calibration_id")
+    for field in EXPERIMENT_IDENTITY_DUPLICATE_FIELDS:
+        if field not in identity or experiment.get(field) != identity[field]:
+            raise ValueError(f"experiment duplicate field {field} differs from identity")
+    revision = experiment.get("implementation_revision")
+    manifest_sha256 = identity.get("controlled_manifest_sha256")
+    rows_sha256 = identity.get("controlled_manifest_rows_sha256")
+    if (
+        not isinstance(calibration_id, str)
+        or not _is_git_revision(revision)
+        or not _is_sha256(manifest_sha256)
+        or not _is_sha256(rows_sha256)
+    ):
+        raise ValueError("experiment has invalid controlled calibration provenance")
+    if experiment.get("controlled_manifest_sha256") != manifest_sha256:
+        raise ValueError("experiment controlled manifest identity is inconsistent")
+    return {
+        "schema_version": 1,
+        "calibration_id": calibration_id,
+        "implementation_revision": revision,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
+        "controlled_manifest_sha256": manifest_sha256,
+        "controlled_manifest_rows_sha256": rows_sha256,
+    }
 
 
 def prepare_calibration(
@@ -1951,9 +4241,9 @@ def prepare_calibration(
     quality_gates = {"checkpoint_ape_max": 0.10}
     bridge_contract = {
         "bridge_key_ids": bridge_key_ids,
-        "model": "through_origin_equal_key_median_kappa_sp1",
-        "controlled_ape_max": 0.10,
-        "proposal_ape_max": 0.10,
+        "model": "through_origin_equal_key_median",
+        "controlled_ape_max": "0.10",
+        "proposal_ape_max": "0.10",
         "missing_data": "insufficient_data_is_sealable_and_non_gating",
     }
     calibration_identity = {
@@ -2023,6 +4313,12 @@ def prepare_calibration(
     (run / "controlled-manifest.toml").write_bytes(controlled_manifest.read_bytes())
     (run / "controlled-manifest.sha256").write_text(controlled_hash + "\n")
     (run / "experiment.json").write_text(json.dumps(experiment, indent=2, sort_keys=True) + "\n")
+    (run / "provenance.json").write_text(
+        json.dumps(
+            experiment_provenance_declaration(experiment), indent=2, sort_keys=True
+        )
+        + "\n"
+    )
     (run / "bridge" / "bridge-manifest.json").write_text(
         json.dumps(bridge, indent=2, sort_keys=True) + "\n"
     )
@@ -2287,6 +4583,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
             "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
             "controlled_manifest_rows_sha256": identity["controlled_manifest_rows_sha256"],
         },
+        generator_max_count=args.generator_max_count,
     )
     print(f"wrote {len(written)} case metadata files")
 
@@ -2312,6 +4609,1246 @@ def cmd_inventory(args: argparse.Namespace) -> None:
     print(f"wrote inventory report for {len(rows)} row(s)")
 
 
+def _add_controlled_run_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--fixtures", type=pathlib.Path, required=True)
+    parser.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--elf",
+        type=pathlib.Path,
+        default=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
+        help="SP1 opcode-lab guest ELF",
+    )
+    parser.add_argument(
+        "--precompile-elf",
+        type=pathlib.Path,
+        default=pathlib.Path("crates/guests/elf/sp1_precompile_lab.elf"),
+        help="SP1 precompile-lab guest ELF",
+    )
+    parser.add_argument(
+        "--opcode-stage",
+        choices=["opcode-lab", "revm-opcode-lab"],
+        default="opcode-lab",
+        help="SP1 opcode lab stage to run for opcode fixtures",
+    )
+    parser.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    parser.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    parser.add_argument("--out", type=pathlib.Path, required=True)
+    parser.add_argument("--repeats", type=int, default=1)
+
+
+def _controlled_repeat_point(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    repeats = sorted(rows, key=lambda row: int(row.get("repeat_index", -1)))
+    if [row.get("repeat_index") for row in repeats] != [0, 1, 2]:
+        raise ValueError("controlled point requires repeat_index 0, 1, and 2")
+    workload_ids = {row.get("workload_id") for row in repeats}
+    if len(workload_ids) != 1 or not _is_sha256(next(iter(workload_ids))):
+        raise ValueError("controlled repeats do not share one workload_id")
+    execution_row_ids = [row.get("execution_row_id") for row in repeats]
+    if len(set(execution_row_ids)) != 3 or not all(
+        _is_sha256(value) for value in execution_row_ids
+    ):
+        raise ValueError("controlled repeats require distinct execution_row_id values")
+    first = repeats[0]
+    point = {
+        "count": int(first["target_count"]),
+        "prover_gas_repeats": [str(row.get("prover_gas", row.get("gas"))) for row in repeats],
+        "instruction_count_repeats": [
+            str(row.get("total_instruction_count")) for row in repeats
+        ],
+        "case_input_sha256_repeats": [row.get("backend_input_sha256") for row in repeats],
+        "exit_code_repeats": [row.get("exit_code") for row in repeats],
+        "public_values_repeats": [row.get("public_values") for row in repeats],
+        "isolation": first.get("isolation"),
+    }
+    pair_ids = {row.get("pair_id") for row in repeats}
+    if pair_ids != {None}:
+        if len(pair_ids) != 1 or not _is_sha256(next(iter(pair_ids))):
+            raise ValueError("controlled repeats do not share one pair_id")
+        point["pair_id"] = next(iter(pair_ids))
+    return point
+
+
+def fit_controlled_costs(
+    manifest: Manifest, rows: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fit primary controlled cases after enforcing exact three-repeat identities."""
+    rows_by_case_lane_count: dict[tuple[str, str, int], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        case_id = str(row.get("case"))
+        lane = str(row.get("lane", "target"))
+        count = int(row.get("target_count", -1))
+        rows_by_case_lane_count.setdefault((case_id, lane, count), []).append(row)
+
+    key_by_case = {
+        case_id: key
+        for key in manifest.measurement_keys
+        for case_id in (*key.required_case_ids, *key.diagnostic_case_ids)
+    }
+    results: list[dict[str, Any]] = []
+    for case in manifest.cases:
+        key = key_by_case[case.name]
+        generator_bounds = {
+            int(row.get("generator_max_count", -1))
+            for (case_id, _lane, _count), grouped in rows_by_case_lane_count.items()
+            if case_id == case.name
+            for row in grouped
+        }
+        if len(generator_bounds) != 1 or next(iter(generator_bounds)) <= 0:
+            results.append(
+                {
+                    "case_id": case.name,
+                    "measurement_key_id": key.id,
+                    "pricing_basis": key.pricing_basis,
+                    "status": "rejected",
+                    "reasons": ["generator_footprint"],
+                }
+            )
+            continue
+        generator_max_count = next(iter(generator_bounds))
+        if case.kind == "precompile":
+            observations = []
+            counts = sorted(
+                count
+                for case_id, lane, count in rows_by_case_lane_count
+                if case_id == case.name and lane == "target"
+            )
+            for count in counts:
+                target = _controlled_repeat_point(
+                    rows_by_case_lane_count.get((case.name, "target", count), [])
+                )
+                control = _controlled_repeat_point(
+                    rows_by_case_lane_count.get((case.name, "control", count), [])
+                )
+                if target.get("pair_id") != control.get("pair_id") or target.get(
+                    "pair_id"
+                ) is None:
+                    raise ValueError("paired precompile target/control pair_id mismatch")
+                isolation = target.get("isolation") or {}
+                control_isolation = control.get("isolation") or {}
+                shape = {
+                    "input_size": isolation.get("input_size"),
+                    "output_size": isolation.get("output_size"),
+                    "folded_bytes_per_iteration": isolation.get(
+                        "folded_bytes_per_iteration"
+                    ),
+                }
+                if shape != {
+                    "input_size": control_isolation.get("input_size"),
+                    "output_size": control_isolation.get("output_size"),
+                    "folded_bytes_per_iteration": control_isolation.get(
+                        "folded_bytes_per_iteration"
+                    ),
+                }:
+                    shape["control_shape_mismatch"] = True
+                observations.append(
+                    {"count": count, "target": target, "control": control, "shape": shape}
+                )
+            result = evaluate_paired_precompile_sweep(
+                observations,
+                target_raw_gas=case.target_raw_gas,
+                generator_max_count=generator_max_count,
+            )
+        else:
+            observations = [
+                _controlled_repeat_point(grouped)
+                for (case_id, lane, _count), grouped in sorted(
+                    rows_by_case_lane_count.items(), key=lambda item: item[0][2]
+                )
+                if case_id == case.name and lane == "target"
+            ]
+            result = evaluate_controlled_sweep(
+                observations,
+                pricing_basis=key.pricing_basis,
+                target_raw_gas=case.target_raw_gas or None,
+                generator_max_count=generator_max_count,
+            )
+        results.append(
+            {
+                "case_id": case.name,
+                "measurement_key_id": key.id,
+                "pricing_basis": key.pricing_basis,
+                "target_raw_gas": case.target_raw_gas or None,
+                "generator_max_count": generator_max_count,
+                **result,
+            }
+        )
+    return results
+
+
+def cmd_fit_controlled_costs(args: argparse.Namespace) -> None:
+    manifest = load_manifest(
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest")
+    )
+    results = fit_controlled_costs(
+        manifest, iter_jsonl(_resolve_repo_path(args.runs, field_name="controlled_runs"))
+    )
+    output = _resolve_repo_path(args.out, field_name="controlled_fit")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps({"schema_version": 1, "case_results": results}, indent=2, sort_keys=True)
+        + "\n"
+    )
+    print(f"fit {len(results)} controlled case(s)")
+
+
+CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
+
+
+def controlled_round_counts(generator_max_count: int) -> tuple[int, ...]:
+    try:
+        index = CONTROLLED_GENERATOR_ROUNDS.index(generator_max_count)
+    except ValueError as exc:
+        raise ValueError("unknown controlled generator round") from exc
+    return tuple(dict.fromkeys((*CONTROLLED_PREFIXES[index], generator_max_count)))
+
+
+def run_controlled_overhead_round(
+    *,
+    guest_launcher: pathlib.Path,
+    calibration_run_id: str,
+    generator_max_count: int,
+    include_startup: bool,
+    out: pathlib.Path,
+) -> None:
+    """Execute each frozen overhead point three times through sp1-shasta-proposal."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for target_count in controlled_round_counts(generator_max_count):
+        for repeat_index in range(3):
+            stem = f"overhead-{generator_max_count}-{target_count}-{repeat_index}"
+            spec_path = out.with_name(f"{stem}.json")
+            report_path = out.with_name(f"{stem}.reports.jsonl")
+            run_startup = include_startup and target_count == 0
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "target_count": target_count,
+                        "include_startup": run_startup,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            subprocess.run(
+                [
+                    str(guest_launcher),
+                    "--stage",
+                    "controlled-overhead",
+                    "--proof-type",
+                    "sp1",
+                    "--mode",
+                    "execute",
+                    "--sp1-prover",
+                    "local",
+                    "--input",
+                    str(spec_path),
+                    "--jsonl-out",
+                    str(report_path),
+                ],
+                check=True,
+            )
+            for report in iter_jsonl(report_path):
+                controlled = report.get("controlled_overhead")
+                if not isinstance(controlled, Mapping):
+                    raise ValueError("controlled overhead report is missing typed metadata")
+                status = controlled.get("status")
+                if status == "rejected":
+                    rows.append(
+                        {
+                            "case": "block_base_one_vs_two_minimal_blocks",
+                            "overhead_key_id": "block_base",
+                            "lane": "target",
+                            "target_count": target_count,
+                            "generator_max_count": generator_max_count,
+                            "repeat_index": repeat_index,
+                            "status": "rejected",
+                            "reasons": controlled.get("reasons", []),
+                            "error": controlled.get("error"),
+                        }
+                    )
+                    continue
+                if status != "accepted" or not isinstance(
+                    controlled.get("observation"), Mapping
+                ):
+                    raise ValueError("controlled overhead report has invalid status")
+                observation = dict(controlled["observation"])
+                workload_id = observation.get("workload_id")
+                workload_spec = observation.get("workload_spec")
+                backend_input_sha256 = observation.get("backend_input_sha256")
+                if not _is_sha256(workload_id) or not _is_sha256(
+                    backend_input_sha256
+                ):
+                    raise ValueError("controlled overhead identity is not canonical")
+                if not isinstance(workload_spec, Mapping) or controlled_workload_id(
+                    workload_spec
+                ) != workload_id:
+                    raise ValueError("controlled overhead workload identity mismatch")
+                if report.get("guest_input_sha256") != observation.get(
+                    "guest_input_sha256"
+                ):
+                    raise ValueError("controlled overhead GuestInput identity mismatch")
+                row = {
+                    **report,
+                    "case": observation["case_id"],
+                    "overhead_key_id": observation["overhead_key_id"],
+                    "lane": observation["lane"],
+                    "baseline_kind": observation.get("baseline_kind"),
+                    "target_count": observation["target_count"],
+                    "generator_max_count": generator_max_count,
+                    "repeat_index": repeat_index,
+                    "status": "accepted",
+                    "workload_id": workload_id,
+                    "workload_spec": workload_spec,
+                    "backend_input_sha256": backend_input_sha256,
+                    "expected_feature_deltas": observation.get(
+                        "expected_feature_deltas", {}
+                    ),
+                    "expected_operation_deltas": observation.get(
+                        "expected_operation_deltas", {}
+                    ),
+                    "observed_operation_deltas": observation.get(
+                        "observed_operation_deltas", {}
+                    ),
+                    "absolute_feature_counts": observation.get(
+                        "absolute_feature_counts", {}
+                    ),
+                    "absolute_operation_pricing_units": observation.get(
+                        "absolute_operation_pricing_units", {}
+                    ),
+                    "operation_phase_ownership": observation.get(
+                        "operation_phase_ownership"
+                    ),
+                    "system_operation_ownership": observation.get(
+                        "system_operation_ownership"
+                    ),
+                    "anchor_operation_ownership": observation.get(
+                        "anchor_operation_ownership"
+                    ),
+                }
+                row["execution_row_id"] = controlled_execution_row_id(
+                    workload_id,
+                    backend="sp1",
+                    run_id=calibration_run_id,
+                    repeat_index=repeat_index,
+                    backend_input_sha256=backend_input_sha256,
+                )
+                if "prover_gas" not in row and "gas" in row:
+                    row["prover_gas"] = row["gas"]
+                rows.append(row)
+    with out.open("w") as output:
+        for row in rows:
+            output.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _stable_overhead_declaration(
+    rows: Iterable[Mapping[str, Any]], field_name: str
+) -> dict[str, int]:
+    values = [row.get(field_name, {}) for row in rows]
+    if not values or any(not isinstance(value, Mapping) for value in values):
+        raise ValueError(f"controlled overhead rows are missing {field_name}")
+    canonical = {canonical_json(value) for value in values}
+    if len(canonical) != 1:
+        raise ValueError(f"controlled overhead {field_name} changed across repeats")
+    return {str(key): int(value) for key, value in values[0].items()}
+
+
+def _stable_operation_deltas(
+    rows: Iterable[Mapping[str, Any]], field_name: str
+) -> dict[str, dict[str, Any]]:
+    values = [row.get(field_name, {}) for row in rows]
+    if not values or any(not isinstance(value, Mapping) for value in values):
+        raise ValueError(f"controlled overhead rows are missing {field_name}")
+    canonical = {canonical_json(value) for value in values}
+    if len(canonical) != 1:
+        raise ValueError(f"controlled overhead {field_name} changed across repeats")
+    result = {}
+    for key, value in values[0].items():
+        if not isinstance(value, Mapping):
+            raise ValueError("controlled operation delta must declare basis and units")
+        basis = value.get("pricing_basis")
+        if basis not in {"raw_gas_slope", "fixed_per_event"}:
+            raise ValueError("controlled operation delta has unknown pricing basis")
+        units = value.get("units")
+        if isinstance(units, bool) or not isinstance(units, int) or units == 0:
+            raise ValueError("controlled operation delta units must be a nonzero integer")
+        result[str(key)] = {"pricing_basis": basis, "units": units}
+    return result
+
+
+def _overhead_repeat_point(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    point = _controlled_repeat_point(rows)
+    point["isolation"] = {
+        "status": "passed",
+        "bytecode_size": 0,
+        "input_size": 0,
+        "non_target_counts": {},
+        "non_target_raw_gas": 0,
+    }
+    return point
+
+
+def _operation_costs(
+    manifest: Manifest, case_results: Iterable[Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    rows = list(case_results)
+    values = construct_measurement_values(manifest, rows)
+    by_case = {str(row.get("case_id")): row for row in rows}
+    key_specs = {key.id: key for key in manifest.measurement_keys}
+    result = {}
+    for key, value in values.items():
+        if value.get("status") != "accepted":
+            continue
+        field_name = "c_p" if "c_p" in value else "f_p"
+        if field_name in value:
+            operation = {
+                "pricing_basis": value["pricing_basis"],
+                "cost": _decimal(value[field_name], label=f"operation cost {key}"),
+            }
+            required = [by_case.get(case_id) for case_id in key_specs[key].required_case_ids]
+            secondary_values = []
+            for row in required:
+                secondary = row.get("secondary") if isinstance(row, Mapping) else None
+                if not isinstance(secondary, Mapping) or secondary.get("status") != "available":
+                    secondary_values = []
+                    break
+                secondary_slope = _decimal(
+                    secondary.get("g_s"), label=f"secondary operation cost {key}"
+                )
+                if value["pricing_basis"] == "raw_gas_slope":
+                    raw_gas = _decimal(row.get("target_raw_gas"), label=f"raw gas {key}")
+                    if raw_gas <= 0:
+                        secondary_values = []
+                        break
+                    secondary_slope /= raw_gas
+                secondary_values.append(secondary_slope)
+            if secondary_values:
+                minimum, maximum = min(secondary_values), max(secondary_values)
+                if minimum > 0 and maximum / minimum - Decimal(1) <= Decimal("0.05"):
+                    operation["secondary_cost"] = sum(secondary_values) / Decimal(
+                        len(secondary_values)
+                    )
+            result[key] = operation
+    return result
+
+
+def _paired_overhead_points(
+    manifest: Manifest,
+    key_id: str,
+    case_id: str,
+    rows: list[Mapping[str, Any]],
+    operation_costs: Mapping[str, Mapping[str, Any]],
+    accepted_overheads: Mapping[str, Decimal],
+    accepted_secondary_overheads: Mapping[str, Decimal],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    points = []
+    reasons = []
+    counts = sorted(
+        {
+            int(row["target_count"])
+            for row in rows
+            if row.get("case") == case_id
+            and row.get("lane") == "target"
+            and row.get("status") == "accepted"
+        }
+    )
+    for count in counts:
+        target_rows = [
+            row
+            for row in rows
+            if row.get("case") == case_id
+            and row.get("lane") == "target"
+            and int(row.get("target_count", -1)) == count
+            and row.get("status") == "accepted"
+        ]
+        control_rows = [
+            row
+            for row in rows
+            if row.get("case") == case_id
+            and row.get("lane") == "control"
+            and int(row.get("target_count", -1)) == count
+            and row.get("status") == "accepted"
+        ]
+        target = _overhead_repeat_point(target_rows)
+        control = _overhead_repeat_point(control_rows)
+        feature_deltas = _stable_overhead_declaration(
+            target_rows, "expected_feature_deltas"
+        )
+        operation_deltas = _stable_operation_deltas(
+            target_rows, "observed_operation_deltas"
+        )
+        missing_operations = [
+            operation
+            for operation in operation_deltas
+            if operation not in operation_costs
+        ]
+        if missing_operations:
+            reasons.append("unmeasured_operation_delta")
+            continue
+        basis_mismatches = [
+            operation
+            for operation, delta in operation_deltas.items()
+            if delta["pricing_basis"]
+            != operation_costs[operation]["pricing_basis"]
+        ]
+        if basis_mismatches:
+            reasons.append("operation_basis_mismatch")
+            continue
+        operation_cost = sum(
+            Decimal(delta["units"]) * operation_costs[operation]["cost"]
+            for operation, delta in operation_deltas.items()
+        )
+        secondary_dependencies_available = all(
+            "secondary_cost" in operation_costs[operation]
+            for operation in operation_deltas
+        ) and all(
+            child in accepted_secondary_overheads
+            for child in manifest.subtract_closure.get(key_id, ())
+        )
+        secondary_operation_cost = (
+            sum(
+                Decimal(delta["units"])
+                * operation_costs[operation]["secondary_cost"]
+                for operation, delta in operation_deltas.items()
+            )
+            if secondary_dependencies_available
+            else None
+        )
+        own_units = feature_deltas.get(key_id, 0)
+        gas_repeats = []
+        instruction_repeats = []
+        for target_gas, control_gas, target_s, control_s in zip(
+            target["prover_gas_repeats"],
+            control["prover_gas_repeats"],
+            target["instruction_count_repeats"],
+            control["instruction_count_repeats"],
+        ):
+            delta = (
+                _decimal(target_gas, label="overhead target proverGas")
+                - _decimal(control_gas, label="overhead control proverGas")
+                - operation_cost
+            )
+            if own_units:
+                delta = residualize_overhead_delta(
+                    manifest,
+                    key_id,
+                    target_minus_control=delta,
+                    feature_deltas=feature_deltas,
+                    accepted_costs=accepted_overheads,
+                ) * Decimal(own_units)
+            elif delta != 0 or any(feature_deltas.values()):
+                reasons.append("zero_count_nonzero_delta")
+            gas_repeats.append(_decimal_text(delta))
+            if secondary_dependencies_available:
+                secondary_delta = (
+                    _decimal(target_s, label="overhead target instruction count")
+                    - _decimal(control_s, label="overhead control instruction count")
+                    - secondary_operation_cost
+                )
+                if own_units:
+                    secondary_delta = residualize_overhead_delta(
+                        manifest,
+                        key_id,
+                        target_minus_control=secondary_delta,
+                        feature_deltas=feature_deltas,
+                        accepted_costs=accepted_secondary_overheads,
+                    ) * Decimal(own_units)
+                instruction_repeats.append(_decimal_text(secondary_delta))
+        points.append(
+            {
+                "count": count,
+                "prover_gas_repeats": gas_repeats,
+                "instruction_count_repeats": instruction_repeats,
+                "secondary_unavailable_reason": (
+                    None
+                    if secondary_dependencies_available
+                    else "unresidualized_dependencies"
+                ),
+                "case_input_sha256_repeats": ["paired"] * 3,
+                "exit_code_repeats": [0, 0, 0],
+                "public_values_repeats": ["paired"] * 3,
+                "isolation": {
+                    "status": "passed",
+                    "bytecode_size": 0,
+                    "input_size": 0,
+                    "non_target_counts": {},
+                    "non_target_raw_gas": 0,
+                },
+            }
+        )
+    return points, list(dict.fromkeys(reasons))
+
+
+def fit_controlled_overheads(
+    manifest: Manifest,
+    rows: Iterable[Mapping[str, Any]],
+    measurement_case_results: Iterable[Mapping[str, Any]],
+    *,
+    generator_max_count: int,
+) -> dict[str, Any]:
+    """Residualize the four frozen controlled overhead identities."""
+    row_list = list(rows)
+    operation_costs = _operation_costs(manifest, measurement_case_results)
+    accepted: dict[str, Decimal] = {}
+    accepted_secondary: dict[str, Decimal] = {}
+    case_results: list[dict[str, Any]] = []
+    overhead_results: dict[str, dict[str, Any]] = {}
+    by_key = {key.id: key for key in manifest.overhead_keys}
+    required_keys = sorted(
+        (key for key in manifest.overhead_keys if key.formula_role == "required"),
+        key=lambda key: len(manifest.subtract_closure.get(key.id, ())),
+    )
+    for key in required_keys:
+        if key.id == "proposal_startup":
+            continue
+        required_values = []
+        key_case_results = []
+        for case_id in key.required_case_ids:
+            if any(
+                row.get("case") == case_id and row.get("status") == "rejected"
+                for row in row_list
+            ):
+                result = {
+                    "case_id": case_id,
+                    "overhead_key_id": key.id,
+                    "status": "rejected",
+                    "reasons": ["generation_failure"],
+                }
+            else:
+                points, reasons = _paired_overhead_points(
+                    manifest,
+                    key.id,
+                    case_id,
+                    row_list,
+                    operation_costs,
+                    accepted,
+                    accepted_secondary,
+                )
+                result = {
+                    "case_id": case_id,
+                    "overhead_key_id": key.id,
+                    **(
+                        {"status": "rejected", "reasons": reasons}
+                        if reasons
+                        else evaluate_controlled_sweep(
+                            points,
+                            pricing_basis="fixed_per_event",
+                            target_raw_gas=None,
+                            generator_max_count=generator_max_count,
+                        )
+                    ),
+                }
+                if not reasons and any(
+                    point.get("secondary_unavailable_reason")
+                    == "unresidualized_dependencies"
+                    for point in points
+                ):
+                    result["secondary"] = {
+                        "status": "failed",
+                        "reason": "unresidualized_dependencies",
+                    }
+            key_case_results.append(result)
+            case_results.append(result)
+            if result.get("status") == "accepted":
+                required_values.append(
+                    _decimal(result["f_p"], label=f"overhead case {case_id}")
+                )
+        if len(required_values) != len(key.required_case_ids):
+            overhead_results[key.id] = {
+                "status": "required_case_incomplete",
+                "required_case_ids": list(key.required_case_ids),
+            }
+            continue
+        minimum, maximum = min(required_values), max(required_values)
+        if minimum <= 0 or maximum / minimum - Decimal(1) > Decimal("0.05"):
+            overhead_results[key.id] = {
+                "status": "scenario_dependent",
+                "required_case_ids": list(key.required_case_ids),
+            }
+            continue
+        value = sum(required_values) / Decimal(len(required_values))
+        accepted[key.id] = value
+        secondary_values = [
+            _decimal(result["secondary"]["g_s"], label=f"secondary overhead {key.id}")
+            for result in key_case_results
+            if isinstance(result.get("secondary"), Mapping)
+            and result["secondary"].get("status") == "available"
+        ]
+        secondary_value = None
+        if len(secondary_values) == len(key.required_case_ids):
+            minimum_s, maximum_s = min(secondary_values), max(secondary_values)
+            if minimum_s > 0 and maximum_s / minimum_s - Decimal(1) <= Decimal("0.05"):
+                secondary_value = sum(secondary_values) / Decimal(len(secondary_values))
+                accepted_secondary[key.id] = secondary_value
+        overhead_results[key.id] = {
+            "status": "accepted",
+            "o_p": _decimal_text(value),
+            "required_case_ids": list(key.required_case_ids),
+            "checkpoint_evidence": {
+                result["case_id"]: result.get("checkpoint")
+                for result in key_case_results
+            },
+            "secondary": (
+                {"status": "available", "o_s": _decimal_text(secondary_value)}
+                if secondary_value is not None
+                else {"status": "failed", "reason": "unresidualized_dependencies"}
+            ),
+        }
+
+    startup = by_key["proposal_startup"]
+    startup_residuals = []
+    startup_secondary_residuals = []
+    startup_complete = True
+    for case_id in startup.required_case_ids:
+        case_rows = [
+            row
+            for row in row_list
+            if row.get("case") == case_id and row.get("status") == "accepted"
+        ]
+        try:
+            point = _overhead_repeat_point(case_rows)
+            features = _stable_overhead_declaration(
+                case_rows, "expected_feature_deltas"
+            )
+            operations = _stable_operation_deltas(
+                case_rows, "observed_operation_deltas"
+            )
+            missing = [
+                operation for operation in operations if operation not in operation_costs
+            ]
+            if missing:
+                raise ValueError("unmeasured startup operation delta")
+            basis_mismatches = [
+                operation
+                for operation, delta in operations.items()
+                if delta["pricing_basis"]
+                != operation_costs[operation]["pricing_basis"]
+            ]
+            if basis_mismatches:
+                raise ValueError("startup operation pricing basis mismatch")
+            operation_cost = sum(
+                Decimal(delta["units"]) * operation_costs[operation]["cost"]
+                for operation, delta in operations.items()
+            )
+            secondary_dependencies_available = all(
+                "secondary_cost" in operation_costs[operation]
+                for operation in operations
+            ) and all(
+                child in accepted_secondary
+                for child in manifest.subtract_closure.get("proposal_startup", ())
+            )
+            secondary_operation_cost = (
+                sum(
+                    Decimal(delta["units"])
+                    * operation_costs[operation]["secondary_cost"]
+                    for operation, delta in operations.items()
+                )
+                if secondary_dependencies_available
+                else None
+            )
+            residuals = [
+                _decimal_text(
+                    residualize_overhead_delta(
+                        manifest,
+                        "proposal_startup",
+                        target_minus_control=_decimal(
+                            value, label="startup proverGas"
+                        )
+                        - operation_cost,
+                        feature_deltas=features,
+                        accepted_costs=accepted,
+                    )
+                )
+                for value in point["prover_gas_repeats"]
+            ]
+            startup_residuals.append(residuals)
+            if secondary_dependencies_available:
+                secondary_residuals = [
+                    _decimal_text(
+                        residualize_overhead_delta(
+                            manifest,
+                            "proposal_startup",
+                            target_minus_control=_decimal(
+                                value, label="startup instruction count"
+                            )
+                            - secondary_operation_cost,
+                            feature_deltas=features,
+                            accepted_costs=accepted_secondary,
+                        )
+                    )
+                    for value in point["instruction_count_repeats"]
+                ]
+                startup_secondary_residuals.append(secondary_residuals)
+            case_results.append(
+                {
+                    "case_id": case_id,
+                    "overhead_key_id": "proposal_startup",
+                    "status": "accepted",
+                    "repeat_residuals": residuals,
+                }
+            )
+        except (KeyError, ValueError) as error:
+            startup_complete = False
+            case_results.append(
+                {
+                    "case_id": case_id,
+                    "overhead_key_id": "proposal_startup",
+                    "status": "rejected",
+                    "reasons": [str(error)],
+                }
+            )
+    if startup_complete and len(startup_residuals) == len(startup.required_case_ids):
+        value = fixed_startup_residual(startup_residuals)
+        accepted["proposal_startup"] = value
+        secondary_value = None
+        if len(startup_secondary_residuals) == len(startup.required_case_ids):
+            secondary_value = fixed_startup_residual(startup_secondary_residuals)
+            accepted_secondary["proposal_startup"] = secondary_value
+        overhead_results["proposal_startup"] = {
+            "status": "accepted",
+            "o_p": _decimal_text(value),
+            "baseline_kind": "mathematical_zero_baseline",
+            "secondary": (
+                {"status": "available", "o_s": _decimal_text(secondary_value)}
+                if secondary_value is not None
+                else {"status": "failed", "reason": "unresidualized_dependencies"}
+            ),
+        }
+    else:
+        overhead_results["proposal_startup"] = {
+            "status": "required_case_incomplete"
+        }
+    return {
+        "schema_version": 1,
+        "generator_max_count": generator_max_count,
+        "status": (
+            "accepted" if set(accepted) == set(Q_FORMULA) else "rejected"
+        ),
+        "o_p": {key: _decimal_text(accepted[key]) for key in Q_FORMULA if key in accepted},
+        "o_s": {
+            key: _decimal_text(accepted_secondary[key])
+            for key in Q_FORMULA
+            if key in accepted_secondary
+        },
+        "overhead_results": overhead_results,
+        "case_results": case_results,
+    }
+
+
+def controlled_round_decision(
+    case_results: Iterable[Mapping[str, Any]], generator_max_count: int
+) -> str:
+    results = list(case_results)
+    if not results:
+        raise ValueError("controlled round produced no case results")
+    needs_larger_footprint = any(
+        result.get("status") == "rejected"
+        and "exhausted_sweep" in result.get("reasons", [])
+        for result in results
+    )
+    if needs_larger_footprint and generator_max_count != CONTROLLED_GENERATOR_ROUNDS[-1]:
+        return "expand_next_round"
+    return "complete"
+
+
+def validate_persisted_controlled_decisions(
+    calibration_run: pathlib.Path, decisions: Mapping[str, Any]
+) -> dict[int, Mapping[str, Any]]:
+    rounds = decisions.get("rounds")
+    if decisions.get("schema_version") != 1 or not isinstance(rounds, list):
+        raise ValueError("invalid persisted controlled decisions")
+    observed = [int(record.get("generator_max_count", -1)) for record in rounds]
+    if observed != list(CONTROLLED_GENERATOR_ROUNDS[: len(observed)]):
+        raise ValueError("persisted controlled rounds must be a unique contiguous prefix")
+    validated: dict[int, Mapping[str, Any]] = {}
+    for index, record in enumerate(rounds):
+        generator_max_count = observed[index]
+        raw_path = calibration_run / record["raw_runs"]
+        fit_path = calibration_run / record["fit"]
+        if (
+            not raw_path.is_file()
+            or sha256_file(raw_path) != record.get("raw_runs_sha256")
+            or not fit_path.is_file()
+            or sha256_file(fit_path) != record.get("fit_sha256")
+        ):
+            raise ValueError("persisted controlled round artifact changed")
+        fit_payload = json.loads(fit_path.read_text())
+        if fit_payload.get("generator_max_count") != generator_max_count:
+            raise ValueError("persisted controlled fit footprint changed")
+        overhead_path = calibration_run / record["overhead_fit"]
+        overhead_runs_path = calibration_run / record["overhead_runs"]
+        if (
+            not overhead_path.is_file()
+            or sha256_file(overhead_path) != record.get("overhead_fit_sha256")
+            or not overhead_runs_path.is_file()
+            or sha256_file(overhead_runs_path) != record.get("overhead_runs_sha256")
+        ):
+            raise ValueError("persisted controlled overhead artifact changed")
+        overhead_payload = json.loads(overhead_path.read_text())
+        if overhead_payload.get("generator_max_count") != generator_max_count:
+            raise ValueError("persisted controlled overhead footprint changed")
+        decision = controlled_round_decision(
+            [
+                *fit_payload.get("case_results", []),
+                *overhead_payload.get("case_results", []),
+            ],
+            generator_max_count,
+        )
+        if decision != record.get("decision"):
+            raise ValueError("persisted controlled round decision changed")
+        if decision == "complete" and index != len(rounds) - 1:
+            raise ValueError("persisted controlled rounds continue after completion")
+        validated[generator_max_count] = record
+    return validated
+
+
+def _canonical_run_artifact(
+    calibration_run: pathlib.Path, supplied: pathlib.Path, filename: str
+) -> pathlib.Path:
+    canonical = (calibration_run / filename).resolve()
+    if supplied.resolve() != canonical:
+        raise ValueError(f"{filename} must be the canonical persisted run artifact")
+    return canonical
+
+
+def load_terminal_controlled_artifacts(
+    calibration_run: pathlib.Path,
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify and load the one complete adaptive round sealed by this run."""
+    experiment_path = calibration_run / "experiment.json"
+    decisions_path = calibration_run / "controlled-decisions.json"
+    decisions_seal_path = calibration_run / "controlled-decisions.sha256"
+    if not experiment_path.is_file() or not decisions_path.is_file():
+        raise ValueError("calibration run is missing experiment or controlled decisions")
+    if (
+        not decisions_seal_path.is_file()
+        or _read_digest(decisions_seal_path) != sha256_file(decisions_path)
+    ):
+        raise ValueError("controlled decisions seal does not match persisted decisions")
+    experiment = json.loads(experiment_path.read_text())
+    declaration = experiment_provenance_declaration(experiment)
+    if declaration["calibration_id"] != calibration_run.name:
+        raise ValueError("experiment calibration_id does not match calibration directory")
+    for key in (
+        "implementation_revision",
+        "controlled_manifest_sha256",
+        "controlled_manifest_rows_sha256",
+    ):
+        if declaration[key] != identity.get(key):
+            raise ValueError(f"experiment {key} does not match frozen manifest identity")
+
+    decisions = json.loads(decisions_path.read_text())
+    validated = validate_persisted_controlled_decisions(calibration_run, decisions)
+    if not validated:
+        raise ValueError("controlled decisions have no terminal round")
+    terminal_count = next(reversed(validated))
+    terminal = validated[terminal_count]
+    if terminal.get("decision") != "complete":
+        raise ValueError("controlled decisions have no terminal complete round")
+
+    fit_path = calibration_run / "controlled-fit.json"
+    overhead_path = calibration_run / "controlled-overheads.json"
+    if (
+        not fit_path.is_file()
+        or sha256_file(fit_path) != terminal.get("fit_sha256")
+        or not overhead_path.is_file()
+        or sha256_file(overhead_path) != terminal.get("overhead_fit_sha256")
+    ):
+        raise ValueError("canonical controlled artifacts do not match terminal decision")
+    fit = json.loads(fit_path.read_text())
+    overhead = json.loads(overhead_path.read_text())
+    if (
+        fit.get("generator_max_count") != terminal_count
+        or overhead.get("generator_max_count") != terminal_count
+    ):
+        raise ValueError("canonical controlled artifact footprint is not terminal")
+    return {
+        "experiment": experiment,
+        "provenance_declaration": declaration,
+        "terminal": terminal,
+        "fit": fit,
+        "overheads": overhead,
+        "fit_sha256": terminal["fit_sha256"],
+        "overheads_sha256": terminal["overhead_fit_sha256"],
+        "controlled_decisions_sha256": sha256_file(decisions_path),
+        "generator_max_count": terminal_count,
+    }
+
+
+def _sealed_candidate_provenance(
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        **artifacts["provenance_declaration"],
+        "controlled_decisions_sha256": artifacts["controlled_decisions_sha256"],
+        "controlled_fit_sha256": artifacts["fit_sha256"],
+        "controlled_overheads_sha256": artifacts["overheads_sha256"],
+        "terminal_generator_max_count": artifacts["generator_max_count"],
+    }
+
+
+def _controlled_sample_artifact(
+    manifest: Manifest,
+    artifacts: Mapping[str, Any],
+    candidate_sha256: str,
+) -> dict[str, Any]:
+    payload = build_controlled_cycle_cost_samples(
+        manifest,
+        artifacts["fit"]["case_results"],
+        artifacts["overheads"],
+    )
+    payload["calibration_id"] = artifacts["provenance_declaration"]["calibration_id"]
+    payload["implementation_revision"] = artifacts["provenance_declaration"][
+        "implementation_revision"
+    ]
+    payload["candidate_sha256"] = candidate_sha256
+    payload["controlled_manifest_sha256"] = artifacts["provenance_declaration"][
+        "controlled_manifest_sha256"
+    ]
+    payload["controlled_manifest_rows_sha256"] = artifacts[
+        "provenance_declaration"
+    ]["controlled_manifest_rows_sha256"]
+    payload["controlled_decisions_sha256"] = artifacts[
+        "controlled_decisions_sha256"
+    ]
+    payload["controlled_fit_sha256"] = artifacts["fit_sha256"]
+    payload["controlled_overheads_sha256"] = artifacts["overheads_sha256"]
+    return payload
+
+
+def cmd_run_controlled(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    manifest_path = _resolve_repo_path(
+        args.controlled_manifest, field_name="controlled_manifest"
+    )
+    manifest, identity = verify_frozen_controlled_manifest(calibration_run, manifest_path)
+    fixtures_root = _resolve_repo_path(args.fixtures, field_name="fixtures")
+    final_runs = _resolve_repo_path(args.out, field_name="controlled_runs")
+    decisions_path = calibration_run / "controlled-decisions.json"
+    decisions_seal_path = calibration_run / "controlled-decisions.sha256"
+    decisions = {"schema_version": 1, "rounds": []}
+    if decisions_path.exists():
+        if (
+            not decisions_seal_path.is_file()
+            or _read_digest(decisions_seal_path) != sha256_file(decisions_path)
+        ):
+            raise ValueError("controlled decisions seal does not match persisted decisions")
+        decisions = json.loads(decisions_path.read_text())
+
+    previous_rounds = validate_persisted_controlled_decisions(calibration_run, decisions)
+    for generator_max_count in CONTROLLED_GENERATOR_ROUNDS:
+        previous = previous_rounds.get(generator_max_count)
+        if previous is not None:
+            raw_path = calibration_run / previous["raw_runs"]
+            decision = previous["decision"]
+            if decision == "complete":
+                final_runs.parent.mkdir(parents=True, exist_ok=True)
+                final_runs.write_bytes(raw_path.read_bytes())
+                overhead_fit = calibration_run / previous["overhead_fit"]
+                (calibration_run / "controlled-overheads.json").write_bytes(
+                    overhead_fit.read_bytes()
+                )
+                fit_path = calibration_run / previous["fit"]
+                (calibration_run / "controlled-fit.json").write_bytes(
+                    fit_path.read_bytes()
+                )
+                print(f"resumed complete controlled round at {generator_max_count}")
+                return
+            if decision != "expand_next_round":
+                raise ValueError("invalid persisted controlled round decision")
+            continue
+
+        round_name = f"generator-max-{generator_max_count}"
+        round_fixtures = fixtures_root / round_name
+        generate_cases(
+            manifest,
+            round_fixtures,
+            provenance={
+                "calibration_id": calibration_run.name,
+                "controlled_manifest_sha256": identity[
+                    "controlled_manifest_sha256"
+                ],
+                "controlled_manifest_rows_sha256": identity[
+                    "controlled_manifest_rows_sha256"
+                ],
+            },
+            generator_max_count=generator_max_count,
+        )
+        round_runs = calibration_run / f"controlled-runs.{round_name}.jsonl"
+        cmd_run(
+            argparse.Namespace(
+                fixtures=round_fixtures,
+                guest_launcher=args.guest_launcher,
+                elf=args.elf,
+                precompile_elf=args.precompile_elf,
+                opcode_stage="revm-opcode-lab",
+                calibration_run=calibration_run,
+                controlled_manifest=manifest_path,
+                out=round_runs,
+                repeats=3,
+            )
+        )
+        results = fit_controlled_costs(manifest, iter_jsonl(round_runs))
+        fit_payload = {
+            "schema_version": 1,
+            "generator_max_count": generator_max_count,
+            "case_results": results,
+        }
+        round_fit = calibration_run / f"controlled-fit.{round_name}.json"
+        round_fit.write_text(json.dumps(fit_payload, indent=2, sort_keys=True) + "\n")
+        overhead_runs = calibration_run / f"controlled-overhead-runs.{round_name}.jsonl"
+        run_controlled_overhead_round(
+            guest_launcher=args.guest_launcher,
+            calibration_run_id=calibration_run.name,
+            generator_max_count=generator_max_count,
+            include_startup=generator_max_count == CONTROLLED_GENERATOR_ROUNDS[0],
+            out=overhead_runs,
+        )
+        overhead_rows = list(iter_jsonl(overhead_runs))
+        if generator_max_count != CONTROLLED_GENERATOR_ROUNDS[0]:
+            first_record = decisions["rounds"][0]
+            first_rows = iter_jsonl(calibration_run / first_record["overhead_runs"])
+            overhead_rows.extend(
+                row
+                for row in first_rows
+                if row.get("overhead_key_id") == "proposal_startup"
+            )
+        overhead_artifact = fit_controlled_overheads(
+            manifest,
+            overhead_rows,
+            results,
+            generator_max_count=generator_max_count,
+        )
+        round_overhead_fit = calibration_run / f"controlled-overheads.{round_name}.json"
+        round_overhead_fit.write_text(
+            json.dumps(overhead_artifact, indent=2, sort_keys=True) + "\n"
+        )
+        decision = controlled_round_decision(
+            [*results, *overhead_artifact["case_results"]], generator_max_count
+        )
+        record = {
+            "generator_max_count": generator_max_count,
+            "raw_runs": str(round_runs.relative_to(calibration_run)),
+            "raw_runs_sha256": sha256_file(round_runs),
+            "fit": str(round_fit.relative_to(calibration_run)),
+            "fit_sha256": sha256_file(round_fit),
+            "overhead_runs": str(overhead_runs.relative_to(calibration_run)),
+            "overhead_runs_sha256": sha256_file(overhead_runs),
+            "overhead_fit": str(round_overhead_fit.relative_to(calibration_run)),
+            "overhead_fit_sha256": sha256_file(round_overhead_fit),
+            "decision": decision,
+        }
+        decisions["rounds"].append(record)
+        decisions_path.write_text(json.dumps(decisions, indent=2, sort_keys=True) + "\n")
+        decisions_seal_path.write_text(sha256_file(decisions_path) + "\n")
+        if decision == "complete":
+            final_runs.parent.mkdir(parents=True, exist_ok=True)
+            final_runs.write_bytes(round_runs.read_bytes())
+            (calibration_run / "controlled-overheads.json").write_bytes(
+                round_overhead_fit.read_bytes()
+            )
+            (calibration_run / "controlled-fit.json").write_bytes(
+                round_fit.read_bytes()
+            )
+            print(f"completed controlled round at {generator_max_count}")
+            return
+    raise ValueError("controlled adaptive sweep exhausted every frozen generator round")
+
+
+def cmd_build_candidate(args: argparse.Namespace) -> None:
+    run = _resolve_repo_path(args.run, field_name="calibration_run")
+    manifest, identity = verify_frozen_controlled_manifest(
+        run,
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+    )
+    artifacts = load_terminal_controlled_artifacts(run, identity)
+    fit_path = _canonical_run_artifact(
+        run,
+        _resolve_repo_path(args.fit, field_name="controlled_fit"),
+        "controlled-fit.json",
+    )
+    overhead_path = _canonical_run_artifact(
+        run,
+        _resolve_repo_path(args.overheads, field_name="controlled_overheads"),
+        "controlled-overheads.json",
+    )
+    if (
+        sha256_file(fit_path) != artifacts["fit_sha256"]
+        or sha256_file(overhead_path) != artifacts["overheads_sha256"]
+    ):
+        raise ValueError("controlled fit/overhead do not match terminal decision")
+    fit = artifacts["fit"]
+    overhead_artifact = artifacts["overheads"]
+    if overhead_artifact.get("status") != "accepted" or not isinstance(
+        overhead_artifact.get("o_p"), Mapping
+    ):
+        raise ValueError("controlled overhead artifact is not accepted")
+    provenance_path = _canonical_run_artifact(
+        run,
+        _resolve_repo_path(args.provenance, field_name="candidate_provenance"),
+        "provenance.json",
+    )
+    supplied_provenance = json.loads(provenance_path.read_text())
+    if supplied_provenance != artifacts["provenance_declaration"]:
+        raise ValueError("candidate provenance does not match experiment identity")
+    provenance = _sealed_candidate_provenance(artifacts)
+    schedule = current_uzen_schedule()
+    preview = build_candidate_components(
+        manifest,
+        fit["case_results"],
+        overhead_artifact["o_p"],
+        provenance,
+        schedule,
+    )
+    samples = _controlled_sample_artifact(
+        manifest, artifacts, preview["candidate_sha256"]
+    )
+    components = seal_candidate_directory(
+        run,
+        manifest,
+        fit["case_results"],
+        overhead_artifact["o_p"],
+        provenance,
+        schedule,
+        controlled_cycle_samples=samples,
+    )
+    if components["candidate_sha256"] != preview["candidate_sha256"]:
+        raise ValueError("candidate identity changed while sealing controlled samples")
+    print(f"sealed candidate {components['candidate_sha256']}")
+
+
+def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
+    run = _resolve_repo_path(args.run, field_name="calibration_run")
+    manifest, identity = verify_frozen_controlled_manifest(
+        run,
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+    )
+    artifacts = load_terminal_controlled_artifacts(run, identity)
+    samples_path = _canonical_run_artifact(
+        run,
+        _resolve_repo_path(args.samples, field_name="controlled_samples"),
+        "samples/controlled-cycle-cost-samples.json",
+    )
+    payload = json.loads(samples_path.read_text())
+    candidate = verify_candidate_directory(run)
+    expected = _controlled_sample_artifact(
+        manifest, artifacts, candidate["candidate_sha256"]
+    )
+    if payload != expected:
+        raise ValueError("controlled samples do not match sealed candidate/run identity")
+    samples = payload.get("samples", payload)
+    if not isinstance(samples, Mapping):
+        raise ValueError("controlled samples must be a JSON object")
+    bridge = seal_bridge_directory(
+        run,
+        manifest,
+        samples,
+        controlled_sample_artifact=(payload if "samples" in payload else None),
+    )
+    print(f"sealed SP1 bridge {bridge['bridge_sha256']}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -2320,33 +5857,56 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--manifest", type=pathlib.Path, required=True)
     generate.add_argument("--calibration-run", type=pathlib.Path, required=True)
     generate.add_argument("--out", type=pathlib.Path, required=True)
+    generate.add_argument(
+        "--generator-max-count",
+        type=int,
+        choices=[8, 32, 128, 512, 2048],
+        default=8,
+        help="frozen controlled sweep checkpoint bound",
+    )
     generate.set_defaults(func=cmd_generate)
 
     run = subcommands.add_parser("run", help="run generated guest-input cases")
-    run.add_argument("--fixtures", type=pathlib.Path, required=True)
-    run.add_argument("--guest-launcher", type=pathlib.Path, required=True)
-    run.add_argument(
-        "--elf",
-        type=pathlib.Path,
-        default=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
-        help="SP1 opcode-lab guest ELF",
-    )
-    run.add_argument(
-        "--precompile-elf",
-        type=pathlib.Path,
-        default=pathlib.Path("crates/guests/elf/sp1_precompile_lab.elf"),
-        help="SP1 precompile-lab guest ELF",
-    )
-    run.add_argument(
-        "--opcode-stage",
-        choices=["opcode-lab", "revm-opcode-lab"],
-        default="opcode-lab",
-        help="SP1 opcode lab stage to run for opcode fixtures",
-    )
-    run.add_argument("--calibration-run", type=pathlib.Path, required=True)
-    run.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
-    run.add_argument("--out", type=pathlib.Path, required=True)
+    _add_controlled_run_arguments(run)
     run.set_defaults(func=cmd_run)
+
+    run_controlled = subcommands.add_parser(
+        "run-controlled",
+        help="run every controlled SP1 workload three times",
+    )
+    _add_controlled_run_arguments(run_controlled)
+    run_controlled.set_defaults(
+        func=cmd_run_controlled,
+        repeats=3,
+        opcode_stage="revm-opcode-lab",
+    )
+
+    fit_controlled = subcommands.add_parser(
+        "fit-controlled-costs",
+        help="apply the frozen repeat, isolation, fit, and checkpoint gates",
+    )
+    fit_controlled.add_argument("--runs", type=pathlib.Path, required=True)
+    fit_controlled.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    fit_controlled.add_argument("--out", type=pathlib.Path, required=True)
+    fit_controlled.set_defaults(func=cmd_fit_controlled_costs)
+
+    candidate = subcommands.add_parser(
+        "build-candidate", help="seal the controlled SP1 proverGas candidate"
+    )
+    candidate.add_argument("--run", type=pathlib.Path, required=True)
+    candidate.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    candidate.add_argument("--fit", type=pathlib.Path, required=True)
+    candidate.add_argument("--overheads", type=pathlib.Path, required=True)
+    candidate.add_argument("--provenance", type=pathlib.Path, required=True)
+    candidate.set_defaults(func=cmd_build_candidate)
+
+    bridge = subcommands.add_parser(
+        "build-sp1-bridge", help="seal the SP1 proverGas/instruction-count bridge"
+    )
+    bridge.add_argument("--run", type=pathlib.Path, required=True)
+    bridge.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    bridge.add_argument("--samples", type=pathlib.Path, required=True)
+    bridge.set_defaults(func=cmd_build_sp1_bridge)
 
     run_proposal = subcommands.add_parser(
         "run-proposal",
@@ -2429,6 +5989,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
+    repeats = getattr(args, "repeats", 1)
+    if repeats <= 0:
+        raise ValueError("controlled run repeats must be positive")
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
     fixtures = _resolve_repo_path(args.fixtures, field_name="fixtures")
     out = _resolve_repo_path(args.out, field_name="runs_output")
@@ -2471,7 +6034,11 @@ def cmd_run(args: argparse.Namespace) -> None:
         run_guest_inputs(
             guest_launcher=args.guest_launcher,
             elf_path=elf_path,
-            input_paths=[input_path for _, input_path in cases],
+            input_paths=[
+                input_path
+                for _, input_path in cases
+                for _repeat_index in range(repeats)
+            ],
             reports_jsonl=report_path,
             stage=stage,
         )
@@ -2481,10 +6048,23 @@ def cmd_run(args: argparse.Namespace) -> None:
     }
     with out.open("w") as output:
         ran = 0
+        repeat_index_by_input: dict[str, int] = {}
         for report_path in report_paths:
             for report in iter_jsonl(report_path):
                 case = case_by_input[report["input"]]
-                output.write(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
+                raw_run = raw_run_from_report(case, report)
+                repeat_index = repeat_index_by_input.get(report["input"], 0)
+                repeat_index_by_input[report["input"]] = repeat_index + 1
+                raw_run["repeat_index"] = repeat_index
+                if "workload_id" in raw_run and "backend_input_sha256" in raw_run:
+                    raw_run["execution_row_id"] = controlled_execution_row_id(
+                        raw_run["workload_id"],
+                        backend="sp1",
+                        run_id=calibration_run.name,
+                        repeat_index=repeat_index,
+                        backend_input_sha256=raw_run["backend_input_sha256"],
+                    )
+                output.write(json.dumps(raw_run, sort_keys=True) + "\n")
                 ran += 1
     print(f"ran {ran} executable case(s)")
 

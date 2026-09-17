@@ -202,6 +202,37 @@ class GenerateTests(unittest.TestCase):
                 self.assertEqual(case.input_size, input_size)
                 self.assertEqual(len(bytes.fromhex(encoded.removeprefix("0x"))), input_size)
 
+    def test_fixed_footprint_add_sweep_keeps_code_and_non_target_layout_constant(self):
+        case = opcode_gas.default_opcode_case(0x01)
+        generated = [
+            opcode_gas.build_fixed_footprint_bytecode(case, count, 8)
+            for count in (0, 1, 2, 4, 8)
+        ]
+
+        self.assertEqual({len(bytes.fromhex(row.bytes_hex)) for row in generated}, {584})
+        self.assertEqual({row.opcode_counts[0x01] for row in generated}, {8})
+        self.assertEqual({row.opcode_counts[0x7F] for row in generated}, {16})
+        self.assertEqual({row.opcode_counts[0x00] for row in generated}, {8})
+
+        for count, row in zip((0, 1, 2, 4, 8), generated):
+            bytecode = bytes.fromhex(row.bytes_hex)
+            programs = opcode_gas.decode_fixed_microprograms(bytecode)
+            self.assertEqual(len(programs), 8)
+            self.assertEqual(sum(program[-2:] == b"\x01\x00" for program in programs), count)
+
+    def test_every_v1_opcode_has_equal_size_fixed_microprogram_slots(self):
+        for opcode in sorted(opcode_gas.PLANNED_PURE_OPCODE_OPCODES):
+            with self.subTest(opcode=f"0x{opcode:02x}"):
+                case = opcode_gas.default_opcode_case(opcode)
+                for count in (0, 1, 2, 4, 8):
+                    generated = opcode_gas.build_fixed_footprint_bytecode(case, count, 8)
+                    programs = opcode_gas.decode_fixed_microprograms(
+                        bytes.fromhex(generated.bytes_hex)
+                    )
+                    self.assertEqual(len(programs), 8)
+                    self.assertEqual(len({len(program) for program in programs}), 1)
+                    self.assertEqual(generated.opcode_counts[opcode], 8)
+
 
 if __name__ == "__main__":
     unittest.main()

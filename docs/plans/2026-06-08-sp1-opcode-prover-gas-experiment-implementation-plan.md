@@ -378,7 +378,7 @@ The reviewed V1 manifest must define exactly these four required overhead identi
 ```text
 proposal_startup       unit=proposal
 block_base             unit=block
-tx_base                unit=started_transaction
+tx_base                unit=started_non_anchor_transaction
 native_value_transfer  unit=native_value_transfer
 ```
 
@@ -444,7 +444,7 @@ OverheadCaseSpec.target_template: str
 OverheadCaseSpec.control_template: str
 OverheadCaseSpec.expected_changed_feature_keys: tuple[str, ...]
 OverheadKeySpec.id: str
-OverheadKeySpec.unit: proposal|block|started_transaction|native_value_transfer|
+OverheadKeySpec.unit: proposal|block|started_non_anchor_transaction|native_value_transfer|
                       witness_byte|witness_node|stdin_byte|blob_byte|kzg_invocation
 OverheadKeySpec.formula_role: required|diagnostic
 OverheadKeySpec.subtract_keys: tuple[str, ...]
@@ -696,9 +696,10 @@ valid controlled measurement.
 ### Controlled Non-Opcode Overhead Acceptance
 
 Measure `proposal_startup`, `block_base`, `tx_base`, and `native_value_transfer` as the four required
-V1 non-operation costs. One `tx_base` unit is counted per transaction yielded to Alethia's executor,
+V1 non-operation costs. One `tx_base` unit is counted per non-Anchor candidate transaction yielded
+to Alethia's executor; the Anchor transaction is owned exclusively by `block_base`,
 and its coefficient is
-the common per-started-transaction residual after modeled work is removed; it is not limited to work
+the common per-started-non-Anchor-transaction residual after modeled work is removed; it is not limited to work
 that occurs before that event. `native_value_transfer` is the additional exclusive cost for a
 committed positive-value transaction that executes no recipient code. Measure
 the block residual only after subtracting transaction, transfer, opcode, and precompile work.
@@ -706,6 +707,16 @@ Witness-byte, witness-node, stdin-byte, blob-byte, and KZG-invocation cases may 
 V1 diagnostics. These raw features can overlap, so the manifest freezes a residualization DAG rather
 than assuming every other quantity can remain physically constant. Each run records every changed
 feature count plus raw-gas and fixed-event operation deltas.
+
+V1 assigns the complete pre-transaction `OperationPhase::System`, the Anchor transaction, and the
+fixed per-block MPT, trie, and host hashing baseline to `block_base`. Controlled operation deltas
+therefore contain only non-Anchor transaction-phase pricing units: interpreter raw gas for ordinary opcodes,
+native gas for precompiles, and event count for confirmed spawned wrappers. Zero-gas events contribute
+zero units. Proposal execution terms use the same non-Anchor transaction boundary, preventing the
+system/Anchor work from being charged once through an operation coefficient and again through
+`block_base`. A future V2 may split individual system, trie, Merkle, witness, or hash actions after it
+defines independently controlled units; V1 diagnostics do not enter `Q_formula`, the candidate, or
+the bridge.
 
 Run the same three deterministic repeats, cumulative-prefix fit, frozen checkpoint mapping, and 10%
 out-of-fit APE gate for primary `p` responses.
@@ -745,10 +756,12 @@ arithmetic mean. Never use a proposal-corpus intercept.
 ```text
 startup_residual_p(h) = p(h)
                       - block_count(h) * o_p(block_base)
-                      - started_transaction_count(h) * o_p(tx_base)
+                      - started_non_anchor_transaction_count(h) * o_p(tx_base)
                       - native_value_transfer_count(h) * o_p(native_value_transfer)
-                      - sum(raw_operation_gas(e) * c_p(resolve_measurement_key(e)) for e in h)
-                      - sum(f_p(resolve_measurement_key(e)) for fixed_per_event e in h)
+                      - sum(raw_operation_gas(e) * c_p(resolve_measurement_key(e))
+                            for non-Anchor transaction-phase e in h)
+                      - sum(f_p(resolve_measurement_key(e))
+                            for non-Anchor transaction-phase fixed_per_event e in h)
 
 max(startup_residual_p(h)) / min(startup_residual_p(h)) - 1 <= 0.05
 o_p(proposal_startup) = arithmetic_mean(startup_residual_p(h))
@@ -872,9 +885,11 @@ execution_raw_evm_gas(e) = e.interpreter_raw_gas for a raw_gas_slope opcode Oper
 execution_raw_evm_gas(e) = e.native_gas for a raw_gas_slope precompile OperationTrace
 
 p_hat(j) = sum(execution_raw_evm_gas(e) * c_p(resolve_measurement_key(e))
-               for e where basis(resolve_measurement_key(e)) == raw_gas_slope)
+               for non-Anchor transaction-phase e
+               where basis(resolve_measurement_key(e)) == raw_gas_slope)
          + sum(f_p(resolve_measurement_key(e))
-               for e where basis(resolve_measurement_key(e)) == fixed_per_event)
+               for non-Anchor transaction-phase e
+               where basis(resolve_measurement_key(e)) == fixed_per_event)
          + sum(controlled_feature(j, q) * o_p(q) for q in Q_formula)
 
 APE_main(j) = abs(p_hat(j) - p(j)) / p(j)
@@ -882,15 +897,19 @@ APE_main(j) = abs(p_hat(j) - p(j)) / p(j)
 
 `Q_formula` is exactly `[proposal_startup, block_base, tx_base, native_value_transfer]` in canonical
 order. Their proposal feature counts are respectively one, successful block count,
-started transaction iterator-yield count, and committed structured native-value-transfer count.
+started non-Anchor candidate transaction iterator-yield count, and committed structured
+native-value-transfer count.
 Every key and
 transitive subtraction dependency must be accepted before sealing. Diagnostic
 or bundled keys never appear independently in the sum. This same exclusive feature basis is used in
 controlled fixtures and proposal extraction, so witness/blob bytes are not also charged as full stdin
 bytes and block/transaction features do not repeat operation work.
 
-The execution sums include resolved operations in committed, attempted, and pre-execution system
-work. They exclude intrinsic or pre-validation failures, the unattempted truncation tail, and
+The execution sums include resolved non-Anchor transaction-phase operations in committed and
+attempted work. Pre-execution system work and the Anchor transaction are owned exclusively by
+`block_base`; a double-counting guard must
+reject any extractor that also places it in an execution sum. The sums exclude intrinsic or
+pre-validation failures, the unattempted truncation tail, and
 missing/rejected/ambiguous keys. Spawned CALL/CREATE is included only as one `fixed_per_event` term
 when the frozen event match and basis resolve exactly; its forwarded interpreter gas is never added.
 Current intrinsic charges, spawn estimates, failsafe values, block cap, and current multipliers remain
@@ -1412,6 +1431,11 @@ that the V1 manifest rejects any required overhead set other than the four froze
 these constructed GuestInputs with the production
 `sp1-shasta-proposal` ELF; do not add a separate overhead guest whose program costs would differ from
 the proposal path.
+Freeze `system_operation_ownership = "block_base"` and
+`anchor_operation_ownership = "block_base"`. Assert that overhead operation deltas use only
+non-Anchor transaction-phase pricing units, that raw-gas cases accumulate raw gas rather than event count, that
+zero-gas events are omitted, and that system/Anchor operations cannot be counted again in proposal
+execution terms.
 
 Add manifest rejection tests for an empty or duplicate `bridge_key_ids`; an unknown key or a
 diagnostic-only overhead key; omission of ADD or any `Q_formula` key; omission of an additional opcode
@@ -1505,10 +1529,12 @@ referenced by `candidate-manifest.json`.
 
 ### Step 4: Test The Immutable Proposal Validation Boundary
 
-Write failing tests for transaction iterator boundaries, attempted/system/committed recomputation,
+Write failing tests for transaction iterator boundaries, attempted/committed recomputation and
+system-to-block ownership,
 ordinary/traced difficulty and complete A/B parity, exact trace/SP1 GuestInput and public-output
 joins, and positive `p`. Record missing/non-positive `s` as a secondary-sample failure. Cover
-prediction inclusion for executed committed/attempted/system operations and exclusion for intrinsic/
+prediction inclusion for executed non-Anchor transaction-phase committed/attempted operations,
+exclusive `block_base` ownership of system and Anchor operations, and exclusion for intrinsic/
 pre-validation failure, unattempted work, unmeasured keys, and pricing-basis mismatch. Reject any use
 of current zkGas multipliers, fixed spawn estimates, or spawned forwarded gas as proving-gas
 coefficients.
@@ -1521,7 +1547,8 @@ that measurement key. Separately prove the required P1 case: when two required s
 unresolvable measurement key and one is accepted while the other is rejected, the complete key stays
 out of `K` and every matching proposal operation enters unmeasured coverage.
 
-Test exact feature extraction for proposal startup, block base, started transactions, and committed
+Test exact feature extraction for proposal startup, block base, started non-Anchor candidate
+transactions, and committed
 native-value transfers, plus diagnostic blob-byte and KZG-invocation counts. Test the fixed `p_hat`
 formula and exact `APE_main = abs(p_hat-p)/p` denominator using 50-digit `Decimal`. Prove MAPE is the
 arithmetic mean of proposal APE values rather than aggregate-gas error. Test metric signs,

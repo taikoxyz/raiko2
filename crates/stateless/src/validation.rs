@@ -26,6 +26,38 @@ use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader, SignerRec
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
 
+/// Injection point for derived-block execution during stateless reconstruction.
+pub trait DerivedBlockExecutor {
+    /// Executes the prepared candidate block against the witness-backed database.
+    ///
+    /// # Errors
+    ///
+    /// Returns the block executor's error when the candidate cannot be executed.
+    fn execute<DB: reth_revm::Database + std::fmt::Debug>(
+        &mut self,
+        evm_config: &TaikoEvmConfig,
+        parent_header: &SealedHeader,
+        derived_block: &RecoveredBlock<Block>,
+        db: DB,
+    ) -> Result<alethia_reth_block::derived_block::DerivedBlockExecutionOutcome, BlockExecutionError>;
+}
+
+#[derive(Debug, Default)]
+struct AlethiaDerivedBlockExecutor;
+
+impl DerivedBlockExecutor for AlethiaDerivedBlockExecutor {
+    fn execute<DB: reth_revm::Database + std::fmt::Debug>(
+        &mut self,
+        evm_config: &TaikoEvmConfig,
+        parent_header: &SealedHeader,
+        derived_block: &RecoveredBlock<Block>,
+        db: DB,
+    ) -> Result<alethia_reth_block::derived_block::DerivedBlockExecutionOutcome, BlockExecutionError>
+    {
+        execute_derived_block(evm_config, parent_header, derived_block, db)
+    }
+}
+
 /// Performs stateless validation of a block using the provided witness data.
 ///
 /// # Errors
@@ -223,6 +255,7 @@ fn build_derived_block(
         base_fee_per_gas: Some(block_env.base_fee_per_gas),
         mix_hash: block_env.prev_randao,
         extra_data: block_env.extra_data,
+        parent_beacon_block_root: block_env.parent_beacon_block_root,
         transactions_root: proofs::calculate_transaction_root(body.transactions.as_slice()),
         ommers_hash: body.calculate_ommers_root(),
         withdrawals_root: body.calculate_withdrawals_root(),
@@ -254,6 +287,44 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
 ) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError> {
+    reconstruct_block_from_transactions_with_executor_and_witness_resources(
+        anchor_tx,
+        transactions,
+        block_env,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        chain_spec,
+        evm_config,
+        &mut AlethiaDerivedBlockExecutor,
+    )
+}
+
+/// Reconstructs a candidate block while delegating only the prepared derived-block execution.
+///
+/// Sparse-state creation, state-root calculation, block assembly, and consensus validation remain
+/// owned by this function.
+///
+/// # Errors
+///
+/// Returns the same validation errors as
+/// [`reconstruct_block_from_transactions_with_witness_resources`], including an injected block
+/// execution failure mapped to [`StatelessValidationError`].
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_block_from_transactions_with_executor_and_witness_resources<E>(
+    anchor_tx: Recovered<TransactionSigned>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
+    executor: &mut E,
+) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError>
+where
+    E: DerivedBlockExecutor,
+{
     let parent_header = sealed_parent_header(ancestor_headers)?;
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
     let ancestor_hashes = compute_next_block_ancestor_hashes(ancestor_headers)?;
@@ -263,7 +334,8 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
 
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
-    let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
+    let execution_outcome = executor
+        .execute(evm_config, &parent_header, &derived_block, db)
         .map_err(|err| map_block_execution_error(&err))?;
     ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
@@ -289,6 +361,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
         &outcome.filtered_block,
         chain_spec.as_ref(),
         &outcome.execution_result,
+        None,
         None,
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
@@ -324,7 +397,7 @@ where
     ensure_anchor_receipt_success(&output.receipts)?;
 
     // Post validation checks
-    validate_block_post_execution(current_block, chain_spec, &output, None)
+    validate_block_post_execution(current_block, chain_spec, &output, None, None)
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
     validate_anchor_transaction_in_block(current_block, chain_spec)
@@ -510,11 +583,13 @@ fn compute_ancestor_hashes_for_child(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_derived_block, ensure_anchor_receipt_success,
+        DerivedBlockExecutor, build_derived_block, ensure_anchor_receipt_success,
+        reconstruct_block_from_transactions_with_executor_and_witness_resources,
         reconstruct_block_from_transactions_with_witness_resources, validate_block,
     };
     use alethia_reth_block::config::TaikoEvmConfig;
     use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
+    use alethia_reth_block::derived_block::DerivedBlockExecutionOutcome;
     use alethia_reth_chainspec::TAIKO_DEVNET;
     use alethia_reth_consensus::validation::{ANCHOR_V3_V4_GAS_LIMIT, ANCHOR_V4_SELECTOR};
     use alloy_consensus::{
@@ -528,7 +603,9 @@ mod tests {
     };
     use reth_consensus::ConsensusError;
     use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
+    use reth_evm::block::BlockExecutionError;
     use reth_primitives_traits::{SealedHeader, SignerRecoverable};
+    use reth_revm::Database;
     use risc0_ethereum_trie::Trie;
 
     fn empty_shanghai_body() -> BlockBody {
@@ -546,6 +623,7 @@ mod tests {
             parent_hash,
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(1),
+            extra_data: Bytes::from(vec![0; 7]),
             ..Default::default()
         };
 
@@ -593,6 +671,69 @@ mod tests {
 
     fn golden_touch_address() -> Address {
         alloy_primitives::address!("0000777735367b36bc9b61c50022d9d0700db4ec")
+    }
+
+    #[derive(Debug, Default)]
+    struct RejectingDerivedBlockExecutor {
+        called: bool,
+        parent_beacon_block_root: Option<alloy_primitives::B256>,
+    }
+
+    impl DerivedBlockExecutor for RejectingDerivedBlockExecutor {
+        fn execute<DB: Database + std::fmt::Debug>(
+            &mut self,
+            _evm_config: &TaikoEvmConfig,
+            _parent_header: &SealedHeader,
+            derived_block: &reth_primitives_traits::RecoveredBlock<Block>,
+            _db: DB,
+        ) -> Result<DerivedBlockExecutionOutcome, BlockExecutionError> {
+            self.called = true;
+            self.parent_beacon_block_root = derived_block.header().parent_beacon_block_root;
+            Err(BlockExecutionError::other(std::io::Error::other(
+                "injected executor rejection",
+            )))
+        }
+    }
+
+    #[test]
+    fn reconstruction_uses_the_injected_derived_block_executor() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let witness = witness_from_state_nodes(Vec::new(), EMPTY_ROOT_HASH);
+        let anchor_tx = Recovered::new_unchecked(
+            test_anchor_tx(chain_spec.inner.chain().id(), 0),
+            golden_touch_address(),
+        );
+        let mut executor = RejectingDerivedBlockExecutor::default();
+        let parent_beacon_block_root = alloy_primitives::B256::with_last_byte(0x42);
+
+        let error = reconstruct_block_from_transactions_with_executor_and_witness_resources(
+            anchor_tx,
+            Vec::new(),
+            TaikoNextBlockEnvAttributes {
+                timestamp: 101,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: Bytes::from(vec![0; 7]),
+                base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: Some(parent_beacon_block_root),
+            },
+            &witness,
+            &witness.headers,
+            &[],
+            &chain_spec,
+            &evm_config,
+            &mut executor,
+        )
+        .expect_err("injected executor must control the execution result");
+
+        assert!(executor.called);
+        assert_eq!(
+            executor.parent_beacon_block_root,
+            Some(parent_beacon_block_root)
+        );
+        assert!(error.to_string().contains("injected executor rejection"));
     }
 
     fn test_anchor_tx(chain_id: u64, nonce: u64) -> TransactionSigned {
@@ -645,8 +786,9 @@ mod tests {
                 suggested_fee_recipient: Address::ZERO,
                 prev_randao: alloy_primitives::B256::ZERO,
                 gas_limit: 30_000_000,
-                extra_data: Bytes::new(),
+                extra_data: Bytes::from(vec![0; 7]),
                 base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
             },
         );
 
@@ -803,8 +945,9 @@ mod tests {
                 suggested_fee_recipient: Address::ZERO,
                 prev_randao: alloy_primitives::B256::ZERO,
                 gas_limit: 30_000_000,
-                extra_data: Bytes::new(),
+                extra_data: Bytes::from(vec![0; 7]),
                 base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
             },
             &witness,
             &witness.headers,
@@ -859,8 +1002,9 @@ mod tests {
             suggested_fee_recipient: Address::ZERO,
             prev_randao: alloy_primitives::B256::ZERO,
             gas_limit: 30_000_000,
-            extra_data: Bytes::new(),
+            extra_data: Bytes::from(vec![0; 7]),
             base_fee_per_gas: 25_000_000,
+            parent_beacon_block_root: None,
         };
 
         let derived_block = build_derived_block(
@@ -928,8 +1072,9 @@ mod tests {
                 suggested_fee_recipient: Address::ZERO,
                 prev_randao: alloy_primitives::B256::ZERO,
                 gas_limit: 30_000_000,
-                extra_data: Bytes::new(),
+                extra_data: Bytes::from(vec![0; 7]),
                 base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
             },
             &witness,
             &witness.headers,

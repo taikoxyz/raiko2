@@ -10,6 +10,9 @@ use sp1_zkvm::io;
 
 pub fn main() {
     let input = io::read::<PrecompileLabInput>();
+    input
+        .validate_controlled_contract()
+        .expect("valid precompile controlled-workload contract");
 
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-start: precompile_lab_execute");
@@ -19,6 +22,7 @@ pub fn main() {
 
     let mut output = Vec::new();
     output.extend_from_slice(input.case.as_bytes());
+    output.extend_from_slice(format!("{:?}", input.lane).as_bytes());
     output.extend_from_slice(&input.address.to_le_bytes());
     output.extend_from_slice(&input.target_count.to_le_bytes());
     output.extend_from_slice(&input.input_size.to_le_bytes());

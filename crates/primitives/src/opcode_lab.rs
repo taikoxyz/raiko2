@@ -9,6 +9,99 @@ pub struct OpcodeLabInput {
     pub target_raw_gas: u64,
     #[serde(with = "hex_bytes")]
     pub bytecode: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator_max_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_bytecode_len: Option<u64>,
+}
+
+impl OpcodeLabInput {
+    pub const GAS_LIMIT_OVERHEAD: u64 = 1_000_000;
+    pub const FIXED_MICROPROGRAM_MAGIC: [u8; 4] = [0xef, 0x4d, 0x50, 0x01];
+
+    #[must_use]
+    pub const fn execution_gas_limit(&self) -> u64 {
+        self.target_raw_gas
+            .saturating_mul(self.target_count)
+            .saturating_add(Self::GAS_LIMIT_OVERHEAD)
+    }
+
+    /// Validates the count and bytecode-size commitments carried by a controlled fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected count exceeds the declared generator bound or the
+    /// serialized bytecode length differs from the frozen layout length.
+    pub fn validate_controlled_contract(&self) -> Result<(), &'static str> {
+        if let Some(max_count) = self.generator_max_count
+            && self.target_count > max_count
+        {
+            return Err("target_count exceeds declared generator_max_count");
+        }
+        if let Some(fixed_len) = self.fixed_bytecode_len
+            && u64::try_from(self.bytecode.len()).unwrap_or(u64::MAX) != fixed_len
+        {
+            return Err("bytecode length differs from fixed_bytecode_len");
+        }
+        self.execution_programs()?;
+        Ok(())
+    }
+
+    /// Returns the one legacy program or every framed fixed-footprint microprogram.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the framed microprogram header, count, or length table is malformed,
+    /// or when its program count differs from the declared generator footprint.
+    pub fn execution_programs(&self) -> Result<Vec<&[u8]>, &'static str> {
+        if !self.bytecode.starts_with(&Self::FIXED_MICROPROGRAM_MAGIC) {
+            return Ok(vec![self.bytecode.as_slice()]);
+        }
+        if self.bytecode.len() < 8 {
+            return Err("truncated fixed-microprogram header");
+        }
+        let count = u32::from_be_bytes(
+            self.bytecode[4..8]
+                .try_into()
+                .map_err(|_| "truncated fixed-microprogram header")?,
+        );
+        if count == 0 {
+            return Err("fixed microprogram list is empty");
+        }
+        if let Some(max_count) = self.generator_max_count
+            && u64::from(count) != max_count
+        {
+            return Err("fixed microprogram count differs from generator_max_count");
+        }
+        let mut cursor = 8usize;
+        let mut programs = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            if cursor
+                .checked_add(4)
+                .is_none_or(|end| end > self.bytecode.len())
+            {
+                return Err("truncated fixed-microprogram length");
+            }
+            let length = u32::from_be_bytes(
+                self.bytecode[cursor..cursor + 4]
+                    .try_into()
+                    .map_err(|_| "truncated fixed-microprogram length")?,
+            ) as usize;
+            cursor += 4;
+            let end = cursor
+                .checked_add(length)
+                .ok_or("fixed microprogram length overflow")?;
+            if end > self.bytecode.len() {
+                return Err("truncated fixed microprogram");
+            }
+            programs.push(&self.bytecode[cursor..end]);
+            cursor = end;
+        }
+        if cursor != self.bytecode.len() {
+            return Err("trailing fixed-microprogram bytes");
+        }
+        Ok(programs)
+    }
 }
 
 mod hex_bytes {
@@ -50,5 +143,80 @@ mod tests {
         .expect("parse lab input");
 
         assert_eq!(input.bytecode, vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00]);
+        assert_eq!(input.generator_max_count, None);
+        assert_eq!(input.fixed_bytecode_len, None);
+    }
+
+    #[test]
+    fn controlled_contract_binds_generator_bound_and_fixed_bytecode_length() {
+        let input: OpcodeLabInput = serde_json::from_str(
+            r#"{
+              "case": "add",
+              "scenario": "arithmetic",
+              "opcode": 1,
+              "target_count": 4,
+              "target_raw_gas": 3,
+              "bytecode": "0x600160020100",
+              "generator_max_count": 8,
+              "fixed_bytecode_len": 6
+            }"#,
+        )
+        .expect("parse controlled lab input");
+
+        input
+            .validate_controlled_contract()
+            .expect("valid controlled contract");
+
+        let beyond_bound = OpcodeLabInput {
+            target_count: 9,
+            ..input.clone()
+        };
+        assert_eq!(
+            beyond_bound.validate_controlled_contract(),
+            Err("target_count exceeds declared generator_max_count")
+        );
+
+        let wrong_size = OpcodeLabInput {
+            bytecode: vec![0x00],
+            ..input
+        };
+        assert_eq!(
+            wrong_size.validate_controlled_contract(),
+            Err("bytecode length differs from fixed_bytecode_len")
+        );
+
+        assert_eq!(
+            OpcodeLabInput {
+                target_count: 4,
+                target_raw_gas: 3,
+                ..OpcodeLabInput::default()
+            }
+            .execution_gas_limit(),
+            1_000_012
+        );
+    }
+
+    #[test]
+    fn controlled_contract_decodes_fixed_microprogram_framing() {
+        let input = OpcodeLabInput {
+            bytecode: vec![
+                0xef, 0x4d, 0x50, 0x01, 0, 0, 0, 2, 0, 0, 0, 2, 0x01, 0x00, 0, 0, 0, 2, 0x00, 0x01,
+            ],
+            generator_max_count: Some(2),
+            fixed_bytecode_len: Some(20),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            input.execution_programs().unwrap(),
+            vec![&[0x01, 0x00][..], &[0x00, 0x01][..]]
+        );
+
+        let mut truncated = input;
+        truncated.bytecode.pop();
+        assert_eq!(
+            truncated.execution_programs(),
+            Err("truncated fixed microprogram")
+        );
     }
 }

@@ -32,7 +32,7 @@ pub use error::{RaikoError, RaikoResult};
 pub use input::{AggregationGuestInput, RawAggregationGuestInput, RawProof, StatelessInput};
 pub use opcode_lab::OpcodeLabInput;
 pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};
-pub use precompile_lab::PrecompileLabInput;
+pub use precompile_lab::{PrecompileLabInput, PrecompileLabLane};
 pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig};
 pub use proof_type::ProofType;
 pub use serde_bincode::EthereumBlock;

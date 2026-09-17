@@ -1,0 +1,2410 @@
+name = "sp1-calibration-v1"
+backend = "sp1"
+variants = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+normalization_reference_key = "opcode:0x01"
+system_operation_ownership = "block_base"
+anchor_operation_ownership = "block_base"
+q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
+bridge_key_ids = [
+  "opcode:0x01",
+  "opcode:0x02",
+  "opcode:0x03",
+  "opcode:0x04",
+  "opcode:0x05",
+  "opcode:0x06",
+  "opcode:0x07",
+  "opcode:0x08",
+  "opcode:0x09",
+  "opcode:0x0a",
+  "opcode:0x0b",
+  "opcode:0x10",
+  "opcode:0x11",
+  "opcode:0x12",
+  "opcode:0x13",
+  "opcode:0x14",
+  "opcode:0x15",
+  "opcode:0x16",
+  "opcode:0x17",
+  "opcode:0x18",
+  "opcode:0x19",
+  "opcode:0x1a",
+  "opcode:0x1b",
+  "opcode:0x1c",
+  "opcode:0x1d",
+  "opcode:0x20",
+  "opcode:0x50",
+  "opcode:0x51",
+  "opcode:0x52",
+  "opcode:0x53",
+  "opcode:0x56",
+  "opcode:0x57",
+  "opcode:0x58",
+  "opcode:0x59",
+  "opcode:0x5a",
+  "opcode:0x5b",
+  "opcode:0x5e",
+  "opcode:0x5f",
+  "opcode:0x60",
+  "opcode:0x61",
+  "opcode:0x62",
+  "opcode:0x63",
+  "opcode:0x64",
+  "opcode:0x65",
+  "opcode:0x66",
+  "opcode:0x67",
+  "opcode:0x68",
+  "opcode:0x69",
+  "opcode:0x6a",
+  "opcode:0x6b",
+  "opcode:0x6c",
+  "opcode:0x6d",
+  "opcode:0x6e",
+  "opcode:0x6f",
+  "opcode:0x70",
+  "opcode:0x71",
+  "opcode:0x72",
+  "opcode:0x73",
+  "opcode:0x74",
+  "opcode:0x75",
+  "opcode:0x76",
+  "opcode:0x77",
+  "opcode:0x78",
+  "opcode:0x79",
+  "opcode:0x7a",
+  "opcode:0x7b",
+  "opcode:0x7c",
+  "opcode:0x7d",
+  "opcode:0x7e",
+  "opcode:0x7f",
+  "opcode:0x80",
+  "opcode:0x81",
+  "opcode:0x82",
+  "opcode:0x83",
+  "opcode:0x84",
+  "opcode:0x85",
+  "opcode:0x86",
+  "opcode:0x87",
+  "opcode:0x88",
+  "opcode:0x89",
+  "opcode:0x8a",
+  "opcode:0x8b",
+  "opcode:0x8c",
+  "opcode:0x8d",
+  "opcode:0x8e",
+  "opcode:0x8f",
+  "opcode:0x90",
+  "opcode:0x91",
+  "opcode:0x92",
+  "opcode:0x93",
+  "opcode:0x94",
+  "opcode:0x95",
+  "opcode:0x96",
+  "opcode:0x97",
+  "opcode:0x98",
+  "opcode:0x99",
+  "opcode:0x9a",
+  "opcode:0x9b",
+  "opcode:0x9c",
+  "opcode:0x9d",
+  "opcode:0x9e",
+  "opcode:0x9f",
+  "precompile:0x01",
+  "precompile:0x02",
+  "precompile:0x03",
+  "precompile:0x04",
+  "precompile:0x05",
+  "precompile:0x06",
+  "precompile:0x07",
+  "precompile:0x08",
+  "precompile:0x09",
+  "precompile:0x0a",
+  "precompile:0x0b",
+  "precompile:0x0c",
+  "precompile:0x0d",
+  "precompile:0x0e",
+  "precompile:0x0f",
+  "precompile:0x10",
+  "precompile:0x11",
+  "proposal_startup",
+  "block_base",
+  "tx_base",
+  "native_value_transfer",
+]
+bridge_model = "through_origin_equal_key_median"
+bridge_controlled_max_ape = "0.10"
+bridge_proposal_max_ape = "0.10"
+
+[[cases]]
+name = "add"
+kind = "opcode"
+opcode = "0x01"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "mul"
+kind = "opcode"
+opcode = "0x02"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "sub"
+kind = "opcode"
+opcode = "0x03"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "div"
+kind = "opcode"
+opcode = "0x04"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "sdiv"
+kind = "opcode"
+opcode = "0x05"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "mod"
+kind = "opcode"
+opcode = "0x06"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "smod"
+kind = "opcode"
+opcode = "0x07"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "addmod"
+kind = "opcode"
+opcode = "0x08"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_ternary"
+target_raw_gas = 8
+
+[[cases]]
+name = "mulmod"
+kind = "opcode"
+opcode = "0x09"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_ternary"
+target_raw_gas = 8
+
+[[cases]]
+name = "exp"
+kind = "opcode"
+opcode = "0x0a"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_exp"
+target_raw_gas = 60
+
+[[cases]]
+name = "signextend"
+kind = "opcode"
+opcode = "0x0b"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "lt"
+kind = "opcode"
+opcode = "0x10"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "gt"
+kind = "opcode"
+opcode = "0x11"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "slt"
+kind = "opcode"
+opcode = "0x12"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "sgt"
+kind = "opcode"
+opcode = "0x13"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "eq"
+kind = "opcode"
+opcode = "0x14"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "iszero"
+kind = "opcode"
+opcode = "0x15"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary"
+target_raw_gas = 3
+
+[[cases]]
+name = "and"
+kind = "opcode"
+opcode = "0x16"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "or"
+kind = "opcode"
+opcode = "0x17"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "xor"
+kind = "opcode"
+opcode = "0x18"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "not"
+kind = "opcode"
+opcode = "0x19"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary"
+target_raw_gas = 3
+
+[[cases]]
+name = "byte"
+kind = "opcode"
+opcode = "0x1a"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "shl"
+kind = "opcode"
+opcode = "0x1b"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "shr"
+kind = "opcode"
+opcode = "0x1c"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "sar"
+kind = "opcode"
+opcode = "0x1d"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "keccak256"
+kind = "opcode"
+opcode = "0x20"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "keccak_32"
+target_raw_gas = 36
+
+[[cases]]
+name = "pop"
+kind = "opcode"
+opcode = "0x50"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_pop"
+target_raw_gas = 2
+
+[[cases]]
+name = "mload"
+kind = "opcode"
+opcode = "0x51"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_load_32"
+target_raw_gas = 3
+
+[[cases]]
+name = "mstore"
+kind = "opcode"
+opcode = "0x52"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_store_32"
+target_raw_gas = 3
+
+[[cases]]
+name = "mstore8"
+kind = "opcode"
+opcode = "0x53"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_store8"
+target_raw_gas = 3
+
+[[cases]]
+name = "jump"
+kind = "opcode"
+opcode = "0x56"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "jump_chain"
+target_raw_gas = 8
+
+[[cases]]
+name = "jumpi"
+kind = "opcode"
+opcode = "0x57"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "jumpi_chain"
+target_raw_gas = 10
+
+[[cases]]
+name = "pc"
+kind = "opcode"
+opcode = "0x58"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary_producer"
+target_raw_gas = 2
+
+[[cases]]
+name = "msize"
+kind = "opcode"
+opcode = "0x59"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary_producer"
+target_raw_gas = 2
+
+[[cases]]
+name = "gas"
+kind = "opcode"
+opcode = "0x5a"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary_producer"
+target_raw_gas = 2
+
+[[cases]]
+name = "jumpdest"
+kind = "opcode"
+opcode = "0x5b"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "jumpdest_chain"
+target_raw_gas = 1
+
+[[cases]]
+name = "mcopy"
+kind = "opcode"
+opcode = "0x5e"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_copy_32"
+target_raw_gas = 6
+
+[[cases]]
+name = "push0"
+kind = "opcode"
+opcode = "0x5f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 2
+
+[[cases]]
+name = "push1"
+kind = "opcode"
+opcode = "0x60"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push2"
+kind = "opcode"
+opcode = "0x61"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push3"
+kind = "opcode"
+opcode = "0x62"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push4"
+kind = "opcode"
+opcode = "0x63"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push5"
+kind = "opcode"
+opcode = "0x64"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push6"
+kind = "opcode"
+opcode = "0x65"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push7"
+kind = "opcode"
+opcode = "0x66"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push8"
+kind = "opcode"
+opcode = "0x67"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push9"
+kind = "opcode"
+opcode = "0x68"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push10"
+kind = "opcode"
+opcode = "0x69"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push11"
+kind = "opcode"
+opcode = "0x6a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push12"
+kind = "opcode"
+opcode = "0x6b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push13"
+kind = "opcode"
+opcode = "0x6c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push14"
+kind = "opcode"
+opcode = "0x6d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push15"
+kind = "opcode"
+opcode = "0x6e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push16"
+kind = "opcode"
+opcode = "0x6f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push17"
+kind = "opcode"
+opcode = "0x70"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push18"
+kind = "opcode"
+opcode = "0x71"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push19"
+kind = "opcode"
+opcode = "0x72"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push20"
+kind = "opcode"
+opcode = "0x73"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push21"
+kind = "opcode"
+opcode = "0x74"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push22"
+kind = "opcode"
+opcode = "0x75"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push23"
+kind = "opcode"
+opcode = "0x76"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push24"
+kind = "opcode"
+opcode = "0x77"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push25"
+kind = "opcode"
+opcode = "0x78"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push26"
+kind = "opcode"
+opcode = "0x79"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push27"
+kind = "opcode"
+opcode = "0x7a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push28"
+kind = "opcode"
+opcode = "0x7b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push29"
+kind = "opcode"
+opcode = "0x7c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push30"
+kind = "opcode"
+opcode = "0x7d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push31"
+kind = "opcode"
+opcode = "0x7e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push32"
+kind = "opcode"
+opcode = "0x7f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup1"
+kind = "opcode"
+opcode = "0x80"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup2"
+kind = "opcode"
+opcode = "0x81"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup3"
+kind = "opcode"
+opcode = "0x82"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup4"
+kind = "opcode"
+opcode = "0x83"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup5"
+kind = "opcode"
+opcode = "0x84"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup6"
+kind = "opcode"
+opcode = "0x85"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup7"
+kind = "opcode"
+opcode = "0x86"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup8"
+kind = "opcode"
+opcode = "0x87"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup9"
+kind = "opcode"
+opcode = "0x88"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup10"
+kind = "opcode"
+opcode = "0x89"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup11"
+kind = "opcode"
+opcode = "0x8a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup12"
+kind = "opcode"
+opcode = "0x8b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup13"
+kind = "opcode"
+opcode = "0x8c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup14"
+kind = "opcode"
+opcode = "0x8d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup15"
+kind = "opcode"
+opcode = "0x8e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup16"
+kind = "opcode"
+opcode = "0x8f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap1"
+kind = "opcode"
+opcode = "0x90"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap2"
+kind = "opcode"
+opcode = "0x91"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap3"
+kind = "opcode"
+opcode = "0x92"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap4"
+kind = "opcode"
+opcode = "0x93"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap5"
+kind = "opcode"
+opcode = "0x94"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap6"
+kind = "opcode"
+opcode = "0x95"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap7"
+kind = "opcode"
+opcode = "0x96"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap8"
+kind = "opcode"
+opcode = "0x97"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap9"
+kind = "opcode"
+opcode = "0x98"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap10"
+kind = "opcode"
+opcode = "0x99"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap11"
+kind = "opcode"
+opcode = "0x9a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap12"
+kind = "opcode"
+opcode = "0x9b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap13"
+kind = "opcode"
+opcode = "0x9c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap14"
+kind = "opcode"
+opcode = "0x9d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap15"
+kind = "opcode"
+opcode = "0x9e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap16"
+kind = "opcode"
+opcode = "0x9f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "ecrecover"
+kind = "precompile"
+address = "0x01"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_ecrecover_valid"
+input_size = 128
+target_raw_gas = 3000
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "sha256"
+kind = "precompile"
+address = "0x02"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_fixed_32"
+input_size = 32
+target_raw_gas = 72
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "ripemd160"
+kind = "precompile"
+address = "0x03"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_fixed_32"
+input_size = 32
+target_raw_gas = 720
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "identity"
+kind = "precompile"
+address = "0x04"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_fixed_32"
+input_size = 32
+target_raw_gas = 18
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "modexp"
+kind = "precompile"
+address = "0x05"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_modexp_small"
+input_size = 99
+target_raw_gas = 500
+paired = true
+expected_output_size = 1
+
+[[cases]]
+name = "bn128_add"
+kind = "precompile"
+address = "0x06"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bn254_add"
+input_size = 128
+target_raw_gas = 150
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "bn128_mul"
+kind = "precompile"
+address = "0x07"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bn254_mul"
+input_size = 96
+target_raw_gas = 6000
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "bn128_pairing"
+kind = "precompile"
+address = "0x08"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bn254_pairing"
+input_size = 192
+target_raw_gas = 79000
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "blake2f"
+kind = "precompile"
+address = "0x09"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_blake2f_12_rounds"
+input_size = 213
+target_raw_gas = 12
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "point_evaluation"
+kind = "precompile"
+address = "0x0a"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_kzg_point_evaluation"
+input_size = 192
+target_raw_gas = 50000
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "bls12_g1add"
+kind = "precompile"
+address = "0x0b"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g1add_zero"
+input_size = 256
+target_raw_gas = 375
+paired = true
+expected_output_size = 128
+
+[[cases]]
+name = "bls12_g1msm"
+kind = "precompile"
+address = "0x0c"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g1msm_zero"
+input_size = 160
+target_raw_gas = 12000
+paired = true
+expected_output_size = 128
+
+[[cases]]
+name = "bls12_g2add"
+kind = "precompile"
+address = "0x0d"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g2add_zero"
+input_size = 512
+target_raw_gas = 600
+paired = true
+expected_output_size = 256
+
+[[cases]]
+name = "bls12_g2msm"
+kind = "precompile"
+address = "0x0e"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g2msm_zero"
+input_size = 288
+target_raw_gas = 22500
+paired = true
+expected_output_size = 256
+
+[[cases]]
+name = "bls12_pairing"
+kind = "precompile"
+address = "0x0f"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_pairing_zero"
+input_size = 384
+target_raw_gas = 70300
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "bls12_map_fp_to_g1"
+kind = "precompile"
+address = "0x10"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_map_fp_to_g1_zero"
+input_size = 64
+target_raw_gas = 5500
+paired = true
+expected_output_size = 128
+
+[[cases]]
+name = "bls12_map_fp2_to_g2"
+kind = "precompile"
+address = "0x11"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_map_fp2_to_g2_zero"
+input_size = 128
+target_raw_gas = 23800
+paired = true
+expected_output_size = 256
+
+[[measurement_keys]]
+id = "opcode:0x01"
+production_schedule_key = "opcode:0x01"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["add"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x01" }
+
+[[measurement_keys]]
+id = "opcode:0x02"
+production_schedule_key = "opcode:0x02"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mul"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x02" }
+
+[[measurement_keys]]
+id = "opcode:0x03"
+production_schedule_key = "opcode:0x03"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sub"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x03" }
+
+[[measurement_keys]]
+id = "opcode:0x04"
+production_schedule_key = "opcode:0x04"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["div"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x04" }
+
+[[measurement_keys]]
+id = "opcode:0x05"
+production_schedule_key = "opcode:0x05"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sdiv"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x05" }
+
+[[measurement_keys]]
+id = "opcode:0x06"
+production_schedule_key = "opcode:0x06"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x06" }
+
+[[measurement_keys]]
+id = "opcode:0x07"
+production_schedule_key = "opcode:0x07"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["smod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x07" }
+
+[[measurement_keys]]
+id = "opcode:0x08"
+production_schedule_key = "opcode:0x08"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["addmod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x08" }
+
+[[measurement_keys]]
+id = "opcode:0x09"
+production_schedule_key = "opcode:0x09"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mulmod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x09" }
+
+[[measurement_keys]]
+id = "opcode:0x0a"
+production_schedule_key = "opcode:0x0a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["exp"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x0a" }
+
+[[measurement_keys]]
+id = "opcode:0x0b"
+production_schedule_key = "opcode:0x0b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["signextend"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x0b" }
+
+[[measurement_keys]]
+id = "opcode:0x10"
+production_schedule_key = "opcode:0x10"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["lt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x10" }
+
+[[measurement_keys]]
+id = "opcode:0x11"
+production_schedule_key = "opcode:0x11"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["gt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x11" }
+
+[[measurement_keys]]
+id = "opcode:0x12"
+production_schedule_key = "opcode:0x12"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["slt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x12" }
+
+[[measurement_keys]]
+id = "opcode:0x13"
+production_schedule_key = "opcode:0x13"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sgt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x13" }
+
+[[measurement_keys]]
+id = "opcode:0x14"
+production_schedule_key = "opcode:0x14"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["eq"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x14" }
+
+[[measurement_keys]]
+id = "opcode:0x15"
+production_schedule_key = "opcode:0x15"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["iszero"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x15" }
+
+[[measurement_keys]]
+id = "opcode:0x16"
+production_schedule_key = "opcode:0x16"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["and"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x16" }
+
+[[measurement_keys]]
+id = "opcode:0x17"
+production_schedule_key = "opcode:0x17"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["or"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x17" }
+
+[[measurement_keys]]
+id = "opcode:0x18"
+production_schedule_key = "opcode:0x18"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["xor"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x18" }
+
+[[measurement_keys]]
+id = "opcode:0x19"
+production_schedule_key = "opcode:0x19"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["not"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x19" }
+
+[[measurement_keys]]
+id = "opcode:0x1a"
+production_schedule_key = "opcode:0x1a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["byte"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1a" }
+
+[[measurement_keys]]
+id = "opcode:0x1b"
+production_schedule_key = "opcode:0x1b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["shl"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1b" }
+
+[[measurement_keys]]
+id = "opcode:0x1c"
+production_schedule_key = "opcode:0x1c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["shr"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1c" }
+
+[[measurement_keys]]
+id = "opcode:0x1d"
+production_schedule_key = "opcode:0x1d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sar"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1d" }
+
+[[measurement_keys]]
+id = "opcode:0x20"
+production_schedule_key = "opcode:0x20"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["keccak256"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x20" }
+
+[[measurement_keys]]
+id = "opcode:0x50"
+production_schedule_key = "opcode:0x50"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["pop"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x50" }
+
+[[measurement_keys]]
+id = "opcode:0x51"
+production_schedule_key = "opcode:0x51"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mload"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x51" }
+
+[[measurement_keys]]
+id = "opcode:0x52"
+production_schedule_key = "opcode:0x52"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mstore"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x52" }
+
+[[measurement_keys]]
+id = "opcode:0x53"
+production_schedule_key = "opcode:0x53"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mstore8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x53" }
+
+[[measurement_keys]]
+id = "opcode:0x56"
+production_schedule_key = "opcode:0x56"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["jump"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x56" }
+
+[[measurement_keys]]
+id = "opcode:0x57"
+production_schedule_key = "opcode:0x57"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["jumpi"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x57" }
+
+[[measurement_keys]]
+id = "opcode:0x58"
+production_schedule_key = "opcode:0x58"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["pc"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x58" }
+
+[[measurement_keys]]
+id = "opcode:0x59"
+production_schedule_key = "opcode:0x59"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["msize"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x59" }
+
+[[measurement_keys]]
+id = "opcode:0x5a"
+production_schedule_key = "opcode:0x5a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["gas"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5a" }
+
+[[measurement_keys]]
+id = "opcode:0x5b"
+production_schedule_key = "opcode:0x5b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["jumpdest"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5b" }
+
+[[measurement_keys]]
+id = "opcode:0x5e"
+production_schedule_key = "opcode:0x5e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mcopy"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5e" }
+
+[[measurement_keys]]
+id = "opcode:0x5f"
+production_schedule_key = "opcode:0x5f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push0"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5f" }
+
+[[measurement_keys]]
+id = "opcode:0x60"
+production_schedule_key = "opcode:0x60"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push1"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x60" }
+
+[[measurement_keys]]
+id = "opcode:0x61"
+production_schedule_key = "opcode:0x61"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push2"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x61" }
+
+[[measurement_keys]]
+id = "opcode:0x62"
+production_schedule_key = "opcode:0x62"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push3"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x62" }
+
+[[measurement_keys]]
+id = "opcode:0x63"
+production_schedule_key = "opcode:0x63"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push4"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x63" }
+
+[[measurement_keys]]
+id = "opcode:0x64"
+production_schedule_key = "opcode:0x64"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push5"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x64" }
+
+[[measurement_keys]]
+id = "opcode:0x65"
+production_schedule_key = "opcode:0x65"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push6"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x65" }
+
+[[measurement_keys]]
+id = "opcode:0x66"
+production_schedule_key = "opcode:0x66"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push7"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x66" }
+
+[[measurement_keys]]
+id = "opcode:0x67"
+production_schedule_key = "opcode:0x67"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x67" }
+
+[[measurement_keys]]
+id = "opcode:0x68"
+production_schedule_key = "opcode:0x68"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push9"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x68" }
+
+[[measurement_keys]]
+id = "opcode:0x69"
+production_schedule_key = "opcode:0x69"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push10"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x69" }
+
+[[measurement_keys]]
+id = "opcode:0x6a"
+production_schedule_key = "opcode:0x6a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push11"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6a" }
+
+[[measurement_keys]]
+id = "opcode:0x6b"
+production_schedule_key = "opcode:0x6b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push12"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6b" }
+
+[[measurement_keys]]
+id = "opcode:0x6c"
+production_schedule_key = "opcode:0x6c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push13"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6c" }
+
+[[measurement_keys]]
+id = "opcode:0x6d"
+production_schedule_key = "opcode:0x6d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push14"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6d" }
+
+[[measurement_keys]]
+id = "opcode:0x6e"
+production_schedule_key = "opcode:0x6e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push15"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6e" }
+
+[[measurement_keys]]
+id = "opcode:0x6f"
+production_schedule_key = "opcode:0x6f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push16"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6f" }
+
+[[measurement_keys]]
+id = "opcode:0x70"
+production_schedule_key = "opcode:0x70"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push17"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x70" }
+
+[[measurement_keys]]
+id = "opcode:0x71"
+production_schedule_key = "opcode:0x71"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push18"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x71" }
+
+[[measurement_keys]]
+id = "opcode:0x72"
+production_schedule_key = "opcode:0x72"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push19"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x72" }
+
+[[measurement_keys]]
+id = "opcode:0x73"
+production_schedule_key = "opcode:0x73"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push20"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x73" }
+
+[[measurement_keys]]
+id = "opcode:0x74"
+production_schedule_key = "opcode:0x74"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push21"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x74" }
+
+[[measurement_keys]]
+id = "opcode:0x75"
+production_schedule_key = "opcode:0x75"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push22"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x75" }
+
+[[measurement_keys]]
+id = "opcode:0x76"
+production_schedule_key = "opcode:0x76"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push23"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x76" }
+
+[[measurement_keys]]
+id = "opcode:0x77"
+production_schedule_key = "opcode:0x77"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push24"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x77" }
+
+[[measurement_keys]]
+id = "opcode:0x78"
+production_schedule_key = "opcode:0x78"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push25"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x78" }
+
+[[measurement_keys]]
+id = "opcode:0x79"
+production_schedule_key = "opcode:0x79"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push26"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x79" }
+
+[[measurement_keys]]
+id = "opcode:0x7a"
+production_schedule_key = "opcode:0x7a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push27"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7a" }
+
+[[measurement_keys]]
+id = "opcode:0x7b"
+production_schedule_key = "opcode:0x7b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push28"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7b" }
+
+[[measurement_keys]]
+id = "opcode:0x7c"
+production_schedule_key = "opcode:0x7c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push29"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7c" }
+
+[[measurement_keys]]
+id = "opcode:0x7d"
+production_schedule_key = "opcode:0x7d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push30"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7d" }
+
+[[measurement_keys]]
+id = "opcode:0x7e"
+production_schedule_key = "opcode:0x7e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push31"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7e" }
+
+[[measurement_keys]]
+id = "opcode:0x7f"
+production_schedule_key = "opcode:0x7f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push32"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7f" }
+
+[[measurement_keys]]
+id = "opcode:0x80"
+production_schedule_key = "opcode:0x80"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup1"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x80" }
+
+[[measurement_keys]]
+id = "opcode:0x81"
+production_schedule_key = "opcode:0x81"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup2"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x81" }
+
+[[measurement_keys]]
+id = "opcode:0x82"
+production_schedule_key = "opcode:0x82"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup3"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x82" }
+
+[[measurement_keys]]
+id = "opcode:0x83"
+production_schedule_key = "opcode:0x83"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup4"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x83" }
+
+[[measurement_keys]]
+id = "opcode:0x84"
+production_schedule_key = "opcode:0x84"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup5"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x84" }
+
+[[measurement_keys]]
+id = "opcode:0x85"
+production_schedule_key = "opcode:0x85"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup6"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x85" }
+
+[[measurement_keys]]
+id = "opcode:0x86"
+production_schedule_key = "opcode:0x86"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup7"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x86" }
+
+[[measurement_keys]]
+id = "opcode:0x87"
+production_schedule_key = "opcode:0x87"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x87" }
+
+[[measurement_keys]]
+id = "opcode:0x88"
+production_schedule_key = "opcode:0x88"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup9"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x88" }
+
+[[measurement_keys]]
+id = "opcode:0x89"
+production_schedule_key = "opcode:0x89"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup10"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x89" }
+
+[[measurement_keys]]
+id = "opcode:0x8a"
+production_schedule_key = "opcode:0x8a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup11"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8a" }
+
+[[measurement_keys]]
+id = "opcode:0x8b"
+production_schedule_key = "opcode:0x8b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup12"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8b" }
+
+[[measurement_keys]]
+id = "opcode:0x8c"
+production_schedule_key = "opcode:0x8c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup13"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8c" }
+
+[[measurement_keys]]
+id = "opcode:0x8d"
+production_schedule_key = "opcode:0x8d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup14"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8d" }
+
+[[measurement_keys]]
+id = "opcode:0x8e"
+production_schedule_key = "opcode:0x8e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup15"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8e" }
+
+[[measurement_keys]]
+id = "opcode:0x8f"
+production_schedule_key = "opcode:0x8f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup16"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8f" }
+
+[[measurement_keys]]
+id = "opcode:0x90"
+production_schedule_key = "opcode:0x90"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap1"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x90" }
+
+[[measurement_keys]]
+id = "opcode:0x91"
+production_schedule_key = "opcode:0x91"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap2"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x91" }
+
+[[measurement_keys]]
+id = "opcode:0x92"
+production_schedule_key = "opcode:0x92"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap3"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x92" }
+
+[[measurement_keys]]
+id = "opcode:0x93"
+production_schedule_key = "opcode:0x93"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap4"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x93" }
+
+[[measurement_keys]]
+id = "opcode:0x94"
+production_schedule_key = "opcode:0x94"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap5"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x94" }
+
+[[measurement_keys]]
+id = "opcode:0x95"
+production_schedule_key = "opcode:0x95"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap6"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x95" }
+
+[[measurement_keys]]
+id = "opcode:0x96"
+production_schedule_key = "opcode:0x96"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap7"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x96" }
+
+[[measurement_keys]]
+id = "opcode:0x97"
+production_schedule_key = "opcode:0x97"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x97" }
+
+[[measurement_keys]]
+id = "opcode:0x98"
+production_schedule_key = "opcode:0x98"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap9"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x98" }
+
+[[measurement_keys]]
+id = "opcode:0x99"
+production_schedule_key = "opcode:0x99"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap10"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x99" }
+
+[[measurement_keys]]
+id = "opcode:0x9a"
+production_schedule_key = "opcode:0x9a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap11"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9a" }
+
+[[measurement_keys]]
+id = "opcode:0x9b"
+production_schedule_key = "opcode:0x9b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap12"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9b" }
+
+[[measurement_keys]]
+id = "opcode:0x9c"
+production_schedule_key = "opcode:0x9c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap13"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9c" }
+
+[[measurement_keys]]
+id = "opcode:0x9d"
+production_schedule_key = "opcode:0x9d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap14"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9d" }
+
+[[measurement_keys]]
+id = "opcode:0x9e"
+production_schedule_key = "opcode:0x9e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap15"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9e" }
+
+[[measurement_keys]]
+id = "opcode:0x9f"
+production_schedule_key = "opcode:0x9f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap16"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9f" }
+
+[[measurement_keys]]
+id = "precompile:0x01"
+production_schedule_key = "precompile:0x01"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["ecrecover"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x01" }
+
+[[measurement_keys]]
+id = "precompile:0x02"
+production_schedule_key = "precompile:0x02"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sha256"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x02" }
+
+[[measurement_keys]]
+id = "precompile:0x03"
+production_schedule_key = "precompile:0x03"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["ripemd160"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x03" }
+
+[[measurement_keys]]
+id = "precompile:0x04"
+production_schedule_key = "precompile:0x04"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["identity"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x04" }
+
+[[measurement_keys]]
+id = "precompile:0x05"
+production_schedule_key = "precompile:0x05"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["modexp"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x05" }
+
+[[measurement_keys]]
+id = "precompile:0x06"
+production_schedule_key = "precompile:0x06"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bn128_add"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x06" }
+
+[[measurement_keys]]
+id = "precompile:0x07"
+production_schedule_key = "precompile:0x07"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bn128_mul"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x07" }
+
+[[measurement_keys]]
+id = "precompile:0x08"
+production_schedule_key = "precompile:0x08"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bn128_pairing"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x08" }
+
+[[measurement_keys]]
+id = "precompile:0x09"
+production_schedule_key = "precompile:0x09"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["blake2f"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x09" }
+
+[[measurement_keys]]
+id = "precompile:0x0a"
+production_schedule_key = "precompile:0x0a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["point_evaluation"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0a" }
+
+[[measurement_keys]]
+id = "precompile:0x0b"
+production_schedule_key = "precompile:0x0b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g1add"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0b" }
+
+[[measurement_keys]]
+id = "precompile:0x0c"
+production_schedule_key = "precompile:0x0c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g1msm"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0c" }
+
+[[measurement_keys]]
+id = "precompile:0x0d"
+production_schedule_key = "precompile:0x0d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g2add"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0d" }
+
+[[measurement_keys]]
+id = "precompile:0x0e"
+production_schedule_key = "precompile:0x0e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g2msm"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0e" }
+
+[[measurement_keys]]
+id = "precompile:0x0f"
+production_schedule_key = "precompile:0x0f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_pairing"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0f" }
+
+[[measurement_keys]]
+id = "precompile:0x10"
+production_schedule_key = "precompile:0x10"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_map_fp_to_g1"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x10" }
+
+[[measurement_keys]]
+id = "precompile:0x11"
+production_schedule_key = "precompile:0x11"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_map_fp2_to_g2"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x11" }
+
+[[overhead_keys]]
+id = "tx_base"
+unit = "started_non_anchor_transaction"
+formula_role = "required"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["tx_base_no_code_no_value", "tx_base_minimal_contract_call"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "native_value_transfer"
+unit = "native_value_transfer"
+formula_role = "required"
+subtract_keys = ["tx_base"]
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["native_transfer_positive_vs_zero"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "block_base"
+unit = "block"
+formula_role = "required"
+subtract_keys = ["tx_base", "native_value_transfer"]
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["block_base_one_vs_two_minimal_blocks"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "proposal_startup"
+unit = "proposal"
+formula_role = "required"
+subtract_keys = ["block_base"]
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["startup_minimal_no_candidate_tx", "startup_minimal_one_no_code_tx"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "witness_byte"
+unit = "witness_byte"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["witness_bytes"]
+
+[[overhead_keys]]
+id = "witness_node"
+unit = "witness_node"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["witness_nodes"]
+
+[[overhead_keys]]
+id = "stdin_byte"
+unit = "stdin_byte"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["stdin_bytes"]
+
+[[overhead_keys]]
+id = "blob_byte"
+unit = "blob_byte"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["blob_bytes"]
+
+[[overhead_keys]]
+id = "kzg_invocation"
+unit = "kzg_invocation"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["kzg_invocations"]
+
+[[overhead_keys]]
+id = "unique_state_access"
+unit = "unique_state_access"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["unique_state_accesses"]
+
+[[overhead_keys]]
+id = "dirty_state_entry"
+unit = "dirty_state_entry"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["dirty_state_entries"]
+
+[[overhead_cases]]
+name = "tx_base_no_code_no_value"
+overhead_key_id = "tx_base"
+target_template = "tx_no_code"
+control_template = "tx_absent"
+expected_changed_feature_keys = ["tx_base"]
+
+[[overhead_cases]]
+name = "tx_base_minimal_contract_call"
+overhead_key_id = "tx_base"
+target_template = "tx_minimal_contract_call"
+control_template = "tx_absent"
+expected_changed_feature_keys = ["tx_base"]
+
+[[overhead_cases]]
+name = "native_transfer_positive_vs_zero"
+overhead_key_id = "native_value_transfer"
+target_template = "native_value"
+control_template = "native_zero"
+expected_changed_feature_keys = ["native_value_transfer"]
+
+[[overhead_cases]]
+name = "block_base_one_vs_two_minimal_blocks"
+overhead_key_id = "block_base"
+target_template = "two_minimal_blocks"
+control_template = "one_minimal_block"
+expected_changed_feature_keys = ["block_base"]
+
+[[overhead_cases]]
+name = "startup_minimal_no_candidate_tx"
+overhead_key_id = "proposal_startup"
+target_template = "minimal_proposal_no_candidate_tx"
+control_template = "proposal_control"
+expected_changed_feature_keys = ["proposal_startup", "block_base"]
+
+[[overhead_cases]]
+name = "startup_minimal_one_no_code_tx"
+overhead_key_id = "proposal_startup"
+target_template = "minimal_proposal_one_no_code_tx"
+control_template = "proposal_control"
+expected_changed_feature_keys = ["proposal_startup", "block_base", "tx_base"]
+
+[[overhead_cases]]
+name = "witness_bytes"
+overhead_key_id = "witness_byte"
+target_template = "witness_bytes_target"
+control_template = "witness_bytes_control"
+expected_changed_feature_keys = ["witness_byte"]
+
+[[overhead_cases]]
+name = "witness_nodes"
+overhead_key_id = "witness_node"
+target_template = "witness_nodes_target"
+control_template = "witness_nodes_control"
+expected_changed_feature_keys = ["witness_node"]
+
+[[overhead_cases]]
+name = "stdin_bytes"
+overhead_key_id = "stdin_byte"
+target_template = "stdin_bytes_target"
+control_template = "stdin_bytes_control"
+expected_changed_feature_keys = ["stdin_byte"]
+
+[[overhead_cases]]
+name = "blob_bytes"
+overhead_key_id = "blob_byte"
+target_template = "blob_bytes_target"
+control_template = "blob_bytes_control"
+expected_changed_feature_keys = ["blob_byte"]
+
+[[overhead_cases]]
+name = "kzg_invocations"
+overhead_key_id = "kzg_invocation"
+target_template = "kzg_invocations_target"
+control_template = "kzg_invocations_control"
+expected_changed_feature_keys = ["kzg_invocation"]
+
+[[overhead_cases]]
+name = "unique_state_accesses"
+overhead_key_id = "unique_state_access"
+target_template = "unique_state_accesses_target"
+control_template = "unique_state_accesses_control"
+expected_changed_feature_keys = ["unique_state_access"]
+
+[[overhead_cases]]
+name = "dirty_state_entries"
+overhead_key_id = "dirty_state_entry"
+target_template = "dirty_state_entries_target"
+control_template = "dirty_state_entries_control"
+expected_changed_feature_keys = ["dirty_state_entry"]

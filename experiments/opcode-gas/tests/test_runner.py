@@ -10,6 +10,56 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 import opcode_gas
 
 
+def write_execution_identity(root):
+    revision = "a" * 40
+    artifact = root / "sp1-test.elf"
+    artifact.write_bytes(b"test SP1 guest artifact")
+    guest_artifacts = {artifact.name: opcode_gas.sha256_file(artifact)}
+    identity = {
+        "implementation_revision": revision,
+        "alethia_reth_revision": "d" * 40,
+        "rust_version": "rustc test",
+        "sp1_sdk_version": "test-sdk",
+        "controlled_manifest_sha256": "a" * 64,
+        "controlled_manifest_rows_sha256": "b" * 64,
+        "complete_schedule_sha256": "e" * 64,
+        "guest_artifacts": guest_artifacts,
+        "guest_artifacts_sha256": opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(guest_artifacts)
+        ),
+        "normalization_reference_key": "opcode:0x01",
+        "sp1_execution_parameters": {"mode": "execute"},
+        "primary_metric": "proverGas",
+        "sp1_instruction_count": "secondary_non_gating",
+        "workload_identity_schema_version": 1,
+        "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+        "primary_formulas": {"candidate_cost": "g_p(k) / r(k)"},
+        "q_formula": list(opcode_gas.Q_FORMULA),
+        "out_of_fit_checkpoint": {"mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS},
+        "quality_gates": {"checkpoint_ape_max": 0.10},
+        "bridge": {"model": "through_origin_equal_key_median"},
+    }
+    calibration_id = opcode_gas.sha256_bytes(opcode_gas.canonical_json(identity))[:24]
+    run = root / calibration_id
+    run.mkdir()
+    experiment = {
+        "schema_version": 1,
+        "calibration_id": calibration_id,
+        "dirty_state": False,
+        "calibration_identity": identity,
+        **{
+            field: identity[field]
+            for field in opcode_gas.EXPERIMENT_IDENTITY_DUPLICATE_FIELDS
+        },
+    }
+    (run / "experiment.json").write_text(opcode_gas.json.dumps(experiment) + "\n")
+    (run / "provenance.json").write_text(
+        opcode_gas.json.dumps(opcode_gas.experiment_provenance_declaration(experiment))
+        + "\n"
+    )
+    return run, revision
+
+
 class RunnerTests(unittest.TestCase):
     def test_runner_uses_guest_launcher_directly(self):
         calls = []
@@ -318,6 +368,7 @@ class RunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
+            calibration_run, revision = write_execution_identity(tmp_path)
             case_dir = tmp_path / "fixtures" / "add"
             case_dir.mkdir(parents=True)
             input_path = case_dir / "guest-input.json"
@@ -330,7 +381,7 @@ class RunnerTests(unittest.TestCase):
                         "case": "add",
                         "target_count": 1,
                         "target_raw_gas": 3,
-                        "calibration_id": "calibration",
+                        "calibration_id": calibration_run.name,
                         "controlled_manifest_sha256": "a" * 64,
                         "controlled_manifest_rows_sha256": "b" * 64,
                         "fixture_sha256": opcode_gas.sha256_file(input_path),
@@ -349,7 +400,7 @@ class RunnerTests(unittest.TestCase):
                     "--opcode-stage",
                     "revm-opcode-lab",
                     "--calibration-run",
-                    str(tmp_path / "calibration"),
+                    str(calibration_run),
                     "--controlled-manifest",
                     str(tmp_path / "controlled.toml"),
                     "--out",
@@ -358,6 +409,10 @@ class RunnerTests(unittest.TestCase):
             )
 
             with mock.patch.object(opcode_gas, "REPO_ROOT", tmp_path), mock.patch.object(
+                opcode_gas, "git_head", return_value=revision
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
                 opcode_gas, "verify_frozen_controlled_manifest",
                 return_value=(None, {
                     "controlled_manifest_sha256": "a" * 64,

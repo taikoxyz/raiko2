@@ -70,8 +70,12 @@ def accepted_case(case_id, key_id, basis, slope, raw_gas=None):
     return result
 
 
-def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a" * 40):
-    """Create the exact persisted artifacts consumed by candidate sealing."""
+def persist_execution_identity(root, manifest, revision="a" * 40):
+    guest_artifact = root / "sp1-test.elf"
+    guest_artifact.write_bytes(b"test SP1 guest artifact")
+    guest_artifacts = {
+        guest_artifact.name: opcode_gas.sha256_file(guest_artifact)
+    }
     identity = {
         "implementation_revision": revision,
         "alethia_reth_revision": "d" * 40,
@@ -80,8 +84,10 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
         "controlled_manifest_sha256": "b" * 64,
         "controlled_manifest_rows_sha256": "c" * 64,
         "complete_schedule_sha256": "e" * 64,
-        "guest_artifacts": {"sp1-test.elf": "f" * 64},
-        "guest_artifacts_sha256": "1" * 64,
+        "guest_artifacts": guest_artifacts,
+        "guest_artifacts_sha256": opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(guest_artifacts)
+        ),
         "normalization_reference_key": "opcode:0x01",
         "sp1_execution_parameters": {"mode": "execute"},
         "primary_metric": "proverGas",
@@ -110,13 +116,23 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
     (run / "experiment.json").write_text(opcode_gas.json.dumps(experiment) + "\n")
     provenance = opcode_gas.experiment_provenance_declaration(experiment)
     (run / "provenance.json").write_text(opcode_gas.json.dumps(provenance) + "\n")
+    return run, identity
+
+
+def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a" * 40):
+    """Create the exact persisted artifacts consumed by candidate sealing."""
+    run, identity = persist_execution_identity(root, manifest, revision)
 
     fit = {
         "schema_version": 1,
         "generator_max_count": 8,
         "case_results": rows,
     }
-    overhead = {**overhead, "generator_max_count": 8}
+    overhead = {
+        **overhead,
+        "generator_max_count": 8,
+        "overhead_generator_max_count": 8,
+    }
     fit_path = run / "controlled-fit.json"
     overhead_path = run / "controlled-overheads.json"
     raw_path = run / "controlled-runs.generator-max-8.jsonl"
@@ -133,6 +149,7 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
         "fit_sha256": opcode_gas.sha256_file(fit_path),
         "overhead_runs": overhead_raw_path.name,
         "overhead_runs_sha256": opcode_gas.sha256_file(overhead_raw_path),
+        "overhead_generator_max_count": 8,
         "overhead_fit": overhead_path.name,
         "overhead_fit_sha256": opcode_gas.sha256_file(overhead_path),
         "decision": "complete",
@@ -950,7 +967,7 @@ class CandidateConstructionTests(unittest.TestCase):
         def fake_generate(_manifest, out, *, provenance, generator_max_count):
             generated.append(generator_max_count)
             out.mkdir(parents=True)
-            self.assertEqual(provenance["calibration_id"], "calibration")
+            self.assertRegex(provenance["calibration_id"], r"^[0-9a-f]{24}$")
             return []
 
         def fake_run(args):
@@ -969,7 +986,14 @@ class CandidateConstructionTests(unittest.TestCase):
         def fake_overhead_run(*, out, **_kwargs):
             out.write_text("{}\n")
 
-        def fake_overhead_fit(_manifest, _rows, _results, *, generator_max_count):
+        def fake_overhead_fit(
+            _manifest,
+            _rows,
+            _results,
+            *,
+            generator_max_count,
+            overhead_generator_max_count,
+        ):
             if generator_max_count == 8:
                 case_results = [
                     {
@@ -985,6 +1009,7 @@ class CandidateConstructionTests(unittest.TestCase):
             return {
                 "schema_version": 1,
                 "generator_max_count": generator_max_count,
+                "overhead_generator_max_count": overhead_generator_max_count,
                 "status": status,
                 "o_p": {key: "1" for key in opcode_gas.Q_FORMULA},
                 "case_results": case_results,
@@ -992,8 +1017,7 @@ class CandidateConstructionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            run = root / "calibration"
-            run.mkdir()
+            run, _ = persist_execution_identity(root, controlled_manifest())
             args = opcode_gas.argparse.Namespace(
                 fixtures=root / "fixtures",
                 guest_launcher=pathlib.Path("guest-launcher"),
@@ -1004,6 +1028,10 @@ class CandidateConstructionTests(unittest.TestCase):
                 out=root / "runs.jsonl",
             )
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
                 opcode_gas,
                 "verify_frozen_controlled_manifest",
                 return_value=(
@@ -1031,6 +1059,143 @@ class CandidateConstructionTests(unittest.TestCase):
             [row["decision"] for row in decisions["rounds"]],
             ["expand_next_round", "complete"],
         )
+
+    def test_operation_2048_reuses_sealed_512_overhead_raw_and_refits(self):
+        generated = []
+        overhead_runs = []
+        overhead_fits = []
+
+        def fake_generate(_manifest, out, *, provenance, generator_max_count):
+            generated.append(generator_max_count)
+            out.mkdir(parents=True)
+            return []
+
+        def fake_run(args):
+            args.out.write_text(
+                opcode_gas.json.dumps(
+                    {"generator_max_count": generated[-1]}
+                )
+                + "\n"
+            )
+
+        def fake_fit(_manifest, rows):
+            generator_max_count = next(iter(rows))["generator_max_count"]
+            return [
+                {
+                    "status": (
+                        "accepted" if generator_max_count == 2048 else "rejected"
+                    ),
+                    "reasons": (
+                        [] if generator_max_count == 2048 else ["exhausted_sweep"]
+                    ),
+                    "generator_max_count": generator_max_count,
+                }
+            ]
+
+        def fake_overhead_run(*, generator_max_count, out, **_kwargs):
+            overhead_runs.append(generator_max_count)
+            out.write_text(
+                opcode_gas.json.dumps(
+                    {
+                        "overhead_key_id": "tx_base",
+                        "generator_max_count": generator_max_count,
+                    }
+                )
+                + "\n"
+            )
+
+        def fake_overhead_fit(
+            _manifest,
+            rows,
+            results,
+            *,
+            generator_max_count,
+            overhead_generator_max_count=None,
+        ):
+            overhead_fits.append(
+                (
+                    generator_max_count,
+                    overhead_generator_max_count,
+                    {row["generator_max_count"] for row in rows},
+                    {row["generator_max_count"] for row in results},
+                )
+            )
+            return {
+                "schema_version": 1,
+                "generator_max_count": generator_max_count,
+                "overhead_generator_max_count": overhead_generator_max_count,
+                "status": "accepted",
+                "o_p": {key: "1" for key in opcode_gas.Q_FORMULA},
+                "case_results": [{"status": "accepted"}],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run, _ = persist_execution_identity(root, controlled_manifest())
+            args = opcode_gas.argparse.Namespace(
+                fixtures=root / "fixtures",
+                guest_launcher=pathlib.Path("guest-launcher"),
+                elf=pathlib.Path("opcode.elf"),
+                precompile_elf=pathlib.Path("precompile.elf"),
+                calibration_run=run,
+                controlled_manifest=root / "manifest.toml",
+                out=root / "runs.jsonl",
+            )
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas,
+                "verify_frozen_controlled_manifest",
+                return_value=(
+                    controlled_manifest(),
+                    {
+                        "controlled_manifest_sha256": "a" * 64,
+                        "controlled_manifest_rows_sha256": "b" * 64,
+                    },
+                ),
+            ), mock.patch.object(opcode_gas, "generate_cases", fake_generate), mock.patch.object(
+                opcode_gas, "cmd_run", fake_run
+            ), mock.patch.object(opcode_gas, "fit_controlled_costs", fake_fit), mock.patch.object(
+                opcode_gas, "run_controlled_overhead_round", fake_overhead_run
+            ), mock.patch.object(
+                opcode_gas, "fit_controlled_overheads", fake_overhead_fit
+            ):
+                opcode_gas.cmd_run_controlled(args)
+
+            decisions_path = run / "controlled-decisions.json"
+            decisions = opcode_gas.json.loads(decisions_path.read_text())
+            records = decisions["rounds"]
+            self.assertEqual(generated, [8, 32, 128, 512, 2048])
+            self.assertEqual(overhead_runs, [8, 32, 128, 512])
+            self.assertEqual(
+                overhead_fits[-1],
+                (2048, 512, {512}, {2048}),
+            )
+            self.assertEqual(records[-1]["overhead_generator_max_count"], 512)
+            self.assertEqual(records[-1]["overhead_runs"], records[-2]["overhead_runs"])
+            self.assertEqual(
+                records[-1]["overhead_runs_sha256"],
+                records[-2]["overhead_runs_sha256"],
+            )
+            opcode_gas.validate_persisted_controlled_decisions(run, decisions)
+
+            tampered = copy.deepcopy(decisions)
+            tampered["rounds"][-1]["overhead_generator_max_count"] = 2048
+            with self.assertRaisesRegex(ValueError, "overhead generator"):
+                opcode_gas.validate_persisted_controlled_decisions(run, tampered)
+
+            tampered_fit = copy.deepcopy(decisions)
+            overhead_fit_path = run / records[-1]["overhead_fit"]
+            overhead_payload = opcode_gas.json.loads(overhead_fit_path.read_text())
+            overhead_payload["overhead_generator_max_count"] = 2048
+            overhead_fit_path.write_text(opcode_gas.json.dumps(overhead_payload) + "\n")
+            tampered_fit["rounds"][-1]["overhead_fit_sha256"] = (
+                opcode_gas.sha256_file(overhead_fit_path)
+            )
+            with self.assertRaisesRegex(ValueError, "overhead footprint"):
+                opcode_gas.validate_persisted_controlled_decisions(run, tampered_fit)
 
     def test_adaptive_resume_rejects_gap_duplicate_and_edited_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1061,6 +1226,7 @@ class CandidateConstructionTests(unittest.TestCase):
                         {
                             "schema_version": 1,
                             "generator_max_count": generator_max_count,
+                            "overhead_generator_max_count": generator_max_count,
                             "case_results": [],
                         }
                     )
@@ -1074,6 +1240,7 @@ class CandidateConstructionTests(unittest.TestCase):
                     "fit_sha256": opcode_gas.sha256_file(fit),
                     "overhead_runs": overhead_raw.name,
                     "overhead_runs_sha256": opcode_gas.sha256_file(overhead_raw),
+                    "overhead_generator_max_count": generator_max_count,
                     "overhead_fit": overhead_fit.name,
                     "overhead_fit_sha256": opcode_gas.sha256_file(overhead_fit),
                     "decision": decision,

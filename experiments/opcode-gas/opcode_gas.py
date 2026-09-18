@@ -4192,6 +4192,47 @@ def experiment_provenance_declaration(
     }
 
 
+def validate_calibration_execution_identity(
+    calibration_run: pathlib.Path,
+) -> Mapping[str, Any]:
+    """Reject execution when the frozen calibration no longer describes this checkout."""
+    experiment_path = calibration_run / "experiment.json"
+    provenance_path = calibration_run / "provenance.json"
+    if not experiment_path.is_file() or not provenance_path.is_file():
+        raise ValueError("calibration run is missing experiment provenance")
+    experiment = json.loads(experiment_path.read_text())
+    declaration = experiment_provenance_declaration(experiment)
+    if declaration["calibration_id"] != calibration_run.name:
+        raise ValueError("experiment calibration_id does not match calibration directory")
+    if json.loads(provenance_path.read_text()) != declaration:
+        raise ValueError("persisted calibration provenance differs from experiment identity")
+    if git_head() != declaration["implementation_revision"]:
+        raise ValueError("current HEAD does not match frozen implementation_revision")
+    assert_generated_paths_only(git_worktree_status())
+
+    identity = experiment["calibration_identity"]
+    guest_artifacts = identity.get("guest_artifacts")
+    if not isinstance(guest_artifacts, Mapping) or not guest_artifacts:
+        raise ValueError("calibration identity has no frozen guest artifacts")
+    if sha256_bytes(canonical_json(guest_artifacts)) != identity.get(
+        "guest_artifacts_sha256"
+    ):
+        raise ValueError("frozen guest artifact map digest does not match calibration identity")
+    for relative, expected_sha256 in guest_artifacts.items():
+        if (
+            not isinstance(relative, str)
+            or pathlib.Path(relative).is_absolute()
+            or not _is_sha256(expected_sha256)
+        ):
+            raise ValueError("calibration identity has an invalid guest artifact entry")
+        artifact = (REPO_ROOT / relative).resolve()
+        if not artifact.is_relative_to(REPO_ROOT.resolve()):
+            raise ValueError("frozen guest artifact path escapes the repository")
+        if not artifact.is_file() or sha256_file(artifact) != expected_sha256:
+            raise ValueError(f"frozen guest artifact changed: {relative}")
+    return identity
+
+
 def prepare_calibration(
     output_root: pathlib.Path,
     controlled_manifest: pathlib.Path,
@@ -4573,6 +4614,7 @@ def cmd_prepare_validation(args: argparse.Namespace) -> None:
 
 def cmd_generate(args: argparse.Namespace) -> None:
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    validate_calibration_execution_identity(calibration_run)
     manifest_path = _resolve_repo_path(args.manifest, field_name="controlled_manifest")
     manifest, identity = verify_frozen_controlled_manifest(calibration_run, manifest_path)
     written = generate_cases(
@@ -4792,6 +4834,7 @@ def cmd_fit_controlled_costs(args: argparse.Namespace) -> None:
 
 
 CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
+CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT = 512
 
 
 def controlled_round_counts(generator_max_count: int) -> tuple[int, ...]:
@@ -4811,6 +4854,8 @@ def run_controlled_overhead_round(
     out: pathlib.Path,
 ) -> None:
     """Execute each frozen overhead point three times through sp1-shasta-proposal."""
+    if generator_max_count > CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
+        raise ValueError("controlled overhead generator exceeds the frozen 512 bound")
     out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for target_count in controlled_round_counts(generator_max_count):
@@ -5185,8 +5230,19 @@ def fit_controlled_overheads(
     measurement_case_results: Iterable[Mapping[str, Any]],
     *,
     generator_max_count: int,
+    overhead_generator_max_count: int | None = None,
 ) -> dict[str, Any]:
     """Residualize the four frozen controlled overhead identities."""
+    overhead_generator_max_count = (
+        generator_max_count
+        if overhead_generator_max_count is None
+        else overhead_generator_max_count
+    )
+    if (
+        overhead_generator_max_count > CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
+        or overhead_generator_max_count > generator_max_count
+    ):
+        raise ValueError("invalid controlled overhead generator maximum")
     row_list = list(rows)
     operation_costs = _operation_costs(manifest, measurement_case_results)
     accepted: dict[str, Decimal] = {}
@@ -5252,7 +5308,7 @@ def fit_controlled_overheads(
                             points,
                             pricing_basis="fixed_per_event",
                             target_raw_gas=None,
-                            generator_max_count=generator_max_count,
+                            generator_max_count=overhead_generator_max_count,
                         )
                     ),
                 }
@@ -5461,6 +5517,7 @@ def fit_controlled_overheads(
     return {
         "schema_version": 1,
         "generator_max_count": generator_max_count,
+        "overhead_generator_max_count": overhead_generator_max_count,
         "status": (
             "accepted" if set(accepted) == set(Q_FORMULA) else "rejected"
         ),
@@ -5504,6 +5561,14 @@ def validate_persisted_controlled_decisions(
     validated: dict[int, Mapping[str, Any]] = {}
     for index, record in enumerate(rounds):
         generator_max_count = observed[index]
+        expected_overhead_generator_max_count = min(
+            generator_max_count, CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
+        )
+        if (
+            record.get("overhead_generator_max_count")
+            != expected_overhead_generator_max_count
+        ):
+            raise ValueError("persisted controlled overhead generator maximum changed")
         raw_path = calibration_run / record["raw_runs"]
         fit_path = calibration_run / record["fit"]
         if (
@@ -5526,8 +5591,22 @@ def validate_persisted_controlled_decisions(
         ):
             raise ValueError("persisted controlled overhead artifact changed")
         overhead_payload = json.loads(overhead_path.read_text())
-        if overhead_payload.get("generator_max_count") != generator_max_count:
+        if (
+            overhead_payload.get("generator_max_count") != generator_max_count
+            or overhead_payload.get("overhead_generator_max_count")
+            != expected_overhead_generator_max_count
+        ):
             raise ValueError("persisted controlled overhead footprint changed")
+        if generator_max_count > CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
+            source = validated.get(CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT)
+            if source is None or (
+                record.get("overhead_runs") != source.get("overhead_runs")
+                or record.get("overhead_runs_sha256")
+                != source.get("overhead_runs_sha256")
+            ):
+                raise ValueError(
+                    "persisted controlled overhead raw does not reuse the sealed 512 round"
+                )
         decision = controlled_round_decision(
             [
                 *fit_payload.get("case_results", []),
@@ -5602,6 +5681,8 @@ def load_terminal_controlled_artifacts(
     if (
         fit.get("generator_max_count") != terminal_count
         or overhead.get("generator_max_count") != terminal_count
+        or overhead.get("overhead_generator_max_count")
+        != min(terminal_count, CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT)
     ):
         raise ValueError("canonical controlled artifact footprint is not terminal")
     return {
@@ -5614,6 +5695,7 @@ def load_terminal_controlled_artifacts(
         "overheads_sha256": terminal["overhead_fit_sha256"],
         "controlled_decisions_sha256": sha256_file(decisions_path),
         "generator_max_count": terminal_count,
+        "overhead_generator_max_count": overhead["overhead_generator_max_count"],
     }
 
 
@@ -5626,6 +5708,9 @@ def _sealed_candidate_provenance(
         "controlled_fit_sha256": artifacts["fit_sha256"],
         "controlled_overheads_sha256": artifacts["overheads_sha256"],
         "terminal_generator_max_count": artifacts["generator_max_count"],
+        "terminal_overhead_generator_max_count": artifacts[
+            "overhead_generator_max_count"
+        ],
     }
 
 
@@ -5660,6 +5745,7 @@ def _controlled_sample_artifact(
 
 def cmd_run_controlled(args: argparse.Namespace) -> None:
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    validate_calibration_execution_identity(calibration_run)
     manifest_path = _resolve_repo_path(
         args.controlled_manifest, field_name="controlled_manifest"
     )
@@ -5738,14 +5824,39 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
         }
         round_fit = calibration_run / f"controlled-fit.{round_name}.json"
         round_fit.write_text(json.dumps(fit_payload, indent=2, sort_keys=True) + "\n")
-        overhead_runs = calibration_run / f"controlled-overhead-runs.{round_name}.jsonl"
-        run_controlled_overhead_round(
-            guest_launcher=args.guest_launcher,
-            calibration_run_id=calibration_run.name,
-            generator_max_count=generator_max_count,
-            include_startup=generator_max_count == CONTROLLED_GENERATOR_ROUNDS[0],
-            out=overhead_runs,
+        overhead_generator_max_count = min(
+            generator_max_count, CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
         )
+        if generator_max_count <= CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
+            overhead_runs = (
+                calibration_run / f"controlled-overhead-runs.{round_name}.jsonl"
+            )
+            run_controlled_overhead_round(
+                guest_launcher=args.guest_launcher,
+                calibration_run_id=calibration_run.name,
+                generator_max_count=overhead_generator_max_count,
+                include_startup=generator_max_count == CONTROLLED_GENERATOR_ROUNDS[0],
+                out=overhead_runs,
+            )
+        else:
+            source_record = next(
+                (
+                    record
+                    for record in decisions["rounds"]
+                    if record.get("generator_max_count")
+                    == CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
+                ),
+                None,
+            )
+            if source_record is None:
+                raise ValueError("controlled 2048 round has no sealed 512 overhead raw")
+            overhead_runs = calibration_run / source_record["overhead_runs"]
+            if (
+                not overhead_runs.is_file()
+                or sha256_file(overhead_runs)
+                != source_record.get("overhead_runs_sha256")
+            ):
+                raise ValueError("sealed 512 overhead raw changed before 2048 reuse")
         overhead_rows = list(iter_jsonl(overhead_runs))
         if generator_max_count != CONTROLLED_GENERATOR_ROUNDS[0]:
             first_record = decisions["rounds"][0]
@@ -5760,6 +5871,7 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
             overhead_rows,
             results,
             generator_max_count=generator_max_count,
+            overhead_generator_max_count=overhead_generator_max_count,
         )
         round_overhead_fit = calibration_run / f"controlled-overheads.{round_name}.json"
         round_overhead_fit.write_text(
@@ -5776,6 +5888,7 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
             "fit_sha256": sha256_file(round_fit),
             "overhead_runs": str(overhead_runs.relative_to(calibration_run)),
             "overhead_runs_sha256": sha256_file(overhead_runs),
+            "overhead_generator_max_count": overhead_generator_max_count,
             "overhead_fit": str(round_overhead_fit.relative_to(calibration_run)),
             "overhead_fit_sha256": sha256_file(round_overhead_fit),
             "decision": decision,
@@ -6034,6 +6147,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if repeats <= 0:
         raise ValueError("controlled run repeats must be positive")
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    validate_calibration_execution_identity(calibration_run)
     fixtures = _resolve_repo_path(args.fixtures, field_name="fixtures")
     out = _resolve_repo_path(args.out, field_name="runs_output")
     _, identity = verify_frozen_controlled_manifest(

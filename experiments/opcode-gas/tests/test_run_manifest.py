@@ -521,15 +521,98 @@ class RunManifestTests(unittest.TestCase):
                 )
             run = root / "runs" / experiment["calibration_id"]
             self.assertEqual((run / "controlled-manifest.toml").read_bytes(), manifest_a.read_bytes())
+            for relative in experiment["guest_artifacts"]:
+                source = ROOT / relative
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source.read_bytes())
             args = types.SimpleNamespace(
                 calibration_run=run, manifest=manifest_b, out=root / "fixtures"
             )
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
                 opcode_gas, "generate_cases"
             ) as generate:
                 with self.assertRaisesRegex(ValueError, "controlled manifest"):
                     opcode_gas.cmd_generate(args)
             generate.assert_not_called()
+
+    def test_controlled_execution_commands_reject_stale_head_before_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run = write_controlled_run(root, revision="a" * 40)
+            common = dict(
+                fixtures=root / "fixtures",
+                guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                elf=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
+                precompile_elf=pathlib.Path(
+                    "crates/guests/elf/sp1_precompile_lab.elf"
+                ),
+                out=root / "runs.jsonl",
+                calibration_run=run,
+                controlled_manifest=run / "controlled-manifest.toml",
+            )
+            commands = (
+                (
+                    opcode_gas.cmd_generate,
+                    types.SimpleNamespace(
+                        calibration_run=run,
+                        manifest=run / "controlled-manifest.toml",
+                        out=root / "fixtures",
+                        generator_max_count=8,
+                    ),
+                ),
+                (opcode_gas.cmd_run, types.SimpleNamespace(**common)),
+                (opcode_gas.cmd_run_controlled, types.SimpleNamespace(**common)),
+            )
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="c" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas, "generate_cases"
+            ) as generate, mock.patch.object(
+                opcode_gas, "run_guest_inputs"
+            ) as launcher:
+                for command, args in commands:
+                    with self.subTest(command=command.__name__), self.assertRaisesRegex(
+                        ValueError, "current HEAD"
+                    ):
+                        command(args)
+            generate.assert_not_called()
+            launcher.assert_not_called()
+            self.assertFalse((run / "controlled-decisions.json").exists())
+            self.assertFalse((root / "fixtures").exists())
+            self.assertFalse((root / "runs.jsonl").exists())
+
+    def test_controlled_execution_rejects_dirty_source_and_changed_guest_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            revision = "a" * 40
+            run = write_controlled_run(root, revision=revision)
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value=revision
+            ), mock.patch.object(
+                opcode_gas,
+                "git_worktree_status",
+                return_value=" M experiments/opcode-gas/opcode_gas.py\n",
+            ):
+                with self.assertRaisesRegex(ValueError, "dirty implementation path"):
+                    opcode_gas.validate_calibration_execution_identity(run)
+
+            experiment = json.loads((run / "experiment.json").read_text())
+            relative = next(iter(experiment["guest_artifacts"]))
+            (root / relative).write_bytes(b"changed guest artifact")
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value=revision
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ):
+                with self.assertRaisesRegex(ValueError, "frozen guest artifact changed"):
+                    opcode_gas.validate_calibration_execution_identity(run)
 
     def test_controlled_run_rejects_resume_provenance_mismatch_before_guest_launcher(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -551,6 +634,10 @@ class RunManifestTests(unittest.TestCase):
                 controlled_manifest=run / "controlled-manifest.toml",
             )
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
                 opcode_gas, "run_guest_inputs"
             ) as execute:
                 with self.assertRaisesRegex(ValueError, "controlled manifest provenance"):
@@ -573,7 +660,7 @@ class RunManifestTests(unittest.TestCase):
                 "case": "add",
                 "target_count": 1,
                 "target_raw_gas": 3,
-                "calibration_id": "calibration",
+                "calibration_id": run.name,
                 "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
                 "controlled_manifest_rows_sha256": identity[
                     "controlled_manifest_rows_sha256"
@@ -594,6 +681,10 @@ class RunManifestTests(unittest.TestCase):
                 controlled_manifest=run / "controlled-manifest.toml",
             )
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
                 opcode_gas, "run_guest_inputs"
             ) as execute:
                 with self.assertRaisesRegex(ValueError, "GuestInput"):
@@ -666,22 +757,60 @@ def controlled_manifest_text(name):
     )
 
 
-def write_controlled_run(root):
+def write_controlled_run(root, revision="a" * 40):
     manifest = root / "controlled.toml"
     manifest.write_text(controlled_manifest_text("controlled"))
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     rows = opcode_gas.controlled_manifest_rows_sha256(manifest)
-    run = root / "runs" / "calibration"
+    guest_artifact = root / "crates/guests/elf/sp1-test.elf"
+    guest_artifact.parent.mkdir(parents=True)
+    guest_artifact.write_bytes(b"test SP1 guest artifact")
+    guest_artifacts = {
+        str(guest_artifact.relative_to(root)): opcode_gas.sha256_file(guest_artifact)
+    }
+    identity = {
+        "implementation_revision": revision,
+        "alethia_reth_revision": "d" * 40,
+        "rust_version": "rustc test",
+        "sp1_sdk_version": "test-sdk",
+        "controlled_manifest_sha256": digest,
+        "controlled_manifest_rows_sha256": rows,
+        "complete_schedule_sha256": "e" * 64,
+        "guest_artifacts": guest_artifacts,
+        "guest_artifacts_sha256": opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(guest_artifacts)
+        ),
+        "normalization_reference_key": "opcode:0x01",
+        "sp1_execution_parameters": {"mode": "execute"},
+        "primary_metric": "proverGas",
+        "sp1_instruction_count": "secondary_non_gating",
+        "workload_identity_schema_version": 1,
+        "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+        "primary_formulas": {"candidate_cost": "g_p(k) / r(k)"},
+        "q_formula": list(opcode_gas.Q_FORMULA),
+        "out_of_fit_checkpoint": {"mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS},
+        "quality_gates": {"checkpoint_ape_max": 0.10},
+        "bridge": {"model": "through_origin_equal_key_median"},
+    }
+    calibration_id = opcode_gas.sha256_bytes(opcode_gas.canonical_json(identity))[:24]
+    run = root / "runs" / calibration_id
     run.mkdir(parents=True)
     (run / "controlled-manifest.toml").write_bytes(manifest.read_bytes())
     (run / "controlled-manifest.sha256").write_text(digest + "\n")
-    (run / "experiment.json").write_text(json.dumps({
-        "calibration_id": "calibration",
-        "calibration_identity": {
-            "controlled_manifest_sha256": digest,
-            "controlled_manifest_rows_sha256": rows,
+    experiment = {
+        "schema_version": 1,
+        "calibration_id": calibration_id,
+        "dirty_state": False,
+        "calibration_identity": identity,
+        **{
+            field: identity[field]
+            for field in opcode_gas.EXPERIMENT_IDENTITY_DUPLICATE_FIELDS
         },
-    }))
+    }
+    (run / "experiment.json").write_text(json.dumps(experiment))
+    (run / "provenance.json").write_text(
+        json.dumps(opcode_gas.experiment_provenance_declaration(experiment))
+    )
     return run
 
 

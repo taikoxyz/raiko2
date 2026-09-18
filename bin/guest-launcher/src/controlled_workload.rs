@@ -16,6 +16,7 @@ use raiko2_primitives::{
     StatelessInput, SupportedChainSpecs, WitnessHeader, WitnessStateNode,
     blob::util::{blob_to_commitment, blob_to_proof_of_equivalence, commitment_to_version_hash},
     builtin_taiko_chain_spec,
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
 use raiko2_protocol::InputDataSource;
@@ -50,7 +51,6 @@ use taiko_client_protocol::FixedKSigner;
 const OVERHEAD_CHAIN_ID: u64 = 167_000;
 const OVERHEAD_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
 const OVERHEAD_BLOCK_NUMBER: u64 = 1_166_000;
-const OVERHEAD_PARENT_TIMESTAMP: u64 = 1_775_135_700;
 const OVERHEAD_ANCHOR_GAS_LIMIT: u64 = 1_000_000;
 const CONTROLLED_CHECKPOINT_STORE: Address = Address::repeat_byte(0x88);
 const CONTROLLED_RESOLVER: Address = Address::repeat_byte(0x99);
@@ -270,7 +270,16 @@ fn observe_overhead_fixture(
         || !trace.partial_blocks.is_empty()
         || !trace.recovery_failures.is_empty()
     {
-        bail!("controlled overhead fixture did not complete the production trace path");
+        let (stage, error) = trace
+            .failure
+            .as_ref()
+            .map(|failure| (failure.stage.as_str(), failure.error.as_str()))
+            .unwrap_or(("unknown", "trace failed without typed failure diagnostics"));
+        bail!(
+            "controlled overhead fixture {} {:?} did not complete the production trace path: trace stage={stage}, error={error}",
+            fixture.case_id,
+            fixture.lane,
+        );
     }
     let mut absolute_operation_pricing_units = BTreeMap::new();
     for block in &trace.blocks {
@@ -904,6 +913,14 @@ fn build_overhead_guest_input(
     let chain_spec = SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(OVERHEAD_CHAIN_ID)
         .ok_or_else(|| anyhow::anyhow!("missing controlled Taiko chain spec"))?;
+    let overhead_parent_timestamp =
+        match chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) {
+            Some(ForkCondition::Timestamp(timestamp)) => *timestamp,
+            Some(condition) => {
+                bail!("controlled Taiko chain has non-timestamp Unzen activation: {condition:?}")
+            }
+            None => bail!("controlled Taiko chain is missing canonical Unzen activation"),
+        };
     let runtime_chain_spec = builtin_taiko_chain_spec(OVERHEAD_CHAIN_ID)?;
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
     let candidates = candidate_transactions(kind, candidate_count)?;
@@ -928,7 +945,7 @@ fn build_overhead_guest_input(
             let header = alloy_consensus::Header {
                 parent_hash: previous_hash,
                 number,
-                timestamp: OVERHEAD_PARENT_TIMESTAMP
+                timestamp: overhead_parent_timestamp
                     - (OVERHEAD_BLOCK_NUMBER - 1).saturating_sub(number),
                 gas_limit: 31_000_000,
                 base_fee_per_gas: Some(10_000_000),
@@ -955,7 +972,9 @@ fn build_overhead_guest_input(
 
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
-        let block_timestamp = OVERHEAD_PARENT_TIMESTAMP + 1 + u64::try_from(index)?;
+        let block_timestamp = overhead_parent_timestamp
+            .checked_add(1 + u64::try_from(index)?)
+            .ok_or_else(|| anyhow::anyhow!("controlled overhead block timestamp overflow"))?;
         let transactions = if index == 0 {
             candidates.clone()
         } else {
@@ -1071,7 +1090,12 @@ fn build_overhead_guest_input(
                 proposal: raiko2_protocol_shasta::shasta::Proposal {
                     id: 42u64.try_into()?,
                     proposer,
-                    timestamp: (OVERHEAD_PARENT_TIMESTAMP + 100).try_into()?,
+                    timestamp: overhead_parent_timestamp
+                        .checked_add(u64::try_from(block_count)?)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("controlled overhead proposal timestamp overflow")
+                        })?
+                        .try_into()?,
                     parentProposalHash: B256::repeat_byte(0x44),
                     originBlockNumber: l1_header.number.try_into()?,
                     originBlockHash: l1_header.hash_slow(),

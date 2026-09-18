@@ -11,7 +11,12 @@ use controlled_workload::{
     trace_revm_opcode_workload, validate_fixed_footprint, validate_precompile_pair,
     validate_required_overhead_fixtures,
 };
-use raiko2_primitives::{OpcodeLabInput, PrecompileLabInput, PrecompileLabLane};
+use raiko2_primitives::{
+    OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
+};
+use raiko2_protocol_shasta::libhash::hash_proposal;
+use raiko2_zkgas_trace::ProposalTraceStatus;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -421,6 +426,95 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
             )
         });
     }
+}
+
+#[test]
+fn max_128_block_overhead_fixture_is_post_unzen_and_traces_all_129_blocks() {
+    let fixtures = build_required_overhead_fixtures(128).expect("build max-128 fixtures");
+    let fixture = fixtures
+        .iter()
+        .find(|fixture| {
+            fixture.case_id == "block_base_one_vs_two_minimal_blocks"
+                && fixture.lane == ControlledOverheadLane::Target
+        })
+        .expect("block-base target fixture");
+    let trace = raiko2_zkgas_trace::trace_shasta_proposal(&fixture.guest_input)
+        .expect("trace max-128 block fixture");
+    assert_eq!(trace.status, ProposalTraceStatus::Complete, "{trace:?}");
+    assert_eq!(trace.blocks.len(), 129);
+
+    let chain_spec = SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(167_000)
+        .expect("mainnet chain spec");
+    let unzen_timestamp = match chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) {
+        Some(ForkCondition::Timestamp(timestamp)) => *timestamp,
+        other => panic!("expected canonical mainnet Unzen timestamp, got {other:?}"),
+    };
+    let last_block_timestamp = fixture
+        .guest_input
+        .witnesses
+        .last()
+        .expect("last witness")
+        .block
+        .header
+        .timestamp;
+    assert!(
+        fixture
+            .guest_input
+            .witnesses
+            .iter()
+            .all(|witness| witness.block.header.timestamp > unzen_timestamp)
+    );
+    assert!(
+        fixture
+            .guest_input
+            .taiko
+            .proposal_event
+            .proposal
+            .timestamp
+            .to::<u64>()
+            >= last_block_timestamp
+    );
+}
+
+#[test]
+fn overhead_trace_failure_names_fixture_stage_and_error() {
+    let fixtures = build_required_overhead_fixtures(2).expect("build fixtures");
+    let mut fixture = fixtures
+        .into_iter()
+        .find(|fixture| {
+            fixture.case_id == "block_base_one_vs_two_minimal_blocks"
+                && fixture.lane == ControlledOverheadLane::Target
+        })
+        .expect("block-base target fixture");
+    let first_block_timestamp = fixture.guest_input.witnesses[0].block.header.timestamp;
+    fixture.guest_input.taiko.proposal_event.proposal.timestamp = first_block_timestamp
+        .try_into()
+        .expect("timestamp fits u48");
+    fixture
+        .guest_input
+        .proof_carry_data
+        .transition_input
+        .transition
+        .timestamp = first_block_timestamp;
+    fixture
+        .guest_input
+        .proof_carry_data
+        .transition_input
+        .proposal_hash = hash_proposal(&fixture.guest_input.taiko.proposal_event.proposal);
+
+    let error = validate_required_overhead_fixtures(&[fixture])
+        .expect_err("proposal timestamp before the final block must fail");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("block_base_one_vs_two_minimal_blocks Target"),
+        "{message}"
+    );
+    assert!(message.contains("stage=ordinary"), "{message}");
+    assert!(
+        message.contains("witness count (3) does not match derived manifest block count (1)"),
+        "{message}"
+    );
 }
 
 #[test]

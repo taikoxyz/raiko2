@@ -1203,6 +1203,21 @@ class CandidateConstructionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "overhead generator"):
                 opcode_gas.validate_persisted_controlled_decisions(run, tampered)
 
+            tampered_raw = copy.deepcopy(decisions)
+            sealed_overhead_raw = run / records[2]["overhead_runs"]
+            alternate_overhead_raw = run / "alternate-overhead-runs.jsonl"
+            alternate_overhead_raw.write_bytes(
+                sealed_overhead_raw.read_bytes() + sealed_overhead_raw.read_bytes()
+            )
+            tampered_raw["rounds"][-1]["overhead_runs"] = str(
+                alternate_overhead_raw.relative_to(run)
+            )
+            tampered_raw["rounds"][-1]["overhead_runs_sha256"] = (
+                opcode_gas.sha256_file(alternate_overhead_raw)
+            )
+            with self.assertRaisesRegex(ValueError, "does not reuse the sealed 128 round"):
+                opcode_gas.validate_persisted_controlled_decisions(run, tampered_raw)
+
             tampered_fit = copy.deepcopy(decisions)
             overhead_fit_path = run / records[-1]["overhead_fit"]
             overhead_payload = opcode_gas.json.loads(overhead_fit_path.read_text())

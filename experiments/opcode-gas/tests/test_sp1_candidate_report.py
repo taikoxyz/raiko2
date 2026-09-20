@@ -1060,7 +1060,7 @@ class CandidateConstructionTests(unittest.TestCase):
             ["expand_next_round", "complete"],
         )
 
-    def test_operation_2048_reuses_sealed_512_overhead_raw_and_refits(self):
+    def test_later_operation_rounds_reuse_sealed_128_overhead_raw_and_refit(self):
         generated = []
         overhead_runs = []
         overhead_fits = []
@@ -1131,7 +1131,7 @@ class CandidateConstructionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            run, _ = persist_execution_identity(root, controlled_manifest())
+            run, identity = persist_execution_identity(root, controlled_manifest())
             args = opcode_gas.argparse.Namespace(
                 fixtures=root / "fixtures",
                 guest_launcher=pathlib.Path("guest-launcher"),
@@ -1168,16 +1168,33 @@ class CandidateConstructionTests(unittest.TestCase):
             decisions = opcode_gas.json.loads(decisions_path.read_text())
             records = decisions["rounds"]
             self.assertEqual(generated, [8, 32, 128, 512, 2048])
-            self.assertEqual(overhead_runs, [8, 32, 128, 512])
+            self.assertEqual(overhead_runs, [8, 32, 128])
+            self.assertEqual(
+                overhead_fits[-2],
+                (512, 128, {128}, {512}),
+            )
             self.assertEqual(
                 overhead_fits[-1],
-                (2048, 512, {512}, {2048}),
+                (2048, 128, {128}, {2048}),
             )
-            self.assertEqual(records[-1]["overhead_generator_max_count"], 512)
-            self.assertEqual(records[-1]["overhead_runs"], records[-2]["overhead_runs"])
+            self.assertEqual(records[-1]["overhead_generator_max_count"], 128)
+            for record in records[3:]:
+                self.assertEqual(record["overhead_generator_max_count"], 128)
+                self.assertEqual(record["overhead_runs"], records[2]["overhead_runs"])
+                self.assertEqual(
+                    record["overhead_runs_sha256"],
+                    records[2]["overhead_runs_sha256"],
+                )
+            artifacts = opcode_gas.load_terminal_controlled_artifacts(
+                run,
+                identity,
+            )
+            self.assertEqual(artifacts["overhead_generator_max_count"], 128)
             self.assertEqual(
-                records[-1]["overhead_runs_sha256"],
-                records[-2]["overhead_runs_sha256"],
+                opcode_gas._sealed_candidate_provenance(artifacts)[
+                    "terminal_overhead_generator_max_count"
+                ],
+                128,
             )
             opcode_gas.validate_persisted_controlled_decisions(run, decisions)
 

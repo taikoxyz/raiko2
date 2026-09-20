@@ -4834,7 +4834,7 @@ def cmd_fit_controlled_costs(args: argparse.Namespace) -> None:
 
 
 CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
-CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT = 512
+CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT = 128
 
 
 def controlled_round_counts(generator_max_count: int) -> tuple[int, ...]:
@@ -4855,7 +4855,10 @@ def run_controlled_overhead_round(
 ) -> None:
     """Execute each frozen overhead point three times through sp1-shasta-proposal."""
     if generator_max_count > CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
-        raise ValueError("controlled overhead generator exceeds the frozen 512 bound")
+        raise ValueError(
+            "controlled overhead generator exceeds the frozen "
+            f"{CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} bound"
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for target_count in controlled_round_counts(generator_max_count):
@@ -5605,7 +5608,8 @@ def validate_persisted_controlled_decisions(
                 != source.get("overhead_runs_sha256")
             ):
                 raise ValueError(
-                    "persisted controlled overhead raw does not reuse the sealed 512 round"
+                    "persisted controlled overhead raw does not reuse the sealed "
+                    f"{CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} round"
                 )
         decision = controlled_round_decision(
             [
@@ -5849,14 +5853,20 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
                 None,
             )
             if source_record is None:
-                raise ValueError("controlled 2048 round has no sealed 512 overhead raw")
+                raise ValueError(
+                    f"controlled {generator_max_count} round has no sealed "
+                    f"{CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} overhead raw"
+                )
             overhead_runs = calibration_run / source_record["overhead_runs"]
             if (
                 not overhead_runs.is_file()
                 or sha256_file(overhead_runs)
                 != source_record.get("overhead_runs_sha256")
             ):
-                raise ValueError("sealed 512 overhead raw changed before 2048 reuse")
+                raise ValueError(
+                    f"sealed {CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} overhead raw "
+                    f"changed before {generator_max_count} reuse"
+                )
         overhead_rows = list(iter_jsonl(overhead_runs))
         if generator_max_count != CONTROLLED_GENERATOR_ROUNDS[0]:
             first_record = decisions["rounds"][0]

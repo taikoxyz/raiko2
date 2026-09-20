@@ -91,11 +91,11 @@ footprint instead of attempting residualization or aborting; secondary dependenc
 independent `unresidualized_dependencies` diagnostic.
 
 Operation workloads retain the frozen generator rounds through 2048. Production-proposal overhead
-workloads stop at `overhead_generator_max_count = 512` (at most 513 synthetic blocks). The operation
-2048 round reuses the sealed 512 overhead raw file and refits those rows against the current 2048
-operation coefficients; it does not rerun or relabel overhead raw data. Decisions and fit artifacts
-persist both generator bounds, and resume validation rejects a changed bound or a 2048 record that
-does not reference the exact sealed 512 raw artifact.
+workloads stop at `overhead_generator_max_count = 128` (at most 129 synthetic blocks). The later
+operation rounds reuse the sealed 128 overhead raw file and refit those rows against their current
+operation coefficients; they do not rerun or relabel overhead raw data. Decisions and fit artifacts
+persist both generator bounds, and resume validation rejects a changed bound or a later operation
+record that does not reference the exact sealed 128 raw artifact.
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-controlled \

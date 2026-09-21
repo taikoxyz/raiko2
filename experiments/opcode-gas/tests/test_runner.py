@@ -517,6 +517,7 @@ class RunnerTests(unittest.TestCase):
             "scenario": "arithmetic",
             "operands": [0, 0],
             "relation": "OP-POP",
+            "signal_kind": "contextual_relative",
             "diagnostic_count": 2,
             "generator_max_count": 8,
             "fixed_bytecode_len": 584,
@@ -562,6 +563,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report["results"][0]["prover_gas_delta"], 400)
         self.assertEqual(report["results"][0]["prover_gas_per_relation"], "200")
         self.assertEqual(report["results"][0]["instruction_count_delta"], 800)
+        self.assertEqual(report["results"][0]["signal_kind"], "contextual_relative")
 
         with self.assertRaisesRegex(ValueError, "backend input length"):
             opcode_gas.build_matched_control_report(

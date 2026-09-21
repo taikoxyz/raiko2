@@ -68,6 +68,8 @@ class FixtureEmitTests(unittest.TestCase):
         self.assertEqual(target_case["pair_id"], control_case["pair_id"])
         self.assertEqual(target_case["relation"], "OP-POP")
         self.assertEqual(control_case["relation"], "OP-POP")
+        self.assertEqual(target_case["signal_kind"], "contextual_relative")
+        self.assertEqual(control_case["signal_kind"], "contextual_relative")
         self.assertEqual(target_case["diagnostic_count"], 2)
         self.assertEqual(control_case["diagnostic_count"], 2)
         self.assertEqual(target_case["original_opcode"], "0x01")
@@ -178,10 +180,11 @@ class FixtureEmitTests(unittest.TestCase):
                 },
             )
 
-    def test_matched_control_exp_uses_pop_and_unary_uses_zero_op_control(self):
-        for opcode, relation, control_opcode, control_count in [
-            (0x0A, "OP-POP", 0x50, 8),
-            (0x15, "OP", 0x15, 0),
+    def test_matched_control_exp_uses_pop_and_unary_uses_not_reference(self):
+        for opcode, relation, control_opcode, target_count, control_count in [
+            (0x0A, "OP-POP", 0x50, 2, 8),
+            (0x15, "OP-NOT", 0x19, 2, 8),
+            (0x19, "OP-NOT", 0x19, 8, 8),
         ]:
             with self.subTest(opcode=f"0x{opcode:02x}"), tempfile.TemporaryDirectory() as tmp:
                 data = controlled_manifest_data()
@@ -215,8 +218,12 @@ class FixtureEmitTests(unittest.TestCase):
                 self.assertEqual(
                     target_case["operands"], [2, 2] if opcode == 0x0A else [1]
                 )
+                self.assertEqual(target_input["target_count"], target_count)
                 self.assertEqual(control_input["opcode"], control_opcode)
                 self.assertEqual(control_input["target_count"], control_count)
+                self.assertEqual(
+                    control_input["target_raw_gas"], 2 if opcode == 0x0A else 3
+                )
                 self.assertEqual(
                     target_input["fixed_bytecode_len"],
                     control_input["fixed_bytecode_len"],
@@ -237,12 +244,19 @@ class FixtureEmitTests(unittest.TestCase):
                     )
                 else:
                     self.assertTrue(
-                        all(program.endswith(b"\x00\x15") for program in control_programs)
+                        all(program.endswith(b"\x19\x00") for program in control_programs)
                     )
                     self.assertTrue(
-                        all(program.endswith(b"\x15\x00") for program in target_programs[:2])
+                        all(
+                            program.endswith(bytes([opcode, 0x00]))
+                            for program in target_programs[:2]
+                        )
                     )
-                    self.assertEqual(target_programs[2:], control_programs[2:])
+                    self.assertTrue(
+                        all(program.endswith(b"\x19\x00") for program in target_programs[2:])
+                    )
+                    if opcode == 0x19:
+                        self.assertEqual(target_programs, control_programs)
 
     def test_matched_control_rejects_ternary_until_two_pop_contract_exists(self):
         data = controlled_manifest_data()

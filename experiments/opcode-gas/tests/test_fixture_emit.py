@@ -1,3 +1,4 @@
+import hashlib
 import pathlib
 import sys
 import tempfile
@@ -74,6 +75,8 @@ class FixtureEmitTests(unittest.TestCase):
         self.assertEqual(control_case["diagnostic_count"], 2)
         self.assertEqual(target_case["original_opcode"], "0x01")
         self.assertEqual(control_case["original_opcode"], "0x01")
+        self.assertEqual(target_case["operand_profile"], "zero")
+        self.assertEqual(control_case["operand_profile"], "zero")
         self.assertEqual(target_case["operands"], [0, 0])
         self.assertEqual(control_case["operands"], [0, 0])
         self.assertEqual(target_case["final_stack_height"], 1)
@@ -94,6 +97,14 @@ class FixtureEmitTests(unittest.TestCase):
         )
         control_programs = opcode_gas.decode_fixed_microprograms(
             bytes.fromhex(control_input["bytecode"][2:])
+        )
+        self.assertEqual(
+            hashlib.sha256(bytes.fromhex(target_input["bytecode"][2:])).hexdigest(),
+            "90ad79a7d0be24c23cd9f15e9db1c31fc95dd501d1f3cd178699ccaabc71003d",
+        )
+        self.assertEqual(
+            hashlib.sha256(bytes.fromhex(control_input["bytecode"][2:])).hexdigest(),
+            "b6875ca3228cc58836023a1ac28f2f0ef71926f93e048fe33bd942769aa3fda6",
         )
         self.assertEqual(len(target_programs), 8)
         self.assertEqual([program[:-2] for program in target_programs], [
@@ -178,6 +189,144 @@ class FixtureEmitTests(unittest.TestCase):
                     altered_target["fixture_sha256"]: tampered_input,
                     altered_control["fixture_sha256"]: control_input,
                 },
+            )
+
+    def test_matched_control_small_nonzero_profile_is_bound_to_fixture_identity(self):
+        expected_operands = {
+            0x01: [7, 3],
+            0x0A: [3, 5],
+            0x15: [7],
+        }
+        for opcode, operands in expected_operands.items():
+            with self.subTest(
+                opcode=f"0x{opcode:02x}"
+            ), tempfile.TemporaryDirectory() as tmp:
+                data = controlled_manifest_data()
+                data["variants"] = [2]
+                manifest = opcode_gas.parse_controlled_manifest(
+                    data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
+                )
+                case = opcode_gas.default_opcode_case(opcode)
+                manifest = replace(manifest, cases=[case])
+                out_dir = pathlib.Path(tmp)
+
+                opcode_gas.generate_cases(
+                    manifest,
+                    out_dir,
+                    provenance=diagnostic_provenance(),
+                    generator_max_count=8,
+                    matched_control_diagnostic=True,
+                    operand_profile="small_nonzero",
+                )
+                pair_root = out_dir / "controlled" / case.name / "count-2"
+                target_case = opcode_gas.json.loads(
+                    (pair_root / "target" / "case.json").read_text()
+                )
+                control_case = opcode_gas.json.loads(
+                    (pair_root / "control" / "case.json").read_text()
+                )
+                target_input = opcode_gas.json.loads(
+                    (pair_root / "target" / "guest-input.json").read_text()
+                )
+                control_input = opcode_gas.json.loads(
+                    (pair_root / "control" / "guest-input.json").read_text()
+                )
+
+                self.assertEqual(target_case["operand_profile"], "small_nonzero")
+                self.assertEqual(control_case["operand_profile"], "small_nonzero")
+                self.assertEqual(target_case["operands"], operands)
+                self.assertEqual(control_case["operands"], operands)
+                target_programs = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(target_input["bytecode"][2:])
+                )
+                control_programs = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(control_input["bytecode"][2:])
+                )
+                self.assertEqual(
+                    [program[:-2] for program in target_programs],
+                    [program[:-2] for program in control_programs],
+                )
+                expected_setup = b"".join(
+                    opcode_gas._fixed_push(value, target_opcode=opcode)
+                    for value in operands
+                )
+                self.assertTrue(
+                    all(program.startswith(expected_setup) for program in target_programs)
+                )
+                pairs = opcode_gas.validate_matched_control_fixture_pairs(
+                    [target_case, control_case],
+                    guest_inputs={
+                        target_case["fixture_sha256"]: target_input,
+                        control_case["fixture_sha256"]: control_input,
+                    },
+                )
+                self.assertEqual(list(pairs), [target_case["pair_id"]])
+                pair_spec = opcode_gas._matched_control_pair_spec(
+                    target_case, control_case
+                )
+                self.assertEqual(
+                    pair_spec["workload"]["operand_profile"], "small_nonzero"
+                )
+                self.assertEqual(pair_spec["workload"]["operands"], operands)
+
+                for updates, message in [
+                    ({"operand_profile": "unknown"}, "operand profile"),
+                    ({"operands": [0] * len(operands)}, "operands"),
+                ]:
+                    altered_target = {**target_case, **updates}
+                    altered_control = {**control_case, **updates}
+                    with self.assertRaisesRegex(ValueError, message):
+                        opcode_gas.matched_control_pair_id(
+                            altered_target, altered_control
+                        )
+
+                zero_target = opcode_gas.build_matched_control_bytecode(
+                    case, 2, 8, lane="target", operand_profile="zero"
+                )
+                altered_target = {
+                    **target_case,
+                    "bytecode": "0x" + zero_target.bytes_hex,
+                }
+                with self.assertRaisesRegex(ValueError, "matched layout"):
+                    opcode_gas.matched_control_pair_id(altered_target, control_case)
+
+                if opcode == 0x01:
+                    altered_input = {
+                        **target_input,
+                        "bytecode": "0x" + zero_target.bytes_hex,
+                    }
+                    altered_input_bytes = (
+                        opcode_gas.json.dumps(
+                            altered_input, indent=2, sort_keys=True
+                        )
+                        + "\n"
+                    ).encode()
+                    altered_target = {
+                        **target_case,
+                        "fixture_sha256": opcode_gas.sha256_bytes(
+                            altered_input_bytes
+                        ),
+                    }
+                    altered_control = dict(control_case)
+                    altered_pair_id = opcode_gas.matched_control_pair_id(
+                        altered_target, altered_control
+                    )
+                    altered_target["pair_id"] = altered_pair_id
+                    altered_control["pair_id"] = altered_pair_id
+                    with self.assertRaisesRegex(
+                        ValueError, "guest input bytecode"
+                    ):
+                        opcode_gas.validate_matched_control_fixture_pairs(
+                            [altered_target, altered_control],
+                            guest_inputs={
+                                altered_target["fixture_sha256"]: altered_input,
+                                altered_control["fixture_sha256"]: control_input,
+                            },
+                        )
+
+        with self.assertRaisesRegex(ValueError, "operand profile"):
+            opcode_gas.matched_control_operands(
+                opcode_gas.default_opcode_case(0x01), "unknown"
             )
 
     def test_matched_control_exp_uses_pop_and_unary_uses_not_reference(self):

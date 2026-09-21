@@ -452,6 +452,7 @@ class RunnerTests(unittest.TestCase):
 
         self.assertTrue(generate.matched_control_diagnostic)
         self.assertEqual(generate.matched_control_cases, ["add"])
+        self.assertEqual(generate.operand_profile, "zero")
         self.assertEqual(run.expected_purpose, "matched_control_diagnostic")
         self.assertEqual(run.opcode_stage, "revm-opcode-lab")
         self.assertEqual(
@@ -475,6 +476,38 @@ class RunnerTests(unittest.TestCase):
                     "/tmp/controlled.toml",
                     "--out",
                     "/tmp/runs.jsonl",
+                ]
+            )
+        small_nonzero = opcode_gas.build_parser().parse_args(
+            [
+                "generate-matched-control",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
+                "--calibration-run",
+                "/tmp/calibration",
+                "--out",
+                "/tmp/fixtures",
+                "--case",
+                "add",
+                "--operand-profile",
+                "small_nonzero",
+            ]
+        )
+        self.assertEqual(small_nonzero.operand_profile, "small_nonzero")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            opcode_gas.build_parser().parse_args(
+                [
+                    "generate-matched-control",
+                    "--manifest",
+                    "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
+                    "--calibration-run",
+                    "/tmp/calibration",
+                    "--out",
+                    "/tmp/fixtures",
+                    "--case",
+                    "add",
+                    "--operand-profile",
+                    "unknown",
                 ]
             )
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -515,7 +548,8 @@ class RunnerTests(unittest.TestCase):
             "original_opcode": "0x01",
             "template": "stack_binary",
             "scenario": "arithmetic",
-            "operands": [0, 0],
+            "operand_profile": "small_nonzero",
+            "operands": [7, 3],
             "relation": "OP-POP",
             "signal_kind": "contextual_relative",
             "diagnostic_count": 2,
@@ -564,6 +598,18 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report["results"][0]["prover_gas_per_relation"], "200")
         self.assertEqual(report["results"][0]["instruction_count_delta"], 800)
         self.assertEqual(report["results"][0]["signal_kind"], "contextual_relative")
+        self.assertEqual(report["results"][0]["operand_profile"], "small_nonzero")
+
+        for updates, message in [
+            ({"operands": [0, 0]}, "operands"),
+            ({"operand_profile": "unknown"}, "operand profile"),
+        ]:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                opcode_gas.build_matched_control_report(
+                    [{**target, **updates}, {**control, **updates}]
+                )
 
         with self.assertRaisesRegex(ValueError, "backend input length"):
             opcode_gas.build_matched_control_report(

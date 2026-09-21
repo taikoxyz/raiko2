@@ -470,6 +470,15 @@ The run command groups generated `guest-input.json` files by lab stage and batch
 one launcher process via `--input-list` and `--jsonl-out`. This is important for research loops
 because SP1 profiling startup is much more expensive than the tiny lab execute bodies.
 
+Opcode-lab runs use the SP1 gas-estimator fast path, while proposal, precompile, and overhead runs
+retain their normal execution engines. Before interpreting a slope or reusing a calibration run,
+read the [SP1 opcode proverGas calibration pitfalls][opcode-calibration-pitfalls]: fixed
+gas/footprint controls, operand-dependent paths, contextual reference costs, backend metric
+separation, and content-addressed restart rules are correctness requirements rather than optional
+benchmark hygiene.
+
+[opcode-calibration-pitfalls]: solutions/experiment-correctness/sp1-opcode-prover-gas-calibration.md
+
 ## GuestInput Replay
 
 The `shasta` in fixture paths, script names, and `xtask` profile names below is a frozen identifier,

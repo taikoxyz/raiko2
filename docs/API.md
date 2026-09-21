@@ -1283,11 +1283,12 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   quote, roughly 205 times the five-child quote.
   That older release cohort measured about 175 mcycles at one child and 817-818 at five children:
   the five-child quote is 10.02-10.16% high, and extending the observed 1-to-5 trend would approach
-  roughly 12% overquote at larger counts. Those observations do not measure the shipped aggregation
-  guest. The artifact pins its ELF SHA-256 as
+  roughly 12% overquote at larger counts. Those observations do not measure the current checked-in
+  aggregation guest. The model artifact records its calibration ELF SHA-256 as
   `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
-  `disable-dev-mode` build prevents the development-receipt probe and the artifact has no aggregation
-  image ID. Error direction for the running guest is therefore unknown. With the
+  `disable-dev-mode` build prevents the development-receipt probe, the artifact has no aggregation
+  image ID, and the current checked-in aggregation guest no longer hashes to that value. Error
+  direction for the running guest is therefore unknown. With the
   committed scalar and v4 limit, the estimator's multiplication/conversion overflow fallback is
   unreachable; the separately configured `mcycles_offset` can still trigger the generic fallback if
   its addition overflows. With the documented aggregation offset of zero, valid aggregation input
@@ -1302,7 +1303,7 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - Selecting `estimated` is the release owner's assertion that the deployed guest and RISC0 runtime
   remain compatible with the committed calibration. Raiko2 does not runtime-check the ELF hash,
   image ID, source revision, or RISC0 SDK version. The committed proposal calibration currently
-  predates the guest rebuilt by raiko2 #242 and does not describe the shipped
+  predates the current checked-in guest and does not describe the shipped
   `risc0_shasta_proposal.elf`. This known release-pairing drift is explicitly accepted for
   quote-price and timeout sizing when the release selects `estimated`; it does not affect proof
   validity. There is no user-visible `skip_preflight` option:

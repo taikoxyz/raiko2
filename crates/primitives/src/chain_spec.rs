@@ -622,18 +622,13 @@ struct CanonicalChainSpec {
 const ETHEREUM_EXECUTION_FORKS: &[(EthereumHardfork, SpecId)] = &[
     (EthereumHardfork::Frontier, SpecId::FRONTIER),
     (EthereumHardfork::Homestead, SpecId::HOMESTEAD),
-    (EthereumHardfork::Dao, SpecId::DAO_FORK),
     (EthereumHardfork::Tangerine, SpecId::TANGERINE),
     (EthereumHardfork::SpuriousDragon, SpecId::SPURIOUS_DRAGON),
     (EthereumHardfork::Byzantium, SpecId::BYZANTIUM),
-    (EthereumHardfork::Constantinople, SpecId::CONSTANTINOPLE),
     (EthereumHardfork::Petersburg, SpecId::PETERSBURG),
     (EthereumHardfork::Istanbul, SpecId::ISTANBUL),
-    (EthereumHardfork::MuirGlacier, SpecId::MUIR_GLACIER),
     (EthereumHardfork::Berlin, SpecId::BERLIN),
     (EthereumHardfork::London, SpecId::LONDON),
-    (EthereumHardfork::ArrowGlacier, SpecId::ARROW_GLACIER),
-    (EthereumHardfork::GrayGlacier, SpecId::GRAY_GLACIER),
     (EthereumHardfork::Paris, SpecId::MERGE),
     (EthereumHardfork::Shanghai, SpecId::SHANGHAI),
     (EthereumHardfork::Cancun, SpecId::CANCUN),
@@ -1284,6 +1279,20 @@ mod tests {
 
         assert_eq!(ethereum.chain_id, RETH_MAINNET.chain.id());
         assert_eq!(ethereum.max_spec_id, SpecId::OSAKA);
+        assert_eq!(
+            ethereum
+                .hard_forks
+                .get(&ForkId::Standard(SpecId::HOMESTEAD)),
+            Some(&ForkCondition::Block(1_150_000))
+        );
+        assert_eq!(
+            ethereum.hard_forks.get(&ForkId::Standard(SpecId::ISTANBUL)),
+            Some(&ForkCondition::Block(9_069_000))
+        );
+        assert_eq!(
+            ethereum.hard_forks.get(&ForkId::Standard(SpecId::LONDON)),
+            Some(&ForkCondition::Block(12_965_000))
+        );
         assert_eq!(
             ethereum.hard_forks.get(&ForkId::Standard(SpecId::PRAGUE)),
             Some(&ForkCondition::Timestamp(1_746_612_311))

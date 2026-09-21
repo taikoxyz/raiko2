@@ -142,6 +142,35 @@ fn ensure_full_ancestor_headers(
     Ok(())
 }
 
+fn ensure_supported_parent_beacon_block_root(
+    parent_beacon_block_root: Option<B256>,
+) -> Result<(), StatelessValidationError> {
+    if parent_beacon_block_root.is_some_and(|root| !root.is_zero()) {
+        return Err(StatelessValidationError::Custom(
+            "non-zero parent_beacon_block_root is unsupported on Taiko",
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_canonical_parent_beacon_block_root(
+    chain_spec: &TaikoChainSpec,
+    timestamp: u64,
+    parent_beacon_block_root: Option<B256>,
+) -> Result<(), StatelessValidationError> {
+    ensure_supported_parent_beacon_block_root(parent_beacon_block_root)?;
+
+    let expected = chain_spec.is_unzen_active(timestamp).then_some(B256::ZERO);
+    if parent_beacon_block_root != expected {
+        return Err(StatelessValidationError::Custom(
+            "parent_beacon_block_root does not match the active Taiko fork",
+        ));
+    }
+
+    Ok(())
+}
+
 fn sealed_parent_header(
     ancestor_headers: &[WitnessHeader],
 ) -> Result<SealedHeader, StatelessValidationError> {
@@ -223,6 +252,7 @@ fn build_derived_block(
         base_fee_per_gas: Some(block_env.base_fee_per_gas),
         mix_hash: block_env.prev_randao,
         extra_data: block_env.extra_data,
+        parent_beacon_block_root: block_env.parent_beacon_block_root,
         transactions_root: proofs::calculate_transaction_root(body.transactions.as_slice()),
         ommers_hash: body.calculate_ommers_root(),
         withdrawals_root: body.calculate_withdrawals_root(),
@@ -254,6 +284,8 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
 ) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError> {
+    ensure_supported_parent_beacon_block_root(block_env.parent_beacon_block_root)?;
+
     let parent_header = sealed_parent_header(ancestor_headers)?;
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
     let ancestor_hashes = compute_next_block_ancestor_hashes(ancestor_headers)?;
@@ -290,6 +322,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
         chain_spec.as_ref(),
         &outcome.execution_result,
         None,
+        None,
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
     validate_anchor_transaction_in_block(&outcome.filtered_block, chain_spec.as_ref())
@@ -324,7 +357,7 @@ where
     ensure_anchor_receipt_success(&output.receipts)?;
 
     // Post validation checks
-    validate_block_post_execution(current_block, chain_spec, &output, None)
+    validate_block_post_execution(current_block, chain_spec, &output, None, None)
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
     validate_anchor_transaction_in_block(current_block, chain_spec)
@@ -418,6 +451,11 @@ pub(crate) fn validate_block_consensus(
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<(), StatelessValidationError> {
+    ensure_canonical_parent_beacon_block_root(
+        chain_spec.as_ref(),
+        block.header().timestamp,
+        block.header().parent_beacon_block_root,
+    )?;
     ensure_full_ancestor_headers(ancestor_headers)?;
 
     let parent_header = ancestor_headers
@@ -515,7 +553,7 @@ mod tests {
     };
     use alethia_reth_block::config::TaikoEvmConfig;
     use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
-    use alethia_reth_chainspec::TAIKO_DEVNET;
+    use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_MAINNET};
     use alethia_reth_consensus::validation::{ANCHOR_V3_V4_GAS_LIMIT, ANCHOR_V4_SELECTOR};
     use alloy_consensus::{
         Header, SignableTransaction, TrieAccount, TxEip1559, constants::KECCAK_EMPTY, proofs,
@@ -546,6 +584,8 @@ mod tests {
             parent_hash,
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(1),
+            extra_data: shasta_extra_data(),
+            parent_beacon_block_root: Some(alloy_primitives::B256::ZERO),
             ..Default::default()
         };
 
@@ -593,6 +633,10 @@ mod tests {
 
     fn golden_touch_address() -> Address {
         alloy_primitives::address!("0000777735367b36bc9b61c50022d9d0700db4ec")
+    }
+
+    fn shasta_extra_data() -> Bytes {
+        Bytes::from_static(&[75, 0, 0, 0, 0, 0x4c, 0x81])
     }
 
     fn test_anchor_tx(chain_id: u64, nonce: u64) -> TransactionSigned {
@@ -645,8 +689,9 @@ mod tests {
                 suggested_fee_recipient: Address::ZERO,
                 prev_randao: alloy_primitives::B256::ZERO,
                 gas_limit: 30_000_000,
-                extra_data: Bytes::new(),
+                extra_data: shasta_extra_data(),
                 base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
             },
         );
 
@@ -663,6 +708,109 @@ mod tests {
             derived_block.header().withdrawals_root,
             body.calculate_withdrawals_root()
         );
+    }
+
+    #[test]
+    fn reconstruct_block_rejects_nonzero_parent_beacon_block_root() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let tx = test_signed_tx(
+            chain_spec.inner.chain().id(),
+            0,
+            Signature::test_signature(),
+        );
+        let parent_beacon_block_root = alloy_primitives::B256::repeat_byte(0x42);
+
+        let result = reconstruct_block_from_transactions_with_witness_resources(
+            tx.try_into_recovered()
+                .expect("test transaction should recover"),
+            Vec::new(),
+            TaikoNextBlockEnvAttributes {
+                timestamp: 101,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: shasta_extra_data(),
+                base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: Some(parent_beacon_block_root),
+            },
+            &ExecutionWitness::default(),
+            &[],
+            &[],
+            &chain_spec,
+            &evm_config,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StatelessValidationError::Custom(
+                "non-zero parent_beacon_block_root is unsupported on Taiko"
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_block_rejects_nonzero_parent_beacon_block_root_before_witness_processing() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let mut header = shanghai_header(1, 101, alloy_primitives::B256::ZERO);
+        header.parent_beacon_block_root = Some(alloy_primitives::B256::repeat_byte(0x42));
+
+        let result = validate_block(
+            Block {
+                header,
+                body: empty_shanghai_body(),
+            },
+            &ExecutionWitness::default(),
+            &chain_spec,
+            &evm_config,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StatelessValidationError::Custom(
+                "non-zero parent_beacon_block_root is unsupported on Taiko"
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_block_requires_fork_exact_parent_beacon_block_root_before_witness_processing() {
+        let devnet_config = TaikoEvmConfig::new(TAIKO_DEVNET.clone());
+        let mut unzen_header = shanghai_header(1, 101, alloy_primitives::B256::ZERO);
+        unzen_header.parent_beacon_block_root = None;
+        let missing_unzen_root = validate_block(
+            Block {
+                header: unzen_header,
+                body: empty_shanghai_body(),
+            },
+            &ExecutionWitness::default(),
+            &TAIKO_DEVNET,
+            &devnet_config,
+        );
+        assert!(matches!(
+            missing_unzen_root,
+            Err(StatelessValidationError::Custom(
+                "parent_beacon_block_root does not match the active Taiko fork"
+            ))
+        ));
+
+        let mainnet_config = TaikoEvmConfig::new(TAIKO_MAINNET.clone());
+        let unexpected_pre_unzen_root = validate_block(
+            Block {
+                header: shanghai_header(1, 1, alloy_primitives::B256::ZERO),
+                body: empty_shanghai_body(),
+            },
+            &ExecutionWitness::default(),
+            &TAIKO_MAINNET,
+            &mainnet_config,
+        );
+        assert!(matches!(
+            unexpected_pre_unzen_root,
+            Err(StatelessValidationError::Custom(
+                "parent_beacon_block_root does not match the active Taiko fork"
+            ))
+        ));
     }
 
     #[test]
@@ -803,8 +951,9 @@ mod tests {
                 suggested_fee_recipient: Address::ZERO,
                 prev_randao: alloy_primitives::B256::ZERO,
                 gas_limit: 30_000_000,
-                extra_data: Bytes::new(),
+                extra_data: shasta_extra_data(),
                 base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
             },
             &witness,
             &witness.headers,
@@ -859,8 +1008,9 @@ mod tests {
             suggested_fee_recipient: Address::ZERO,
             prev_randao: alloy_primitives::B256::ZERO,
             gas_limit: 30_000_000,
-            extra_data: Bytes::new(),
+            extra_data: shasta_extra_data(),
             base_fee_per_gas: 25_000_000,
+            parent_beacon_block_root: None,
         };
 
         let derived_block = build_derived_block(
@@ -928,8 +1078,9 @@ mod tests {
                 suggested_fee_recipient: Address::ZERO,
                 prev_randao: alloy_primitives::B256::ZERO,
                 gas_limit: 30_000_000,
-                extra_data: Bytes::new(),
+                extra_data: shasta_extra_data(),
                 base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
             },
             &witness,
             &witness.headers,

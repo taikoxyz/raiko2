@@ -287,6 +287,18 @@ class RunManifestTests(unittest.TestCase):
         self.assertEqual(identity["out_of_fit_checkpoint"], {"mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS, "ape_max": 0.10})
         self.assertEqual(identity["guest_artifacts_sha256"], experiment["guest_artifacts_sha256"])
         self.assertEqual(identity["guest_artifacts"], experiment["guest_artifacts"])
+        self.assertEqual(
+            identity["sp1_execution_parameters"]["engines"],
+            {
+                "opcode": "gas-estimator",
+                "precompile": "standard",
+                "overhead": "standard",
+            },
+        )
+        self.assertEqual(
+            identity["sp1_execution_parameters"]["gas_estimator"],
+            {"gas_trace_chunk_threshold": 134_217_728, "gas_trace_chunk_slots": 2},
+        )
 
     def test_publish_corpus_rejects_remote_size_that_does_not_match_local_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -781,7 +793,7 @@ def write_controlled_run(root, revision="a" * 40):
             opcode_gas.canonical_json(guest_artifacts)
         ),
         "normalization_reference_key": "opcode:0x01",
-        "sp1_execution_parameters": {"mode": "execute"},
+        "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
         "primary_metric": "proverGas",
         "sp1_instruction_count": "secondary_non_gating",
         "workload_identity_schema_version": 1,

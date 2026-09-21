@@ -20,6 +20,18 @@ def controlled_manifest():
     )
 
 
+def opcode_execution_provenance():
+    return {
+        "sp1_execution_engine": "gas-estimator",
+        "sp1_gas_trace_chunk_threshold": 134_217_728,
+        "sp1_gas_trace_chunk_slots": 2,
+    }
+
+
+def standard_execution_provenance():
+    return {"sp1_execution_engine": "standard"}
+
+
 def repeated_point(count, prover_gas, instruction_count=None, **extra):
     if instruction_count is None:
         instruction_count = prover_gas * 2
@@ -90,7 +102,7 @@ def persist_execution_identity(root, manifest, revision="a" * 40):
             opcode_gas.canonical_json(guest_artifacts)
         ),
         "normalization_reference_key": "opcode:0x01",
-        "sp1_execution_parameters": {"mode": "execute"},
+        "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
         "primary_metric": "proverGas",
         "sp1_instruction_count": "secondary_non_gating",
         "workload_identity_schema_version": 1,
@@ -345,6 +357,7 @@ class CandidateConstructionTests(unittest.TestCase):
                     rows.append(
                         {
                             "case": "tx_base_no_code_no_value",
+                            "overhead_key_id": "tx_base",
                             "lane": lane,
                             "target_count": count,
                             "workload_id": workload_id,
@@ -352,11 +365,13 @@ class CandidateConstructionTests(unittest.TestCase):
                             "execution_row_id": opcode_gas.controlled_execution_row_id(
                                 workload_id,
                                 backend="sp1",
+                                execution_engine="standard",
                                 run_id="calibration",
                                 repeat_index=repeat_index,
                                 backend_input_sha256="b" * 64,
                             ),
                             "repeat_index": repeat_index,
+                            **standard_execution_provenance(),
                             "status": "accepted",
                             "gas": (
                                 10_000 + 1_200 * count
@@ -442,6 +457,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 rows.append(
                     {
                         "case": case,
+                        "overhead_key_id": "test-overhead",
                         "lane": lane,
                         "target_count": 1 if startup else count,
                         "generator_max_count": 8,
@@ -450,11 +466,13 @@ class CandidateConstructionTests(unittest.TestCase):
                         "execution_row_id": opcode_gas.controlled_execution_row_id(
                             workload_id,
                             backend="sp1",
+                            execution_engine="standard",
                             run_id="calibration",
                             repeat_index=repeat_index,
                             backend_input_sha256="b" * 64,
                         ),
                         "repeat_index": repeat_index,
+                        **standard_execution_provenance(),
                         "status": "accepted",
                         "gas": gas,
                         "total_instruction_count": gas * 2,
@@ -585,6 +603,9 @@ class CandidateConstructionTests(unittest.TestCase):
                 opcode_gas.json.dumps(
                     {
                         "guest_input_sha256": "0x" + "b" * 64,
+                        "sp1_execution_engine": "standard",
+                        "sp1_gas_trace_chunk_threshold": None,
+                        "sp1_gas_trace_chunk_slots": None,
                         "gas": 1,
                         "total_instruction_count": 2,
                         "exit_code": 0,
@@ -917,11 +938,13 @@ class CandidateConstructionTests(unittest.TestCase):
                         "execution_row_id": opcode_gas.controlled_execution_row_id(
                             workload_id,
                             backend="sp1",
+                            execution_engine="gas-estimator",
                             run_id="calibration",
                             repeat_index=repeat_index,
                             backend_input_sha256=backend_hash,
                         ),
                         "repeat_index": repeat_index,
+                        **opcode_execution_provenance(),
                         "gas": 10_000 + count * 1_200,
                         "total_instruction_count": 20_000 + count * 2_400,
                         "exit_code": 0,
@@ -947,6 +970,45 @@ class CandidateConstructionTests(unittest.TestCase):
         self.assertEqual(result["c_p"], "400")
         self.assertEqual(result["generator_max_count"], 8)
 
+    def test_controlled_fit_rejects_missing_or_mixed_execution_provenance(self):
+        base = {
+            "case": "add",
+            "kind": "opcode",
+            "target_count": 0,
+            "workload_id": "a" * 64,
+            "backend_input_sha256": "b" * 64,
+            "gas": 10_000,
+            "total_instruction_count": 20_000,
+            "exit_code": 0,
+            "public_values": "0x01",
+            "isolation": {"status": "passed", "tx_gas_limit": 1_000_024},
+        }
+        missing = [
+            {
+                **base,
+                "repeat_index": repeat,
+                "execution_row_id": str(repeat + 1) * 64,
+            }
+            for repeat in range(3)
+        ]
+        mixed = [
+            {
+                **row,
+                **(
+                    opcode_execution_provenance()
+                    if repeat < 2
+                    else standard_execution_provenance()
+                ),
+            }
+            for repeat, row in enumerate(missing)
+        ]
+
+        for rows in [missing, mixed]:
+            with self.subTest(rows=rows), self.assertRaisesRegex(
+                ValueError, "SP1 execution provenance"
+            ):
+                opcode_gas._controlled_repeat_point(rows)
+
     def test_fit_rejects_cross_batch_precompile_pairing(self):
         rows = []
         for lane, pair_id, workload_id, backend_hash in [
@@ -968,11 +1030,13 @@ class CandidateConstructionTests(unittest.TestCase):
                         "execution_row_id": opcode_gas.controlled_execution_row_id(
                             workload_id,
                             backend="sp1",
+                            execution_engine="standard",
                             run_id="calibration",
                             repeat_index=repeat_index,
                             backend_input_sha256=backend_hash,
                         ),
                         "repeat_index": repeat_index,
+                        **standard_execution_provenance(),
                         "gas": 10_000,
                         "total_instruction_count": 20_000,
                         "exit_code": 0,
@@ -1613,19 +1677,21 @@ class IdentityAndValidationTests(unittest.TestCase):
             opcode_gas.controlled_execution_row_id(
                 workload_id,
                 backend=backend,
+                execution_engine=engine,
                 run_id=run_id,
                 repeat_index=repeat,
                 backend_input_sha256=input_hash,
             )
-            for backend, run_id, repeat, input_hash in [
-                ("sp1", "run", 0, "a" * 64),
-                ("risc0", "run", 0, "a" * 64),
-                ("sp1", "other", 0, "a" * 64),
-                ("sp1", "run", 1, "a" * 64),
-                ("sp1", "run", 0, "b" * 64),
+            for backend, engine, run_id, repeat, input_hash in [
+                ("sp1", "gas-estimator", "run", 0, "a" * 64),
+                ("sp1", "standard", "run", 0, "a" * 64),
+                ("risc0", "standard", "run", 0, "a" * 64),
+                ("sp1", "gas-estimator", "other", 0, "a" * 64),
+                ("sp1", "gas-estimator", "run", 1, "a" * 64),
+                ("sp1", "gas-estimator", "run", 0, "b" * 64),
             ]
         }
-        self.assertEqual(len(ids), 5)
+        self.assertEqual(len(ids), 6)
 
     def test_event_resolution_inclusion_exclusion_and_selected_not_dispatched(self):
         manifest = controlled_manifest()

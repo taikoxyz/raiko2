@@ -28,7 +28,7 @@ def write_execution_identity(root):
             opcode_gas.canonical_json(guest_artifacts)
         ),
         "normalization_reference_key": "opcode:0x01",
-        "sp1_execution_parameters": {"mode": "execute"},
+        "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
         "primary_metric": "proverGas",
         "sp1_instruction_count": "secondary_non_gating",
         "workload_identity_schema_version": 1,
@@ -83,6 +83,8 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("--elf", calls[0])
         self.assertIn("--sp1-prover", calls[0])
         self.assertIn("local", calls[0])
+        engine_index = calls[0].index("--sp1-execution-engine")
+        self.assertEqual(calls[0][engine_index + 1], "gas-estimator")
         self.assertNotIn("cargo", calls[0][0])
 
     def test_batch_runner_uses_one_guest_launcher_process(self):
@@ -108,6 +110,8 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("--input-list", calls[0])
             self.assertIn(str(input_list_path), calls[0])
             self.assertIn("--jsonl-out", calls[0])
+            engine_index = calls[0].index("--sp1-execution-engine")
+            self.assertEqual(calls[0][engine_index + 1], "gas-estimator")
             self.assertEqual(
                 opcode_gas.json.loads(input_list_path.read_text()),
                 [str(path) for path in input_paths],
@@ -134,6 +138,26 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("--stage", calls[0])
         self.assertIn("revm-opcode-lab", calls[0])
         self.assertIn("crates/guests/elf/sp1_revm_opcode_lab.elf", calls[0])
+        engine_index = calls[0].index("--sp1-execution-engine")
+        self.assertEqual(calls[0][engine_index + 1], "gas-estimator")
+
+    def test_precompile_batch_keeps_standard_sp1_execution_engine(self):
+        calls = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            with mock.patch.object(
+                opcode_gas.subprocess, "run", lambda cmd, check: calls.append(cmd)
+            ):
+                opcode_gas.run_guest_inputs(
+                    guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                    elf_path=pathlib.Path("crates/guests/elf/sp1_precompile_lab.elf"),
+                    input_paths=[tmp_path / "input.json"],
+                    reports_jsonl=tmp_path / "reports.jsonl",
+                    stage="precompile-lab",
+                )
+
+        self.assertNotIn("--sp1-execution-engine", calls[0])
 
     def test_raw_run_normalizes_guest_launcher_gas_to_prover_gas(self):
         case = {
@@ -145,6 +169,9 @@ class RunnerTests(unittest.TestCase):
             "gas": 160,
             "wall_time_ms": 9,
             "exit_code": 0,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
         }
 
         raw_run = opcode_gas.raw_run_from_report(case, report)
@@ -152,6 +179,32 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(raw_run["prover_gas"], 160)
         self.assertEqual(raw_run["gas"], 160)
         self.assertEqual(raw_run["case"], "add")
+        self.assertEqual(raw_run["sp1_execution_engine"], "gas-estimator")
+
+    def test_raw_opcode_run_rejects_missing_or_noncanonical_execution_provenance(self):
+        case = {"case": "add", "kind": "opcode", "target_count": 1, "target_raw_gas": 3}
+        invalid_reports = [
+            {"gas": 160},
+            {"gas": 160, "sp1_execution_engine": "standard"},
+            {
+                "gas": 160,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_gas_trace_chunk_threshold": 100_000,
+                "sp1_gas_trace_chunk_slots": 2,
+            },
+            {
+                "gas": 160,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_gas_trace_chunk_threshold": 134_217_728,
+                "sp1_gas_trace_chunk_slots": 9,
+            },
+        ]
+
+        for report in invalid_reports:
+            with self.subTest(report=report), self.assertRaisesRegex(
+                ValueError, "SP1 execution provenance"
+            ):
+                opcode_gas.raw_run_from_report(case, report)
 
     def test_raw_run_preserves_guest_launcher_primary_workload_metric(self):
         case = {
@@ -177,6 +230,7 @@ class RunnerTests(unittest.TestCase):
     def test_raw_run_promotes_real_host_trace_to_isolation_evidence(self):
         case = {
             "case": "add",
+            "kind": "opcode",
             "opcode": "0x01",
             "target_count": 1,
             "target_raw_gas": 3,
@@ -184,6 +238,9 @@ class RunnerTests(unittest.TestCase):
         }
         report = {
             "gas": 160,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
             "controlled_trace": {
                 "schema_version": 1,
                 "workload_id": "a" * 64,
@@ -221,11 +278,15 @@ class RunnerTests(unittest.TestCase):
     def test_raw_run_rejects_host_trace_that_does_not_match_case_identity(self):
         case = {
             "case": "add",
+            "kind": "opcode",
             "opcode": "0x01",
             "target_count": 1,
             "target_raw_gas": 3,
         }
         report = {
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
             "controlled_trace": {
                 "workload_id": "a" * 64,
                 "backend_input_sha256": "b" * 64,
@@ -252,6 +313,7 @@ class RunnerTests(unittest.TestCase):
         }
         report = {
             "gas": 160,
+            "sp1_execution_engine": "standard",
             "controlled_trace": {
                 "kind": "precompile",
                 "workload_id": "a" * 64,
@@ -307,7 +369,10 @@ class RunnerTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "controlled trace identity"):
-            opcode_gas.raw_run_from_report(case, {"controlled_trace": trace})
+            opcode_gas.raw_run_from_report(
+                case,
+                {"sp1_execution_engine": "standard", "controlled_trace": trace},
+            )
 
     def test_parser_accepts_damage_command(self):
         args = opcode_gas.build_parser().parse_args(
@@ -364,6 +429,9 @@ class RunnerTests(unittest.TestCase):
                     {
                         "input": str(input_path),
                         "gas": 10,
+                        "sp1_execution_engine": "gas-estimator",
+                        "sp1_gas_trace_chunk_threshold": 134_217_728,
+                        "sp1_gas_trace_chunk_slots": 2,
                     }
                 )
                 + "\n"

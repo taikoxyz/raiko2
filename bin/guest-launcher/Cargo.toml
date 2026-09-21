@@ -24,6 +24,8 @@ serde_json.workspace = true
 sha2.workspace = true
 risc0-zkvm.workspace = true
 sp1-sdk.workspace = true
+sp1-core-executor.workspace = true
+sp1-core-executor-runner.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-signer = { version = "2.0", default-features = false }

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use alloy_primitives::hex;
@@ -25,6 +26,12 @@ use raiko2_prover::sp1::{
     Sp1NetworkMode, Sp1Prover,
 };
 use serde::{Deserialize, Serialize};
+use sp1_core_executor::{
+    DEFAULT_GAS_TRACE_CHUNK_SLOTS, DEFAULT_MEMORY_LIMIT, DEFAULT_TRACE_CHUNK_SLOTS,
+    ELEMENT_THRESHOLD, GAS_TRACE_CHUNK_THRESHOLD, GasEstimatingVMEnum, HEIGHT_THRESHOLD,
+    MINIMAL_TRACE_CHUNK_THRESHOLD, Program, SP1CoreOpts, ShardingThreshold,
+};
+use sp1_core_executor_runner::MinimalExecutorRunner;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
     ExecutionReport, SP1ProvingKey, SP1Stdin,
@@ -72,6 +79,9 @@ struct Args {
     /// Override the SP1 prover mode. Defaults to `local` for execute and `network` for prove.
     #[arg(long, value_enum)]
     sp1_prover: Option<CliSp1ProverMode>,
+    /// SP1 execution implementation. The gas estimator is restricted to local execute-only opcode labs.
+    #[arg(long, value_enum, default_value = "standard")]
+    sp1_execution_engine: Sp1ExecutionEngine,
     /// Succinct network mode for SP1 remote proving.
     #[arg(long, value_enum, default_value = "reserved")]
     sp1_network_mode: CliSp1NetworkMode,
@@ -135,6 +145,13 @@ enum CliSp1ProverMode {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum Sp1ExecutionEngine {
+    Standard,
+    #[value(name = "gas-estimator")]
+    GasEstimator,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum CliSp1NetworkMode {
     Reserved,
     Mainnet,
@@ -171,6 +188,9 @@ struct BenchReport {
     stage: &'static str,
     mode: &'static str,
     proof_mode: &'static str,
+    sp1_execution_engine: &'static str,
+    sp1_gas_trace_chunk_threshold: Option<u64>,
+    sp1_gas_trace_chunk_slots: Option<usize>,
     input: String,
     guest_input_sha256: Option<String>,
     guest_input_bincode_length: Option<usize>,
@@ -227,6 +247,9 @@ impl BenchReport {
             stage,
             mode,
             proof_mode,
+            sp1_execution_engine: Sp1ExecutionEngine::Standard.as_str(),
+            sp1_gas_trace_chunk_threshold: None,
+            sp1_gas_trace_chunk_slots: None,
             input,
             guest_input_sha256: None,
             guest_input_bincode_length: None,
@@ -301,6 +324,27 @@ impl ProofType {
     }
 }
 
+impl Sp1ExecutionEngine {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::GasEstimator => "gas-estimator",
+        }
+    }
+}
+
+fn apply_sp1_execution_engine_metadata(
+    report: &mut BenchReport,
+    execution_engine: Sp1ExecutionEngine,
+) {
+    report.sp1_execution_engine = execution_engine.as_str();
+    if execution_engine == Sp1ExecutionEngine::GasEstimator {
+        let opts = canonical_sp1_core_opts();
+        report.sp1_gas_trace_chunk_threshold = Some(opts.gas_trace_chunk_threshold);
+        report.sp1_gas_trace_chunk_slots = Some(opts.gas_trace_chunk_slots);
+    }
+}
+
 impl Stage {
     const fn as_str(self) -> &'static str {
         match self {
@@ -315,6 +359,19 @@ impl Stage {
 }
 
 impl Args {
+    fn effective_sp1_prover_mode(&self) -> Sp1ProverMode {
+        self.sp1_prover.map_or_else(
+            || {
+                if self.mode == Mode::Execute {
+                    Sp1ProverMode::Local
+                } else {
+                    Sp1ProverMode::Network
+                }
+            },
+            Into::into,
+        )
+    }
+
     fn effective_proof_mode(&self) -> ProofMode {
         self.proof_mode.unwrap_or({
             if self.aggregate.is_empty() {
@@ -326,16 +383,7 @@ impl Args {
     }
 
     fn sp1_config(&self) -> Result<Sp1Config> {
-        let prover = self.sp1_prover.map_or_else(
-            || {
-                if self.mode == Mode::Execute {
-                    Sp1ProverMode::Local
-                } else {
-                    Sp1ProverMode::Network
-                }
-            },
-            Into::into,
-        );
+        let prover = self.effective_sp1_prover_mode();
         let proof_mode = self.effective_proof_mode();
         let config = Sp1Config {
             recursion: match proof_mode {
@@ -399,6 +447,28 @@ impl Args {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_sp1_execution_engine(&self) -> Result<()> {
+        if self.sp1_execution_engine == Sp1ExecutionEngine::Standard {
+            return Ok(());
+        }
+        if !matches!(self.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
+            bail!("--sp1-execution-engine gas-estimator is restricted to opcode labs");
+        }
+        if self.proof_type != ProofType::Sp1 {
+            bail!("--sp1-execution-engine gas-estimator requires --proof-type sp1");
+        }
+        if self.mode != Mode::Execute {
+            bail!("--sp1-execution-engine gas-estimator requires --mode execute");
+        }
+        if self.effective_sp1_prover_mode() != Sp1ProverMode::Local {
+            bail!("--sp1-execution-engine gas-estimator requires --sp1-prover local");
+        }
+        if !self.aggregate.is_empty() {
+            bail!("--sp1-execution-engine gas-estimator does not support --aggregate");
+        }
         Ok(())
     }
 }
@@ -561,6 +631,7 @@ async fn main() -> Result<()> {
     setup_logger();
 
     let args = Args::parse();
+    args.validate_sp1_execution_engine()?;
     args.validate_standard_guest_artifacts()?;
 
     if args.stage == Stage::ProposalTrace {
@@ -729,6 +800,7 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
         proof_mode.as_str(),
         input_path.display().to_string(),
     );
+    apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
     let labels = opcode_lab_memory_labels(args.stage);
     record_memory_snapshot(&mut report, labels.start);
 
@@ -744,8 +816,12 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
     let sp1_config = args.sp1_config()?;
     let start = Instant::now();
     record_memory_snapshot(&mut report, labels.before_execute_run);
-    let (public_values, execution_report) =
-        execute_sp1_blocking(sp1_config.prover, elf, stdin).await?;
+    let (public_values, execution_report) = match args.sp1_execution_engine {
+        Sp1ExecutionEngine::Standard => execute_sp1_blocking(sp1_config.prover, elf, stdin).await?,
+        Sp1ExecutionEngine::GasEstimator => {
+            execute_opcode_lab_gas_estimator_blocking(elf, input).await?
+        }
+    };
     record_memory_snapshot(&mut report, labels.after_execute_run);
     report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     report.public_values = public_values.raw();
@@ -787,8 +863,14 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
     }
     let elf = fs::read(&elf_path).with_context(|| format!("read {}", elf_path.display()))?;
     let sp1_config = args.sp1_config()?;
-    let runs =
-        execute_opcode_lab_batch_blocking(sp1_config.prover, elf, inputs, args.stage).await?;
+    let runs = execute_opcode_lab_batch_blocking(
+        sp1_config.prover,
+        args.sp1_execution_engine,
+        elf,
+        inputs,
+        args.stage,
+    )
+    .await?;
 
     let mut output = String::new();
     for run in runs {
@@ -798,6 +880,7 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
             proof_mode.as_str(),
             run.input_path.display().to_string(),
         );
+        apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
         report.controlled_trace = run.controlled_trace;
@@ -1266,25 +1349,138 @@ async fn execute_risc0_proposal_blocking(
 
 async fn execute_opcode_lab_batch_blocking(
     prover_mode: Sp1ProverMode,
+    execution_engine: Sp1ExecutionEngine,
     elf: Vec<u8>,
     inputs: Vec<(PathBuf, OpcodeLabInput)>,
     stage: Stage,
 ) -> Result<Vec<OpcodeLabExecution>> {
-    tokio::task::spawn_blocking(move || match prover_mode {
-        Sp1ProverMode::Mock => {
-            let prover = BlockingProverClient::builder().mock().build();
-            execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
-        }
-        Sp1ProverMode::Local => {
-            let prover = BlockingProverClient::builder().cpu().build();
-            execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
-        }
-        Sp1ProverMode::Network => {
-            anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
+    tokio::task::spawn_blocking(move || match execution_engine {
+        Sp1ExecutionEngine::Standard => match prover_mode {
+            Sp1ProverMode::Mock => {
+                let prover = BlockingProverClient::builder().mock().build();
+                execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
+            }
+            Sp1ProverMode::Local => {
+                let prover = BlockingProverClient::builder().cpu().build();
+                execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
+            }
+            Sp1ProverMode::Network => {
+                anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
+            }
+        },
+        Sp1ExecutionEngine::GasEstimator => {
+            if prover_mode != Sp1ProverMode::Local {
+                anyhow::bail!("gas-estimator execution requires the local SP1 prover")
+            }
+            execute_opcode_lab_batch_gas_estimator(&elf, inputs, stage)
         }
     })
     .await
     .context("join SP1 blocking opcode-lab batch task")?
+}
+
+async fn execute_opcode_lab_gas_estimator_blocking(
+    elf: Vec<u8>,
+    input: OpcodeLabInput,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    tokio::task::spawn_blocking(move || {
+        let program = parse_sp1_program(&elf)?;
+        execute_opcode_lab_gas_estimator(program, &input)
+    })
+    .await
+    .context("join SP1 gas-estimator opcode-lab task")?
+}
+
+fn parse_sp1_program(elf: &[u8]) -> Result<Arc<Program>> {
+    Program::from(elf)
+        .map(Arc::new)
+        .map_err(|err| anyhow::anyhow!("parse SP1 opcode-lab ELF: {err:?}"))
+}
+
+fn execute_opcode_lab_gas_estimator(
+    program: Arc<Program>,
+    input: &OpcodeLabInput,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    execute_opcode_lab_gas_estimator_with_opts(program, input, canonical_sp1_core_opts())
+}
+
+fn canonical_sp1_core_opts() -> SP1CoreOpts {
+    canonicalize_sp1_core_opts(SP1CoreOpts::default())
+}
+
+fn canonicalize_sp1_core_opts(mut opts: SP1CoreOpts) -> SP1CoreOpts {
+    opts.minimal_trace_chunk_threshold = MINIMAL_TRACE_CHUNK_THRESHOLD;
+    opts.gas_trace_chunk_threshold = GAS_TRACE_CHUNK_THRESHOLD;
+    opts.trace_chunk_slots = DEFAULT_TRACE_CHUNK_SLOTS;
+    opts.gas_trace_chunk_slots = DEFAULT_GAS_TRACE_CHUNK_SLOTS;
+    opts.memory_limit = DEFAULT_MEMORY_LIMIT;
+    opts.shard_size = 1 << 24;
+    opts.sharding_threshold = ShardingThreshold {
+        element_threshold: ELEMENT_THRESHOLD,
+        height_threshold: HEIGHT_THRESHOLD,
+    };
+    opts
+}
+
+fn execute_opcode_lab_gas_estimator_with_opts(
+    program: Arc<Program>,
+    input: &OpcodeLabInput,
+    opts: SP1CoreOpts,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    let mut runner = MinimalExecutorRunner::new(
+        program.clone(),
+        false,
+        Some(opts.gas_trace_chunk_threshold),
+        opts.memory_limit,
+        opts.gas_trace_chunk_slots,
+    );
+    let mut stdin = SP1Stdin::new();
+    stdin.write(input);
+    for buffer in &stdin.buffer {
+        runner.with_input(buffer);
+    }
+
+    let mut report = ExecutionReport::default();
+    while let Some(chunk) = runner
+        .try_execute_chunk()
+        .map_err(|err| anyhow::anyhow!("execute minimal SP1 opcode-lab chunk: {err:?}"))?
+    {
+        let mut vm = GasEstimatingVMEnum::new(&chunk, program.clone(), [0u32; 4], opts.clone());
+        report += vm
+            .execute()
+            .map_err(|err| anyhow::anyhow!("estimate SP1 opcode-lab gas: {err:?}"))?;
+    }
+    let public_values = sp1_sdk::SP1PublicValues::from(runner.public_values_stream());
+    Ok((public_values, report))
+}
+
+fn execute_opcode_lab_batch_gas_estimator(
+    elf: &[u8],
+    inputs: Vec<(PathBuf, OpcodeLabInput)>,
+    stage: Stage,
+) -> Result<Vec<OpcodeLabExecution>> {
+    let program = parse_sp1_program(elf)?;
+    let mut outputs = Vec::with_capacity(inputs.len());
+    for (input_path, input) in inputs {
+        let controlled_trace = if stage == Stage::RevmOpcodeLab {
+            Some(controlled_workload::ControlledTrace::RevmOpcode(
+                controlled_workload::trace_revm_opcode_workload(&input)?,
+            ))
+        } else {
+            None
+        };
+        let start = Instant::now();
+        let (public_values, execution_report) =
+            execute_opcode_lab_gas_estimator(program.clone(), &input)?;
+        outputs.push(OpcodeLabExecution {
+            input_path,
+            public_values: public_values.raw(),
+            wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            execution_report,
+            controlled_trace,
+        });
+    }
+    Ok(outputs)
 }
 
 fn execute_opcode_lab_batch_local<P>(
@@ -1540,9 +1736,11 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage, apply_controlled_opcode_trace,
-        apply_controlled_precompile_trace, apply_risc0_execution_metadata, apply_sp1_metadata,
-        read_input, read_opcode_lab_input_list, risc0_padded_cycles,
+        Args, BenchReport, ProofType, Risc0ProposalExecution, Sp1ExecutionEngine, Stage,
+        apply_controlled_opcode_trace, apply_controlled_precompile_trace,
+        apply_risc0_execution_metadata, apply_sp1_metadata, canonical_sp1_core_opts,
+        canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts, parse_sp1_program,
+        read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
     };
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
@@ -1597,10 +1795,179 @@ mod tests {
         .expect("parse args");
 
         assert_eq!(args.stage, Stage::OpcodeLab);
+        assert_eq!(args.sp1_execution_engine, Sp1ExecutionEngine::Standard);
         assert_eq!(
             args.elf.expect("elf path").display().to_string(),
             "crates/guests/elf/sp1_opcode_lab.elf"
         );
+    }
+
+    #[test]
+    fn gas_estimator_accepts_only_local_sp1_execute_opcode_labs() {
+        for stage in ["opcode-lab", "revm-opcode-lab"] {
+            let args = Args::try_parse_from([
+                "guest-launcher",
+                "--stage",
+                stage,
+                "--proof-type",
+                "sp1",
+                "--mode",
+                "execute",
+                "--sp1-prover",
+                "local",
+                "--sp1-execution-engine",
+                "gas-estimator",
+                "--elf",
+                "/tmp/lab.elf",
+                "--input",
+                "/tmp/input.json",
+            ])
+            .expect("parse gas-estimator args");
+
+            args.validate_sp1_execution_engine()
+                .expect("valid lab-only gas estimator selection");
+        }
+    }
+
+    #[test]
+    fn gas_estimator_rejects_non_lab_prove_non_local_and_aggregate_usage() {
+        let invalid = [
+            ("precompile-lab", "sp1", "execute", "local", false),
+            ("proposal", "sp1", "execute", "local", false),
+            ("controlled-overhead", "sp1", "execute", "local", false),
+            ("opcode-lab", "sp1", "prove", "local", false),
+            ("opcode-lab", "sp1", "execute", "network", false),
+            ("opcode-lab", "native", "execute", "local", false),
+            ("opcode-lab", "sp1", "execute", "local", true),
+        ];
+        for (stage, proof_type, mode, prover, aggregate) in invalid {
+            let mut argv = vec![
+                "guest-launcher",
+                "--stage",
+                stage,
+                "--proof-type",
+                proof_type,
+                "--mode",
+                mode,
+                "--sp1-prover",
+                prover,
+                "--sp1-execution-engine",
+                "gas-estimator",
+                "--input",
+                "/tmp/input.json",
+            ];
+            if aggregate {
+                argv.extend(["--aggregate", "/tmp/proof.json"]);
+            }
+            let args = Args::try_parse_from(argv).expect("parse invalid selection");
+            assert!(
+                args.validate_sp1_execution_engine().is_err(),
+                "gas estimator unexpectedly accepted stage={} mode={:?} proof_type={:?}",
+                args.stage.as_str(),
+                args.mode,
+                args.proof_type,
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_report_records_sp1_execution_engine() {
+        let mut report = BenchReport::new("opcode-lab", "execute", "core", "input.json".into());
+        let standard = serde_json::to_value(&report).expect("serialize standard report");
+        assert_eq!(standard["sp1_execution_engine"], "standard");
+        assert!(standard["sp1_gas_trace_chunk_threshold"].is_null());
+        assert!(standard["sp1_gas_trace_chunk_slots"].is_null());
+
+        report.sp1_execution_engine = Sp1ExecutionEngine::GasEstimator.as_str();
+        report.sp1_gas_trace_chunk_threshold = Some(134_217_728);
+        report.sp1_gas_trace_chunk_slots = Some(2);
+        let estimator = serde_json::to_value(&report).expect("serialize estimator report");
+        assert_eq!(estimator["sp1_execution_engine"], "gas-estimator");
+        assert_eq!(estimator["sp1_gas_trace_chunk_threshold"], 134_217_728);
+        assert_eq!(estimator["sp1_gas_trace_chunk_slots"], 2);
+    }
+
+    #[test]
+    fn canonical_gas_estimator_options_ignore_ambient_sp1_overrides() {
+        // Model every environment-overridable field with deliberately noncanonical values, then
+        // prove the formal sampling normalization replaces all of them without mutating process env.
+        let ambient = sp1_core_executor::SP1CoreOpts {
+            minimal_trace_chunk_threshold: 200_000,
+            gas_trace_chunk_threshold: 100_000,
+            trace_chunk_slots: 8,
+            gas_trace_chunk_slots: 9,
+            memory_limit: 123_456,
+            shard_size: 1_024,
+            sharding_threshold: sp1_core_executor::ShardingThreshold {
+                element_threshold: 2_048,
+                height_threshold: 4_096,
+            },
+            ..sp1_core_executor::SP1CoreOpts::default()
+        };
+        let opts = canonicalize_sp1_core_opts(ambient);
+
+        assert_eq!(opts.minimal_trace_chunk_threshold, 16_777_216);
+        assert_eq!(opts.gas_trace_chunk_threshold, 134_217_728);
+        assert_eq!(opts.trace_chunk_slots, 5);
+        assert_eq!(opts.gas_trace_chunk_slots, 2);
+        assert_eq!(opts.memory_limit, 24 * 1024 * 1024 * 1024);
+        assert_eq!(opts.shard_size, 1 << 24);
+        assert_eq!(
+            opts.sharding_threshold.element_threshold,
+            (1 << 28) + (1 << 27)
+        );
+        assert_eq!(opts.sharding_threshold.height_threshold, 1 << 22);
+    }
+
+    fn current_revm_add_32_fixture() -> (std::sync::Arc<sp1_core_executor::Program>, OpcodeLabInput)
+    {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let elf = std::fs::read(repo.join("crates/guests/elf/sp1_revm_opcode_lab.elf"))
+            .expect("read checked-in revm opcode lab ELF");
+        let input_path = repo.join("bin/guest-launcher/tests/fixtures/revm-opcode-lab-add-32.json");
+        let input = read_opcode_lab_input(&input_path).expect("read checked-in add/count-32 input");
+        (
+            parse_sp1_program(&elf).expect("parse checked-in ELF"),
+            input,
+        )
+    }
+
+    fn assert_add_32_execution_surface(
+        public_values: &sp1_sdk::SP1PublicValues,
+        report: &sp1_sdk::ExecutionReport,
+        expected_gas: u64,
+    ) {
+        assert_eq!(
+            public_values.raw(),
+            "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
+        );
+        assert_eq!(report.gas(), Some(expected_gas));
+        assert_eq!(report.total_instruction_count(), 1_597_491);
+        assert_eq!(report.total_syscall_count(), 35);
+        assert_eq!(report.exit_code, 0);
+    }
+
+    #[test]
+    fn canonical_gas_estimator_matches_checked_in_add_32_baseline() {
+        let (program, input) = current_revm_add_32_fixture();
+        let (public_values, report) =
+            execute_opcode_lab_gas_estimator_with_opts(program, &input, canonical_sp1_core_opts())
+                .expect("execute canonical gas estimator");
+
+        // Hand-checked against the standard SP1 6.3 execution baseline for this tracked fixture.
+        assert_add_32_execution_surface(&public_values, &report, 1_443_869);
+    }
+
+    #[test]
+    fn gas_estimator_sums_all_forced_small_chunks() {
+        let (program, input) = current_revm_add_32_fixture();
+        let mut opts = canonical_sp1_core_opts();
+        opts.gas_trace_chunk_threshold = 100_000;
+        let (public_values, report) =
+            execute_opcode_lab_gas_estimator_with_opts(program, &input, opts)
+                .expect("execute forced multi-chunk gas estimator");
+
+        assert_add_32_execution_surface(&public_values, &report, 1_595_314);
     }
 
     #[test]

@@ -1787,6 +1787,8 @@ def run_guest_input(
         "--json-out",
         str(json_out),
     ]
+    if stage in {"opcode-lab", "revm-opcode-lab"}:
+        cmd.extend(["--sp1-execution-engine", "gas-estimator"])
     subprocess.run(cmd, check=True)
 
 
@@ -1819,6 +1821,8 @@ def run_guest_inputs(
         "--jsonl-out",
         str(reports_jsonl),
     ]
+    if stage in {"opcode-lab", "revm-opcode-lab"}:
+        cmd.extend(["--sp1-execution-engine", "gas-estimator"])
     subprocess.run(cmd, check=True)
     return input_list_path
 
@@ -1940,6 +1944,9 @@ def join_proposal_trace_and_sp1(
 
 
 def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    workload_kind = case.get("kind")
+    if workload_kind in {"opcode", "precompile"}:
+        validate_sp1_execution_provenance(report, workload_kind=workload_kind)
     raw_run = {**case, **report}
     controlled_trace = raw_run.get("controlled_trace")
     if isinstance(controlled_trace, Mapping):
@@ -2384,6 +2391,49 @@ CONTROLLED_PREFIXES = (
     (0, 1, 2, 4, 8, 16, 32, 64, 128, 256),
     (0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
 )
+SP1_GAS_TRACE_CHUNK_THRESHOLD = 134_217_728
+SP1_GAS_TRACE_CHUNK_SLOTS = 2
+
+
+def sp1_execution_parameters() -> dict[str, Any]:
+    return {
+        "mode": "execute",
+        "prover": "local",
+        "primary_api": "ExecutionReport::gas",
+        "engines": {
+            "opcode": "gas-estimator",
+            "precompile": "standard",
+            "overhead": "standard",
+        },
+        "gas_estimator": {
+            "gas_trace_chunk_threshold": SP1_GAS_TRACE_CHUNK_THRESHOLD,
+            "gas_trace_chunk_slots": SP1_GAS_TRACE_CHUNK_SLOTS,
+        },
+    }
+
+
+def validate_sp1_execution_provenance(
+    row: Mapping[str, Any], *, workload_kind: str
+) -> None:
+    expected_engine = sp1_execution_parameters()["engines"].get(workload_kind)
+    if expected_engine is None:
+        raise ValueError(f"unknown SP1 workload kind {workload_kind}")
+    if row.get("sp1_execution_engine") != expected_engine:
+        raise ValueError(
+            f"SP1 execution provenance requires {workload_kind} engine {expected_engine}"
+        )
+    threshold = row.get("sp1_gas_trace_chunk_threshold")
+    slots = row.get("sp1_gas_trace_chunk_slots")
+    if workload_kind == "opcode":
+        if (
+            type(threshold) is not int
+            or threshold != SP1_GAS_TRACE_CHUNK_THRESHOLD
+            or type(slots) is not int
+            or slots != SP1_GAS_TRACE_CHUNK_SLOTS
+        ):
+            raise ValueError("SP1 execution provenance has noncanonical gas chunk settings")
+    elif threshold is not None or slots is not None:
+        raise ValueError("SP1 execution provenance has unexpected gas chunk settings")
 
 
 def _decimal(value: Any, *, label: str) -> Decimal:
@@ -2417,6 +2467,7 @@ def controlled_execution_row_id(
     workload_id: str,
     *,
     backend: str,
+    execution_engine: str,
     run_id: str,
     repeat_index: int,
     backend_input_sha256: str,
@@ -2426,6 +2477,7 @@ def controlled_execution_row_id(
             {
                 "backend": backend,
                 "backend_input_sha256": backend_input_sha256,
+                "execution_engine": execution_engine,
                 "kind": "controlled_execution",
                 "repeat_index": repeat_index,
                 "run_id": run_id,
@@ -4203,6 +4255,8 @@ def experiment_provenance_declaration(
         raise ValueError("experiment has invalid controlled calibration provenance")
     if experiment.get("controlled_manifest_sha256") != manifest_sha256:
         raise ValueError("experiment controlled manifest identity is inconsistent")
+    if identity.get("sp1_execution_parameters") != sp1_execution_parameters():
+        raise ValueError("experiment has unexpected SP1 execution parameters")
     return {
         "schema_version": 1,
         "calibration_id": calibration_id,
@@ -4291,11 +4345,7 @@ def prepare_calibration(
     guest_artifacts_sha256 = sha256_bytes(canonical_json(guest_artifacts))
     rust_version = _rust_version()
     sp1_sdk_version = _locked_package_version("sp1-sdk")
-    execution_parameters = {
-        "mode": "execute",
-        "prover": "local",
-        "primary_api": "ExecutionReport::gas",
-    }
+    execution_parameters = sp1_execution_parameters()
     out_of_fit_checkpoint = {
         "mapping": OUT_OF_FIT_CHECKPOINTS,
         "ape_max": 0.10,
@@ -4711,6 +4761,11 @@ def _controlled_repeat_point(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any
         _is_sha256(value) for value in execution_row_ids
     ):
         raise ValueError("controlled repeats require distinct execution_row_id values")
+    workload_kind = "overhead" if repeats[0].get("overhead_key_id") else repeats[0].get("kind")
+    if workload_kind not in {"opcode", "precompile", "overhead"}:
+        raise ValueError("controlled repeats have unknown SP1 workload kind")
+    for row in repeats:
+        validate_sp1_execution_provenance(row, workload_kind=str(workload_kind))
     first = repeats[0]
     point = {
         "count": int(first["target_count"]),
@@ -4918,6 +4973,7 @@ def run_controlled_overhead_round(
                 check=True,
             )
             for report in iter_jsonl(report_path):
+                validate_sp1_execution_provenance(report, workload_kind="overhead")
                 controlled = report.get("controlled_overhead")
                 if not isinstance(controlled, Mapping):
                     raise ValueError("controlled overhead report is missing typed metadata")
@@ -4932,6 +4988,7 @@ def run_controlled_overhead_round(
                             "generator_max_count": generator_max_count,
                             "repeat_index": repeat_index,
                             "status": "rejected",
+                            "sp1_execution_engine": report["sp1_execution_engine"],
                             "reasons": controlled.get("reasons", []),
                             "error": controlled.get("error"),
                         }
@@ -4998,6 +5055,7 @@ def run_controlled_overhead_round(
                 row["execution_row_id"] = controlled_execution_row_id(
                     workload_id,
                     backend="sp1",
+                    execution_engine=row["sp1_execution_engine"],
                     run_id=calibration_run_id,
                     repeat_index=repeat_index,
                     backend_input_sha256=backend_input_sha256,
@@ -6246,6 +6304,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                     raw_run["execution_row_id"] = controlled_execution_row_id(
                         raw_run["workload_id"],
                         backend="sp1",
+                        execution_engine=raw_run["sp1_execution_engine"],
                         run_id=calibration_run.name,
                         repeat_index=repeat_index,
                         backend_input_sha256=raw_run["backend_input_sha256"],

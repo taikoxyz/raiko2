@@ -3,6 +3,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from dataclasses import replace
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -30,7 +31,11 @@ def diagnostic_provenance():
 
 
 def emit_matched_control_case(
-    case: opcode_gas.CaseSpec, *, operand_profile: str = "zero"
+    case: opcode_gas.CaseSpec,
+    *,
+    operand_profile: str = "zero",
+    diagnostic_count: int = 2,
+    generator_max_count: int = 8,
 ) -> tuple[
     opcode_gas.CaseSpec,
     dict,
@@ -39,7 +44,7 @@ def emit_matched_control_case(
     dict,
 ]:
     data = controlled_manifest_data()
-    data["variants"] = [2]
+    data["variants"] = [diagnostic_count]
     manifest = opcode_gas.parse_controlled_manifest(
         data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
     )
@@ -50,11 +55,11 @@ def emit_matched_control_case(
             manifest,
             out_dir,
             provenance=diagnostic_provenance(),
-            generator_max_count=8,
+            generator_max_count=generator_max_count,
             matched_control_diagnostic=True,
             operand_profile=operand_profile,
         )
-        pair_root = out_dir / "controlled" / case.name / "count-2"
+        pair_root = out_dir / "controlled" / case.name / f"count-{diagnostic_count}"
         target_case = opcode_gas.json.loads(
             (pair_root / "target" / "case.json").read_text()
         )
@@ -71,7 +76,11 @@ def emit_matched_control_case(
 
 
 def emit_matched_control_pair(
-    opcode: int, *, operand_profile: str = "zero"
+    opcode: int,
+    *,
+    operand_profile: str = "zero",
+    diagnostic_count: int = 2,
+    generator_max_count: int = 8,
 ) -> tuple[
     opcode_gas.CaseSpec,
     dict,
@@ -82,6 +91,8 @@ def emit_matched_control_pair(
     return emit_matched_control_case(
         opcode_gas.default_opcode_case(opcode),
         operand_profile=operand_profile,
+        diagnostic_count=diagnostic_count,
+        generator_max_count=generator_max_count,
     )
 
 
@@ -596,12 +607,342 @@ class FixtureEmitTests(unittest.TestCase):
                 },
             )
 
-    def test_matched_control_rejects_unmatched_templates_and_push_widths(self):
-        for opcode in (0x08, 0x52, 0x53, 0x5E, 0x60, 0x56, 0x57):
-            with self.subTest(opcode=f"0x{opcode:02x}"), self.assertRaisesRegex(
-                ValueError, "unsupported"
+    def test_matched_control_compound_families_bind_exact_executed_programs(self):
+        cases = [
+            (
+                0x08,
+                "OP-(POP+ADD)",
+                "08",
+                "5001",
+                {"0x01": 1, "0x50": 1},
+                5,
+                0x50,
+                2,
+                1,
+                2,
+            ),
+            (
+                0x09,
+                "OP-(POP+ADD)",
+                "09",
+                "5001",
+                {"0x01": 1, "0x50": 1},
+                5,
+                0x50,
+                2,
+                1,
+                2,
+            ),
+            (
+                0x50,
+                "POP-(NOT+POP)",
+                "50",
+                "1950",
+                {"0x19": 1, "0x50": 1},
+                5,
+                0x19,
+                3,
+                0,
+                8,
+            ),
+            (
+                0x52,
+                "OP-(ADD+POP)",
+                "52",
+                "0150",
+                {"0x01": 1, "0x50": 1},
+                5,
+                0x01,
+                3,
+                0,
+                2,
+            ),
+            (
+                0x53,
+                "OP-(ADD+POP)",
+                "53",
+                "0150",
+                {"0x01": 1, "0x50": 1},
+                5,
+                0x01,
+                3,
+                0,
+                2,
+            ),
+            (
+                0x5E,
+                "MCOPY-(ADD+MUL+POP)",
+                "5e",
+                "010250",
+                {"0x01": 1, "0x02": 1, "0x50": 1},
+                10,
+                0x01,
+                3,
+                0,
+                2,
+            ),
+            (
+                0x60,
+                "OP-PUSH0",
+                "6000",
+                "5f",
+                {"0x5f": 1},
+                2,
+                0x5F,
+                2,
+                1,
+                2,
+            ),
+            (
+                0x7F,
+                "OP-PUSH0",
+                "7f" + "00" * 32,
+                "5f",
+                {"0x5f": 1},
+                2,
+                0x5F,
+                2,
+                1,
+                2,
+            ),
+            (
+                0x56,
+                "JUMP-POP",
+                "56",
+                "50",
+                {"0x50": 1},
+                2,
+                0x50,
+                2,
+                0,
+                2,
+            ),
+            (
+                0x57,
+                "JUMPI-(ADD+POP)",
+                "57",
+                "0150",
+                {"0x01": 1, "0x50": 1},
+                5,
+                0x01,
+                3,
+                0,
+                2,
+            ),
+            (
+                0x5B,
+                "JUMPDEST-(PUSH0+POP)",
+                "5b",
+                "5f50",
+                {"0x50": 1, "0x5f": 1},
+                4,
+                0x5F,
+                2,
+                0,
+                2,
+            ),
+        ]
+        compound_fields = {
+            "target_program",
+            "reference_program",
+            "reference_opcode_counts",
+            "reference_raw_gas_total",
+            "target_pre_suffix_padding",
+            "control_pre_suffix_padding",
+            "common_suffix",
+            "target_post_suffix_padding",
+            "control_post_suffix_padding",
+        }
+        for (
+            opcode,
+            relation,
+            target_program,
+            reference_program,
+            reference_counts,
+            reference_raw_gas_total,
+            primary_reference,
+            primary_raw_gas,
+            final_height,
+            target_count,
+        ) in cases:
+            with self.subTest(opcode=f"0x{opcode:02x}"):
+                _, target, control, target_input, control_input = (
+                    emit_matched_control_pair(opcode)
+                )
+                self.assertTrue(compound_fields <= target.keys())
+                self.assertTrue(compound_fields <= control.keys())
+                self.assertEqual(target["target_program"], "0x" + target_program)
+                self.assertEqual(target["reference_program"], "0x" + reference_program)
+                self.assertEqual(target["reference_opcode_counts"], reference_counts)
+                self.assertEqual(
+                    target["reference_raw_gas_total"], reference_raw_gas_total
+                )
+                self.assertEqual(target["relation"], relation)
+                self.assertEqual(target["final_stack_height"], final_height)
+                self.assertEqual(control["opcode"], f"0x{primary_reference:02x}")
+                self.assertEqual(control["target_raw_gas"], primary_raw_gas)
+                self.assertEqual(control_input["target_count"], 8)
+                self.assertEqual(target_input["target_count"], target_count)
+
+                target_slots = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(target_input["bytecode"][2:])
+                )
+                control_slots = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(control_input["bytecode"][2:])
+                )
+                self.assertEqual(target_slots[2:], control_slots[2:])
+                for target_slot, control_slot in zip(target_slots[:2], control_slots[:2]):
+                    self.assertEqual(len(target_slot), len(control_slot))
+                    self.assertEqual(Counter(target_slot), Counter(control_slot))
+                pairs = opcode_gas.validate_matched_control_fixture_pairs(
+                    [target, control],
+                    guest_inputs={
+                        target["fixture_sha256"]: target_input,
+                        control["fixture_sha256"]: control_input,
+                    },
+                )
+                self.assertEqual(list(pairs), [target["pair_id"]])
+
+    def test_matched_control_compound_jump_layouts_bind_executed_suffixes(self):
+        _, jump_target, jump_control, jump_target_input, jump_control_input = (
+            emit_matched_control_pair(0x56)
+        )
+        jump_target_slot = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(jump_target_input["bytecode"][2:])
+        )[0]
+        jump_control_slot = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(jump_control_input["bytecode"][2:])
+        )[0]
+        self.assertEqual(jump_target["common_suffix"], "0x5b00")
+        self.assertEqual(jump_target_slot[-4:], bytes.fromhex("565b0050"))
+        self.assertEqual(jump_control_slot[-4:], bytes.fromhex("505b0056"))
+        self.assertEqual(int.from_bytes(jump_target_slot[1:33], "big"), 34)
+
+        _, jumpi_target, jumpi_control, jumpi_target_input, jumpi_control_input = (
+            emit_matched_control_pair(0x57)
+        )
+        jumpi_target_slot = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(jumpi_target_input["bytecode"][2:])
+        )[0]
+        jumpi_control_slot = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(jumpi_control_input["bytecode"][2:])
+        )[0]
+        self.assertEqual(jumpi_target["target_pre_suffix_padding"], "0x00")
+        self.assertEqual(jumpi_target["control_pre_suffix_padding"], "0x")
+        self.assertEqual(jumpi_target["common_suffix"], "0x5b00")
+        self.assertEqual(jumpi_target_slot[-6:], bytes.fromhex("57005b000150"))
+        self.assertEqual(jumpi_control_slot[-6:], bytes.fromhex("01505b005700"))
+        self.assertEqual(int.from_bytes(jumpi_target_slot[34:66], "big"), 68)
+
+    def test_matched_control_compound_count_zero_lanes_are_identical(self):
+        for opcode in (
+            0x08,
+            0x50,
+            0x52,
+            0x53,
+            0x5E,
+            0x60,
+            0x7F,
+            0x56,
+            0x57,
+            0x5B,
+        ):
+            with self.subTest(opcode=f"0x{opcode:02x}"):
+                _, _, _, target_input, control_input = emit_matched_control_pair(
+                    opcode, diagnostic_count=0
+                )
+                self.assertEqual(target_input["bytecode"], control_input["bytecode"])
+
+    def test_matched_control_compound_metadata_is_complete_and_canonical(self):
+        _, target, control, target_input, control_input = emit_matched_control_pair(
+            0x52
+        )
+        for field, bad_value in (
+            ("reference_program", "0x5001"),
+            ("reference_opcode_counts", {"0x01": 2}),
+            ("reference_raw_gas_total", 6),
+            ("common_suffix", "0x0000"),
+            ("target_post_suffix_padding", "0x50"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field.replace("_", " ")
             ):
-                emit_matched_control_pair(opcode)
+                opcode_gas.matched_control_pair_id(
+                    {**target, field: bad_value}, {**control, field: bad_value}
+                )
+        partial_target = dict(target)
+        partial_control = dict(control)
+        del partial_target["common_suffix"]
+        del partial_control["common_suffix"]
+        with self.assertRaisesRegex(ValueError, "compound metadata"):
+            opcode_gas.matched_control_pair_id(partial_target, partial_control)
+
+        tampered_input = dict(target_input)
+        tampered = bytearray.fromhex(tampered_input["bytecode"][2:])
+        tampered[-1] ^= 1
+        tampered_input["bytecode"] = "0x" + tampered.hex()
+        tampered_bytes = (
+            opcode_gas.json.dumps(tampered_input, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        altered_target = {
+            **target,
+            "fixture_sha256": opcode_gas.sha256_bytes(tampered_bytes),
+        }
+        altered_pair = opcode_gas.matched_control_pair_id(altered_target, control)
+        altered_target["pair_id"] = altered_pair
+        altered_control = {**control, "pair_id": altered_pair}
+        with self.assertRaisesRegex(ValueError, "bytecode differs|guest input bytecode"):
+            opcode_gas.validate_matched_control_fixture_pairs(
+                [altered_target, altered_control],
+                guest_inputs={
+                    altered_target["fixture_sha256"]: tampered_input,
+                    altered_control["fixture_sha256"]: control_input,
+                },
+            )
+
+    def test_legacy_one_opcode_matched_control_schema_and_identity_are_unchanged(self):
+        _, target, control, _, _ = emit_matched_control_pair(0x01)
+        self.assertEqual(
+            target["pair_id"],
+            "636fb8ef0ca79c416ee253fc568af1713594ec69c7fef8831bae07b5288c4371",
+        )
+        self.assertEqual(
+            target["fixture_sha256"],
+            "acd876bc5375b954a7af42b8018d2a5b56cda542381c35142bb7f0ad10d49c92",
+        )
+        self.assertEqual(
+            control["fixture_sha256"],
+            "2e117b306bb9593ad6bbe28fa92fbea3924db22dd215b9dff0e3f8ec9bff16ce",
+        )
+        self.assertNotIn("reference_program", target)
+
+    def test_new_compound_families_reject_nonzero_profile_and_unsupported_opcode(self):
+        for opcode in (
+            0x08,
+            0x50,
+            0x52,
+            0x53,
+            0x5E,
+            0x60,
+            0x7F,
+            0x56,
+            0x57,
+            0x5B,
+        ):
+            with self.subTest(opcode=f"0x{opcode:02x}"), self.assertRaisesRegex(
+                ValueError, "only supports operand profile zero"
+            ):
+                emit_matched_control_pair(opcode, operand_profile="small_nonzero")
+        with self.assertRaisesRegex(ValueError, "canonical opcode/template"):
+            emit_matched_control_case(
+                opcode_gas.CaseSpec(
+                    name="unsupported_tload",
+                    scenario="state",
+                    template="memory_load_32",
+                    target_raw_gas=100,
+                    opcode=0x5C,
+                )
+            )
 
     def test_matched_control_rejects_relabelled_opcode_templates(self):
         relabelled = [
@@ -701,25 +1042,6 @@ class FixtureEmitTests(unittest.TestCase):
                     hashlib.sha256(bytes.fromhex(generated.bytes_hex)).hexdigest(),
                     expected,
                 )
-
-    def test_matched_control_rejects_ternary_until_two_pop_contract_exists(self):
-        data = controlled_manifest_data()
-        data["variants"] = [2]
-        manifest = opcode_gas.parse_controlled_manifest(
-            data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
-        )
-        manifest = replace(manifest, cases=[opcode_gas.default_opcode_case(0x08)])
-
-        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
-            ValueError, "stack_ternary.*unsupported"
-        ):
-            opcode_gas.generate_cases(
-                manifest,
-                pathlib.Path(tmp),
-                provenance=diagnostic_provenance(),
-                generator_max_count=8,
-                matched_control_diagnostic=True,
-            )
 
     def test_matched_control_case_selection_is_explicit_and_manifest_ordered(self):
         manifest = opcode_gas.load_manifest(

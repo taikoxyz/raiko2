@@ -1259,6 +1259,32 @@ class MatchedControlSpec:
     final_stack_height: int
     operands: tuple[int, ...]
     setup: bytes
+    target_program: bytes = b""
+    reference_program: bytes = b""
+    reference_opcode_counts: tuple[tuple[int, int], ...] = ()
+    reference_raw_gas_total: int = 0
+    target_pre_suffix_padding: bytes = b""
+    control_pre_suffix_padding: bytes = b""
+    common_suffix: bytes = b""
+    target_post_suffix_padding: bytes = b""
+    control_post_suffix_padding: bytes = b""
+
+    @property
+    def compound(self) -> bool:
+        return bool(self.target_program)
+
+
+MATCHED_CONTROL_COMPOUND_FIELDS = (
+    "target_program",
+    "reference_program",
+    "reference_opcode_counts",
+    "reference_raw_gas_total",
+    "target_pre_suffix_padding",
+    "control_pre_suffix_padding",
+    "common_suffix",
+    "target_post_suffix_padding",
+    "control_post_suffix_padding",
+)
 
 
 def encode_fixed_microprograms(programs: Iterable[bytes]) -> bytes:
@@ -1382,6 +1408,120 @@ def build_fixed_footprint_bytecode(
     return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
 
 
+def _program_raw_gas(program: bytes) -> int:
+    total = 0
+    for opcode, count in count_opcodes(program).items():
+        if opcode == 0x00:
+            raw_gas = 0
+        else:
+            try:
+                raw_gas = PURE_OPCODE_DEFAULTS[opcode][2]
+            except KeyError as exc:
+                raise ValueError(
+                    f"matched control reference opcode 0x{opcode:02x} has no raw gas"
+                ) from exc
+        total += raw_gas * count
+    return total
+
+
+def _compound_matched_control_spec(case: CaseSpec) -> MatchedControlSpec | None:
+    assert case.opcode is not None
+    target_program = _fixed_target_instruction(case)
+    target_pre_suffix_padding = b""
+    control_pre_suffix_padding = b""
+    common_suffix = b"\x00"
+
+    if case.template == "stack_ternary":
+        operands = (0, 0, 0)
+        reference_program = b"\x50\x01"
+        reference_opcode = POP_OPCODE
+        relation = "OP-(POP+ADD)"
+        final_stack_height = 1
+    elif case.template == "stack_pop":
+        operands = (1,)
+        reference_program = b"\x19\x50"
+        reference_opcode = NOT_OPCODE
+        relation = "POP-(NOT+POP)"
+        final_stack_height = 0
+    elif case.template in {"memory_store_32", "memory_store8"}:
+        operands = (1, 0)
+        reference_program = b"\x01\x50"
+        reference_opcode = 0x01
+        relation = "OP-(ADD+POP)"
+        final_stack_height = 0
+    elif case.template == "memory_copy_32":
+        operands = (32, 0, 0)
+        reference_program = b"\x01\x02\x50"
+        reference_opcode = 0x01
+        relation = "MCOPY-(ADD+MUL+POP)"
+        final_stack_height = 0
+    elif case.template == "stack_push" and case.opcode != PUSH0_OPCODE:
+        operands = ()
+        reference_program = bytes([PUSH0_OPCODE])
+        reference_opcode = PUSH0_OPCODE
+        relation = "OP-PUSH0"
+        final_stack_height = 1
+    elif case.template == "jump_chain":
+        reference_program = bytes([POP_OPCODE])
+        reference_opcode = POP_OPCODE
+        relation = "JUMP-POP"
+        final_stack_height = 0
+        destination = len(_fixed_push(0, target_opcode=case.opcode)) + len(target_program)
+        operands = (destination,)
+        setup = _fixed_push(destination, target_opcode=case.opcode)
+        common_suffix = b"\x5b\x00"
+    elif case.template == "jumpi_chain":
+        reference_program = b"\x01\x50"
+        reference_opcode = 0x01
+        relation = "JUMPI-(ADD+POP)"
+        final_stack_height = 0
+        empty_push = _fixed_push(0, target_opcode=case.opcode)
+        destination = 2 * len(empty_push) + 2
+        operands = (1, destination)
+        setup = _fixed_push(1, target_opcode=case.opcode) + _fixed_push(
+            destination, target_opcode=case.opcode
+        )
+        target_pre_suffix_padding = b"\x00"
+        common_suffix = b"\x5b\x00"
+    elif case.template == "jumpdest_chain":
+        operands = ()
+        reference_program = b"\x5f\x50"
+        reference_opcode = PUSH0_OPCODE
+        relation = "JUMPDEST-(PUSH0+POP)"
+        final_stack_height = 0
+    else:
+        return None
+
+    if case.template not in {"jump_chain", "jumpi_chain"}:
+        active = _fixed_slot(case, active=True)
+        if not active.endswith(target_program + b"\x00"):
+            raise AssertionError("matched-control target slot has an unexpected suffix")
+        setup = active[: -len(target_program) - 1]
+
+    reference_counts = tuple(sorted(count_opcodes(reference_program).items()))
+    reference_raw_gas_total = _program_raw_gas(reference_program)
+    reference_raw_gas = PURE_OPCODE_DEFAULTS[reference_opcode][2]
+    target_post_suffix_padding = reference_program
+    control_post_suffix_padding = target_program + target_pre_suffix_padding
+    return MatchedControlSpec(
+        reference_opcode=reference_opcode,
+        reference_raw_gas=reference_raw_gas,
+        relation=relation,
+        final_stack_height=final_stack_height,
+        operands=operands,
+        setup=setup,
+        target_program=target_program,
+        reference_program=reference_program,
+        reference_opcode_counts=reference_counts,
+        reference_raw_gas_total=reference_raw_gas_total,
+        target_pre_suffix_padding=target_pre_suffix_padding,
+        control_pre_suffix_padding=control_pre_suffix_padding,
+        common_suffix=common_suffix,
+        target_post_suffix_padding=target_post_suffix_padding,
+        control_post_suffix_padding=control_post_suffix_padding,
+    )
+
+
 def matched_control_spec(
     case: CaseSpec, operand_profile: str = "zero"
 ) -> MatchedControlSpec:
@@ -1399,6 +1539,14 @@ def matched_control_spec(
         raise ValueError(
             f"matched control operand profile {operand_profile!r} is unsupported"
         )
+
+    compound = _compound_matched_control_spec(case)
+    if compound is not None:
+        if operand_profile != "zero":
+            raise ValueError(
+                f"matched control template {case.template} only supports operand profile zero"
+            )
+        return compound
 
     if case.template in {"stack_binary", "stack_exp", "stack_unary"}:
         operands = MATCHED_CONTROL_OPERAND_PROFILES[operand_profile][case.template]
@@ -1500,9 +1648,123 @@ def _matched_control_slot(
 ) -> bytes:
     """Build one diagnostic slot with the same setup and final stack height."""
     spec = matched_control_spec(case, operand_profile)
+    if spec.compound:
+        if execute_target:
+            return (
+                spec.setup
+                + spec.target_program
+                + spec.target_pre_suffix_padding
+                + spec.common_suffix
+                + spec.target_post_suffix_padding
+            )
+        return (
+            spec.setup
+            + spec.reference_program
+            + spec.control_pre_suffix_padding
+            + spec.common_suffix
+            + spec.control_post_suffix_padding
+        )
     opcode = case.opcode if execute_target else spec.reference_opcode
     assert opcode is not None
     return spec.setup + bytes([opcode, 0x00])
+
+
+def _matched_control_executed_counts(
+    spec: MatchedControlSpec, *, execute_target: bool
+) -> dict[int, int]:
+    if not spec.compound:
+        raise AssertionError("one-op matched control has no compound count")
+    program = spec.target_program if execute_target else spec.reference_program
+    counts: dict[int, int] = {}
+    for fragment in (spec.setup, program, spec.common_suffix):
+        for opcode, count in count_opcodes(fragment).items():
+            counts[opcode] = counts.get(opcode, 0) + count
+    return counts
+
+
+def _matched_control_declared_target_count(
+    case: CaseSpec,
+    spec: MatchedControlSpec,
+    diagnostic_count: int,
+    generator_max_count: int,
+) -> int:
+    assert case.opcode is not None
+    if not spec.compound:
+        return (
+            generator_max_count
+            if case.opcode == spec.reference_opcode
+            else diagnostic_count
+        )
+    target_count = _matched_control_executed_counts(
+        spec, execute_target=True
+    ).get(case.opcode, 0)
+    reference_count = _matched_control_executed_counts(
+        spec, execute_target=False
+    ).get(case.opcode, 0)
+    return diagnostic_count * target_count + (
+        generator_max_count - diagnostic_count
+    ) * reference_count
+
+
+def _matched_control_declared_control_count(
+    spec: MatchedControlSpec, generator_max_count: int
+) -> int:
+    if not spec.compound:
+        return generator_max_count
+    per_slot = _matched_control_executed_counts(
+        spec, execute_target=False
+    ).get(spec.reference_opcode, 0)
+    return generator_max_count * per_slot
+
+
+def _matched_control_compound_metadata(spec: MatchedControlSpec) -> dict[str, Any]:
+    if not spec.compound:
+        return {}
+    return {
+        "target_program": "0x" + spec.target_program.hex(),
+        "reference_program": "0x" + spec.reference_program.hex(),
+        "reference_opcode_counts": {
+            f"0x{opcode:02x}": count
+            for opcode, count in spec.reference_opcode_counts
+        },
+        "reference_raw_gas_total": spec.reference_raw_gas_total,
+        "target_pre_suffix_padding": "0x" + spec.target_pre_suffix_padding.hex(),
+        "control_pre_suffix_padding": "0x" + spec.control_pre_suffix_padding.hex(),
+        "common_suffix": "0x" + spec.common_suffix.hex(),
+        "target_post_suffix_padding": "0x"
+        + spec.target_post_suffix_padding.hex(),
+        "control_post_suffix_padding": "0x"
+        + spec.control_post_suffix_padding.hex(),
+    }
+
+
+def _validate_matched_control_compound_metadata(
+    target: Mapping[str, Any],
+    control: Mapping[str, Any],
+    spec: MatchedControlSpec,
+) -> dict[str, Any]:
+    target_fields = {field for field in MATCHED_CONTROL_COMPOUND_FIELDS if field in target}
+    control_fields = {
+        field for field in MATCHED_CONTROL_COMPOUND_FIELDS if field in control
+    }
+    expected_fields = set(MATCHED_CONTROL_COMPOUND_FIELDS)
+    if target_fields != control_fields or target_fields not in (set(), expected_fields):
+        raise ValueError("matched-control compound metadata must be complete")
+    expected = _matched_control_compound_metadata(spec)
+    if spec.compound and target_fields != expected_fields:
+        raise ValueError("matched-control compound metadata must be complete")
+    if not spec.compound and target_fields:
+        raise ValueError("matched-control compound metadata is unexpected")
+    for field_name, expected_value in expected.items():
+        if target.get(field_name) != control.get(field_name):
+            raise ValueError(
+                f"matched-control {field_name.replace('_', ' ')} mismatch"
+            )
+        if target.get(field_name) != expected_value:
+            raise ValueError(
+                f"matched-control {field_name.replace('_', ' ')} differs from canonical spec"
+            )
+    return expected
 
 
 def build_matched_control_bytecode(
@@ -1641,16 +1903,18 @@ def _matched_control_pair_spec(
         raise ValueError("matched-control final stack height mismatch")
     if target.get("operands") != list(spec.operands):
         raise ValueError("matched-control operands do not match operand profile")
-    expected_target_count = (
-        generator_max_count
-        if original_opcode == spec.reference_opcode
-        else diagnostic_count
+    compound_metadata = _validate_matched_control_compound_metadata(
+        target, control, spec
+    )
+    expected_target_count = _matched_control_declared_target_count(
+        reconstructed_case, spec, diagnostic_count, generator_max_count
     )
     if target.get("target_count") != expected_target_count:
         raise ValueError("matched-control target count differs from executed opcode count")
     if (
         parse_opcode(control.get("opcode")) != spec.reference_opcode
-        or control.get("target_count") != generator_max_count
+        or control.get("target_count")
+        != _matched_control_declared_control_count(spec, generator_max_count)
         or control.get("target_raw_gas") != spec.reference_raw_gas
     ):
         raise ValueError("matched-control control declaration is invalid")
@@ -1688,6 +1952,11 @@ def _matched_control_pair_spec(
         or any(char not in "0123456789abcdef" for char in calibration_id)
     ):
         raise ValueError("matched-control calibration ID is invalid")
+    workload = {
+        field_name: target[field_name]
+        for field_name in MATCHED_CONTROL_WORKLOAD_FIELDS
+    }
+    workload.update(compound_metadata)
     return {
         "schema_version": 1,
         "purpose": MATCHED_CONTROL_PURPOSE,
@@ -1701,10 +1970,7 @@ def _matched_control_pair_spec(
                 "controlled_manifest_rows_sha256",
             )
         },
-        "workload": {
-            field_name: target[field_name]
-            for field_name in MATCHED_CONTROL_WORKLOAD_FIELDS
-        },
+        "workload": workload,
         "lanes": {
             lane: {
                 "case": row["case"],
@@ -1894,12 +2160,22 @@ def build_matched_control_report(
             raise ValueError("matched-control result relation/template mismatch")
         if target.get("final_stack_height") != spec.final_stack_height:
             raise ValueError("matched-control result final stack height mismatch")
+        compound_metadata = _validate_matched_control_compound_metadata(
+            target, control, spec
+        )
         diagnostic_count = target.get("diagnostic_count")
         generator_max_count = target.get("generator_max_count")
-        expected_target_count = (
-            generator_max_count
-            if report_case.opcode == spec.reference_opcode
-            else diagnostic_count
+        if (
+            isinstance(diagnostic_count, bool)
+            or not isinstance(diagnostic_count, int)
+            or isinstance(generator_max_count, bool)
+            or not isinstance(generator_max_count, int)
+            or diagnostic_count < 0
+            or diagnostic_count > generator_max_count
+        ):
+            raise ValueError("matched-control result diagnostic count is invalid")
+        expected_target_count = _matched_control_declared_target_count(
+            report_case, spec, diagnostic_count, generator_max_count
         )
         if (
             parse_opcode(target.get("opcode")) != report_case.opcode
@@ -1908,7 +2184,8 @@ def build_matched_control_report(
             raise ValueError("matched-control result target declaration is invalid")
         if (
             parse_opcode(control.get("opcode")) != spec.reference_opcode
-            or control.get("target_count") != generator_max_count
+            or control.get("target_count")
+            != _matched_control_declared_control_count(spec, generator_max_count)
             or control.get("target_raw_gas") != spec.reference_raw_gas
         ):
             raise ValueError("matched-control result control declaration is invalid")
@@ -1975,8 +2252,7 @@ def build_matched_control_report(
             raise ValueError("matched-control result metrics must be integers")
         diagnostic_count = target["diagnostic_count"]
         prover_gas_delta = target_gas - control_gas
-        results.append(
-            {
+        result = {
                 "pair_id": pair_id,
                 "repeat_index": repeat_index,
                 "original_case": target["original_case"],
@@ -2002,7 +2278,8 @@ def build_matched_control_report(
                 "sp1_gas_trace_chunk_threshold": execution_provenance[1],
                 "sp1_gas_trace_chunk_slots": execution_provenance[2],
             }
-        )
+        result.update(compound_metadata)
+        results.append(result)
     return {
         "schema_version": 1,
         "purpose": MATCHED_CONTROL_PURPOSE,
@@ -2336,23 +2613,26 @@ def generate_cases(
                     if target_len != control_len:
                         raise AssertionError("matched-control bytecode footprints differ")
                     tx_gas_limit = 1_000_000 + controlled_max * max(
-                        case.target_raw_gas, matched_spec.reference_raw_gas
+                        case.target_raw_gas,
+                        matched_spec.reference_raw_gas_total
+                        if matched_spec.compound
+                        else matched_spec.reference_raw_gas,
                     )
                     lane_artifacts = []
                     for lane, generated in (("target", target), ("control", control)):
                         lane_dir = case_dir / lane
                         if lane == "target":
                             declared_opcode = case.opcode
-                            declared_count = (
-                                controlled_max
-                                if case.opcode == matched_spec.reference_opcode
-                                else variant
+                            declared_count = _matched_control_declared_target_count(
+                                case, matched_spec, variant, controlled_max
                             )
                             declared_raw_gas = case.target_raw_gas
                             lane_case = f"{case.name}__matched_t"
                         else:
                             declared_opcode = matched_spec.reference_opcode
-                            declared_count = controlled_max
+                            declared_count = _matched_control_declared_control_count(
+                                matched_spec, controlled_max
+                            )
                             declared_raw_gas = matched_spec.reference_raw_gas
                             lane_case = f"{case.name}__matched_c"
                         payload = {
@@ -2386,6 +2666,9 @@ def generate_cases(
                             "tx_gas_limit": tx_gas_limit,
                             "guest_input_status": "opcode_lab_guest_input",
                         }
+                        payload.update(
+                            _matched_control_compound_metadata(matched_spec)
+                        )
                         guest_input = {
                             "case": lane_case,
                             "scenario": case.scenario,

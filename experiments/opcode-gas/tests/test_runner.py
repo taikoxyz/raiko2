@@ -692,6 +692,94 @@ class RunnerTests(unittest.TestCase):
                     [target, {**control, "exit_code": invalid_exit}]
                 )
 
+    def test_matched_control_report_binds_complete_compound_reference_contract(self):
+        compound = {
+            "target_program": "0x52",
+            "reference_program": "0x0150",
+            "reference_opcode_counts": {"0x01": 1, "0x50": 1},
+            "reference_raw_gas_total": 5,
+            "target_pre_suffix_padding": "0x",
+            "control_pre_suffix_padding": "0x",
+            "common_suffix": "0x00",
+            "target_post_suffix_padding": "0x0150",
+            "control_post_suffix_padding": "0x52",
+        }
+        common = {
+            "purpose": "matched_control_diagnostic",
+            "pair_id": "a" * 64,
+            "original_case": "mstore",
+            "original_opcode": "0x52",
+            "template": "memory_store_32",
+            "scenario": "memory",
+            "operand_profile": "zero",
+            "operands": [1, 0],
+            "relation": "OP-(ADD+POP)",
+            "signal_kind": "contextual_relative",
+            "diagnostic_count": 2,
+            "final_stack_height": 0,
+            "generator_max_count": 8,
+            "fixed_bytecode_len": 900,
+            "tx_gas_limit": 1_000_040,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "repeat_index": 0,
+            "exit_code": 0,
+            **compound,
+        }
+        isolation = {
+            "status": "passed",
+            "bytecode_size": 900,
+            "input_size": 1_000,
+            "tx_gas_limit": 1_000_040,
+        }
+        target = {
+            **common,
+            "lane": "target",
+            "opcode": "0x52",
+            "target_count": 2,
+            "target_raw_gas": 3,
+            "prover_gas": 1_500,
+            "total_instruction_count": 3_000,
+            "workload_id": "b" * 64,
+            "backend_input_sha256": "c" * 64,
+            "isolation": isolation,
+        }
+        control = {
+            **common,
+            "lane": "control",
+            "opcode": "0x01",
+            "target_count": 8,
+            "target_raw_gas": 3,
+            "prover_gas": 1_100,
+            "total_instruction_count": 2_200,
+            "workload_id": "d" * 64,
+            "backend_input_sha256": "e" * 64,
+            "isolation": isolation,
+        }
+
+        report = opcode_gas.build_matched_control_report([target, control])
+
+        for field, value in compound.items():
+            self.assertEqual(report["results"][0][field], value)
+        for field, bad_value in (
+            ("reference_program", "0x5001"),
+            ("reference_opcode_counts", {"0x01": 2}),
+            ("common_suffix", "0x0000"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field.replace("_", " ")
+            ):
+                opcode_gas.build_matched_control_report(
+                    [{**target, field: bad_value}, {**control, field: bad_value}]
+                )
+        partial_target = dict(target)
+        partial_control = dict(control)
+        del partial_target["reference_raw_gas_total"]
+        del partial_control["reference_raw_gas_total"]
+        with self.assertRaisesRegex(ValueError, "compound metadata"):
+            opcode_gas.build_matched_control_report([partial_target, partial_control])
+
     def test_run_command_uses_revm_elf_for_revm_opcode_stage(self):
         calls = []
         out_path = None

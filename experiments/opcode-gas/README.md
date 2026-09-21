@@ -136,9 +136,14 @@ These reports contain contextual relative signals. Binary and EXP cases currentl
 `zero` profile additionally supports `MLOAD - NOT`, `KECCAK32 - POP`, `DUPn - DUP1`,
 `SWAPn - SWAP1`, and `PC/MSIZE/GAS - PUSH0`; PUSH0 is its own self-control. DUP1, SWAP1, and PUSH0
 self-control pairs also intentionally have identical target/control bytecode and zero delta. These
-additional families reject `small_nonzero` because they do not define a second operand profile.
-PUSH1 through PUSH32 and the other unmatched templates remain unsupported. The numbers are not
-absolute opcode costs and cannot be copied into a production multiplier table.
+additional families reject `small_nonzero` because they do not define a second operand profile. The
+`zero` profile also supports `ADDMOD/MULMOD - (POP+ADD)`, `POP - (NOT+POP)`,
+`MSTORE/MSTORE8 - (ADD+POP)`, `MCOPY - (ADD+MUL+POP)`, `PUSHn - PUSH0`, `JUMP - POP`,
+`JUMPI - (ADD+POP)`, and `JUMPDEST - (PUSH0+POP)`. Compound controls bind the exact executed target
+and reference programs, padding, common suffix, opcode counts, and raw-gas total into the pair.
+Coefficients from an early-STOP control are explicitly rejected: equal serialized size alone does
+not establish an equal executed workload. These numbers remain contextual relative signals, not
+absolute opcode costs, and cannot be copied into a production multiplier table.
 Different operand profiles may exercise materially different guest paths: in the initial comparison,
 EQ, signed comparisons, division/modulo, EXP, and LT/GT changed between zero and small-nonzero
 profiles. A measurement key that needs multiple scenarios must satisfy the formal required-case

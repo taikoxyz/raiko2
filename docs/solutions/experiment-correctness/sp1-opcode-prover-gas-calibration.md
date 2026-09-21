@@ -64,6 +64,12 @@ zero-delta self-control.
 
 The result is therefore `OP - NOT`, not an absolute unary opcode cost.
 
+The broader 41-case diagnostic showed that fixed byte footprint and transaction gas are still
+insufficient when an early `STOP` changes the executed program or its final effects: all 41 sweeps
+were non-monotonic and 40 produced negative deltas. Increasing the count cannot repair that
+confound. Matched controls must instead bind and validate the exact executed reference program,
+including any padding and shared suffix, while preserving the intended final stack effect.
+
 ### Zero Operands Hid Or Selected Special Paths
 
 The compatibility profile used `[0, 0]` for binary operations. That selects special behavior for

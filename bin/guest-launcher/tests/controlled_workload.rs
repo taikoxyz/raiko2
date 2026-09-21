@@ -100,6 +100,7 @@ fn fixed_footprint_rejects_growing_bytecode_or_non_target_work() {
     let fixed = [
         ControlledFootprint {
             target_count: 0,
+            tx_gas_limit: 1_000_024,
             bytecode_len: 64,
             input_len: 32,
             non_target_counts: BTreeMap::from([("push1".into(), 4)]),
@@ -107,6 +108,7 @@ fn fixed_footprint_rejects_growing_bytecode_or_non_target_work() {
         },
         ControlledFootprint {
             target_count: 4,
+            tx_gas_limit: 1_000_024,
             bytecode_len: 64,
             input_len: 32,
             non_target_counts: BTreeMap::from([("push1".into(), 4)]),
@@ -133,6 +135,15 @@ fn fixed_footprint_rejects_growing_bytecode_or_non_target_work() {
             .unwrap_err()
             .to_string(),
         "confounded_template: non-target executed work changed"
+    );
+
+    let mut changing_gas_limit = fixed.clone();
+    changing_gas_limit[1].tx_gas_limit += 1;
+    assert_eq!(
+        validate_fixed_footprint(&changing_gas_limit)
+            .unwrap_err()
+            .to_string(),
+        "confounded_template: transaction gas limit changed"
     );
 }
 
@@ -167,6 +178,7 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
         opcode: 0x01,
         target_count: 1,
         target_raw_gas: 3,
+        tx_gas_limit: Some(1_000_024),
         bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
@@ -193,6 +205,7 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
     assert_eq!(trace.non_target_counts.get("opcode:0x00"), Some(&1));
     assert_eq!(trace.non_target_raw_gas, 6);
     assert_eq!(trace.total_raw_gas, 9);
+    assert_eq!(trace.tx_gas_limit, 1_000_024);
     assert_eq!(trace.bytecode_len, 6);
     assert_eq!(trace.workload_id.len(), 64);
     assert_eq!(trace.workload_id, alternate_trace.workload_id);
@@ -259,6 +272,7 @@ fn revm_trace_rejects_declared_count_or_raw_gas_that_execution_does_not_match() 
         opcode: 0x01,
         target_count: 2,
         target_raw_gas: 3,
+        tx_gas_limit: Some(1_000_024),
         bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
@@ -313,6 +327,7 @@ fn fixed_footprint_add_sweep_has_constant_real_non_target_execution() {
             opcode: 0x01,
             target_count,
             target_raw_gas: 3,
+            tx_gas_limit: Some(1_000_000 + max_count * 3),
             fixed_bytecode_len: Some(bytecode.len() as u64),
             generator_max_count: Some(max_count),
             bytecode,
@@ -326,6 +341,7 @@ fn fixed_footprint_add_sweep_has_constant_real_non_target_execution() {
         assert_eq!(trace.bytecode_len, reference.bytecode_len);
         assert_eq!(trace.non_target_counts, reference.non_target_counts);
         assert_eq!(trace.non_target_raw_gas, reference.non_target_raw_gas);
+        assert_eq!(trace.tx_gas_limit, reference.tx_gas_limit);
     }
 }
 

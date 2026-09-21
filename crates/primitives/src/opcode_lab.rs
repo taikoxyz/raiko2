@@ -7,6 +7,8 @@ pub struct OpcodeLabInput {
     pub opcode: u8,
     pub target_count: u64,
     pub target_raw_gas: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_gas_limit: Option<u64>,
     #[serde(with = "hex_bytes")]
     pub bytecode: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -17,13 +19,18 @@ pub struct OpcodeLabInput {
 
 impl OpcodeLabInput {
     pub const GAS_LIMIT_OVERHEAD: u64 = 1_000_000;
+    pub const MIN_EXECUTION_GAS_LIMIT: u64 = 100_000;
     pub const FIXED_MICROPROGRAM_MAGIC: [u8; 4] = [0xef, 0x4d, 0x50, 0x01];
 
     #[must_use]
     pub const fn execution_gas_limit(&self) -> u64 {
-        self.target_raw_gas
-            .saturating_mul(self.target_count)
-            .saturating_add(Self::GAS_LIMIT_OVERHEAD)
+        match self.tx_gas_limit {
+            Some(tx_gas_limit) => tx_gas_limit,
+            None => self
+                .target_raw_gas
+                .saturating_mul(self.target_count)
+                .saturating_add(Self::GAS_LIMIT_OVERHEAD),
+        }
     }
 
     /// Validates the count and bytecode-size commitments carried by a controlled fixture.
@@ -37,6 +44,15 @@ impl OpcodeLabInput {
             && self.target_count > max_count
         {
             return Err("target_count exceeds declared generator_max_count");
+        }
+        if self.generator_max_count.is_some() && self.tx_gas_limit.is_none() {
+            return Err("controlled input is missing tx_gas_limit");
+        }
+        if self
+            .tx_gas_limit
+            .is_some_and(|gas_limit| gas_limit < Self::MIN_EXECUTION_GAS_LIMIT)
+        {
+            return Err("tx_gas_limit is below the revm opcode execution minimum");
         }
         if let Some(fixed_len) = self.fixed_bytecode_len
             && u64::try_from(self.bytecode.len()).unwrap_or(u64::MAX) != fixed_len
@@ -156,6 +172,7 @@ mod tests {
               "opcode": 1,
               "target_count": 4,
               "target_raw_gas": 3,
+              "tx_gas_limit": 1000024,
               "bytecode": "0x600160020100",
               "generator_max_count": 8,
               "fixed_bytecode_len": 6
@@ -166,6 +183,14 @@ mod tests {
         input
             .validate_controlled_contract()
             .expect("valid controlled contract");
+        assert_eq!(input.tx_gas_limit, Some(1_000_024));
+        assert_eq!(input.execution_gas_limit(), 1_000_024);
+
+        let lower_count = OpcodeLabInput {
+            target_count: 1,
+            ..input.clone()
+        };
+        assert_eq!(lower_count.execution_gas_limit(), 1_000_024);
 
         let beyond_bound = OpcodeLabInput {
             target_count: 9,
@@ -184,15 +209,36 @@ mod tests {
             wrong_size.validate_controlled_contract(),
             Err("bytecode length differs from fixed_bytecode_len")
         );
+    }
+
+    #[test]
+    fn controlled_contract_requires_explicit_transaction_gas_limit() {
+        let input = OpcodeLabInput {
+            target_count: 4,
+            target_raw_gas: 3,
+            generator_max_count: Some(8),
+            ..OpcodeLabInput::default()
+        };
 
         assert_eq!(
-            OpcodeLabInput {
-                target_count: 4,
-                target_raw_gas: 3,
-                ..OpcodeLabInput::default()
-            }
-            .execution_gas_limit(),
-            1_000_012
+            input.validate_controlled_contract(),
+            Err("controlled input is missing tx_gas_limit")
+        );
+    }
+
+    #[test]
+    fn controlled_contract_rejects_transaction_gas_limit_below_execution_minimum() {
+        let input = OpcodeLabInput {
+            target_count: 4,
+            target_raw_gas: 3,
+            tx_gas_limit: Some(99_999),
+            generator_max_count: Some(8),
+            ..OpcodeLabInput::default()
+        };
+
+        assert_eq!(
+            input.validate_controlled_contract(),
+            Err("tx_gas_limit is below the revm opcode execution minimum")
         );
     }
 

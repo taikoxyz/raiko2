@@ -1821,6 +1821,7 @@ mod tests {
             opcode: 0x01,
             target_count: 1,
             target_raw_gas: 3,
+            tx_gas_limit: Some(1_000_024),
             bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),

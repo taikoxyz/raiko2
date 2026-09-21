@@ -99,6 +99,7 @@ pub struct ControlledExecutionIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlledFootprint {
     pub target_count: u64,
+    pub tx_gas_limit: u64,
     pub bytecode_len: usize,
     pub input_len: usize,
     pub non_target_counts: BTreeMap<String, u64>,
@@ -124,6 +125,7 @@ pub struct ControlledOpcodeTrace {
     pub target_opcode: u8,
     pub declared_target_count: u64,
     pub declared_target_raw_gas: u64,
+    pub tx_gas_limit: u64,
     pub executed_target_count: u64,
     pub executed_target_raw_gas: u64,
     pub non_target_counts: BTreeMap<String, u64>,
@@ -1474,6 +1476,10 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
             ("opcode".into(), Value::from(input.opcode)),
             ("target_raw_gas".into(), Value::from(input.target_raw_gas)),
             (
+                "tx_gas_limit".into(),
+                Value::from(input.execution_gas_limit()),
+            ),
+            (
                 "generator_max_count".into(),
                 input
                     .generator_max_count
@@ -1544,6 +1550,7 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         target_opcode: input.opcode,
         declared_target_count: input.target_count,
         declared_target_raw_gas: input.target_raw_gas,
+        tx_gas_limit: input.execution_gas_limit(),
         executed_target_count: target_count,
         executed_target_raw_gas: target_raw_gas,
         non_target_counts,
@@ -1567,6 +1574,12 @@ pub fn validate_fixed_footprint(rows: &[ControlledFootprint]) -> Result<()> {
             || row.non_target_raw_gas != reference.non_target_raw_gas
     }) {
         bail!("confounded_template: non-target executed work changed");
+    }
+    if rows
+        .iter()
+        .any(|row| row.tx_gas_limit != reference.tx_gas_limit)
+    {
+        bail!("confounded_template: transaction gas limit changed");
     }
     Ok(())
 }

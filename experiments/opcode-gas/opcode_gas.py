@@ -1675,10 +1675,13 @@ def generate_cases(
                 }
                 if controlled_max is not None:
                     fixed_len = len(bytes.fromhex(generated.bytes_hex))
+                    tx_gas_limit = 1_000_000 + controlled_max * case.target_raw_gas
                     payload["generator_max_count"] = controlled_max
                     payload["fixed_bytecode_len"] = fixed_len
+                    payload["tx_gas_limit"] = tx_gas_limit
                     guest_input["generator_max_count"] = controlled_max
                     guest_input["fixed_bytecode_len"] = fixed_len
+                    guest_input["tx_gas_limit"] = tx_gas_limit
             elif case.kind == "precompile":
                 if case.address is None:
                     raise ValueError(f"precompile case {case.name} is missing address")
@@ -1957,6 +1960,7 @@ def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[st
                     controlled_trace.get("declared_target_raw_gas"),
                     case.get("target_raw_gas"),
                 ),
+                (controlled_trace.get("tx_gas_limit"), case.get("tx_gas_limit")),
             )
         else:
             raise ValueError("unknown controlled trace kind")
@@ -1986,6 +1990,7 @@ def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[st
                 "input_size": controlled_trace.get("backend_input_len"),
                 "non_target_counts": controlled_trace.get("non_target_counts"),
                 "non_target_raw_gas": controlled_trace.get("non_target_raw_gas"),
+                "tx_gas_limit": controlled_trace.get("tx_gas_limit"),
             }
     if "prover_gas" not in raw_run and "gas" in raw_run:
         raw_run["prover_gas"] = raw_run["gas"]
@@ -2560,11 +2565,18 @@ def _fit_decimal(xs: list[Decimal], ys: list[Decimal]) -> dict[str, Decimal | li
     }
 
 
-def _isolation_reasons(points: list[Mapping[str, Any]]) -> list[str]:
+def _isolation_reasons(
+    points: list[Mapping[str, Any]], *, require_tx_gas_limit: bool
+) -> list[str]:
     identities = []
     for point in points:
         isolation = point.get("isolation")
         if not isinstance(isolation, Mapping) or isolation.get("status") != "passed":
+            return ["confounded_template"]
+        tx_gas_limit = isolation.get("tx_gas_limit")
+        if require_tx_gas_limit and (
+            type(tx_gas_limit) is not int or tx_gas_limit <= 0
+        ):
             return ["confounded_template"]
         identities.append(
             canonical_json(
@@ -2573,6 +2585,7 @@ def _isolation_reasons(points: list[Mapping[str, Any]]) -> list[str]:
                     "input_size": isolation.get("input_size"),
                     "non_target_counts": isolation.get("non_target_counts"),
                     "non_target_raw_gas": isolation.get("non_target_raw_gas"),
+                    "tx_gas_limit": isolation.get("tx_gas_limit"),
                 }
             )
         )
@@ -2585,7 +2598,10 @@ def evaluate_controlled_sweep(
     pricing_basis: str,
     target_raw_gas: int | None,
     generator_max_count: int,
+    require_tx_gas_limit: bool | None = None,
 ) -> dict[str, Any]:
+    if require_tx_gas_limit is None:
+        require_tx_gas_limit = pricing_basis == "raw_gas_slope"
     observation_list = list(observations)
     points = {int(point["count"]): point for point in observation_list}
     if len(points) != len(observation_list):
@@ -2605,7 +2621,10 @@ def evaluate_controlled_sweep(
     for prefix in CONTROLLED_PREFIXES:
         if max(prefix) > generator_max_count or any(count not in points for count in prefix):
             continue
-        isolation_reasons = _isolation_reasons([points[count] for count in prefix])
+        isolation_reasons = _isolation_reasons(
+            [points[count] for count in prefix],
+            require_tx_gas_limit=require_tx_gas_limit,
+        )
         if isolation_reasons:
             return {"status": "rejected", "reasons": isolation_reasons}
         fit = _fit_decimal(
@@ -2636,7 +2655,8 @@ def evaluate_controlled_sweep(
             "reasons": ["checkpoint_missing"],
         }
     isolation_reasons = _isolation_reasons(
-        [points[count] for count in selected] + [checkpoint]
+        [points[count] for count in selected] + [checkpoint],
+        require_tx_gas_limit=require_tx_gas_limit,
     )
     if isolation_reasons:
         return {
@@ -2755,6 +2775,7 @@ def evaluate_paired_precompile_sweep(
         pricing_basis="raw_gas_slope",
         target_raw_gas=target_raw_gas,
         generator_max_count=generator_max_count,
+        require_tx_gas_limit=False,
     )
 
 

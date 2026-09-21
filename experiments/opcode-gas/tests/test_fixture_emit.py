@@ -100,6 +100,7 @@ class FixtureEmitTests(unittest.TestCase):
 
         self.assertEqual([row["target_count"] for row in inputs], [0, 1, 2, 4, 8])
         self.assertEqual({row["generator_max_count"] for row in inputs}, {8})
+        self.assertEqual({row["tx_gas_limit"] for row in inputs}, {1_000_024})
         self.assertEqual(len({row["fixed_bytecode_len"] for row in inputs}), 1)
         self.assertEqual(
             {
@@ -135,6 +136,8 @@ class FixtureEmitTests(unittest.TestCase):
         )
         self.assertEqual({row["generator_max_count"] for row in first_rows}, {8})
         self.assertEqual({row["generator_max_count"] for row in expanded_rows}, {32})
+        self.assertEqual({row["tx_gas_limit"] for row in first_rows}, {1_000_024})
+        self.assertEqual({row["tx_gas_limit"] for row in expanded_rows}, {1_000_096})
         self.assertEqual(len({row["fixed_bytecode_len"] for row in expanded_rows}), 1)
         first_by_count = {row["target_count"]: row for row in first_rows}
         expanded_by_count = {row["target_count"]: row for row in expanded_rows}

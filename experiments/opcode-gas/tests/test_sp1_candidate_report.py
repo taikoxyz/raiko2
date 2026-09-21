@@ -36,6 +36,7 @@ def repeated_point(count, prover_gas, instruction_count=None, **extra):
             "input_size": 32,
             "non_target_counts": {"push1": 4},
             "non_target_raw_gas": "12",
+            "tx_gas_limit": 1_000_024,
         },
         **extra,
     }
@@ -289,6 +290,33 @@ class MeasurementGateTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "rejected")
         self.assertIn("confounded_template", result["reasons"])
+
+        rows = linear_observations()
+        rows[1]["isolation"]["tx_gas_limit"] += 1
+        result = opcode_gas.evaluate_controlled_sweep(
+            rows,
+            pricing_basis="raw_gas_slope",
+            target_raw_gas=3,
+            generator_max_count=8,
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("confounded_template", result["reasons"])
+
+        for invalid_limit in [None, True, 0]:
+            rows = linear_observations()
+            for row in rows:
+                if invalid_limit is None:
+                    row["isolation"].pop("tx_gas_limit")
+                else:
+                    row["isolation"]["tx_gas_limit"] = invalid_limit
+            result = opcode_gas.evaluate_controlled_sweep(
+                rows,
+                pricing_basis="raw_gas_slope",
+                target_raw_gas=3,
+                generator_max_count=8,
+            )
+            self.assertEqual(result["status"], "rejected")
+            self.assertIn("confounded_template", result["reasons"])
 
         paired = [
             {
@@ -904,6 +932,7 @@ class CandidateConstructionTests(unittest.TestCase):
                             "input_size": 256,
                             "non_target_counts": {"opcode:0x60": 16},
                             "non_target_raw_gas": 48,
+                            "tx_gas_limit": 1_000_024,
                         },
                     }
                 )

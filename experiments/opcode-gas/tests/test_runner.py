@@ -180,6 +180,7 @@ class RunnerTests(unittest.TestCase):
             "opcode": "0x01",
             "target_count": 1,
             "target_raw_gas": 3,
+            "tx_gas_limit": 1_000_024,
         }
         report = {
             "gas": 160,
@@ -191,6 +192,7 @@ class RunnerTests(unittest.TestCase):
                 "target_opcode": 1,
                 "declared_target_count": 1,
                 "declared_target_raw_gas": 3,
+                "tx_gas_limit": 1_000_024,
                 "executed_target_count": 1,
                 "executed_target_raw_gas": 3,
                 "non_target_counts": {"opcode:0x60": 2, "opcode:0x00": 1},
@@ -212,6 +214,7 @@ class RunnerTests(unittest.TestCase):
                 "input_size": 48,
                 "non_target_counts": {"opcode:0x60": 2, "opcode:0x00": 1},
                 "non_target_raw_gas": 6,
+                "tx_gas_limit": 1_000_024,
             },
         )
 

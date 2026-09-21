@@ -1,3 +1,5 @@
+import contextlib
+import io
 import pathlib
 import sys
 import tempfile
@@ -418,8 +420,200 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(args.command, "run")
         self.assertEqual(args.opcode_stage, "revm-opcode-lab")
 
+    def test_parser_exposes_separate_matched_control_generate_and_run_commands(self):
+        generate = opcode_gas.build_parser().parse_args(
+            [
+                "generate-matched-control",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
+                "--calibration-run",
+                "/tmp/calibration",
+                "--out",
+                "/tmp/fixtures",
+                "--case",
+                "add",
+            ]
+        )
+        run = opcode_gas.build_parser().parse_args(
+            [
+                "run-matched-control",
+                "--fixtures",
+                "/tmp/fixtures",
+                "--guest-launcher",
+                "target/release/guest-launcher",
+                "--calibration-run",
+                "/tmp/calibration",
+                "--controlled-manifest",
+                "/tmp/controlled.toml",
+                "--out",
+                "/tmp/runs.jsonl",
+            ]
+        )
+
+        self.assertTrue(generate.matched_control_diagnostic)
+        self.assertEqual(generate.matched_control_cases, ["add"])
+        self.assertEqual(run.expected_purpose, "matched_control_diagnostic")
+        self.assertEqual(run.opcode_stage, "revm-opcode-lab")
+        self.assertEqual(
+            run.elf,
+            pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+        )
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            opcode_gas.build_parser().parse_args(
+                [
+                    "run-matched-control",
+                    "--fixtures",
+                    "/tmp/fixtures",
+                    "--guest-launcher",
+                    "target/release/guest-launcher",
+                    "--opcode-stage",
+                    "opcode-lab",
+                    "--calibration-run",
+                    "/tmp/calibration",
+                    "--controlled-manifest",
+                    "/tmp/controlled.toml",
+                    "--out",
+                    "/tmp/runs.jsonl",
+                ]
+            )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            opcode_gas.build_parser().parse_args(
+                [
+                    "run-matched-control",
+                    "--fixtures",
+                    "/tmp/fixtures",
+                    "--guest-launcher",
+                    "target/release/guest-launcher",
+                    "--elf",
+                    "/tmp/not-the-frozen-guest.elf",
+                    "--calibration-run",
+                    "/tmp/calibration",
+                    "--controlled-manifest",
+                    "/tmp/controlled.toml",
+                    "--out",
+                    "/tmp/runs.jsonl",
+                ]
+            )
+
+    def test_formal_run_rejects_matched_control_fixture_purpose(self):
+        with self.assertRaisesRegex(ValueError, "diagnostic fixture"):
+            opcode_gas.validate_fixture_purpose(
+                {"purpose": "matched_control_diagnostic"}, expected_purpose=None
+            )
+
+        opcode_gas.validate_fixture_purpose(
+            {"purpose": "matched_control_diagnostic"},
+            expected_purpose="matched_control_diagnostic",
+        )
+
+    def test_matched_control_results_validate_actual_footprint_and_emit_signal(self):
+        common = {
+            "purpose": "matched_control_diagnostic",
+            "pair_id": "a" * 64,
+            "original_case": "add",
+            "original_opcode": "0x01",
+            "template": "stack_binary",
+            "scenario": "arithmetic",
+            "operands": [0, 0],
+            "relation": "OP-POP",
+            "diagnostic_count": 2,
+            "generator_max_count": 8,
+            "fixed_bytecode_len": 584,
+            "tx_gas_limit": 1_000_024,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "repeat_index": 0,
+            "exit_code": 0,
+        }
+        target = {
+            **common,
+            "lane": "target",
+            "prover_gas": 1_500,
+            "total_instruction_count": 3_000,
+            "workload_id": "b" * 64,
+            "backend_input_sha256": "c" * 64,
+            "isolation": {
+                "status": "passed",
+                "bytecode_size": 584,
+                "input_size": 700,
+                "tx_gas_limit": 1_000_024,
+            },
+        }
+        control = {
+            **common,
+            "lane": "control",
+            "prover_gas": 1_100,
+            "total_instruction_count": 2_200,
+            "workload_id": "d" * 64,
+            "backend_input_sha256": "e" * 64,
+            "isolation": {
+                "status": "passed",
+                "bytecode_size": 584,
+                "input_size": 700,
+                "tx_gas_limit": 1_000_024,
+            },
+        }
+
+        report = opcode_gas.build_matched_control_report([target, control])
+
+        self.assertEqual(report["purpose"], "matched_control_diagnostic")
+        self.assertEqual(report["results"][0]["prover_gas_delta"], 400)
+        self.assertEqual(report["results"][0]["prover_gas_per_relation"], "200")
+        self.assertEqual(report["results"][0]["instruction_count_delta"], 800)
+
+        with self.assertRaisesRegex(ValueError, "backend input length"):
+            opcode_gas.build_matched_control_report(
+                [
+                    target,
+                    {
+                        **control,
+                        "isolation": {**control["isolation"], "input_size": 701},
+                    },
+                ]
+            )
+        with self.assertRaisesRegex(ValueError, "actual trace"):
+            opcode_gas.build_matched_control_report(
+                [target, {**control, "isolation": None}]
+            )
+        without_input_len = {
+            **target,
+            "isolation": {
+                key: value
+                for key, value in target["isolation"].items()
+                if key != "input_size"
+            },
+        }
+        without_control_input_len = {
+            **control,
+            "isolation": {
+                key: value
+                for key, value in control["isolation"].items()
+                if key != "input_size"
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "backend input length"):
+            opcode_gas.build_matched_control_report(
+                [without_input_len, without_control_input_len]
+            )
+        with self.assertRaisesRegex(ValueError, "missing expected pair/repeat"):
+            opcode_gas.build_matched_control_report(
+                [target, control],
+                expected_pair_ids={"a" * 64, "f" * 64},
+                expected_repeats=1,
+            )
+        for invalid_exit in (None, 1):
+            with self.subTest(exit_code=invalid_exit), self.assertRaisesRegex(
+                ValueError, "exit_code"
+            ):
+                opcode_gas.build_matched_control_report(
+                    [target, {**control, "exit_code": invalid_exit}]
+                )
+
     def test_run_command_uses_revm_elf_for_revm_opcode_stage(self):
         calls = []
+        out_path = None
 
         def fake_run(cmd, check):
             calls.append(cmd)
@@ -479,6 +673,12 @@ class RunnerTests(unittest.TestCase):
                 ]
             )
 
+            original_iter_jsonl = opcode_gas.iter_jsonl
+
+            def streaming_iter(path):
+                yield from original_iter_jsonl(path)
+                self.assertTrue(out_path.is_file())
+
             with mock.patch.object(opcode_gas, "REPO_ROOT", tmp_path), mock.patch.object(
                 opcode_gas, "git_head", return_value=revision
             ), mock.patch.object(
@@ -489,7 +689,9 @@ class RunnerTests(unittest.TestCase):
                     "controlled_manifest_sha256": "a" * 64,
                     "controlled_manifest_rows_sha256": "b" * 64,
                 }),
-            ), mock.patch.object(opcode_gas.subprocess, "run", fake_run):
+            ), mock.patch.object(opcode_gas.subprocess, "run", fake_run), mock.patch.object(
+                opcode_gas, "iter_jsonl", streaming_iter
+            ):
                 opcode_gas.cmd_run(args)
 
         self.assertIn("revm-opcode-lab", calls[0])

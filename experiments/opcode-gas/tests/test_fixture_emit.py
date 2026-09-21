@@ -18,7 +18,265 @@ def fixture_schedule():
     )
 
 
+def diagnostic_provenance():
+    return {
+        "calibration_id": "a" * 24,
+        "calibration_identity_sha256": "b" * 64,
+        "implementation_revision": "c" * 40,
+        "controlled_manifest_sha256": "d" * 64,
+        "controlled_manifest_rows_sha256": "e" * 64,
+    }
+
+
 class FixtureEmitTests(unittest.TestCase):
+    def test_matched_control_binary_emits_equal_footprint_op_minus_pop_pair(self):
+        data = controlled_manifest_data()
+        data["variants"] = [2]
+        manifest = opcode_gas.parse_controlled_manifest(
+            data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
+        )
+        manifest = replace(manifest, cases=[opcode_gas.default_opcode_case(0x01)])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = pathlib.Path(tmp)
+            written = opcode_gas.generate_cases(
+                manifest,
+                out_dir,
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+                matched_control_diagnostic=True,
+            )
+            pair_root = out_dir / "controlled" / "add" / "count-2"
+            target_case = opcode_gas.json.loads(
+                (pair_root / "target" / "case.json").read_text()
+            )
+            control_case = opcode_gas.json.loads(
+                (pair_root / "control" / "case.json").read_text()
+            )
+            target_input = opcode_gas.json.loads(
+                (pair_root / "target" / "guest-input.json").read_text()
+            )
+            control_input = opcode_gas.json.loads(
+                (pair_root / "control" / "guest-input.json").read_text()
+            )
+
+        self.assertEqual(len(written), 2)
+        self.assertEqual(
+            {target_case["purpose"], control_case["purpose"]},
+            {"matched_control_diagnostic"},
+        )
+        self.assertEqual(target_case["pair_id"], control_case["pair_id"])
+        self.assertEqual(target_case["relation"], "OP-POP")
+        self.assertEqual(control_case["relation"], "OP-POP")
+        self.assertEqual(target_case["diagnostic_count"], 2)
+        self.assertEqual(control_case["diagnostic_count"], 2)
+        self.assertEqual(target_case["original_opcode"], "0x01")
+        self.assertEqual(control_case["original_opcode"], "0x01")
+        self.assertEqual(target_case["operands"], [0, 0])
+        self.assertEqual(control_case["operands"], [0, 0])
+        self.assertEqual(target_case["final_stack_height"], 1)
+        self.assertEqual(control_case["final_stack_height"], 1)
+        self.assertEqual(target_input["opcode"], 0x01)
+        self.assertEqual(target_input["target_count"], 2)
+        self.assertEqual(control_input["opcode"], 0x50)
+        self.assertEqual(control_input["target_count"], 8)
+        self.assertEqual(control_input["target_raw_gas"], 2)
+        self.assertEqual(target_input["tx_gas_limit"], control_input["tx_gas_limit"])
+        self.assertEqual(
+            target_input["fixed_bytecode_len"], control_input["fixed_bytecode_len"]
+        )
+        self.assertEqual(len(target_input["case"]), len(control_input["case"]))
+
+        target_programs = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(target_input["bytecode"][2:])
+        )
+        control_programs = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(control_input["bytecode"][2:])
+        )
+        self.assertEqual(len(target_programs), 8)
+        self.assertEqual([program[:-2] for program in target_programs], [
+            program[:-2] for program in control_programs
+        ])
+        self.assertTrue(all(program.endswith(b"\x50\x00") for program in control_programs))
+        self.assertTrue(all(program.endswith(b"\x01\x00") for program in target_programs[:2]))
+        self.assertTrue(all(program.endswith(b"\x50\x00") for program in target_programs[2:]))
+        pairs = opcode_gas.validate_matched_control_fixture_pairs(
+            [target_case, control_case],
+            calibration_execution_identity=diagnostic_provenance(),
+        )
+        self.assertEqual(list(pairs), [target_case["pair_id"]])
+
+        for invalid, message in [
+            ([target_case], "exactly one target and one control"),
+            ([target_case, target_case], "duplicate lane"),
+            ([target_case, {**control_case, "pair_id": "f" * 64}], "pair_id"),
+            (
+                [target_case, {**control_case, "fixed_bytecode_len": 1}],
+                "fixed_bytecode_len",
+            ),
+        ]:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                opcode_gas.validate_matched_control_fixture_pairs(invalid)
+
+        altered_target = {**target_case, "calibration_identity_sha256": "f" * 64}
+        altered_control = {**control_case, "calibration_identity_sha256": "f" * 64}
+        altered_pair_id = opcode_gas.matched_control_pair_id(
+            altered_target, altered_control
+        )
+        altered_target["pair_id"] = altered_pair_id
+        altered_control["pair_id"] = altered_pair_id
+        with self.assertRaisesRegex(ValueError, "calibration execution identity"):
+            opcode_gas.validate_matched_control_fixture_pairs(
+                [altered_target, altered_control],
+                calibration_execution_identity=diagnostic_provenance(),
+            )
+
+        altered_pair_spec = opcode_gas._matched_control_pair_spec(
+            target_case, control_case
+        )
+        altered_pair_spec["lanes"]["target"]["fixture_sha256"] = "f" * 64
+        altered_pair_id = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {"kind": "matched_control_pair", "pair_spec": altered_pair_spec}
+            )
+        )
+        altered_target = {
+            **target_case,
+            "bytecode": control_case["bytecode"],
+            "fixture_sha256": "f" * 64,
+            "pair_id": altered_pair_id,
+        }
+        altered_control = {**control_case, "pair_id": altered_pair_id}
+        with self.assertRaisesRegex(ValueError, "matched layout"):
+            opcode_gas.validate_matched_control_fixture_pairs(
+                [altered_target, altered_control]
+            )
+
+        tampered_input = dict(target_input)
+        tampered_bytecode = bytearray.fromhex(target_input["bytecode"][2:])
+        tampered_bytecode[13] ^= 1
+        tampered_input["bytecode"] = "0x" + tampered_bytecode.hex()
+        tampered_input_bytes = (
+            opcode_gas.json.dumps(tampered_input, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        altered_target = {
+            **target_case,
+            "fixture_sha256": opcode_gas.sha256_bytes(tampered_input_bytes),
+        }
+        altered_control = dict(control_case)
+        altered_pair_id = opcode_gas.matched_control_pair_id(
+            altered_target, altered_control
+        )
+        altered_target["pair_id"] = altered_pair_id
+        altered_control["pair_id"] = altered_pair_id
+        with self.assertRaisesRegex(ValueError, "guest input bytecode"):
+            opcode_gas.validate_matched_control_fixture_pairs(
+                [altered_target, altered_control],
+                guest_inputs={
+                    altered_target["fixture_sha256"]: tampered_input,
+                    altered_control["fixture_sha256"]: control_input,
+                },
+            )
+
+    def test_matched_control_exp_uses_pop_and_unary_uses_zero_op_control(self):
+        for opcode, relation, control_opcode, control_count in [
+            (0x0A, "OP-POP", 0x50, 8),
+            (0x15, "OP", 0x15, 0),
+        ]:
+            with self.subTest(opcode=f"0x{opcode:02x}"), tempfile.TemporaryDirectory() as tmp:
+                data = controlled_manifest_data()
+                data["variants"] = [2]
+                manifest = opcode_gas.parse_controlled_manifest(
+                    data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
+                )
+                case = opcode_gas.default_opcode_case(opcode)
+                manifest = replace(manifest, cases=[case])
+                out_dir = pathlib.Path(tmp)
+
+                opcode_gas.generate_cases(
+                    manifest,
+                    out_dir,
+                    provenance=diagnostic_provenance(),
+                    generator_max_count=8,
+                    matched_control_diagnostic=True,
+                )
+                pair_root = out_dir / "controlled" / case.name / "count-2"
+                target_case = opcode_gas.json.loads(
+                    (pair_root / "target" / "case.json").read_text()
+                )
+                target_input = opcode_gas.json.loads(
+                    (pair_root / "target" / "guest-input.json").read_text()
+                )
+                control_input = opcode_gas.json.loads(
+                    (pair_root / "control" / "guest-input.json").read_text()
+                )
+
+                self.assertEqual(target_case["relation"], relation)
+                self.assertEqual(
+                    target_case["operands"], [2, 2] if opcode == 0x0A else [1]
+                )
+                self.assertEqual(control_input["opcode"], control_opcode)
+                self.assertEqual(control_input["target_count"], control_count)
+                self.assertEqual(
+                    target_input["fixed_bytecode_len"],
+                    control_input["fixed_bytecode_len"],
+                )
+                target_programs = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(target_input["bytecode"][2:])
+                )
+                control_programs = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(control_input["bytecode"][2:])
+                )
+                self.assertEqual(
+                    [program[:-2] for program in target_programs],
+                    [program[:-2] for program in control_programs],
+                )
+                if opcode == 0x0A:
+                    self.assertTrue(
+                        all(program.endswith(b"\x50\x00") for program in control_programs)
+                    )
+                else:
+                    self.assertTrue(
+                        all(program.endswith(b"\x00\x15") for program in control_programs)
+                    )
+                    self.assertTrue(
+                        all(program.endswith(b"\x15\x00") for program in target_programs[:2])
+                    )
+                    self.assertEqual(target_programs[2:], control_programs[2:])
+
+    def test_matched_control_rejects_ternary_until_two_pop_contract_exists(self):
+        data = controlled_manifest_data()
+        data["variants"] = [2]
+        manifest = opcode_gas.parse_controlled_manifest(
+            data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
+        )
+        manifest = replace(manifest, cases=[opcode_gas.default_opcode_case(0x08)])
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            ValueError, "stack_ternary.*unsupported"
+        ):
+            opcode_gas.generate_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+                matched_control_diagnostic=True,
+            )
+
+    def test_matched_control_case_selection_is_explicit_and_manifest_ordered(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml",
+            schedule=fixture_schedule(),
+        )
+
+        selected = opcode_gas.select_matched_control_cases(
+            manifest, ["iszero", "add", "exp"]
+        )
+
+        self.assertEqual([case.name for case in selected.cases], ["add", "exp", "iszero"])
+        with self.assertRaisesRegex(ValueError, "unknown matched-control case"):
+            opcode_gas.select_matched_control_cases(manifest, ["not-a-case"])
+
     def test_generate_writes_case_metadata(self):
         manifest = opcode_gas.load_manifest(
             ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-smoke.toml",

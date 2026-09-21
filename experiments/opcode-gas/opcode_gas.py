@@ -14,7 +14,7 @@ import subprocess
 import tarfile
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -1226,6 +1226,10 @@ def _fixed_memory_warmup(case: CaseSpec) -> bytes:
 
 
 FIXED_MICROPROGRAM_MAGIC = bytes([0xEF, 0x4D, 0x50, 0x01])
+MATCHED_CONTROL_PURPOSE = "matched_control_diagnostic"
+MATCHED_CONTROL_TEMPLATES = frozenset({"stack_binary", "stack_exp", "stack_unary"})
+POP_OPCODE = 0x50
+POP_RAW_GAS = 2
 
 
 def encode_fixed_microprograms(programs: Iterable[bytes]) -> bytes:
@@ -1347,6 +1351,482 @@ def build_fixed_footprint_bytecode(
         for opcode, count in count_opcodes(program).items():
             counts[opcode] = counts.get(opcode, 0) + count
     return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
+
+
+def _matched_control_slot(case: CaseSpec, *, execute_target: bool) -> bytes:
+    """Build one diagnostic slot with the same setup and final stack height."""
+    if case.template == "stack_unary":
+        return _fixed_slot(case, active=execute_target)
+    if case.template not in {"stack_binary", "stack_exp"}:
+        raise ValueError(f"matched control template {case.template} is unsupported")
+    target = _fixed_slot(case, active=True)
+    instruction = _fixed_target_instruction(case)
+    if not target.endswith(instruction + bytes([0x00])):
+        raise AssertionError("matched-control target slot has an unexpected suffix")
+    setup = target[: -len(instruction) - 1]
+    return setup + bytes([case.opcode if execute_target else POP_OPCODE, 0x00])
+
+
+def build_matched_control_bytecode(
+    case: CaseSpec,
+    diagnostic_count: int,
+    generator_max_count: int,
+    *,
+    lane: str,
+) -> GeneratedBytecode:
+    """Build one lane of a diagnostic OP-minus-control fixed-footprint pair."""
+    if case.template not in MATCHED_CONTROL_TEMPLATES:
+        raise ValueError(f"matched control template {case.template} is unsupported")
+    if diagnostic_count < 0 or diagnostic_count > generator_max_count:
+        raise ValueError("diagnostic_count exceeds generator_max_count")
+    if lane not in {"target", "control"}:
+        raise ValueError("matched control lane must be target or control")
+    programs = [
+        _matched_control_slot(
+            case,
+            execute_target=lane == "target" and index < diagnostic_count,
+        )
+        for index in range(generator_max_count)
+    ]
+    if len({len(program) for program in programs}) > 1:
+        raise AssertionError("matched-control microprogram slots must have one byte length")
+    encoded = encode_fixed_microprograms(programs)
+    counts: dict[int, int] = {}
+    for program in programs:
+        for opcode, count in count_opcodes(program).items():
+            counts[opcode] = counts.get(opcode, 0) + count
+    return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
+
+
+def matched_control_operands(case: CaseSpec) -> list[int]:
+    if case.template == "stack_binary":
+        return [0, 0]
+    if case.template == "stack_exp":
+        return [2, 2]
+    if case.template == "stack_unary":
+        return [1]
+    raise ValueError(f"matched control template {case.template} is unsupported")
+
+
+MATCHED_CONTROL_COMMON_FIELDS = (
+    "suite",
+    "backend",
+    "purpose",
+    "diagnostic_only",
+    "original_case",
+    "original_opcode",
+    "scenario",
+    "operands",
+    "template",
+    "relation",
+    "diagnostic_count",
+    "final_stack_height",
+    "generator_max_count",
+    "fixed_bytecode_len",
+    "tx_gas_limit",
+    "calibration_id",
+    "calibration_identity_sha256",
+    "implementation_revision",
+    "controlled_manifest_sha256",
+    "controlled_manifest_rows_sha256",
+)
+
+
+def _matched_control_pair_spec(
+    target: Mapping[str, Any], control: Mapping[str, Any]
+) -> dict[str, Any]:
+    for field_name in MATCHED_CONTROL_COMMON_FIELDS:
+        if target.get(field_name) != control.get(field_name):
+            raise ValueError(f"matched-control {field_name} mismatch")
+    if target.get("purpose") != MATCHED_CONTROL_PURPOSE:
+        raise ValueError("matched-control purpose is invalid")
+    if target.get("diagnostic_only") is not True:
+        raise ValueError("matched-control fixture must be diagnostic_only")
+    template = target.get("template")
+    expected_relation = "OP" if template == "stack_unary" else "OP-POP"
+    if template not in MATCHED_CONTROL_TEMPLATES or target.get("relation") != expected_relation:
+        raise ValueError("matched-control relation/template mismatch")
+    expected_operands = {
+        "stack_binary": [0, 0],
+        "stack_exp": [2, 2],
+        "stack_unary": [1],
+    }[str(template)]
+    if target.get("operands") != expected_operands:
+        raise ValueError("matched-control operands do not match template")
+    if target.get("final_stack_height") != 1:
+        raise ValueError("matched-control final stack height must be one")
+    diagnostic_count = target.get("diagnostic_count")
+    generator_max_count = target.get("generator_max_count")
+    if (
+        isinstance(diagnostic_count, bool)
+        or not isinstance(diagnostic_count, int)
+        or isinstance(generator_max_count, bool)
+        or not isinstance(generator_max_count, int)
+        or diagnostic_count < 0
+        or diagnostic_count > generator_max_count
+    ):
+        raise ValueError("matched-control diagnostic count is invalid")
+    original_opcode = parse_opcode(target.get("original_opcode"))
+    target_raw_gas = target.get("target_raw_gas")
+    if (
+        isinstance(target_raw_gas, bool)
+        or not isinstance(target_raw_gas, int)
+        or target_raw_gas <= 0
+    ):
+        raise ValueError("matched-control target raw gas is invalid")
+    if parse_opcode(target.get("opcode")) != original_opcode:
+        raise ValueError("matched-control target opcode differs from original opcode")
+    if target.get("target_count") != diagnostic_count:
+        raise ValueError("matched-control target count differs from diagnostic count")
+    if template == "stack_unary":
+        if (
+            parse_opcode(control.get("opcode")) != original_opcode
+            or control.get("target_count") != 0
+            or control.get("target_raw_gas") != target.get("target_raw_gas")
+        ):
+            raise ValueError("matched-control unary control declaration is invalid")
+    elif (
+        parse_opcode(control.get("opcode")) != POP_OPCODE
+        or control.get("target_count") != generator_max_count
+        or control.get("target_raw_gas") != POP_RAW_GAS
+    ):
+        raise ValueError("matched-control POP control declaration is invalid")
+    fixed_len = target.get("fixed_bytecode_len")
+    tx_gas_limit = target.get("tx_gas_limit")
+    if (
+        isinstance(fixed_len, bool)
+        or not isinstance(fixed_len, int)
+        or fixed_len <= 0
+        or isinstance(tx_gas_limit, bool)
+        or not isinstance(tx_gas_limit, int)
+        or tx_gas_limit <= 0
+    ):
+        raise ValueError("matched-control footprint is invalid")
+    for lane, row in (("target", target), ("control", control)):
+        if row.get("lane") != lane:
+            raise ValueError("matched-control lane metadata is invalid")
+        if not _is_sha256(row.get("fixture_sha256")):
+            raise ValueError("matched-control fixture SHA256 is invalid")
+        bytecode = _normalized_hex(row.get("bytecode"), field_name="matched bytecode")
+        if len(bytes.fromhex(bytecode[2:])) != fixed_len:
+            raise ValueError("matched-control fixed_bytecode_len mismatch")
+    reconstructed_case = CaseSpec(
+        name=str(target.get("original_case")),
+        scenario=str(target.get("scenario")),
+        template=str(template),
+        target_raw_gas=target_raw_gas,
+        opcode=original_opcode,
+    )
+    expected_target = build_matched_control_bytecode(
+        reconstructed_case,
+        diagnostic_count,
+        generator_max_count,
+        lane="target",
+    )
+    expected_control = build_matched_control_bytecode(
+        reconstructed_case,
+        diagnostic_count,
+        generator_max_count,
+        lane="control",
+    )
+    if target["bytecode"] != "0x" + expected_target.bytes_hex or control[
+        "bytecode"
+    ] != "0x" + expected_control.bytes_hex:
+        raise ValueError("matched-control bytecode differs from matched layout")
+    for digest_field in (
+        "calibration_identity_sha256",
+        "controlled_manifest_sha256",
+        "controlled_manifest_rows_sha256",
+    ):
+        if not _is_sha256(target.get(digest_field)):
+            raise ValueError(f"matched-control {digest_field} is invalid")
+    if not _is_git_revision(target.get("implementation_revision")):
+        raise ValueError("matched-control implementation revision is invalid")
+    calibration_id = target.get("calibration_id")
+    if (
+        not isinstance(calibration_id, str)
+        or len(calibration_id) != 24
+        or any(char not in "0123456789abcdef" for char in calibration_id)
+    ):
+        raise ValueError("matched-control calibration ID is invalid")
+    return {
+        "schema_version": 1,
+        "purpose": MATCHED_CONTROL_PURPOSE,
+        "calibration_execution_identity": {
+            field_name: target[field_name]
+            for field_name in (
+                "calibration_id",
+                "calibration_identity_sha256",
+                "implementation_revision",
+                "controlled_manifest_sha256",
+                "controlled_manifest_rows_sha256",
+            )
+        },
+        "workload": {
+            field_name: target[field_name]
+            for field_name in MATCHED_CONTROL_COMMON_FIELDS[:15]
+        },
+        "lanes": {
+            lane: {
+                "case": row["case"],
+                "opcode": row["opcode"],
+                "target_count": row["target_count"],
+                "target_raw_gas": row["target_raw_gas"],
+                "fixture_sha256": row["fixture_sha256"],
+            }
+            for lane, row in (("target", target), ("control", control))
+        },
+    }
+
+
+def matched_control_pair_id(
+    target: Mapping[str, Any], control: Mapping[str, Any]
+) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {"kind": "matched_control_pair", "pair_spec": _matched_control_pair_spec(target, control)}
+        )
+    )
+
+
+def validate_matched_control_fixture_pairs(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    calibration_execution_identity: Mapping[str, Any] | None = None,
+    guest_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    grouped: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        key = (
+            row.get("suite"),
+            row.get("original_case"),
+            row.get("diagnostic_count"),
+            row.get("generator_max_count"),
+        )
+        grouped.setdefault(key, []).append(row)
+    if not grouped:
+        raise ValueError("matched-control fixtures are empty")
+    pairs = {}
+    for grouped_rows in grouped.values():
+        if len(grouped_rows) != 2:
+            raise ValueError("matched-control pair requires exactly one target and one control")
+        lanes = [row.get("lane") for row in grouped_rows]
+        if len(set(lanes)) != len(lanes):
+            raise ValueError("matched-control pair has a duplicate lane")
+        if set(lanes) != {"target", "control"}:
+            raise ValueError("matched-control pair requires exactly one target and one control")
+        target = next(row for row in grouped_rows if row["lane"] == "target")
+        control = next(row for row in grouped_rows if row["lane"] == "control")
+        pair_ids = {target.get("pair_id"), control.get("pair_id")}
+        if len(pair_ids) != 1 or not _is_sha256(next(iter(pair_ids))):
+            raise ValueError("matched-control pair_id mismatch")
+        pair_id = next(iter(pair_ids))
+        if matched_control_pair_id(target, control) != pair_id:
+            raise ValueError("matched-control pair_id does not match fixture identity")
+        if guest_inputs is not None:
+            for row in (target, control):
+                fixture_sha256 = row["fixture_sha256"]
+                guest_input = guest_inputs.get(fixture_sha256)
+                if not isinstance(guest_input, Mapping):
+                    raise ValueError("matched-control guest input is missing")
+                for field_name in (
+                    "case",
+                    "scenario",
+                    "opcode",
+                    "target_count",
+                    "target_raw_gas",
+                    "generator_max_count",
+                    "fixed_bytecode_len",
+                    "tx_gas_limit",
+                ):
+                    expected = (
+                        parse_opcode(row[field_name])
+                        if field_name == "opcode"
+                        else row[field_name]
+                    )
+                    if guest_input.get(field_name) != expected:
+                        raise ValueError(
+                            f"matched-control guest input {field_name} mismatch"
+                        )
+                if _normalized_hex(
+                    guest_input.get("bytecode"),
+                    field_name="matched guest input bytecode",
+                ) != _normalized_hex(
+                    row.get("bytecode"), field_name="matched case bytecode"
+                ):
+                    raise ValueError("matched-control guest input bytecode mismatch")
+        if calibration_execution_identity is not None and any(
+            target.get(field_name) != calibration_execution_identity.get(field_name)
+            for field_name in (
+                "calibration_id",
+                "calibration_identity_sha256",
+                "implementation_revision",
+                "controlled_manifest_sha256",
+                "controlled_manifest_rows_sha256",
+            )
+        ):
+            raise ValueError("matched-control calibration execution identity mismatch")
+        if pair_id in pairs:
+            raise ValueError("matched-control pair_id collision")
+        pairs[pair_id] = (target, control)
+    return pairs
+
+
+def build_matched_control_report(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    expected_pair_ids: set[str] | None = None,
+    expected_repeats: int | None = None,
+) -> dict[str, Any]:
+    grouped: dict[tuple[str, int], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if row.get("purpose") != MATCHED_CONTROL_PURPOSE:
+            raise ValueError("matched-control report received a non-diagnostic row")
+        pair_id = row.get("pair_id")
+        repeat_index = row.get("repeat_index")
+        if not _is_sha256(pair_id) or isinstance(repeat_index, bool) or not isinstance(
+            repeat_index, int
+        ):
+            raise ValueError("matched-control result identity is invalid")
+        grouped.setdefault((pair_id, repeat_index), []).append(row)
+    if not grouped:
+        raise ValueError("matched-control report has no rows")
+    if expected_pair_ids is not None or expected_repeats is not None:
+        if (
+            expected_pair_ids is None
+            or not expected_pair_ids
+            or not all(_is_sha256(pair_id) for pair_id in expected_pair_ids)
+            or isinstance(expected_repeats, bool)
+            or not isinstance(expected_repeats, int)
+            or expected_repeats <= 0
+        ):
+            raise ValueError("matched-control expected pair/repeat declaration is invalid")
+        expected_keys = {
+            (pair_id, repeat_index)
+            for pair_id in expected_pair_ids
+            for repeat_index in range(expected_repeats)
+        }
+        if set(grouped) != expected_keys:
+            raise ValueError("matched-control result is missing expected pair/repeat")
+    results = []
+    for (pair_id, repeat_index), grouped_rows in sorted(grouped.items()):
+        if len(grouped_rows) != 2:
+            raise ValueError("matched-control result requires one target and one control")
+        lanes = [row.get("lane") for row in grouped_rows]
+        if len(set(lanes)) != len(lanes):
+            raise ValueError("matched-control result has a duplicate lane")
+        if set(lanes) != {"target", "control"}:
+            raise ValueError("matched-control result requires one target and one control")
+        target = next(row for row in grouped_rows if row["lane"] == "target")
+        control = next(row for row in grouped_rows if row["lane"] == "control")
+        for field_name in (
+            "original_case",
+            "original_opcode",
+            "template",
+            "scenario",
+            "operands",
+            "relation",
+            "diagnostic_count",
+            "generator_max_count",
+            "fixed_bytecode_len",
+            "tx_gas_limit",
+        ):
+            if target.get(field_name) != control.get(field_name):
+                raise ValueError(f"matched-control result {field_name} mismatch")
+        for row in (target, control):
+            isolation = row.get("isolation")
+            if (
+                not isinstance(isolation, Mapping)
+                or isolation.get("status") != "passed"
+                or not _is_sha256(row.get("workload_id"))
+                or not _is_sha256(row.get("backend_input_sha256"))
+            ):
+                raise ValueError("matched-control result is missing an actual trace")
+        target_isolation = target["isolation"]
+        control_isolation = control["isolation"]
+        backend_input_len = target_isolation.get("input_size")
+        if (
+            isinstance(backend_input_len, bool)
+            or not isinstance(backend_input_len, int)
+            or backend_input_len <= 0
+            or backend_input_len != control_isolation.get("input_size")
+        ):
+            raise ValueError("matched-control backend input length mismatch")
+        if target_isolation.get("bytecode_size") != control_isolation.get(
+            "bytecode_size"
+        ) or target_isolation.get("bytecode_size") != target.get("fixed_bytecode_len"):
+            raise ValueError("matched-control actual bytecode footprint mismatch")
+        if (
+            target_isolation.get("tx_gas_limit")
+            != control_isolation.get("tx_gas_limit")
+            or target_isolation.get("tx_gas_limit") != target.get("tx_gas_limit")
+        ):
+            raise ValueError("matched-control actual tx gas limit mismatch")
+        execution_provenance = (
+            target.get("sp1_execution_engine"),
+            target.get("sp1_gas_trace_chunk_threshold"),
+            target.get("sp1_gas_trace_chunk_slots"),
+        )
+        if execution_provenance != (
+            control.get("sp1_execution_engine"),
+            control.get("sp1_gas_trace_chunk_threshold"),
+            control.get("sp1_gas_trace_chunk_slots"),
+        ):
+            raise ValueError("matched-control execution engine/cadence mismatch")
+        if any(
+            isinstance(row.get("exit_code"), bool)
+            or not isinstance(row.get("exit_code"), int)
+            or row.get("exit_code") != 0
+            for row in (target, control)
+        ):
+            raise ValueError("matched-control result requires exit_code == 0")
+        target_gas = target.get("prover_gas", target.get("gas"))
+        control_gas = control.get("prover_gas", control.get("gas"))
+        target_instructions = target.get("total_instruction_count")
+        control_instructions = control.get("total_instruction_count")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in (
+                target_gas,
+                control_gas,
+                target_instructions,
+                control_instructions,
+            )
+        ):
+            raise ValueError("matched-control result metrics must be integers")
+        diagnostic_count = target["diagnostic_count"]
+        prover_gas_delta = target_gas - control_gas
+        results.append(
+            {
+                "pair_id": pair_id,
+                "repeat_index": repeat_index,
+                "original_case": target["original_case"],
+                "original_opcode": target["original_opcode"],
+                "template": target["template"],
+                "scenario": target["scenario"],
+                "operands": target["operands"],
+                "relation": target["relation"],
+                "diagnostic_count": diagnostic_count,
+                "prover_gas_delta": prover_gas_delta,
+                "prover_gas_per_relation": (
+                    _decimal_text(Decimal(prover_gas_delta) / Decimal(diagnostic_count))
+                    if diagnostic_count > 0
+                    else None
+                ),
+                "instruction_count_delta": target_instructions - control_instructions,
+                "backend_input_len": backend_input_len,
+                "bytecode_len": target_isolation["bytecode_size"],
+                "tx_gas_limit": target_isolation["tx_gas_limit"],
+                "sp1_execution_engine": execution_provenance[0],
+                "sp1_gas_trace_chunk_threshold": execution_provenance[1],
+                "sp1_gas_trace_chunk_slots": execution_provenance[2],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "purpose": MATCHED_CONTROL_PURPOSE,
+        "results": results,
+    }
 
 
 def build_stack_binary_bytecode(opcode: int, target_count: int) -> bytes:
@@ -1629,17 +2109,120 @@ def generate_cases(
     out_dir: pathlib.Path,
     provenance: Mapping[str, Any] | None = None,
     generator_max_count: int | None = None,
+    matched_control_diagnostic: bool = False,
 ) -> list[pathlib.Path]:
     written = []
     controlled_max = (
         8 if manifest.measurement_keys and generator_max_count is None else generator_max_count
     )
+    if matched_control_diagnostic:
+        if controlled_max is None:
+            raise ValueError("matched control diagnostic requires generator_max_count")
+        for case in manifest.cases:
+            if case.kind != "opcode" or case.template not in MATCHED_CONTROL_TEMPLATES:
+                raise ValueError(
+                    f"matched control template {case.template} is unsupported"
+                )
     for case in manifest.cases:
         for variant in manifest.variants:
             if controlled_max is not None and variant > controlled_max:
                 continue
             case_dir = out_dir / manifest.name / case.name / f"count-{variant}"
             if case.kind == "opcode":
+                if matched_control_diagnostic:
+                    assert controlled_max is not None
+                    if case.opcode is None:
+                        raise ValueError(f"opcode case {case.name} is missing opcode")
+                    target = build_matched_control_bytecode(
+                        case, variant, controlled_max, lane="target"
+                    )
+                    control = build_matched_control_bytecode(
+                        case, variant, controlled_max, lane="control"
+                    )
+                    target_len = len(bytes.fromhex(target.bytes_hex))
+                    control_len = len(bytes.fromhex(control.bytes_hex))
+                    if target_len != control_len:
+                        raise AssertionError("matched-control bytecode footprints differ")
+                    relation = "OP" if case.template == "stack_unary" else "OP-POP"
+                    tx_gas_limit = 1_000_000 + controlled_max * max(
+                        case.target_raw_gas, POP_RAW_GAS
+                    )
+                    lane_artifacts = []
+                    for lane, generated in (("target", target), ("control", control)):
+                        lane_dir = case_dir / lane
+                        if lane == "target":
+                            declared_opcode = case.opcode
+                            declared_count = variant
+                            declared_raw_gas = case.target_raw_gas
+                            lane_case = f"{case.name}__matched_t"
+                        elif case.template == "stack_unary":
+                            declared_opcode = case.opcode
+                            declared_count = 0
+                            declared_raw_gas = case.target_raw_gas
+                            lane_case = f"{case.name}__matched_c"
+                        else:
+                            declared_opcode = POP_OPCODE
+                            declared_count = controlled_max
+                            declared_raw_gas = POP_RAW_GAS
+                            lane_case = f"{case.name}__matched_c"
+                        payload = {
+                            "suite": manifest.name,
+                            "backend": manifest.backend,
+                            "kind": "opcode",
+                            "purpose": MATCHED_CONTROL_PURPOSE,
+                            "diagnostic_only": True,
+                            "case": lane_case,
+                            "original_case": case.name,
+                            "original_opcode": f"0x{case.opcode:02x}",
+                            "opcode": f"0x{declared_opcode:02x}",
+                            "scenario": case.scenario,
+                            "operands": matched_control_operands(case),
+                            "template": case.template,
+                            "lane": lane,
+                            "relation": relation,
+                            "diagnostic_count": variant,
+                            "final_stack_height": 1,
+                            "target_count": declared_count,
+                            "target_raw_gas": declared_raw_gas,
+                            "bytecode": "0x" + generated.bytes_hex,
+                            "opcode_counts": {
+                                f"0x{k:02x}": v
+                                for k, v in sorted(generated.opcode_counts.items())
+                            },
+                            "generator_max_count": controlled_max,
+                            "fixed_bytecode_len": target_len,
+                            "tx_gas_limit": tx_gas_limit,
+                            "guest_input_status": "opcode_lab_guest_input",
+                        }
+                        guest_input = {
+                            "case": lane_case,
+                            "scenario": case.scenario,
+                            "opcode": declared_opcode,
+                            "target_count": declared_count,
+                            "target_raw_gas": declared_raw_gas,
+                            "bytecode": "0x" + generated.bytes_hex,
+                            "generator_max_count": controlled_max,
+                            "fixed_bytecode_len": target_len,
+                            "tx_gas_limit": tx_gas_limit,
+                        }
+                        guest_input_bytes = (
+                            json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+                        ).encode()
+                        if provenance:
+                            payload.update(provenance)
+                        payload["fixture_sha256"] = sha256_bytes(guest_input_bytes)
+                        lane_artifacts.append((lane_dir, payload, guest_input_bytes))
+                    target_payload = lane_artifacts[0][1]
+                    control_payload = lane_artifacts[1][1]
+                    pair_id = matched_control_pair_id(target_payload, control_payload)
+                    for lane_dir, payload, guest_input_bytes in lane_artifacts:
+                        lane_dir.mkdir(parents=True, exist_ok=True)
+                        payload["pair_id"] = pair_id
+                        path = lane_dir / "case.json"
+                        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+                        (lane_dir / "guest-input.json").write_bytes(guest_input_bytes)
+                        written.append(path)
+                    continue
                 case_dir.mkdir(parents=True, exist_ok=True)
                 if case.opcode is None:
                     raise ValueError(f"opcode case {case.name} is missing opcode")
@@ -1761,6 +2344,22 @@ def generate_cases(
             (case_dir / "guest-input.json").write_bytes(guest_input_bytes)
             written.append(path)
     return written
+
+
+def select_matched_control_cases(
+    manifest: Manifest, case_ids: Iterable[str]
+) -> Manifest:
+    requested = list(case_ids)
+    if not requested:
+        raise ValueError("matched-control generation requires at least one --case")
+    if len(set(requested)) != len(requested):
+        raise ValueError("matched-control case selection contains a duplicate")
+    available = {case.name for case in manifest.cases}
+    unknown = set(requested) - available
+    if unknown:
+        raise ValueError(f"unknown matched-control case: {sorted(unknown)[0]}")
+    selected = [case for case in manifest.cases if case.name in set(requested)]
+    return replace(manifest, cases=selected)
 
 
 def run_guest_input(
@@ -2013,6 +2612,27 @@ def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[st
     if "workload_value" not in raw_run and "prover_gas" in raw_run:
         raw_run["workload_value"] = raw_run["prover_gas"]
     return raw_run
+
+
+def reject_matched_control_diagnostics(
+    rows: Iterable[Mapping[str, Any]], *, context: str
+) -> None:
+    if any(row.get("purpose") == MATCHED_CONTROL_PURPOSE for row in rows):
+        raise ValueError(f"{context} rejects matched-control diagnostic rows")
+
+
+def validate_fixture_purpose(
+    case: Mapping[str, Any], *, expected_purpose: str | None
+) -> None:
+    purpose = case.get("purpose")
+    if expected_purpose is None:
+        if purpose is not None:
+            raise ValueError("formal run rejects diagnostic fixture purpose")
+        return
+    if purpose != expected_purpose:
+        raise ValueError(
+            f"diagnostic run requires fixture purpose {expected_purpose}"
+        )
 
 
 def iter_jsonl(path: pathlib.Path) -> Iterable[dict[str, Any]]:
@@ -3109,6 +3729,7 @@ def build_candidate_components(
     schedule: UnzenSchedule | None = None,
 ) -> dict[str, Any]:
     rows = list(case_results)
+    reject_matched_control_diagnostics(rows, context="formal candidate")
     measurements = construct_measurement_values(manifest, rows)
     add = measurements.get(manifest.normalization_reference_key or "")
     if add is None or add.get("status") != "accepted":
@@ -4688,15 +5309,27 @@ def cmd_generate(args: argparse.Namespace) -> None:
     validate_calibration_execution_identity(calibration_run)
     manifest_path = _resolve_repo_path(args.manifest, field_name="controlled_manifest")
     manifest, identity = verify_frozen_controlled_manifest(calibration_run, manifest_path)
+    matched_control_diagnostic = getattr(args, "matched_control_diagnostic", False)
+    if matched_control_diagnostic:
+        manifest = select_matched_control_cases(manifest, args.matched_control_cases)
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": identity["controlled_manifest_rows_sha256"],
+    }
+    if matched_control_diagnostic:
+        provenance.update(
+            {
+                "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
+                "implementation_revision": identity["implementation_revision"],
+            }
+        )
     written = generate_cases(
         manifest,
         _resolve_repo_path(args.out, field_name="generated_fixtures"),
-        provenance={
-            "calibration_id": calibration_run.name,
-            "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
-            "controlled_manifest_rows_sha256": identity["controlled_manifest_rows_sha256"],
-        },
+        provenance=provenance,
         generator_max_count=args.generator_max_count,
+        matched_control_diagnostic=matched_control_diagnostic,
     )
     print(f"wrote {len(written)} case metadata files")
 
@@ -4722,13 +5355,23 @@ def cmd_inventory(args: argparse.Namespace) -> None:
     print(f"wrote inventory report for {len(rows)} row(s)")
 
 
-def _add_controlled_run_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_controlled_run_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    opcode_stage_choices: tuple[str, ...] = ("opcode-lab", "revm-opcode-lab"),
+    opcode_stage_default: str = "opcode-lab",
+    opcode_elf_default: pathlib.Path = pathlib.Path(
+        "crates/guests/elf/sp1_opcode_lab.elf"
+    ),
+    opcode_elf_choices: tuple[pathlib.Path, ...] | None = None,
+) -> None:
     parser.add_argument("--fixtures", type=pathlib.Path, required=True)
     parser.add_argument("--guest-launcher", type=pathlib.Path, required=True)
     parser.add_argument(
         "--elf",
         type=pathlib.Path,
-        default=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
+        choices=opcode_elf_choices,
+        default=opcode_elf_default,
         help="SP1 opcode-lab guest ELF",
     )
     parser.add_argument(
@@ -4739,8 +5382,8 @@ def _add_controlled_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--opcode-stage",
-        choices=["opcode-lab", "revm-opcode-lab"],
-        default="opcode-lab",
+        choices=opcode_stage_choices,
+        default=opcode_stage_default,
         help="SP1 opcode lab stage to run for opcode fixtures",
     )
     parser.add_argument("--calibration-run", type=pathlib.Path, required=True)
@@ -4790,6 +5433,8 @@ def fit_controlled_costs(
     manifest: Manifest, rows: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
     """Fit primary controlled cases after enforcing exact three-repeat identities."""
+    rows = list(rows)
+    reject_matched_control_diagnostics(rows, context="formal controlled fit")
     rows_by_case_lane_count: dict[tuple[str, str, int], list[Mapping[str, Any]]] = {}
     for row in rows:
         case_id = str(row.get("case"))
@@ -6107,11 +6752,55 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="frozen controlled sweep checkpoint bound",
     )
-    generate.set_defaults(func=cmd_generate)
+    generate.set_defaults(func=cmd_generate, matched_control_diagnostic=False)
+
+    matched_generate = subcommands.add_parser(
+        "generate-matched-control",
+        help="generate diagnostic matched-control opcode pairs",
+    )
+    matched_generate.add_argument("--manifest", type=pathlib.Path, required=True)
+    matched_generate.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    matched_generate.add_argument("--out", type=pathlib.Path, required=True)
+    matched_generate.add_argument(
+        "--case",
+        dest="matched_control_cases",
+        action="append",
+        required=True,
+        help="manifest case ID to include; repeat for multiple cases",
+    )
+    matched_generate.add_argument(
+        "--generator-max-count",
+        type=int,
+        choices=[8, 32, 128, 512, 2048],
+        default=8,
+        help="diagnostic fixed-footprint checkpoint bound",
+    )
+    matched_generate.set_defaults(func=cmd_generate, matched_control_diagnostic=True)
 
     run = subcommands.add_parser("run", help="run generated guest-input cases")
     _add_controlled_run_arguments(run)
-    run.set_defaults(func=cmd_run)
+    run.set_defaults(func=cmd_run, expected_purpose=None)
+
+    matched_run = subcommands.add_parser(
+        "run-matched-control",
+        help="run diagnostic matched-control opcode pairs",
+    )
+    _add_controlled_run_arguments(
+        matched_run,
+        opcode_stage_choices=("revm-opcode-lab",),
+        opcode_stage_default="revm-opcode-lab",
+        opcode_elf_default=pathlib.Path(
+            "crates/guests/elf/sp1_revm_opcode_lab.elf"
+        ),
+        opcode_elf_choices=(
+            pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+        ),
+    )
+    matched_run.set_defaults(
+        func=cmd_run,
+        expected_purpose=MATCHED_CONTROL_PURPOSE,
+        opcode_stage="revm-opcode-lab",
+    )
 
     run_controlled = subcommands.add_parser(
         "run-controlled",
@@ -6122,6 +6811,7 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_run_controlled,
         repeats=3,
         opcode_stage="revm-opcode-lab",
+        expected_purpose=None,
     )
 
     fit_controlled = subcommands.add_parser(
@@ -6235,6 +6925,16 @@ def cmd_run(args: argparse.Namespace) -> None:
     repeats = getattr(args, "repeats", 1)
     if repeats <= 0:
         raise ValueError("controlled run repeats must be positive")
+    expected_purpose = getattr(args, "expected_purpose", None)
+    if (
+        expected_purpose == MATCHED_CONTROL_PURPOSE
+        and args.opcode_stage != "revm-opcode-lab"
+    ):
+        raise ValueError("matched-control run requires revm-opcode-lab")
+    if expected_purpose == MATCHED_CONTROL_PURPOSE and args.elf != pathlib.Path(
+        "crates/guests/elf/sp1_revm_opcode_lab.elf"
+    ):
+        raise ValueError("matched-control run requires the frozen revm opcode-lab ELF")
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
     validate_calibration_execution_identity(calibration_run)
     fixtures = _resolve_repo_path(args.fixtures, field_name="fixtures")
@@ -6245,8 +6945,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     cases_by_kind: dict[str, list[tuple[dict[str, Any], pathlib.Path]]] = {}
+    loaded_cases = []
+    loaded_guest_inputs = {}
     for case_path in sorted(fixtures.glob("**/case.json")):
         case = json.loads(case_path.read_text())
+        validate_fixture_purpose(case, expected_purpose=expected_purpose)
         if (
             case.get("calibration_id") != calibration_run.name
             or case.get("controlled_manifest_sha256") != identity["controlled_manifest_sha256"]
@@ -6263,6 +6966,32 @@ def cmd_run(args: argparse.Namespace) -> None:
             ):
                 raise ValueError("controlled GuestInput does not match sealed case provenance")
             cases_by_kind.setdefault(case.get("kind", "opcode"), []).append((case, input_path))
+            loaded_cases.append(case)
+            if expected_purpose == MATCHED_CONTROL_PURPOSE:
+                try:
+                    guest_input = json.loads(input_path.read_text())
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("controlled GuestInput is not valid JSON") from exc
+                if not isinstance(guest_input, Mapping):
+                    raise ValueError("controlled GuestInput must be a JSON object")
+                loaded_guest_inputs[expected_input_sha256] = guest_input
+    matched_fixture_pairs = None
+    if expected_purpose == MATCHED_CONTROL_PURPOSE:
+        matched_fixture_pairs = validate_matched_control_fixture_pairs(
+            loaded_cases,
+            calibration_execution_identity={
+                "calibration_id": calibration_run.name,
+                "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
+                "implementation_revision": identity["implementation_revision"],
+                "controlled_manifest_sha256": identity[
+                    "controlled_manifest_sha256"
+                ],
+                "controlled_manifest_rows_sha256": identity[
+                    "controlled_manifest_rows_sha256"
+                ],
+            },
+            guest_inputs=loaded_guest_inputs,
+        )
     report_paths = []
     for kind, cases in sorted(cases_by_kind.items()):
         stage = args.opcode_stage if kind == "opcode" else "precompile-lab"
@@ -6290,8 +7019,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     case_by_input = {
         str(input_path): case for cases in cases_by_kind.values() for case, input_path in cases
     }
-    with out.open("w") as output:
-        ran = 0
+    def normalized_raw_runs() -> Iterable[dict[str, Any]]:
         repeat_index_by_input: dict[str, int] = {}
         for report_path in report_paths:
             for report in iter_jsonl(report_path):
@@ -6309,8 +7037,33 @@ def cmd_run(args: argparse.Namespace) -> None:
                         repeat_index=repeat_index,
                         backend_input_sha256=raw_run["backend_input_sha256"],
                     )
+                yield raw_run
+
+    diagnostic_report = None
+    if expected_purpose == MATCHED_CONTROL_PURPOSE:
+        assert matched_fixture_pairs is not None
+        raw_runs = list(normalized_raw_runs())
+        diagnostic_report = build_matched_control_report(
+            raw_runs,
+            expected_pair_ids=set(matched_fixture_pairs),
+            expected_repeats=repeats,
+        )
+        with out.open("w") as output:
+            for raw_run in raw_runs:
+                output.write(json.dumps(raw_run, sort_keys=True) + "\n")
+        ran = len(raw_runs)
+    else:
+        ran = 0
+        with out.open("w") as output:
+            for raw_run in normalized_raw_runs():
                 output.write(json.dumps(raw_run, sort_keys=True) + "\n")
                 ran += 1
+    if diagnostic_report is not None:
+        diagnostic_path = out.with_name(f"{out.stem}.matched-control.json")
+        diagnostic_path.write_text(
+            json.dumps(diagnostic_report, indent=2, sort_keys=True) + "\n"
+        )
+        print(f"wrote matched-control report to {diagnostic_path}")
     print(f"ran {ran} executable case(s)")
 
 

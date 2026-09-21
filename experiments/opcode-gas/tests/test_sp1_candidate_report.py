@@ -1009,6 +1009,22 @@ class CandidateConstructionTests(unittest.TestCase):
             ):
                 opcode_gas._controlled_repeat_point(rows)
 
+    def test_formal_fit_and_candidate_reject_matched_control_diagnostics(self):
+        row = {
+            "purpose": "matched_control_diagnostic",
+            "case": "add__matched_t",
+        }
+
+        with self.assertRaisesRegex(ValueError, "matched-control diagnostic"):
+            opcode_gas.fit_controlled_costs(controlled_manifest(), [row])
+        with self.assertRaisesRegex(ValueError, "matched-control diagnostic"):
+            opcode_gas.build_candidate_components(
+                controlled_manifest(),
+                [row],
+                {},
+                {},
+            )
+
     def test_fit_rejects_cross_batch_precompile_pairing(self):
         rows = []
         for lane, pair_id, workload_id, backend_hash in [

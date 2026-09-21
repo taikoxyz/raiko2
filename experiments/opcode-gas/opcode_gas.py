@@ -1227,7 +1227,6 @@ def _fixed_memory_warmup(case: CaseSpec) -> bytes:
 
 FIXED_MICROPROGRAM_MAGIC = bytes([0xEF, 0x4D, 0x50, 0x01])
 MATCHED_CONTROL_PURPOSE = "matched_control_diagnostic"
-MATCHED_CONTROL_TEMPLATES = frozenset({"stack_binary", "stack_exp", "stack_unary"})
 MATCHED_CONTROL_OPERAND_PROFILES = {
     "zero": {
         "stack_binary": (0, 0),
@@ -1244,6 +1243,22 @@ POP_OPCODE = 0x50
 POP_RAW_GAS = 2
 NOT_OPCODE = 0x19
 NOT_RAW_GAS = 3
+DUP1_OPCODE = 0x80
+DUP1_RAW_GAS = 3
+SWAP1_OPCODE = 0x90
+SWAP1_RAW_GAS = 3
+PUSH0_OPCODE = 0x5F
+PUSH0_RAW_GAS = 2
+
+
+@dataclass(frozen=True)
+class MatchedControlSpec:
+    reference_opcode: int
+    reference_raw_gas: int
+    relation: str
+    final_stack_height: int
+    operands: tuple[int, ...]
+    setup: bytes
 
 
 def encode_fixed_microprograms(programs: Iterable[bytes]) -> bytes:
@@ -1367,18 +1382,120 @@ def build_fixed_footprint_bytecode(
     return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
 
 
+def matched_control_spec(
+    case: CaseSpec, operand_profile: str = "zero"
+) -> MatchedControlSpec:
+    """Derive the complete contextual matched-control contract for one case."""
+    if case.opcode is None:
+        raise ValueError(f"opcode case {case.name} is missing opcode")
+    if operand_profile not in MATCHED_CONTROL_OPERAND_PROFILES:
+        raise ValueError(
+            f"matched control operand profile {operand_profile!r} is unsupported"
+        )
+
+    if case.template in {"stack_binary", "stack_exp", "stack_unary"}:
+        operands = MATCHED_CONTROL_OPERAND_PROFILES[operand_profile][case.template]
+        if case.template == "stack_unary":
+            reference_opcode = NOT_OPCODE
+            reference_raw_gas = NOT_RAW_GAS
+            relation = "OP-NOT"
+        else:
+            reference_opcode = POP_OPCODE
+            reference_raw_gas = POP_RAW_GAS
+            relation = "OP-POP"
+        final_stack_height = 1
+        setup = b"".join(
+            _fixed_push(value, target_opcode=case.opcode) for value in operands
+        )
+    else:
+        if case.template == "stack_push" and case.opcode != PUSH0_OPCODE:
+            raise ValueError(
+                f"matched control template {case.template} is unsupported for "
+                f"opcode 0x{case.opcode:02x}"
+            )
+        if case.template not in {
+            "memory_load_32",
+            "keccak_32",
+            "stack_dup",
+            "stack_swap",
+            "stack_unary_producer",
+            "stack_push",
+        }:
+            raise ValueError(f"matched control template {case.template} is unsupported")
+        if operand_profile != "zero":
+            raise ValueError(
+                f"matched control template {case.template} only supports operand profile zero"
+            )
+        if case.template == "memory_load_32":
+            operands = (0,)
+            reference_opcode = NOT_OPCODE
+            reference_raw_gas = NOT_RAW_GAS
+            relation = "OP-NOT"
+            final_stack_height = 1
+        elif case.template == "keccak_32":
+            operands = (32, 0)
+            reference_opcode = POP_OPCODE
+            reference_raw_gas = POP_RAW_GAS
+            relation = "OP-POP"
+            final_stack_height = 1
+        elif case.template == "stack_dup":
+            depth = case.opcode - 0x7F
+            if not 1 <= depth <= 16:
+                raise ValueError(f"matched control DUP opcode 0x{case.opcode:02x} is invalid")
+            operands = tuple(range(1, depth + 1))
+            reference_opcode = DUP1_OPCODE
+            reference_raw_gas = DUP1_RAW_GAS
+            relation = "OP-DUP1"
+            final_stack_height = depth + 1
+        elif case.template == "stack_swap":
+            depth = case.opcode - 0x8F
+            if not 1 <= depth <= 16:
+                raise ValueError(f"matched control SWAP opcode 0x{case.opcode:02x} is invalid")
+            operands = tuple(range(1, depth + 2))
+            reference_opcode = SWAP1_OPCODE
+            reference_raw_gas = SWAP1_RAW_GAS
+            relation = "OP-SWAP1"
+            final_stack_height = depth + 1
+        elif case.template == "stack_unary_producer":
+            if case.opcode not in {0x58, 0x59, 0x5A}:
+                raise ValueError(
+                    f"matched control unary producer opcode 0x{case.opcode:02x} is unsupported"
+                )
+            operands = ()
+            reference_opcode = PUSH0_OPCODE
+            reference_raw_gas = PUSH0_RAW_GAS
+            relation = "OP-PUSH0"
+            final_stack_height = 1
+        else:
+            operands = ()
+            reference_opcode = PUSH0_OPCODE
+            reference_raw_gas = PUSH0_RAW_GAS
+            relation = "OP-PUSH0"
+            final_stack_height = 1
+
+        active = _fixed_slot(case, active=True)
+        instruction = _fixed_target_instruction(case)
+        if not active.endswith(instruction + b"\x00"):
+            raise AssertionError("matched-control target slot has an unexpected suffix")
+        setup = active[: -len(instruction) - 1]
+    return MatchedControlSpec(
+        reference_opcode=reference_opcode,
+        reference_raw_gas=reference_raw_gas,
+        relation=relation,
+        final_stack_height=final_stack_height,
+        operands=operands,
+        setup=setup,
+    )
+
+
 def _matched_control_slot(
     case: CaseSpec, *, execute_target: bool, operand_profile: str = "zero"
 ) -> bytes:
     """Build one diagnostic slot with the same setup and final stack height."""
-    if case.template not in MATCHED_CONTROL_TEMPLATES:
-        raise ValueError(f"matched control template {case.template} is unsupported")
-    setup = b"".join(
-        _fixed_push(value, target_opcode=case.opcode or 0)
-        for value in matched_control_operands(case, operand_profile)
-    )
-    reference_opcode = NOT_OPCODE if case.template == "stack_unary" else POP_OPCODE
-    return setup + bytes([case.opcode if execute_target else reference_opcode, 0x00])
+    spec = matched_control_spec(case, operand_profile)
+    opcode = case.opcode if execute_target else spec.reference_opcode
+    assert opcode is not None
+    return spec.setup + bytes([opcode, 0x00])
 
 
 def build_matched_control_bytecode(
@@ -1390,8 +1507,7 @@ def build_matched_control_bytecode(
     operand_profile: str = "zero",
 ) -> GeneratedBytecode:
     """Build one lane of a diagnostic OP-minus-control fixed-footprint pair."""
-    if case.template not in MATCHED_CONTROL_TEMPLATES:
-        raise ValueError(f"matched control template {case.template} is unsupported")
+    matched_control_spec(case, operand_profile)
     if diagnostic_count < 0 or diagnostic_count > generator_max_count:
         raise ValueError("diagnostic_count exceeds generator_max_count")
     if lane not in {"target", "control"}:
@@ -1417,15 +1533,7 @@ def build_matched_control_bytecode(
 def matched_control_operands(
     case: CaseSpec, operand_profile: str = "zero"
 ) -> list[int]:
-    profile = MATCHED_CONTROL_OPERAND_PROFILES.get(operand_profile)
-    if profile is None:
-        raise ValueError(
-            f"matched control operand profile {operand_profile!r} is unsupported"
-        )
-    operands = profile.get(case.template)
-    if operands is None:
-        raise ValueError(f"matched control template {case.template} is unsupported")
-    return list(operands)
+    return list(matched_control_spec(case, operand_profile).operands)
 
 
 MATCHED_CONTROL_WORKLOAD_FIELDS = (
@@ -1469,11 +1577,6 @@ def _matched_control_pair_spec(
     if target.get("signal_kind") != "contextual_relative":
         raise ValueError("matched-control signal must be contextual relative")
     template = target.get("template")
-    expected_relation = "OP-NOT" if template == "stack_unary" else "OP-POP"
-    if template not in MATCHED_CONTROL_TEMPLATES or target.get("relation") != expected_relation:
-        raise ValueError("matched-control relation/template mismatch")
-    if target.get("final_stack_height") != 1:
-        raise ValueError("matched-control final stack height must be one")
     diagnostic_count = target.get("diagnostic_count")
     generator_max_count = target.get("generator_max_count")
     if (
@@ -1495,26 +1598,6 @@ def _matched_control_pair_spec(
         raise ValueError("matched-control target raw gas is invalid")
     if parse_opcode(target.get("opcode")) != original_opcode:
         raise ValueError("matched-control target opcode differs from original opcode")
-    expected_target_count = (
-        generator_max_count
-        if template == "stack_unary" and original_opcode == NOT_OPCODE
-        else diagnostic_count
-    )
-    if target.get("target_count") != expected_target_count:
-        raise ValueError("matched-control target count differs from diagnostic count")
-    if template == "stack_unary":
-        if (
-            parse_opcode(control.get("opcode")) != NOT_OPCODE
-            or control.get("target_count") != generator_max_count
-            or control.get("target_raw_gas") != NOT_RAW_GAS
-        ):
-            raise ValueError("matched-control unary control declaration is invalid")
-    elif (
-        parse_opcode(control.get("opcode")) != POP_OPCODE
-        or control.get("target_count") != generator_max_count
-        or control.get("target_raw_gas") != POP_RAW_GAS
-    ):
-        raise ValueError("matched-control POP control declaration is invalid")
     fixed_len = target.get("fixed_bytecode_len")
     tx_gas_limit = target.get("tx_gas_limit")
     if (
@@ -1544,9 +1627,26 @@ def _matched_control_pair_spec(
     operand_profile = target.get("operand_profile")
     if not isinstance(operand_profile, str):
         raise ValueError("matched-control operand profile is invalid")
-    expected_operands = matched_control_operands(reconstructed_case, operand_profile)
-    if target.get("operands") != expected_operands:
+    spec = matched_control_spec(reconstructed_case, operand_profile)
+    if target.get("relation") != spec.relation:
+        raise ValueError("matched-control relation/template mismatch")
+    if target.get("final_stack_height") != spec.final_stack_height:
+        raise ValueError("matched-control final stack height mismatch")
+    if target.get("operands") != list(spec.operands):
         raise ValueError("matched-control operands do not match operand profile")
+    expected_target_count = (
+        generator_max_count
+        if original_opcode == spec.reference_opcode
+        else diagnostic_count
+    )
+    if target.get("target_count") != expected_target_count:
+        raise ValueError("matched-control target count differs from executed opcode count")
+    if (
+        parse_opcode(control.get("opcode")) != spec.reference_opcode
+        or control.get("target_count") != generator_max_count
+        or control.get("target_raw_gas") != spec.reference_raw_gas
+    ):
+        raise ValueError("matched-control control declaration is invalid")
     expected_target = build_matched_control_bytecode(
         reconstructed_case,
         diagnostic_count,
@@ -1761,6 +1861,7 @@ def build_matched_control_report(
             "relation",
             "signal_kind",
             "diagnostic_count",
+            "final_stack_height",
             "generator_max_count",
             "fixed_bytecode_len",
             "tx_gas_limit",
@@ -1777,12 +1878,33 @@ def build_matched_control_report(
         operand_profile = target.get("operand_profile")
         if not isinstance(operand_profile, str):
             raise ValueError("matched-control result operand profile is invalid")
-        if target.get("operands") != matched_control_operands(
-            report_case, operand_profile
-        ):
+        spec = matched_control_spec(report_case, operand_profile)
+        if target.get("operands") != list(spec.operands):
             raise ValueError(
                 "matched-control result operands do not match operand profile"
             )
+        if target.get("relation") != spec.relation:
+            raise ValueError("matched-control result relation/template mismatch")
+        if target.get("final_stack_height") != spec.final_stack_height:
+            raise ValueError("matched-control result final stack height mismatch")
+        diagnostic_count = target.get("diagnostic_count")
+        generator_max_count = target.get("generator_max_count")
+        expected_target_count = (
+            generator_max_count
+            if report_case.opcode == spec.reference_opcode
+            else diagnostic_count
+        )
+        if (
+            parse_opcode(target.get("opcode")) != report_case.opcode
+            or target.get("target_count") != expected_target_count
+        ):
+            raise ValueError("matched-control result target declaration is invalid")
+        if (
+            parse_opcode(control.get("opcode")) != spec.reference_opcode
+            or control.get("target_count") != generator_max_count
+            or control.get("target_raw_gas") != spec.reference_raw_gas
+        ):
+            raise ValueError("matched-control result control declaration is invalid")
         for row in (target, control):
             isolation = row.get("isolation")
             if (
@@ -2172,10 +2294,11 @@ def generate_cases(
         if controlled_max is None:
             raise ValueError("matched control diagnostic requires generator_max_count")
         for case in manifest.cases:
-            if case.kind != "opcode" or case.template not in MATCHED_CONTROL_TEMPLATES:
+            if case.kind != "opcode":
                 raise ValueError(
                     f"matched control template {case.template} is unsupported"
                 )
+            matched_control_spec(case, operand_profile)
     for case in manifest.cases:
         for variant in manifest.variants:
             if controlled_max is not None and variant > controlled_max:
@@ -2186,6 +2309,7 @@ def generate_cases(
                     assert controlled_max is not None
                     if case.opcode is None:
                         raise ValueError(f"opcode case {case.name} is missing opcode")
+                    matched_spec = matched_control_spec(case, operand_profile)
                     target = build_matched_control_bytecode(
                         case,
                         variant,
@@ -2204,16 +2328,8 @@ def generate_cases(
                     control_len = len(bytes.fromhex(control.bytes_hex))
                     if target_len != control_len:
                         raise AssertionError("matched-control bytecode footprints differ")
-                    relation = (
-                        "OP-NOT" if case.template == "stack_unary" else "OP-POP"
-                    )
-                    reference_raw_gas = (
-                        NOT_RAW_GAS
-                        if case.template == "stack_unary"
-                        else POP_RAW_GAS
-                    )
                     tx_gas_limit = 1_000_000 + controlled_max * max(
-                        case.target_raw_gas, reference_raw_gas
+                        case.target_raw_gas, matched_spec.reference_raw_gas
                     )
                     lane_artifacts = []
                     for lane, generated in (("target", target), ("control", control)):
@@ -2222,21 +2338,15 @@ def generate_cases(
                             declared_opcode = case.opcode
                             declared_count = (
                                 controlled_max
-                                if case.template == "stack_unary"
-                                and case.opcode == NOT_OPCODE
+                                if case.opcode == matched_spec.reference_opcode
                                 else variant
                             )
                             declared_raw_gas = case.target_raw_gas
                             lane_case = f"{case.name}__matched_t"
-                        elif case.template == "stack_unary":
-                            declared_opcode = NOT_OPCODE
-                            declared_count = controlled_max
-                            declared_raw_gas = NOT_RAW_GAS
-                            lane_case = f"{case.name}__matched_c"
                         else:
-                            declared_opcode = POP_OPCODE
+                            declared_opcode = matched_spec.reference_opcode
                             declared_count = controlled_max
-                            declared_raw_gas = POP_RAW_GAS
+                            declared_raw_gas = matched_spec.reference_raw_gas
                             lane_case = f"{case.name}__matched_c"
                         payload = {
                             "suite": manifest.name,
@@ -2250,15 +2360,13 @@ def generate_cases(
                             "opcode": f"0x{declared_opcode:02x}",
                             "scenario": case.scenario,
                             "operand_profile": operand_profile,
-                            "operands": matched_control_operands(
-                                case, operand_profile
-                            ),
+                            "operands": list(matched_spec.operands),
                             "template": case.template,
                             "lane": lane,
-                            "relation": relation,
+                            "relation": matched_spec.relation,
                             "signal_kind": "contextual_relative",
                             "diagnostic_count": variant,
-                            "final_stack_height": 1,
+                            "final_stack_height": matched_spec.final_stack_height,
                             "target_count": declared_count,
                             "target_raw_gas": declared_raw_gas,
                             "bytecode": "0x" + generated.bytes_hex,

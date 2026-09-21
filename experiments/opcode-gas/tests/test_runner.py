@@ -553,6 +553,7 @@ class RunnerTests(unittest.TestCase):
             "relation": "OP-POP",
             "signal_kind": "contextual_relative",
             "diagnostic_count": 2,
+            "final_stack_height": 1,
             "generator_max_count": 8,
             "fixed_bytecode_len": 584,
             "tx_gas_limit": 1_000_024,
@@ -565,6 +566,9 @@ class RunnerTests(unittest.TestCase):
         target = {
             **common,
             "lane": "target",
+            "opcode": "0x01",
+            "target_count": 2,
+            "target_raw_gas": 3,
             "prover_gas": 1_500,
             "total_instruction_count": 3_000,
             "workload_id": "b" * 64,
@@ -579,6 +583,9 @@ class RunnerTests(unittest.TestCase):
         control = {
             **common,
             "lane": "control",
+            "opcode": "0x50",
+            "target_count": 8,
+            "target_raw_gas": 2,
             "prover_gas": 1_100,
             "total_instruction_count": 2_200,
             "workload_id": "d" * 64,
@@ -603,6 +610,8 @@ class RunnerTests(unittest.TestCase):
         for updates, message in [
             ({"operands": [0, 0]}, "operands"),
             ({"operand_profile": "unknown"}, "operand profile"),
+            ({"relation": "OP-NOT"}, "relation"),
+            ({"final_stack_height": 2}, "final stack"),
         ]:
             with self.subTest(message=message), self.assertRaisesRegex(
                 ValueError, message
@@ -610,6 +619,10 @@ class RunnerTests(unittest.TestCase):
                 opcode_gas.build_matched_control_report(
                     [{**target, **updates}, {**control, **updates}]
                 )
+        with self.assertRaisesRegex(ValueError, "control declaration"):
+            opcode_gas.build_matched_control_report(
+                [target, {**control, "opcode": "0x19", "target_raw_gas": 3}]
+            )
 
         with self.assertRaisesRegex(ValueError, "backend input length"):
             opcode_gas.build_matched_control_report(

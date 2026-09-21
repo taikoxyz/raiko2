@@ -133,7 +133,12 @@ GuestInput bytecode rather than trusting metadata labels.
 
 These reports contain contextual relative signals. Binary and EXP cases currently report
 `OP - POP`; unary cases report `OP - NOT`, so NOT's self-control delta is intentionally zero. The
-numbers are not absolute opcode costs and cannot be copied into a production multiplier table.
+`zero` profile additionally supports `MLOAD - NOT`, `KECCAK32 - POP`, `DUPn - DUP1`,
+`SWAPn - SWAP1`, and `PC/MSIZE/GAS - PUSH0`; PUSH0 is its own self-control. DUP1, SWAP1, and PUSH0
+self-control pairs also intentionally have identical target/control bytecode and zero delta. These
+additional families reject `small_nonzero` because they do not define a second operand profile.
+PUSH1 through PUSH32 and the other unmatched templates remain unsupported. The numbers are not
+absolute opcode costs and cannot be copied into a production multiplier table.
 Different operand profiles may exercise materially different guest paths: in the initial comparison,
 EQ, signed comparisons, division/modulo, EXP, and LT/GT changed between zero and small-nonzero
 profiles. A measurement key that needs multiple scenarios must satisfy the formal required-case

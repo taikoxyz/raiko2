@@ -623,6 +623,26 @@ class RunnerTests(unittest.TestCase):
             opcode_gas.build_matched_control_report(
                 [target, {**control, "opcode": "0x19", "target_raw_gas": 3}]
             )
+        relabelled = {
+            "original_opcode": "0x52",
+            "template": "keccak_32",
+            "operand_profile": "zero",
+            "operands": [32, 0],
+            "relation": "OP-POP",
+            "final_stack_height": 1,
+        }
+        with self.assertRaisesRegex(ValueError, "canonical opcode/template"):
+            opcode_gas.build_matched_control_report(
+                [
+                    {
+                        **target,
+                        **relabelled,
+                        "opcode": "0x52",
+                        "target_raw_gas": 3,
+                    },
+                    {**control, **relabelled},
+                ]
+            )
 
         with self.assertRaisesRegex(ValueError, "backend input length"):
             opcode_gas.build_matched_control_report(

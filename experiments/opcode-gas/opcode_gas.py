@@ -1388,6 +1388,13 @@ def matched_control_spec(
     """Derive the complete contextual matched-control contract for one case."""
     if case.opcode is None:
         raise ValueError(f"opcode case {case.name} is missing opcode")
+    canonical = PURE_OPCODE_DEFAULTS.get(case.opcode)
+    if canonical is None or canonical[1] != case.template:
+        canonical_template = canonical[1] if canonical is not None else "unsupported"
+        raise ValueError(
+            "matched control canonical opcode/template mismatch: "
+            f"0x{case.opcode:02x} maps to {canonical_template}, not {case.template}"
+        )
     if operand_profile not in MATCHED_CONTROL_OPERAND_PROFILES:
         raise ValueError(
             f"matched control operand profile {operand_profile!r} is unsupported"

@@ -29,8 +29,8 @@ def diagnostic_provenance():
     }
 
 
-def emit_matched_control_pair(
-    opcode: int, *, operand_profile: str = "zero"
+def emit_matched_control_case(
+    case: opcode_gas.CaseSpec, *, operand_profile: str = "zero"
 ) -> tuple[
     opcode_gas.CaseSpec,
     dict,
@@ -43,7 +43,6 @@ def emit_matched_control_pair(
     manifest = opcode_gas.parse_controlled_manifest(
         data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
     )
-    case = opcode_gas.default_opcode_case(opcode)
     manifest = replace(manifest, cases=[case])
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = pathlib.Path(tmp)
@@ -69,6 +68,21 @@ def emit_matched_control_pair(
             (pair_root / "control" / "guest-input.json").read_text()
         )
     return case, target_case, control_case, target_input, control_input
+
+
+def emit_matched_control_pair(
+    opcode: int, *, operand_profile: str = "zero"
+) -> tuple[
+    opcode_gas.CaseSpec,
+    dict,
+    dict,
+    dict,
+    dict,
+]:
+    return emit_matched_control_case(
+        opcode_gas.default_opcode_case(opcode),
+        operand_profile=operand_profile,
+    )
 
 
 class FixtureEmitTests(unittest.TestCase):
@@ -588,6 +602,82 @@ class FixtureEmitTests(unittest.TestCase):
                 ValueError, "unsupported"
             ):
                 emit_matched_control_pair(opcode)
+
+    def test_matched_control_rejects_relabelled_opcode_templates(self):
+        relabelled = [
+            replace(opcode_gas.default_opcode_case(0x52), template="keccak_32"),
+            opcode_gas.CaseSpec(
+                name="sload_relabelled_mload",
+                scenario="memory",
+                template="memory_load_32",
+                target_raw_gas=100,
+                opcode=0x54,
+            ),
+        ]
+        for case in relabelled:
+            with self.subTest(opcode=f"0x{case.opcode:02x}"), self.assertRaisesRegex(
+                ValueError, "canonical opcode/template"
+            ):
+                emit_matched_control_case(case)
+
+    def test_pair_and_guest_input_reject_relabelled_mstore_as_keccak(self):
+        _, target, control, target_input, control_input = emit_matched_control_pair(
+            0x20
+        )
+        programs = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(target_input["bytecode"][2:])
+        )
+        relabelled_programs = [
+            program[:-2] + b"\x52\x00" if index < 2 else program
+            for index, program in enumerate(programs)
+        ]
+        relabelled_bytecode = "0x" + opcode_gas.encode_fixed_microprograms(
+            relabelled_programs
+        ).hex()
+        relabelled_input = {
+            **target_input,
+            "opcode": 0x52,
+            "target_raw_gas": 3,
+            "bytecode": relabelled_bytecode,
+        }
+        relabelled_input_bytes = (
+            opcode_gas.json.dumps(relabelled_input, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        relabelled_target = {
+            **target,
+            "original_opcode": "0x52",
+            "opcode": "0x52",
+            "target_raw_gas": 3,
+            "bytecode": relabelled_bytecode,
+            "fixture_sha256": opcode_gas.sha256_bytes(relabelled_input_bytes),
+        }
+        relabelled_control = {**control, "original_opcode": "0x52"}
+
+        pair_spec = opcode_gas._matched_control_pair_spec(target, control)
+        pair_spec["workload"]["original_opcode"] = "0x52"
+        pair_spec["lanes"]["target"].update(
+            {
+                "opcode": "0x52",
+                "target_raw_gas": 3,
+                "fixture_sha256": relabelled_target["fixture_sha256"],
+            }
+        )
+        pair_id = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {"kind": "matched_control_pair", "pair_spec": pair_spec}
+            )
+        )
+        relabelled_target["pair_id"] = pair_id
+        relabelled_control["pair_id"] = pair_id
+
+        with self.assertRaisesRegex(ValueError, "canonical opcode/template"):
+            opcode_gas.validate_matched_control_fixture_pairs(
+                [relabelled_target, relabelled_control],
+                guest_inputs={
+                    relabelled_target["fixture_sha256"]: relabelled_input,
+                    relabelled_control["fixture_sha256"]: control_input,
+                },
+            )
 
     def test_matched_control_does_not_change_formal_fixed_footprint_bytecode(self):
         expected_sha256 = {

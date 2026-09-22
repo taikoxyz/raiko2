@@ -525,12 +525,26 @@ Expected: compilation failure because the new row types/builders do not exist.
 
 Replace the private fixed `CandidateKind::MinimalContractCall` branch with a controlled contract
 variant that accepts generator-produced bytecode while keeping the address, account shape, code
-length class, transaction envelope, touched keys, and final state frozen. Reuse
-`build_overhead_guest_input()` for empty, transfer, block-count, and transaction-count rows.
+length class, transaction envelope, and touched keys frozen. Bind each row's resulting final state
+root exactly; do not require roots to match when the frozen count immediate changes the deployed
+code hash. Reuse `build_overhead_guest_input()` for empty, transfer, block-count, and
+transaction-count rows.
 
 The `OpcodeLoop` generator may use fixed-length PUSH immediates and traced helper opcodes, but every
 helper's actual raw gas must appear in `expected_raw_gas_by_key`. Do not add a parallel EVM
 interpreter or copy pricing logic into Rust.
+
+For count-bearing opcode rows, freeze `gas_limit = 100000`, empty calldata, and 256-byte code. Encode
+the count only as a fixed-width `PUSH3` immediate. Reject a generated trace containing a runtime
+count-source `GAS` or `CALLDATALOAD`; varying `gas_limit` with count is a confounded fixture even when
+the resulting raw opcode counts are correct.
+
+Add a non-fitting data-control family that changes only the `PUSH3` immediate, discards it, and then
+executes one fixed modeled operation sequence. Run every control input with normal exact repeats.
+Serialize the proverGas range across distinct control inputs as `cross_input_data_floor_p`; do not
+average or subtract it, and do not treat it as repeat noise. Report each opcode-anchor family's
+signal and fit residual relative to this floor. A fixture/guest revision change requires a newly
+measured floor and fresh calibration identity.
 
 - [ ] **Step 4: Materialize the fit and holdout inventory in the manifest**
 
@@ -567,7 +581,10 @@ spawned work, and zero dynamic-key totals across fit and holdout rows. Reject ro
 Add `run-block-calibration`. It first runs Python preflight, then invokes guest-launcher for the
 frozen rows. Guest-launcher constructs each GuestInput, runs `trace_shasta_proposal`, compares
 actual raw gas/features/diagnostics to the row spec, and only then calls the production SP1 proposal
-guest three times. A trace mismatch emits a rejected row and no SP1 observation for that row.
+guest three times through `--sp1-execution-engine gas-estimator`. Before the campaign, run one
+frozen row once through the standard engine and once through the estimator and require exact
+proverGas, instruction-count, syscall-count, and public-values parity. A trace or parity mismatch
+emits a rejected result and no formal SP1 observations.
 
 - [ ] **Step 7: Run focused Python and Rust tests and commit**
 

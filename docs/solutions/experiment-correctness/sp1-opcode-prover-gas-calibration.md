@@ -92,8 +92,18 @@ machine.
 
 This guarantee depends on the recorded engine and canonical gas-estimation cadence. Never mix rows
 with different `sp1_execution_engine`, `gas_trace_chunk_threshold`, or `gas_trace_chunk_slots`.
-The fast path is intentionally limited to local SP1 execute-mode opcode labs; it is not evidence that
-a full proposal can always be estimated in sub-second or fixed time.
+
+The same estimator can consume the production proposal ELF and a production `GuestInput` for local
+controlled-block calibration. A fixed-input parity check must precede the campaign. In the
+fixed-limit spike, the standard engine and estimator both returned `159030265` proverGas,
+`136594192` instructions, `229747` syscalls, and identical public values. The optimized estimator
+took about 7.4 seconds wall time versus about 90 seconds for the standard engine on that machine.
+This does not imply that every proposal is sub-second or fixed-time.
+
+The CLI still uses `--mode execute` because the run executes locally without producing a proof. The
+independent `--sp1-execution-engine gas-estimator` option selects the fast implementation. Do not
+mistake the word `execute` in the mode for use of the standard executor, and do not require the
+standard engine merely to obtain an `ExecutionReport` or public values; the estimator returns both.
 
 ### Old Calibration Artifacts Were Reused After Implementation Changed
 
@@ -115,6 +125,27 @@ unless a later experiment defines an independently controllable unit.
 An opcode loop does not validate the complete block model, and a block/proposal failure does not by
 itself prove that an opcode slope failed to converge. Report the exact phase, generator bound,
 count prefix, checkpoint, and repeat before diagnosing the model.
+
+### Gas Limit Was Accidentally Used As The Block-Loop Counter
+
+One controlled-block prototype encoded the loop count by setting `gas_limit = base + count`, reading
+`GAS` inside the contract, and subtracting a measured base. It produced the requested operation
+counts, but the transaction envelope changed at every sample. The resulting proverGas slope mixed
+the anchor operation with gas-limit-dependent guest work and was not an eligible anchor fit.
+
+Keep the transaction gas limit fixed. Encode the count in a fixed-width bytecode immediate, keep
+calldata empty, and pad every program to the same bytecode length. The fixed-limit spike used a
+`PUSH3` count, `gas_limit = 100000`, and 256-byte code. Host-native tracing must prove the exact raw
+gas map and unchanged declared feature/diagnostic shape before SP1 estimation.
+
+Changing the immediate still changes the deployed bytecode hash, final state root, public output,
+and serialized input bytes. A control that discarded the count and executed identical modeled EVM
+work therefore did not have identical proverGas across different immediates: six counts spanned
+`159029040..159029183`, a range of 143. Repeating the exact same input was bit-for-bit deterministic.
+Treat that 143 as a measured cross-input data floor for this fixture revision, not as run-to-run
+randomness and not as a coefficient. Required repeats of one row must still match exactly. Anchor
+signal and residuals should be reported against the frozen control floor; changing the fixture,
+guest, or input encoding requires measuring a new floor under a fresh calibration identity.
 
 ### Backend Metrics Were Treated As Interchangeable
 
@@ -139,7 +170,7 @@ as a RISC0/Boundless conversion.
 6. Run the formal controlled suite with three repeats, fixed count prefixes, isolation checks, and
    the frozen out-of-fit checkpoint.
 7. Measure startup/block/transaction/transfer overhead separately through the production proposal
-   guest.
+   guest using the estimator after a fixed-input standard/estimator parity check.
 8. Seal the candidate before opening final proposal-validation results. Proposal rows validate; they
    never fit or repair coefficients.
 
@@ -148,6 +179,9 @@ as a RISC0/Boundless conversion.
 - Reject mixed execution engines, cadence settings, revisions, manifests, and guest artifacts.
 - Bind operand profile, resolved operands, exact GuestInput bytes, and target/control pair identity.
 - Keep fixed-footprint and fixed-transaction-gas assertions in executable tests.
+- Never derive a loop count from `GAS` or vary `gas_limit` with the count in a block-anchor cohort.
+- Distinguish exact-repeat determinism from small deterministic differences between distinct input
+  bytes; preserve and report a frozen data-control range instead of averaging it into a coefficient.
 - Require count-zero target/control deltas to be zero and inspect monotonicity before fitting.
 - Inspect instruction-count and proverGas deltas together; disagreement often reveals a runtime or
   system-chip boundary that an opcode-only model cannot express.

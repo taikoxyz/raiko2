@@ -213,11 +213,32 @@ parameters. It must independently vary:
 - `SWAP1`/SWAP-family work;
 - proposal, block, started non-Anchor transaction, and native-transfer counts.
 
-Within each opcode-anchor workload family, paired variants keep the deployment, block and
-transaction envelopes, calldata and bytecode lengths, touched state keys, final state, and every
-non-modeled diagnostic feature count fixed. Only the traced operation mix may change. A variant
-that changes witness nodes, input bytes, blobs, KZG work, or another undeclared feature is
-ineligible rather than silently assigning that work to an opcode anchor.
+Within each opcode-anchor workload family, paired variants keep the deployment topology, block and
+transaction envelopes, calldata and bytecode lengths, touched state keys, and every non-modeled
+diagnostic feature count fixed. The fixed-width count immediate necessarily changes the bytecode
+hash, serialized input, public output, and final state root; each value is bound exactly per row and
+its proverGas effect is bounded by the data-control family below. Any other input-byte change, or a
+variant that changes witness nodes, blobs, KZG work, or another undeclared feature, is ineligible
+rather than silently assigning that work to an opcode anchor.
+
+The transaction `gas_limit` is one of those frozen envelope fields and must not encode the loop
+count. Count-bearing opcode rows use empty calldata, one fixed gas limit, one fixed bytecode length,
+and a fixed-width immediate in the bytecode. Host tracing must reject a row that retains a runtime
+count-source opcode such as `GAS` or `CALLDATALOAD` in the measured program.
+
+Changing a fixed-width immediate still changes input bytes, code hash, final state root, and public
+output. Before fitting, run a non-fitting data-control family that varies only that immediate and
+executes an otherwise identical modeled operation sequence. Exact repeats of each individual row
+remain mandatory. The range across distinct control inputs is recorded as a deterministic
+cross-input data floor, not averaged into proverGas and not fitted as a coefficient. The observed
+floor and every anchor-family signal/residual relative to it are reported. A fixture or guest change
+invalidates the floor and requires a new calibration identity.
+
+Controlled-block SP1 observations use the production proposal ELF and local gas-estimator engine.
+Before the formal campaign, one frozen controlled input must demonstrate exact standard-versus-
+estimator equality for proverGas, instruction count, syscall count, and public values. CLI
+`--mode execute` denotes a local no-proof run; `--sp1-execution-engine gas-estimator` selects the
+actual execution implementation.
 
 Fixture generation must compute the exact rational design matrix before SP1 execution and reject it
 unless all eight columns have exact full rank. It must not round `B`, `x_j * B`, or the rank input.

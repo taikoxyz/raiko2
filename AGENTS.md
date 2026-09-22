@@ -131,6 +131,10 @@ Run the smallest set of checks that proves the change safely, then scale up when
 - Prefer `gh` for GitHub operations.
 - Keep changes on the single primary codepath; do not leave duplicate implementations behind.
 - Fail fast on invalid inputs and keep one source of truth for business rules.
+- For multi-session experiments, record confirmed decisions, failed approaches, measured caveats,
+  and environment constraints in the relevant `docs/solutions/` entry and active design or plan
+  before continuing. Distinguish throwaway-spike evidence from changes committed to the canonical
+  experiment branch; do not leave reusable experiment knowledge only in chat history.
 
 ## Alethia Reth Integration
 

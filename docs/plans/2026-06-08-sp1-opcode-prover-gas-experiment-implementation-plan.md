@@ -213,10 +213,13 @@ missing. Only direct adoption of this scalar transport requires `supported`; ind
 measurement, backend-specific tables, and cross-backend comparison are allowed for every conclusion.
 No conclusion blocks, rescues, or modifies the primary SP1 candidate.
 
-Use `decimal.localcontext(prec=50, rounding=ROUND_HALF_EVEN)` for slopes, coefficients, secondary
-sample diagnostics, predictions, and metrics. Parse integer observations directly into `Decimal`; never route
-canonical values through binary `float`. Serialize canonical numeric fields as normalized decimal
-strings, reject non-finite values, and compare every quality threshold in `Decimal` arithmetic.
+Use `fractions.Fraction` for exact relation algebra: derive and validate `A`, its rank, the natural
+anchor reduction, `mu_zero`, and `B` without binary floating point or Decimal rounding. Use
+`decimal.localcontext(prec=80, rounding=ROUND_HALF_EVEN)` for observations, fitting, coefficients,
+secondary sample diagnostics, predictions, errors, and serialization. Parse integer observations
+directly into `Decimal`; never route canonical values through binary `float`. Serialize canonical
+numeric fields as normalized decimal strings, reject non-finite values, and compare every quality
+threshold in `Decimal` arithmetic.
 
 ### Relative Relations And Controlled Block Artifacts
 
@@ -987,7 +990,7 @@ operation-count and raw-gas denominators must remain positive. Coverage is descr
 keys remain visible and are not priced with the current table.
 
 For `p_hat` against observed `p`, compute every per-proposal APE, combined/per-network MAPE, maximum
-error, and the 10% pass/fail decision from `APE_main` with 50-digit `Decimal` arithmetic. MAPE is the
+error, and the 10% pass/fail decision from `APE_main` with 80-digit `Decimal` arithmetic. MAPE is the
 arithmetic mean of proposal APE values, not a ratio of aggregate gas totals. Also report
 underprediction count, maximum underprediction, coverage, and worst rows, and emit the raw
 paired proposal `(sp1_instruction_count, proverGas)` observations under their separate digest. Apply
@@ -1566,7 +1569,7 @@ Cover proposal-ledger occurrence reporting without measurement deletion and add 
 experiment Python commands write to neither Alethia, production schedule, Boundless config, nor
 generated ELF paths. Assert that candidate artifacts contain `review_only = true` and
 `production_write = false`, and that no protocol integer table is synthesized. Add a large-integer
-fixture that would lose significance through `float` and assert exact 50-digit `Decimal` slopes,
+fixture that would lose significance through `float` and assert exact 80-digit `Decimal` slopes,
 costs, normalization, primary prediction, and serialized-string reproduction.
 
 ### Step 3: Implement Controlled Runs And Candidate Construction
@@ -1630,7 +1633,7 @@ out of `K` and every matching proposal operation enters unmeasured coverage.
 Test exact feature extraction for proposal startup, block base, started non-Anchor candidate
 transactions, and committed
 native-value transfers, plus diagnostic blob-byte and KZG-invocation counts. Test the fixed `p_hat`
-formula and exact `APE_main = abs(p_hat-p)/p` denominator using 50-digit `Decimal`. Prove MAPE is the
+formula and exact `APE_main = abs(p_hat-p)/p` denominator using 80-digit `Decimal`. Prove MAPE is the
 arithmetic mean of proposal APE values rather than aggregate-gas error. Test metric signs,
 per-network aggregation, worst-row ordering, operation-count, raw-gas, and spawned-event coverage,
 required zero-denominator rejection, optional absent-family handling, the exact 10% boundary, the two

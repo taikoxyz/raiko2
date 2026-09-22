@@ -162,6 +162,10 @@ The frozen 102-key relation matrix has rank 98. `mu_zero` and `B` are derived fr
 matrix after setting the four natural anchors to zero; the solver rechecks rank and anchor ordering
 from the manifest. Only `[theta, beta]` is fitted from the predeclared controlled production-guest
 block rows. The 98 accepted relation slopes remain frozen, and proposal rows cannot change them.
+Relation-matrix construction, rank validation, anchor reduction, `mu_zero`, and `B` use exact
+`Fraction` algebra. Observations, Decimal OLS fitting, predictions, errors, threshold comparisons,
+and canonical numeric serialization use `Decimal` with precision 80; binary `float` is never a
+canonical intermediate.
 
 The controlled manifest freezes `normalization_reference_key = "opcode:0x01"` (ADD) before any
 measurement. The reconstructed reference must be positive and pass the relation, block-fit, and
@@ -310,7 +314,7 @@ positive classification is therefore
 if every proposal has finite positive actual `p(j)`, finite `p_hat(j)`, and `APE_main(j) <= 0.10`,
 and every required coverage value is reported with a positive denominator. Per-proposal error,
 per-network and
-combined MAPE, maximum error, and the 10% pass/fail decision all use this formula with 50-digit
+combined MAPE, maximum error, and the 10% pass/fail decision all use this formula with 80-digit
 `Decimal` arithmetic. MAPE is the arithmetic mean of proposal APE values, not a ratio of aggregate
 gas totals. Otherwise emit `candidate_table_not_validated` with the exact failed rows and components.
 
@@ -727,8 +731,7 @@ thresholds, provenance, and review-only status. `candidate.sha256` is the SHA256
 compact bytes of that manifest, so every formula input is transitively covered. A missing relation,
 rank/positivity/holdout failure, or absent required component prevents sealing.
 
-`controlled-prover-gas.jsonl` is a primary-only projection and contains no instruction-count field.
-The controlled and proposal cycle-cost sample files each have their own digest and contain paired
+The controlled and proposal cycle-cost sample files are diagnostic-only, each with its own digest and paired
 `sp1_instruction_count`/`proverGas` observations plus workload identities and diagnostics. They are
 not referenced by `candidate-manifest.json`; missing secondary rows or any bridge conclusion
 cannot change the V1 candidate digest or status. Proposal samples remain under the immutable

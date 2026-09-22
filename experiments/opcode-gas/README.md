@@ -381,11 +381,14 @@ with larger variants or a cleaner template before treating the slope as a candid
 
 ## Frozen SP1 Calibration Inputs
 
-The controlled SP1 candidate is review-only. Its arithmetic uses 50-digit
-`Decimal` values serialized as strings; it never writes a protocol multiplier
+The controlled SP1 candidate is review-only. Relation-matrix construction, rank validation,
+anchor reduction, `mu_zero`, and `B` use exact `Fraction` algebra. Observations, fitting,
+prediction, error computation, and canonical numeric serialization use 80-digit `Decimal` values;
+binary `float` is never a canonical intermediate. The candidate never writes a protocol multiplier
 table, Alethia source, generated guest artifact, or production prover config.
-Candidate sealing requires accepted ADD and all four `Q_formula` overheads,
-passing out-of-fit checkpoint evidence, and canonical component hashes. The
+Candidate sealing requires the accepted rank-98 relation system, positive reconstructed ADD,
+dynamic raw-gas holdouts, the eight-parameter controlled block fit/holdouts, and canonical component
+hashes. The
 instruction-count sample, controlled SP1 bridge, and diagnostic overheads have
 independent digests and cannot change the primary candidate.
 

@@ -5124,6 +5124,7 @@ def _validate_formal_relation_provenance(value: Any) -> dict[str, str]:
     return provenance
 
 
+@_isolated_decimal_context
 def fit_opcode_relations(
     manifest: Manifest,
     rows: Iterable[Mapping[str, Any]],
@@ -5381,6 +5382,7 @@ def _validate_artifact_relation_rows(
     return algebra
 
 
+@_isolated_decimal_context
 def validate_opcode_relations_artifact(
     manifest: Manifest,
     artifact: Mapping[str, Any],
@@ -8058,6 +8060,10 @@ def run_block_calibration_rows(
                     exit_code=report.get("exit_code"),
                     public_values=report.get("public_values"),
                     backend_input_sha256=backend_input_sha256,
+                    backend="sp1",
+                    mode="execute",
+                    sp1_prover="local",
+                    primary_api="ExecutionReport::gas",
                     sp1_execution_engine=report.get("sp1_execution_engine"),
                     sp1_gas_trace_chunk_threshold=report.get(
                         "sp1_gas_trace_chunk_threshold"
@@ -8221,6 +8227,49 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
     print(f"wrote {len(rows)} controlled block calibration observation(s)")
 
 
+_ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS = {
+    "row_id",
+    "workload_family",
+    "split",
+    "block_count",
+    "transaction_count",
+    "program",
+    "expected_final_state_root",
+    "expected_raw_gas_by_key",
+    "expected_features",
+    "expected_diagnostics",
+    "schema_version",
+    "purpose",
+    "status",
+    "repeat_index",
+    "calibration_id",
+    "relation_artifact_sha256",
+    "relation_raw_rows_sha256",
+    "preflight_fit_rank",
+    "prover_gas",
+    "total_instruction_count",
+    "exit_code",
+    "public_values",
+    "backend_input_sha256",
+    "backend",
+    "mode",
+    "sp1_prover",
+    "primary_api",
+    "sp1_execution_engine",
+    "sp1_gas_trace_chunk_threshold",
+    "sp1_gas_trace_chunk_slots",
+    "execution_row_id",
+    "actual_raw_gas_by_key",
+    "actual_features",
+    "actual_diagnostics",
+    "actual_final_state_root",
+    "host_public_output",
+    "guest_input_sha256",
+    "reported_row_id",
+    "observation_row_id",
+}
+
+
 def _validated_block_calibration_rows(
     manifest: Manifest,
     relation_artifact: Mapping[str, Any],
@@ -8245,6 +8294,12 @@ def _validated_block_calibration_rows(
         raise ValueError("block calibration relation provenance is invalid")
 
     expected = {row.row_id: row for row in manifest.block_calibration_rows}
+    if any(
+        not isinstance(row, Mapping)
+        or set(row) != _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS
+        for row in raw_rows
+    ):
+        raise ValueError("block calibration accepted row schema is incomplete or unexpected")
     actual_ids = {str(row.get("row_id")) for row in raw_rows}
     if actual_ids != set(expected):
         raise ValueError("block calibration raw row identities differ from the manifest")
@@ -8256,6 +8311,7 @@ def _validated_block_calibration_rows(
         ) != [0, 1, 2]:
             raise ValueError("block calibration requires exactly three indexed repeats")
         required = {
+            "schema_version": 1,
             "purpose": "block_calibration",
             "status": "accepted",
             "calibration_id": calibration_id,
@@ -8266,6 +8322,10 @@ def _validated_block_calibration_rows(
             "split": spec.split,
             "reported_row_id": row_id,
             "observation_row_id": row_id,
+            "backend": "sp1",
+            "mode": "execute",
+            "sp1_prover": "local",
+            "primary_api": "ExecutionReport::gas",
             "sp1_execution_engine": "standard",
             "exit_code": 0,
         }
@@ -8275,10 +8335,22 @@ def _validated_block_calibration_rows(
             for key, value in required.items()
         ):
             raise ValueError("block calibration raw row provenance or identity differs")
+        payload = _controlled_block_row_payload(spec)
+        if any(
+            repeat.get(field) != value
+            for repeat in repeats
+            for field, value in payload.items()
+        ):
+            raise ValueError("block calibration raw row semantics differ from the manifest")
         stable_fields = (
             "prover_gas",
+            "total_instruction_count",
+            "public_values",
+            "host_public_output",
             "actual_raw_gas_by_key",
             "actual_features",
+            "actual_diagnostics",
+            "actual_final_state_root",
             "backend_input_sha256",
             "guest_input_sha256",
         )
@@ -8289,6 +8361,7 @@ def _validated_block_calibration_rows(
             raise ValueError("block calibration repeats are not deterministic")
         first = repeats[0]
         for repeat in repeats:
+            validate_sp1_execution_provenance(repeat, workload_kind="overhead")
             backend_input_sha256 = repeat.get("backend_input_sha256")
             repeat_index = repeat["repeat_index"]
             expected_execution_row_id = (
@@ -8309,9 +8382,23 @@ def _validated_block_calibration_rows(
                 != "0x" + str(backend_input_sha256)
             ):
                 raise ValueError("block calibration execution row identity differs")
+            instruction_count = repeat.get("total_instruction_count")
+            if type(instruction_count) is not int or instruction_count <= 0:
+                raise ValueError("block calibration instruction count is invalid")
+            public_values = _normalized_hex(
+                repeat.get("public_values"), field_name="block SP1 public output"
+            )
+            host_public_output = _normalized_hex(
+                repeat.get("host_public_output"),
+                field_name="block host public output",
+            )
+            if public_values != host_public_output:
+                raise ValueError("block calibration public output join differs")
         if (
             first.get("actual_raw_gas_by_key") != dict(spec.expected_raw_gas_by_key)
             or first.get("actual_features") != dict(spec.expected_features)
+            or first.get("actual_diagnostics") != dict(spec.expected_diagnostics)
+            or first.get("actual_final_state_root") != spec.expected_final_state_root
         ):
             raise ValueError("block calibration traced inputs differ from the manifest")
         collapsed.append(
@@ -8371,6 +8458,7 @@ def _serialize_decimal_tree(value: Any) -> Any:
     return value
 
 
+@_isolated_decimal_context
 def fit_block_calibration_artifact(
     manifest: Manifest,
     affine_model: AffineOpcodeModel,

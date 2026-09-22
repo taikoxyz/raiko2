@@ -7,7 +7,7 @@ import types
 import unittest
 from dataclasses import replace
 from unittest import mock
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, localcontext
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
@@ -475,6 +475,39 @@ class MeasurementGateTests(unittest.TestCase):
 
 
 class FormalOpcodeRelationTests(unittest.TestCase):
+    def test_relation_artifact_is_byte_identical_across_caller_decimal_contexts(self):
+        manifest = formal_relation_manifest()
+        rows = formal_relation_rows(manifest)
+        relation_id = next(
+            relation.id
+            for relation in manifest.opcode_relations
+            if relation.signed_raw_gas_by_key
+        )
+        for row in rows:
+            if (
+                row["relation_id"] == relation_id
+                and row["lane"] == "target"
+                and row["diagnostic_count"] == 1
+            ):
+                row["prover_gas"] += 1
+
+        artifacts = []
+        for precision in (28, 80):
+            with localcontext() as caller:
+                caller.prec = precision
+                artifact = opcode_gas.fit_opcode_relations(
+                    manifest, copy.deepcopy(rows)
+                )
+                opcode_gas.validate_opcode_relations_artifact(
+                    manifest,
+                    artifact,
+                    rows,
+                    formal_relation_provenance(rows),
+                )
+                artifacts.append(opcode_gas.canonical_json(artifact))
+
+        self.assertEqual(artifacts[0], artifacts[1])
+
     def test_signed_signal_gate_uses_zero_delta_not_shared_lane_baseline(self):
         baseline = Decimal("1000000000")
         counts = {
@@ -1221,21 +1254,25 @@ class CandidateConstructionTests(unittest.TestCase):
                 else:
                     q[features[parameter_index - 4]] = 1
                 row_id = f"family-{family_index}-parameter-{parameter_index}"
-                specs.append(
-                    types.SimpleNamespace(
-                        row_id=row_id,
-                        workload_family=f"family-{family_index}",
-                        split="fit",
-                        expected_raw_gas_by_key=raw,
-                        expected_features=q,
-                    )
+                spec = types.SimpleNamespace(
+                    row_id=row_id,
+                    workload_family=f"family-{family_index}",
+                    split="fit",
+                    block_count=1,
+                    transaction_count=1,
+                    program=types.SimpleNamespace(kind="empty"),
+                    expected_final_state_root="0x" + "1" * 64,
+                    expected_raw_gas_by_key=raw,
+                    expected_features=q,
+                    expected_diagnostics={"witness_node_count": 0},
                 )
+                specs.append(spec)
+                payload = opcode_gas._controlled_block_row_payload(spec)
                 for repeat_index in range(3):
                     raw_rows.append(
                         {
-                            "row_id": row_id,
-                            "workload_family": f"family-{family_index}",
-                            "split": "fit",
+                            **payload,
+                            "schema_version": 1,
                             "purpose": "block_calibration",
                             "status": "accepted",
                             "repeat_index": repeat_index,
@@ -1255,30 +1292,45 @@ class CandidateConstructionTests(unittest.TestCase):
                             ),
                             "reported_row_id": row_id,
                             "observation_row_id": row_id,
+                            "backend": "sp1",
+                            "mode": "execute",
+                            "sp1_prover": "local",
+                            "primary_api": "ExecutionReport::gas",
                             "sp1_execution_engine": "standard",
+                            "sp1_gas_trace_chunk_threshold": None,
+                            "sp1_gas_trace_chunk_slots": None,
                             "exit_code": 0,
+                            "total_instruction_count": 100,
+                            "public_values": "0x01",
+                            "host_public_output": "0x01",
                             "prover_gas": str(parameter),
                             "actual_raw_gas_by_key": raw,
                             "actual_features": q,
+                            "actual_diagnostics": spec.expected_diagnostics,
+                            "actual_final_state_root": spec.expected_final_state_root,
                         }
                     )
         holdout_raw = {**{key: 1 for key in anchors}, "DERIVED": 0}
         holdout_q = {key: 1 for key in features}
-        specs.append(
-            types.SimpleNamespace(
-                row_id="holdout",
-                workload_family="holdout-family",
-                split="holdout",
-                expected_raw_gas_by_key=holdout_raw,
-                expected_features=holdout_q,
-            )
+        holdout_spec = types.SimpleNamespace(
+            row_id="holdout",
+            workload_family="holdout-family",
+            split="holdout",
+            block_count=1,
+            transaction_count=1,
+            program=types.SimpleNamespace(kind="empty"),
+            expected_final_state_root="0x" + "2" * 64,
+            expected_raw_gas_by_key=holdout_raw,
+            expected_features=holdout_q,
+            expected_diagnostics={"witness_node_count": 0},
         )
+        specs.append(holdout_spec)
+        holdout_payload = opcode_gas._controlled_block_row_payload(holdout_spec)
         for repeat_index in range(3):
             raw_rows.append(
                 {
-                    "row_id": "holdout",
-                    "workload_family": "holdout-family",
-                    "split": "holdout",
+                    **holdout_payload,
+                    "schema_version": 1,
                     "purpose": "block_calibration",
                     "status": "accepted",
                     "repeat_index": repeat_index,
@@ -1298,11 +1350,22 @@ class CandidateConstructionTests(unittest.TestCase):
                     ),
                     "reported_row_id": "holdout",
                     "observation_row_id": "holdout",
+                    "backend": "sp1",
+                    "mode": "execute",
+                    "sp1_prover": "local",
+                    "primary_api": "ExecutionReport::gas",
                     "sp1_execution_engine": "standard",
+                    "sp1_gas_trace_chunk_threshold": None,
+                    "sp1_gas_trace_chunk_slots": None,
                     "exit_code": 0,
+                    "total_instruction_count": 100,
+                    "public_values": "0x01",
+                    "host_public_output": "0x01",
                     "prover_gas": str(sum(parameters)),
                     "actual_raw_gas_by_key": holdout_raw,
                     "actual_features": holdout_q,
+                    "actual_diagnostics": holdout_spec.expected_diagnostics,
+                    "actual_final_state_root": holdout_spec.expected_final_state_root,
                 }
             )
         dynamic_rows = []
@@ -1367,6 +1430,41 @@ class CandidateConstructionTests(unittest.TestCase):
             opcode_gas.fit_block_calibration_artifact(
                 manifest, affine_model, relation_artifact, tampered_rows
             )
+
+        for field in (
+            "block_count",
+            "prover_gas",
+            "public_values",
+            "actual_diagnostics",
+            "actual_final_state_root",
+            "total_instruction_count",
+            "sp1_gas_trace_chunk_threshold",
+        ):
+            with self.subTest(missing=field):
+                truncated = copy.deepcopy(raw_rows)
+                del truncated[0][field]
+                with self.assertRaisesRegex(ValueError, "schema"):
+                    opcode_gas.fit_block_calibration_artifact(
+                        manifest, affine_model, relation_artifact, truncated
+                    )
+
+        alterations = {
+            "block_count": 2,
+            "prover_gas": "999",
+            "public_values": "0x02",
+            "actual_diagnostics": {"witness_node_count": 1},
+            "actual_final_state_root": "0x" + "f" * 64,
+            "total_instruction_count": 101,
+            "sp1_gas_trace_chunk_threshold": 1,
+        }
+        for field, value in alterations.items():
+            with self.subTest(altered=field):
+                altered = copy.deepcopy(raw_rows)
+                altered[0][field] = value
+                with self.assertRaises(ValueError):
+                    opcode_gas.fit_block_calibration_artifact(
+                        manifest, affine_model, relation_artifact, altered
+                    )
 
     def test_task5_fit_block_calibration_cli_is_executable(self):
         args = opcode_gas.build_parser().parse_args(

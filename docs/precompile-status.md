@@ -11,7 +11,7 @@ It answers three separate questions:
 
 Use this file together with:
 
-- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at rev `6c4d199`, which `Cargo.toml`
+- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at rev `0fb47d9`, which `Cargo.toml`
   pins
 - `guests/risc0/src/crypto.rs`
 - `guests/sp1/src/crypto.rs`
@@ -28,20 +28,14 @@ and every other Taiko fork falls through to `SpecId::SHANGHAI`. The two agree, b
 no callers outside that file: it feeds chain-spec validation and preflight cache identity, not guest
 execution. Editing it does not change what the guest runs.
 
-This document describes `revm-precompile` version `34.0.0`, which is what both guests pin
-(`guests/sp1/Cargo.toml`, `guests/risc0/Cargo.toml`).
+This document describes `revm-precompile` version `41.0.0`, which is what both guests pin
+(`guests/sp1/Cargo.toml`, `guests/risc0/Cargo.toml`) and what the Alethia execution path uses through
+Reth rev `f2eecc65`. Each guest lockfile resolves a single `revm-precompile` copy. The guest-specific
+`install_crypto` calls therefore register hooks into the same `41.0.0` global used by execution.
+The guests are excluded from the root workspace, so they still carry independent lockfiles and the
+root lockfile does not govern them.
 
-A second copy, `revm-precompile 41.0.0`, is also compiled into both guests. It arrives
-unconditionally through `taiko-client-protocol` -> `alethia-reth-chainspec 1.3.0` ->
-`reth-chainspec 2.4.0` -> `alloy-evm` -> `revm 41.0.0`, and it appears in both guest lockfiles.
-The guests are excluded from the root workspace, so they carry their own lockfiles and the root
-lockfile does not govern them. The `41.0.0` copy is linked but sits off the execution path: the
-guest EVM runs `alethia-reth-block` and `alethia-reth-evm` at the pinned revision ->
-`reth-revm 2.0.0` -> `revm 38.0.0` -> `revm-precompile 34.0.0`. That is also the copy
-`install_crypto` registers hooks into, so guest hooks affect only `34.0.0`. The `41.0.0` copy has
-its own `install_crypto` global, which is never populated.
-
-In `34.0.0`, `SHANGHAI` collapses to `PrecompileSpecId::BERLIN` while `OSAKA` maps to
+In `41.0.0`, `SHANGHAI` collapses to `PrecompileSpecId::BERLIN` while `OSAKA` maps to
 `PrecompileSpecId::OSAKA`, composed as:
 
 ```

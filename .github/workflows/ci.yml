@@ -211,6 +211,10 @@ jobs:
           -p raiko2-protocol
           -p raiko2-protocol-shasta
           -p raiko2-guest-common
+          -p raiko2-stateless
+
+      - name: test protocol shasta net feature
+        run: cargo test -p raiko2-protocol-shasta --features net --test net_feature
 
   rust-test-pipeline:
     needs: changes

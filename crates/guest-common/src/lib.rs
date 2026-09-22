@@ -767,6 +767,10 @@ fn shasta_block_env_attributes(
             .header
             .base_fee_per_gas()
             .context("missing base fee per gas in Shasta block header")?,
+        // Taiko currently has no beacon-chain root source. Leave this unset so Alethia derives
+        // the protocol value from the active fork (Some(ZERO) under Unzen) instead of trusting
+        // the host-supplied canonical header.
+        parent_beacon_block_root: None,
     })
 }
 
@@ -1496,6 +1500,137 @@ mod tests {
         err.chain()
             .map(ToString::to_string)
             .any(|message| message.contains(expected))
+    }
+
+    #[test]
+    fn shasta_block_env_attributes_do_not_trust_canonical_beacon_root() {
+        let mut stateless_input = guest_input_with_single_block().witnesses.remove(0);
+        stateless_input.block.header.parent_beacon_block_root = Some(B256::ZERO);
+
+        let attributes = shasta_block_env_attributes(&stateless_input)
+            .expect("complete canonical header should produce block attributes");
+
+        assert_eq!(attributes.parent_beacon_block_root, None);
+    }
+
+    #[test]
+    fn unzen_reconstructed_header_matches_only_canonical_zero_beacon_root() {
+        let chain_spec = taiko_mainnet_chain_spec();
+        let runtime = TaikoRuntime::from_chain_id(chain_spec.chain_id)
+            .expect("mainnet runtime should be available");
+        let l1_header = sample_l1_header(TEST_PARENT_ANCHOR_BLOCK_NUMBER, B256::from([0x66; 32]));
+        let checkpoint = AnchorV4Checkpoint {
+            blockNumber: l1_header.number.try_into().expect("fits in uint48"),
+            blockHash: l1_header.hash_slow(),
+            stateRoot: l1_header.state_root,
+        };
+        let mut anchor_template = unsigned_anchor_tx(&checkpoint, test_anchor_address());
+        anchor_template.gas_limit = 250_000;
+        anchor_template.max_fee_per_gas = 25_000_000;
+        let anchor_signature = canonical_golden_touch_signature(&anchor_template);
+        let anchor_tx: reth_ethereum_primitives::TransactionSigned =
+            anchor_template.into_signed(anchor_signature).into();
+        let anchor_signer = anchor_tx
+            .recover_signer()
+            .expect("canonical anchor signature should recover");
+
+        let mut trie = Trie::default();
+        trie.insert(
+            keccak256(anchor_signer),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::MAX,
+                storage_root: keccak256([0x80]),
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
+        let parent_header = alloy_consensus::Header {
+            number: 0,
+            timestamp: u64::MAX / 2 - 1,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(25_000_000),
+            state_root: trie.hash_slow(),
+            ..Default::default()
+        };
+        let parent_witness_header = WitnessHeader::from_header(parent_header.clone());
+        let witness = ExecutionWitness {
+            state: trie
+                .rlp_nodes()
+                .into_iter()
+                .map(WitnessStateNode::from_bytes)
+                .collect(),
+            headers: vec![parent_witness_header.clone()],
+            ..Default::default()
+        };
+        let mut stateless_input = StatelessInput {
+            chain_spec,
+            witness,
+            ..Default::default()
+        };
+        stateless_input.block.header.number = 1;
+        stateless_input.block.header.timestamp = u64::MAX / 2;
+        stateless_input.block.header.parent_hash = parent_header.hash_slow();
+        stateless_input.block.header.gas_limit = 30_000_000;
+        stateless_input.block.header.base_fee_per_gas = Some(25_000_000);
+        stateless_input.block.header.extra_data = encode_extra_data(0, 1);
+        stateless_input.block.body.transactions = vec![anchor_tx];
+
+        let reconstruct = |input: &StatelessInput| -> anyhow::Result<_> {
+            let anchor_tx = input
+                .block
+                .body
+                .transactions()
+                .next()
+                .cloned()
+                .context("missing canonical anchor transaction")?
+                .try_into_recovered()
+                .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
+            let outcome = reconstruct_block_from_transactions_with_witness_resources(
+                anchor_tx,
+                Vec::new(),
+                shasta_block_env_attributes(input)?,
+                &input.witness,
+                &[parent_witness_header.clone()],
+                &[],
+                &runtime.chain_spec,
+                &runtime.evm_config,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            let generated = outcome.filtered_block.into_block();
+            validate_generated_block_matches_canonical(&generated, &input.block)?;
+            Ok(generated)
+        };
+
+        let anchor_tx = stateless_input.block.body.transactions[0]
+            .clone()
+            .try_into_recovered()
+            .expect("canonical anchor transaction should recover");
+        let honest = reconstruct_block_from_transactions_with_witness_resources(
+            anchor_tx,
+            Vec::new(),
+            shasta_block_env_attributes(&stateless_input).expect("complete block attributes"),
+            &stateless_input.witness,
+            &[parent_witness_header.clone()],
+            &[],
+            &runtime.chain_spec,
+            &runtime.evm_config,
+        )
+        .expect("Unzen reconstruction should succeed")
+        .filtered_block
+        .into_block();
+        assert_eq!(honest.header.parent_beacon_block_root, Some(B256::ZERO));
+
+        stateless_input.block = honest;
+        reconstruct(&stateless_input)
+            .expect("canonical Unzen zero root should match reconstruction");
+
+        stateless_input.block.header.parent_beacon_block_root = Some(B256::repeat_byte(0x42));
+        reconstruct(&stateless_input)
+            .expect_err("forged non-zero root must not match reconstruction");
+
+        stateless_input.block.header.parent_beacon_block_root = None;
+        reconstruct(&stateless_input)
+            .expect_err("missing Unzen root must not match reconstruction");
     }
 
     #[test]

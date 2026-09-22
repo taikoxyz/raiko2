@@ -1433,11 +1433,12 @@ Operator notes:
   `184,320` mcycles—roughly 205 times the five-child quote—even though the largest historical
   observation has five children. That older cohort measured about 175 mcycles at one child and
   817-818 at five: 900 mcycles is 10.02-10.16% high at five, and extrapolating the observed trend
-  approaches roughly 12% overquote at larger counts. The shipped aggregation guest has not been
-  measured successfully. Its artifact ELF SHA-256 is
+  approaches roughly 12% overquote at larger counts. The aggregation guest recorded by the model
+  artifact has not been measured successfully. Its recorded ELF SHA-256 is
   `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
   `disable-dev-mode` build rejects the development-receipt probe and the artifact image ID is null;
-  its actual error direction is unknown. With the committed scalar and v4 limit,
+  the current checked-in aggregation guest no longer hashes to that value. Its actual error
+  direction is unknown. With the committed scalar and v4 limit,
   multiplication/conversion overflow cannot occur. A configured
   `mcycles_offset` addition can still overflow and use the generic local-evaluation fallback, but at
   the documented aggregation offset of zero valid input has no estimate-unavailable local
@@ -1462,9 +1463,9 @@ Operator notes:
   owner decides whether a new guest/runtime remains compatible: retain `estimated` only after that
   review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
 - The committed artifact pins proposal ELF SHA-256
-  `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the proposal
-  guest rebuilt by raiko2 #242; the shipped `crates/guests/elf/risc0_shasta_proposal.elf` no longer
-  hashes to that value. The calibration therefore describes a guest that is not the one being
+  `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the current
+  checked-in proposal guest; `crates/guests/elf/risc0_shasta_proposal.elf` no longer hashes to that
+  value. The calibration therefore describes a guest that is not the one being
   proved. This release-pairing drift is known and explicitly accepted for quote-price and timeout
   sizing when the release selects `estimated`; it does not affect proof validity. Select
   `evaluated` instead when the running guest's exact local cycle count is required.

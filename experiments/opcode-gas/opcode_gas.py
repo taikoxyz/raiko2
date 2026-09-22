@@ -16,11 +16,32 @@ import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal, InvalidOperation, getcontext
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
+from calibration_model import RelationEquation, derive_affine_opcode_model
 
-getcontext().prec = 50
+
+getcontext().prec = 80
+
+
+FORMAL_RELATION_PURPOSE = "formal_opcode_relation"
+FORMAL_RELATION_SIGNAL_KIND = "signed_raw_gas_relation"
+OPCODE_RELATION_ANCHORS = (
+    "opcode:0x50",
+    "opcode:0x5f",
+    "opcode:0x80",
+    "opcode:0x90",
+)
+DYNAMIC_RAW_GAS_KEYS = (
+    "opcode:0x0a",
+    "opcode:0x20",
+    "opcode:0x51",
+    "opcode:0x52",
+    "opcode:0x53",
+    "opcode:0x5e",
+)
 
 
 @dataclass(frozen=True)
@@ -81,6 +102,20 @@ class OverheadKeySpec:
 
 
 @dataclass(frozen=True)
+class OpcodeRelationSpec:
+    id: str
+    case_id: str
+    key_id: str
+    split: str
+    scenario_id: str
+    scenario: Mapping[str, int | str]
+    target_raw_gas_by_key: Mapping[str, int]
+    control_raw_gas_by_key: Mapping[str, int]
+    signed_raw_gas_by_key: Mapping[str, int]
+    dynamic_key: str | None = None
+
+
+@dataclass(frozen=True)
 class Manifest:
     name: str
     backend: str
@@ -98,6 +133,9 @@ class Manifest:
     overhead_cases: tuple[OverheadCaseSpec, ...] = ()
     q_formula: tuple[str, ...] = ()
     subtract_closure: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    opcode_relation_anchors: tuple[str, ...] = ()
+    dynamic_raw_gas_keys: tuple[str, ...] = ()
+    opcode_relations: tuple[OpcodeRelationSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1061,10 @@ def parse_controlled_manifest(
     if controlled_threshold != Decimal("0.10") or proposal_threshold != Decimal("0.10"):
         raise ValueError("bridge thresholds must equal exactly 0.10")
 
+    relation_anchors, dynamic_raw_gas_keys, opcode_relations = (
+        _parse_opcode_relations(data, cases)
+    )
+
     return Manifest(
         name=str(data["name"]),
         backend=str(data.get("backend", "sp1")),
@@ -1040,6 +1082,9 @@ def parse_controlled_manifest(
         overhead_cases=tuple(overhead_cases),
         q_formula=q_formula,
         subtract_closure=MappingProxyType(subtract_closure),
+        opcode_relation_anchors=relation_anchors,
+        dynamic_raw_gas_keys=dynamic_raw_gas_keys,
+        opcode_relations=opcode_relations,
     )
 
 
@@ -1643,6 +1688,266 @@ def matched_control_spec(
     )
 
 
+def _memory_cost(words: int) -> int:
+    if words < 0:
+        raise ValueError("memory word count must be nonnegative")
+    return 3 * words + words * words // 512
+
+
+def _dynamic_relation_target_raw_gas(
+    case: CaseSpec, scenario: Mapping[str, Any]
+) -> int:
+    """Return the frozen actual target-op raw gas for a formal scenario."""
+    initial_words = scenario.get("initial_memory_words", 0)
+    if isinstance(initial_words, bool) or not isinstance(initial_words, int) or initial_words < 0:
+        raise ValueError("dynamic relation initial_memory_words must be nonnegative")
+    if case.template == "stack_exp":
+        byte_length = scenario.get("exponent_byte_length")
+        if byte_length not in {1, 8, 32}:
+            raise ValueError("EXP relation requires exponent byte length 1, 8, or 32")
+        return 10 + 50 * int(byte_length)
+    if case.template == "keccak_32":
+        length = scenario.get("input_length")
+        if length not in {32, 256, 1024}:
+            raise ValueError("KECCAK256 relation requires input length 32, 256, or 1024")
+        words = (int(length) + 31) // 32
+        return 30 + 6 * words + max(0, _memory_cost(words) - _memory_cost(initial_words))
+    if case.template in {"memory_load_32", "memory_store_32", "memory_store8"}:
+        offset = scenario.get("highest_touched_offset")
+        if offset not in {0, 0x0100, 0x1000}:
+            raise ValueError("memory relation requires offset 0x00, 0x0100, or 0x1000")
+        touched = int(offset) + (1 if case.template == "memory_store8" else 32)
+        words = (touched + 31) // 32
+        return 3 + max(0, _memory_cost(words) - _memory_cost(initial_words))
+    if case.template == "memory_copy_32":
+        length = scenario.get("copy_length")
+        if length not in {32, 256, 1024}:
+            raise ValueError("MCOPY relation requires copy length 32, 256, or 1024")
+        words = (int(length) + 31) // 32
+        return 3 + 3 * words + max(
+            0, _memory_cost(words) - _memory_cost(initial_words)
+        )
+    raise ValueError(f"unmarked dynamic raw-gas template: {case.template}")
+
+
+def relation_matched_control_spec(
+    case: CaseSpec, scenario: Mapping[str, Any] | None = None
+) -> MatchedControlSpec:
+    """Reuse the matched-control contract with frozen formal dynamic operands."""
+    if case.opcode == POP_OPCODE:
+        return MatchedControlSpec(
+            reference_opcode=POP_OPCODE,
+            reference_raw_gas=POP_RAW_GAS,
+            relation="POP-POP",
+            final_stack_height=0,
+            operands=(1,),
+            setup=_fixed_push(1, target_opcode=case.opcode),
+        )
+    if case.opcode == NOT_OPCODE:
+        reference_program = bytes([POP_OPCODE, PUSH0_OPCODE])
+        return MatchedControlSpec(
+            reference_opcode=POP_OPCODE,
+            reference_raw_gas=POP_RAW_GAS,
+            relation="NOT-(POP+PUSH0)",
+            final_stack_height=1,
+            operands=(1,),
+            setup=_fixed_push(1, target_opcode=case.opcode),
+            target_program=bytes([NOT_OPCODE]),
+            reference_program=reference_program,
+            reference_opcode_counts=tuple(sorted(count_opcodes(reference_program).items())),
+            reference_raw_gas_total=POP_RAW_GAS + PUSH0_RAW_GAS,
+            common_suffix=b"\x00",
+            target_post_suffix_padding=reference_program,
+            control_post_suffix_padding=bytes([NOT_OPCODE]),
+        )
+    base = matched_control_spec(case)
+    if not scenario:
+        return base
+    if case.template == "stack_exp":
+        byte_length = int(scenario["exponent_byte_length"])
+        exponent = 1 << (8 * (byte_length - 1))
+        operands = (2, exponent)
+        setup = b"".join(_fixed_push(value, target_opcode=case.opcode or 0) for value in operands)
+    elif case.template == "keccak_32":
+        operands = (int(scenario["input_length"]), 0)
+        setup = _fixed_memory_warmup(case) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        )
+    elif case.template == "memory_load_32":
+        operands = (int(scenario["highest_touched_offset"]),)
+        setup = _fixed_memory_warmup(case) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        )
+    elif case.template in {"memory_store_32", "memory_store8"}:
+        operands = (1, int(scenario["highest_touched_offset"]))
+        setup = _fixed_memory_warmup(case) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        )
+    elif case.template == "memory_copy_32":
+        operands = (int(scenario["copy_length"]), 0, 0)
+        setup = _fixed_memory_warmup(case) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        )
+    else:
+        raise ValueError(f"unmarked dynamic raw-gas template: {case.template}")
+    return replace(base, operands=operands, setup=setup)
+
+
+def _opcode_relation_maps(
+    case: CaseSpec, spec: MatchedControlSpec, target_raw_gas: int
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    assert case.opcode is not None
+    target = {f"opcode:0x{case.opcode:02x}": target_raw_gas}
+    if spec.compound:
+        control = {
+            f"opcode:0x{opcode:02x}": PURE_OPCODE_DEFAULTS[opcode][2] * count
+            for opcode, count in spec.reference_opcode_counts
+        }
+    else:
+        control = {
+            f"opcode:0x{spec.reference_opcode:02x}": spec.reference_raw_gas
+        }
+    signed = {
+        key: target.get(key, 0) - control.get(key, 0)
+        for key in target.keys() | control.keys()
+        if target.get(key, 0) != control.get(key, 0)
+    }
+    return target, control, signed
+
+
+def _parse_opcode_relations(
+    data: Mapping[str, Any], cases: list[CaseSpec]
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[OpcodeRelationSpec, ...]]:
+    anchors = tuple(data.get("opcode_relation_anchors", ()))
+    if anchors != OPCODE_RELATION_ANCHORS:
+        raise ValueError("opcode relation anchors must match the canonical ordered anchors")
+    dynamic_keys = tuple(data.get("dynamic_raw_gas_keys", ()))
+    if dynamic_keys != DYNAMIC_RAW_GAS_KEYS:
+        raise ValueError("dynamic raw-gas keys must match the canonical ordered keys")
+
+    all_opcode_cases = {
+        f"opcode:0x{case.opcode:02x}": case
+        for case in cases
+        if case.kind == "opcode" and case.opcode is not None
+    }
+    dynamic_templates = {
+        "stack_exp",
+        "keccak_32",
+        "memory_load_32",
+        "memory_store_32",
+        "memory_store8",
+        "memory_copy_32",
+    }
+    for key, case in all_opcode_cases.items():
+        if case.template in dynamic_templates and key not in dynamic_keys:
+            raise ValueError(f"unmarked dynamic raw-gas template: {case.template}")
+    opcode_cases = {
+        key: case
+        for key, case in all_opcode_cases.items()
+        if case.opcode in PURE_OPCODE_DEFAULTS
+        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
+    }
+
+    raw_scenarios = data.get("opcode_relation_scenarios", [])
+    if not isinstance(raw_scenarios, list):
+        raise ValueError("opcode relation scenarios must be a list")
+    explicit_by_key: dict[str, list[OpcodeRelationSpec]] = {}
+    relation_ids: set[str] = set()
+    for item in raw_scenarios:
+        if not isinstance(item, Mapping):
+            raise ValueError("opcode relation scenario must be an object")
+        relation_id = item.get("id")
+        if not isinstance(relation_id, str) or not relation_id:
+            raise ValueError("opcode relation ID must be nonempty")
+        if relation_id in relation_ids:
+            raise ValueError(f"duplicate relation ID: {relation_id}")
+        relation_ids.add(relation_id)
+        key_id = item.get("key_id")
+        case_id = item.get("case_id")
+        case = opcode_cases.get(str(key_id))
+        if case is None or case.name != case_id or key_id not in dynamic_keys:
+            raise ValueError("dynamic relation key/case identity is invalid")
+        split = item.get("split")
+        if split not in {"canonical", "dynamic_holdout"}:
+            raise ValueError("dynamic relation split is invalid")
+        scenario = item.get("scenario")
+        if not isinstance(scenario, Mapping):
+            raise ValueError("dynamic relation scenario parameters are missing")
+        scenario = MappingProxyType(dict(scenario))
+        target_raw_gas = _dynamic_relation_target_raw_gas(case, scenario)
+        if item.get("target_raw_gas") != target_raw_gas:
+            raise ValueError("relation target raw-gas total differs from fixture contract")
+        matched = relation_matched_control_spec(case, scenario)
+        expected_reference = (
+            matched.reference_raw_gas_total
+            if matched.compound
+            else matched.reference_raw_gas
+        )
+        if item.get("reference_raw_gas_total") != expected_reference:
+            raise ValueError("relation reference raw-gas total differs from fixture contract")
+        target, control, signed = _opcode_relation_maps(case, matched, target_raw_gas)
+        relation = OpcodeRelationSpec(
+            id=relation_id,
+            case_id=case.name,
+            key_id=str(key_id),
+            split=str(split),
+            scenario_id=str(item.get("scenario_id")),
+            scenario=scenario,
+            target_raw_gas_by_key=MappingProxyType(target),
+            control_raw_gas_by_key=MappingProxyType(control),
+            signed_raw_gas_by_key=MappingProxyType(signed),
+            dynamic_key=str(key_id),
+        )
+        explicit_by_key.setdefault(str(key_id), []).append(relation)
+
+    expected_dynamic = set(dynamic_keys) & set(opcode_cases)
+    if set(explicit_by_key) != expected_dynamic:
+        missing = sorted(expected_dynamic - set(explicit_by_key))
+        raise ValueError(f"dynamic relation scenarios are missing: {missing!r}")
+    for key, relations in explicit_by_key.items():
+        if [relation.split for relation in relations] != [
+            "canonical",
+            "dynamic_holdout",
+            "dynamic_holdout",
+        ]:
+            raise ValueError(f"dynamic relation {key} must have one canonical and two holdouts")
+        if len({relation.scenario_id for relation in relations}) != 3:
+            raise ValueError(f"dynamic relation {key} has duplicate scenario IDs")
+        totals = [relation.target_raw_gas_by_key[key] for relation in relations]
+        if not (0 < totals[0] < totals[1] < totals[2]):
+            raise ValueError(f"dynamic relation {key} raw-gas totals are not distinct positive")
+        if totals[1] < 2 * totals[0] or totals[2] < 4 * totals[0]:
+            raise ValueError(f"dynamic relation {key} fails the 1x/2x/4x raw-gas range")
+
+    relations: list[OpcodeRelationSpec] = []
+    for key, case in opcode_cases.items():
+        if key in explicit_by_key:
+            relations.extend(explicit_by_key[key])
+            continue
+        matched = relation_matched_control_spec(case)
+        target, control, signed = _opcode_relation_maps(
+            case, matched, case.target_raw_gas
+        )
+        relation_id = f"{key}:canonical"
+        if relation_id in relation_ids:
+            raise ValueError(f"duplicate relation ID: {relation_id}")
+        relation_ids.add(relation_id)
+        relations.append(
+            OpcodeRelationSpec(
+                id=relation_id,
+                case_id=case.name,
+                key_id=key,
+                split="canonical",
+                scenario_id="canonical",
+                scenario=MappingProxyType({}),
+                target_raw_gas_by_key=MappingProxyType(target),
+                control_raw_gas_by_key=MappingProxyType(control),
+                signed_raw_gas_by_key=MappingProxyType(signed),
+            )
+        )
+    return anchors, dynamic_keys, tuple(relations)
+
+
 def _matched_control_slot(
     case: CaseSpec, *, execute_target: bool, operand_profile: str = "zero"
 ) -> bytes:
@@ -1799,6 +2104,55 @@ def build_matched_control_bytecode(
     return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
 
 
+def build_relation_bytecode(
+    case: CaseSpec,
+    relation: OpcodeRelationSpec,
+    relation_count: int,
+    generator_max_count: int,
+    *,
+    lane: str,
+) -> GeneratedBytecode:
+    spec = relation_matched_control_spec(case, relation.scenario)
+    if relation_count < 0 or relation_count > generator_max_count:
+        raise ValueError("relation count exceeds generator_max_count")
+    if lane not in {"target", "control"}:
+        raise ValueError("formal relation lane must be target or control")
+
+    def slot(execute_target: bool) -> bytes:
+        if spec.compound:
+            if execute_target:
+                return (
+                    spec.setup
+                    + spec.target_program
+                    + spec.target_pre_suffix_padding
+                    + spec.common_suffix
+                    + spec.target_post_suffix_padding
+                )
+            return (
+                spec.setup
+                + spec.reference_program
+                + spec.control_pre_suffix_padding
+                + spec.common_suffix
+                + spec.control_post_suffix_padding
+            )
+        opcode = case.opcode if execute_target else spec.reference_opcode
+        assert opcode is not None
+        return spec.setup + bytes([opcode, 0x00])
+
+    programs = [
+        slot(lane == "target" and index < relation_count)
+        for index in range(generator_max_count)
+    ]
+    if len({len(program) for program in programs}) > 1:
+        raise AssertionError("formal relation microprogram slots must have one byte length")
+    encoded = encode_fixed_microprograms(programs)
+    counts: dict[int, int] = {}
+    for program in programs:
+        for opcode, count in count_opcodes(program).items():
+            counts[opcode] = counts.get(opcode, 0) + count
+    return GeneratedBytecode(bytes_hex=encoded.hex(), opcode_counts=counts)
+
+
 def matched_control_operands(
     case: CaseSpec, operand_profile: str = "zero"
 ) -> list[int]:
@@ -1832,6 +2186,17 @@ MATCHED_CONTROL_COMMON_FIELDS = MATCHED_CONTROL_WORKLOAD_FIELDS + (
     "controlled_manifest_rows_sha256",
 )
 
+FORMAL_RELATION_FIELDS = (
+    "relation_id",
+    "relation_split",
+    "scenario_id",
+    "relation_scenario",
+    "dynamic_key",
+    "target_raw_gas_by_key",
+    "control_raw_gas_by_key",
+    "signed_raw_gas_by_key",
+)
+
 
 def _matched_control_pair_spec(
     target: Mapping[str, Any], control: Mapping[str, Any]
@@ -1839,12 +2204,24 @@ def _matched_control_pair_spec(
     for field_name in MATCHED_CONTROL_COMMON_FIELDS:
         if target.get(field_name) != control.get(field_name):
             raise ValueError(f"matched-control {field_name} mismatch")
-    if target.get("purpose") != MATCHED_CONTROL_PURPOSE:
+    purpose = target.get("purpose")
+    if purpose not in {MATCHED_CONTROL_PURPOSE, FORMAL_RELATION_PURPOSE}:
         raise ValueError("matched-control purpose is invalid")
-    if target.get("diagnostic_only") is not True:
-        raise ValueError("matched-control fixture must be diagnostic_only")
-    if target.get("signal_kind") != "contextual_relative":
-        raise ValueError("matched-control signal must be contextual relative")
+    expected_diagnostic = purpose == MATCHED_CONTROL_PURPOSE
+    expected_signal = (
+        "contextual_relative"
+        if expected_diagnostic
+        else FORMAL_RELATION_SIGNAL_KIND
+    )
+    if target.get("diagnostic_only") is not expected_diagnostic:
+        raise ValueError("matched-control fixture purpose flag is invalid")
+    if target.get("signal_kind") != expected_signal:
+        raise ValueError("matched-control signal kind is invalid")
+    for field_name in FORMAL_RELATION_FIELDS:
+        if target.get(field_name) != control.get(field_name):
+            raise ValueError(f"matched-control {field_name} mismatch")
+    if expected_diagnostic and any(field in target or field in control for field in FORMAL_RELATION_FIELDS):
+        raise ValueError("diagnostic matched-control fixture contains formal relation fields")
     template = target.get("template")
     diagnostic_count = target.get("diagnostic_count")
     generator_max_count = target.get("generator_max_count")
@@ -1896,7 +2273,14 @@ def _matched_control_pair_spec(
     operand_profile = target.get("operand_profile")
     if not isinstance(operand_profile, str):
         raise ValueError("matched-control operand profile is invalid")
-    spec = matched_control_spec(reconstructed_case, operand_profile)
+    relation_scenario = target.get("relation_scenario", {})
+    if not isinstance(relation_scenario, Mapping):
+        raise ValueError("formal relation scenario is invalid")
+    spec = (
+        relation_matched_control_spec(reconstructed_case, relation_scenario)
+        if purpose == FORMAL_RELATION_PURPOSE
+        else matched_control_spec(reconstructed_case, operand_profile)
+    )
     if target.get("relation") != spec.relation:
         raise ValueError("matched-control relation/template mismatch")
     if target.get("final_stack_height") != spec.final_stack_height:
@@ -1918,20 +2302,60 @@ def _matched_control_pair_spec(
         or control.get("target_raw_gas") != spec.reference_raw_gas
     ):
         raise ValueError("matched-control control declaration is invalid")
-    expected_target = build_matched_control_bytecode(
-        reconstructed_case,
-        diagnostic_count,
-        generator_max_count,
-        lane="target",
-        operand_profile=operand_profile,
-    )
-    expected_control = build_matched_control_bytecode(
-        reconstructed_case,
-        diagnostic_count,
-        generator_max_count,
-        lane="control",
-        operand_profile=operand_profile,
-    )
+    if purpose == FORMAL_RELATION_PURPOSE:
+        target_map = _parse_canonical_int_map(
+            target.get("target_raw_gas_by_key"), label="target raw-gas map"
+        )
+        control_map = _parse_canonical_int_map(
+            target.get("control_raw_gas_by_key"), label="control raw-gas map"
+        )
+        signed_map = _parse_canonical_int_map(
+            target.get("signed_raw_gas_by_key"),
+            label="signed raw-gas map",
+            allow_negative=True,
+        )
+        expected_target_map, expected_control_map, expected_signed_map = (
+            _opcode_relation_maps(reconstructed_case, spec, target_raw_gas)
+        )
+        if target_map != expected_target_map:
+            raise ValueError("formal relation target raw-gas map differs from executed program")
+        if control_map != expected_control_map:
+            raise ValueError("formal relation control raw-gas map differs from executed program")
+        if signed_map != expected_signed_map:
+            raise ValueError("formal relation signed raw-gas map differs from executed programs")
+        relation_spec = OpcodeRelationSpec(
+            id=str(target.get("relation_id")),
+            case_id=reconstructed_case.name,
+            key_id=f"opcode:0x{original_opcode:02x}",
+            split=str(target.get("relation_split")),
+            scenario_id=str(target.get("scenario_id")),
+            scenario=MappingProxyType(dict(relation_scenario)),
+            target_raw_gas_by_key=MappingProxyType(target_map),
+            control_raw_gas_by_key=MappingProxyType(control_map),
+            signed_raw_gas_by_key=MappingProxyType(signed_map),
+            dynamic_key=target.get("dynamic_key"),
+        )
+        expected_target = build_relation_bytecode(
+            reconstructed_case, relation_spec, diagnostic_count, generator_max_count, lane="target"
+        )
+        expected_control = build_relation_bytecode(
+            reconstructed_case, relation_spec, diagnostic_count, generator_max_count, lane="control"
+        )
+    else:
+        expected_target = build_matched_control_bytecode(
+            reconstructed_case,
+            diagnostic_count,
+            generator_max_count,
+            lane="target",
+            operand_profile=operand_profile,
+        )
+        expected_control = build_matched_control_bytecode(
+            reconstructed_case,
+            diagnostic_count,
+            generator_max_count,
+            lane="control",
+            operand_profile=operand_profile,
+        )
     if target["bytecode"] != "0x" + expected_target.bytes_hex or control[
         "bytecode"
     ] != "0x" + expected_control.bytes_hex:
@@ -1956,10 +2380,12 @@ def _matched_control_pair_spec(
         field_name: target[field_name]
         for field_name in MATCHED_CONTROL_WORKLOAD_FIELDS
     }
+    if purpose == FORMAL_RELATION_PURPOSE:
+        workload.update({field_name: target[field_name] for field_name in FORMAL_RELATION_FIELDS})
     workload.update(compound_metadata)
-    return {
+    pair_spec = {
         "schema_version": 1,
-        "purpose": MATCHED_CONTROL_PURPOSE,
+        "purpose": purpose,
         "calibration_execution_identity": {
             field_name: target[field_name]
             for field_name in (
@@ -1982,6 +2408,7 @@ def _matched_control_pair_spec(
             for lane, row in (("target", target), ("control", control))
         },
     }
+    return pair_spec
 
 
 def matched_control_pair_id(
@@ -1997,6 +2424,7 @@ def matched_control_pair_id(
 def validate_matched_control_fixture_pairs(
     rows: Iterable[Mapping[str, Any]],
     *,
+    expected_purpose: str | None = None,
     calibration_execution_identity: Mapping[str, Any] | None = None,
     guest_inputs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]]:
@@ -2005,6 +2433,7 @@ def validate_matched_control_fixture_pairs(
         key = (
             row.get("suite"),
             row.get("original_case"),
+            row.get("relation_id"),
             row.get("diagnostic_count"),
             row.get("generator_max_count"),
         )
@@ -2022,6 +2451,8 @@ def validate_matched_control_fixture_pairs(
             raise ValueError("matched-control pair requires exactly one target and one control")
         target = next(row for row in grouped_rows if row["lane"] == "target")
         control = next(row for row in grouped_rows if row["lane"] == "control")
+        if expected_purpose is not None and target.get("purpose") != expected_purpose:
+            raise ValueError(f"matched-control fixture purpose must be {expected_purpose}")
         pair_ids = {target.get("pair_id"), control.get("pair_id")}
         if len(pair_ids) != 1 or not _is_sha256(next(iter(pair_ids))):
             raise ValueError("matched-control pair_id mismatch")
@@ -2821,6 +3252,152 @@ def generate_cases(
     return written
 
 
+def generate_relation_cases(
+    manifest: Manifest,
+    out_dir: pathlib.Path,
+    *,
+    provenance: Mapping[str, Any],
+    generator_max_count: int = 8,
+) -> list[pathlib.Path]:
+    """Generate the formal matched-control relation campaign without changing diagnostics."""
+    if generator_max_count not in OUT_OF_FIT_CHECKPOINTS.values():
+        raise ValueError("formal relation generator bound must be a frozen checkpoint")
+    required_provenance = {
+        "calibration_id",
+        "calibration_identity_sha256",
+        "implementation_revision",
+        "controlled_manifest_sha256",
+        "controlled_manifest_rows_sha256",
+    }
+    if not required_provenance.issubset(provenance):
+        raise ValueError("formal relation generation requires calibration identity")
+    cases = {case.name: case for case in manifest.cases}
+    written: list[pathlib.Path] = []
+    for relation in manifest.opcode_relations:
+        case = cases[relation.case_id]
+        if case.opcode is None:
+            raise ValueError("formal opcode relation requires an opcode case")
+        spec = relation_matched_control_spec(case, relation.scenario)
+        target_raw_gas = relation.target_raw_gas_by_key[relation.key_id]
+        relation_case = replace(case, target_raw_gas=target_raw_gas)
+        for count in manifest.variants:
+            if count > generator_max_count:
+                continue
+            case_dir = (
+                out_dir
+                / manifest.name
+                / relation.id.replace(":", "-")
+                / f"count-{count}"
+            )
+            target = build_relation_bytecode(
+                relation_case, relation, count, generator_max_count, lane="target"
+            )
+            control = build_relation_bytecode(
+                relation_case, relation, count, generator_max_count, lane="control"
+            )
+            target_len = len(bytes.fromhex(target.bytes_hex))
+            if len(bytes.fromhex(control.bytes_hex)) != target_len:
+                raise AssertionError("formal relation bytecode footprints differ")
+            control_total = sum(relation.control_raw_gas_by_key.values())
+            tx_gas_limit = 1_000_000 + generator_max_count * max(
+                target_raw_gas, control_total
+            )
+            lane_artifacts = []
+            for lane, generated in (("target", target), ("control", control)):
+                if lane == "target":
+                    declared_opcode = case.opcode
+                    declared_count = _matched_control_declared_target_count(
+                        relation_case, spec, count, generator_max_count
+                    )
+                    declared_raw_gas = target_raw_gas
+                else:
+                    declared_opcode = spec.reference_opcode
+                    declared_count = _matched_control_declared_control_count(
+                        spec, generator_max_count
+                    )
+                    declared_raw_gas = spec.reference_raw_gas
+                lane_case = f"{case.name}__relation_{lane}"
+                payload = {
+                    "suite": manifest.name,
+                    "backend": manifest.backend,
+                    "kind": "opcode",
+                    "purpose": FORMAL_RELATION_PURPOSE,
+                    "diagnostic_only": False,
+                    "case": lane_case,
+                    "original_case": case.name,
+                    "original_opcode": f"0x{case.opcode:02x}",
+                    "opcode": f"0x{declared_opcode:02x}",
+                    "scenario": case.scenario,
+                    "operand_profile": "zero",
+                    "operands": list(spec.operands),
+                    "template": case.template,
+                    "lane": lane,
+                    "relation": spec.relation,
+                    "signal_kind": FORMAL_RELATION_SIGNAL_KIND,
+                    "diagnostic_count": count,
+                    "final_stack_height": spec.final_stack_height,
+                    "target_count": declared_count,
+                    "target_raw_gas": declared_raw_gas,
+                    "bytecode": "0x" + generated.bytes_hex,
+                    "opcode_counts": {
+                        f"0x{opcode:02x}": opcode_count
+                        for opcode, opcode_count in sorted(generated.opcode_counts.items())
+                    },
+                    "generator_max_count": generator_max_count,
+                    "fixed_bytecode_len": target_len,
+                    "tx_gas_limit": tx_gas_limit,
+                    "guest_input_status": "opcode_lab_guest_input",
+                    "relation_id": relation.id,
+                    "relation_split": relation.split,
+                    "scenario_id": relation.scenario_id,
+                    "relation_scenario": dict(relation.scenario),
+                    "dynamic_key": relation.dynamic_key,
+                    "target_raw_gas_by_key": {
+                        key: str(value)
+                        for key, value in sorted(relation.target_raw_gas_by_key.items())
+                    },
+                    "control_raw_gas_by_key": {
+                        key: str(value)
+                        for key, value in sorted(relation.control_raw_gas_by_key.items())
+                    },
+                    "signed_raw_gas_by_key": {
+                        key: str(value)
+                        for key, value in sorted(relation.signed_raw_gas_by_key.items())
+                    },
+                    **provenance,
+                }
+                payload.update(_matched_control_compound_metadata(spec))
+                guest_input = {
+                    "case": lane_case,
+                    "scenario": case.scenario,
+                    "opcode": declared_opcode,
+                    "target_count": declared_count,
+                    "target_raw_gas": declared_raw_gas,
+                    "bytecode": "0x" + generated.bytes_hex,
+                    "generator_max_count": generator_max_count,
+                    "fixed_bytecode_len": target_len,
+                    "tx_gas_limit": tx_gas_limit,
+                }
+                guest_input_bytes = (
+                    json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+                ).encode()
+                payload["fixture_sha256"] = sha256_bytes(guest_input_bytes)
+                lane_artifacts.append(
+                    (case_dir / lane, payload, guest_input_bytes)
+                )
+            pair_id = matched_control_pair_id(
+                lane_artifacts[0][1], lane_artifacts[1][1]
+            )
+            for lane_dir, payload, guest_input_bytes in lane_artifacts:
+                lane_dir.mkdir(parents=True, exist_ok=True)
+                payload["pair_id"] = pair_id
+                path = lane_dir / "case.json"
+                path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+                (lane_dir / "guest-input.json").write_bytes(guest_input_bytes)
+                written.append(path)
+    return written
+
+
 def select_matched_control_cases(
     manifest: Manifest, case_ids: Iterable[str]
 ) -> Manifest:
@@ -3017,6 +3594,107 @@ def join_proposal_trace_and_sp1(
     }
 
 
+def _formal_actual_raw_gas_map(
+    case: Mapping[str, Any], trace: Mapping[str, Any]
+) -> dict[str, str]:
+    executed_count = trace.get("executed_target_count")
+    executed_raw_gas = trace.get("executed_target_raw_gas")
+    target_count = case.get("target_count")
+    target_raw_gas = case.get("target_raw_gas")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (executed_count, executed_raw_gas, target_count, target_raw_gas)
+    ):
+        raise ValueError("formal relation trace has invalid executed target raw gas")
+    if executed_count != target_count or executed_raw_gas != target_count * target_raw_gas:
+        raise ValueError("formal relation executed target raw gas differs from fixture units")
+    non_target_counts = trace.get("non_target_counts")
+    non_target_raw_gas = trace.get("non_target_raw_gas")
+    total_raw_gas = trace.get("total_raw_gas")
+    if (
+        not isinstance(non_target_counts, Mapping)
+        or isinstance(non_target_raw_gas, bool)
+        or not isinstance(non_target_raw_gas, int)
+        or non_target_raw_gas < 0
+        or isinstance(total_raw_gas, bool)
+        or not isinstance(total_raw_gas, int)
+        or total_raw_gas != executed_raw_gas + non_target_raw_gas
+    ):
+        raise ValueError("formal relation total raw gas differs from host trace components")
+    target_opcode = parse_opcode(case.get("opcode"))
+    actual: dict[str, int] = {f"opcode:0x{target_opcode:02x}": executed_raw_gas}
+    for raw_key, count in non_target_counts.items():
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("formal relation trace has invalid non-target opcode counts")
+        try:
+            component, opcode = _parse_schedule_key(raw_key)
+        except (TypeError, ValueError):
+            continue
+        if component != "opcode" or opcode not in PURE_OPCODE_DEFAULTS:
+            continue
+        key = f"opcode:0x{opcode:02x}"
+        actual[key] = actual.get(key, 0) + PURE_OPCODE_DEFAULTS[opcode][2] * count
+    if sum(actual.values()) != total_raw_gas:
+        raise ValueError("formal relation non-target raw gas differs from opcode counts")
+    return {key: str(value) for key, value in sorted(actual.items()) if value}
+
+
+def validate_formal_dynamic_raw_gas_preflight(
+    rows: Iterable[Mapping[str, Any]],
+) -> None:
+    """Require executed dynamic scenario totals to span the frozen range before publish."""
+    grouped: dict[str, dict[str, list[Mapping[str, Any]]]] = {}
+    for row in rows:
+        dynamic_key = row.get("dynamic_key")
+        if (
+            row.get("purpose") != FORMAL_RELATION_PURPOSE
+            or dynamic_key is None
+            or row.get("lane") != "target"
+            or row.get("diagnostic_count") != 1
+        ):
+            continue
+        grouped.setdefault(str(dynamic_key), {}).setdefault(
+            str(row.get("relation_id")), []
+        ).append(row)
+    if set(grouped) != set(DYNAMIC_RAW_GAS_KEYS):
+        raise ValueError("formal dynamic raw-gas preflight is incomplete")
+    for key, relations in grouped.items():
+        observations: list[tuple[str, int]] = []
+        if len(relations) != 3:
+            raise ValueError(f"formal dynamic relation {key} must have three scenarios")
+        for relation_rows in relations.values():
+            ordered = sorted(
+                relation_rows, key=lambda row: int(row.get("repeat_index", -1))
+            )
+            if [row.get("repeat_index") for row in ordered] != [0, 1, 2]:
+                raise ValueError("formal dynamic preflight requires exactly three repeats")
+            values = []
+            for row in ordered:
+                trace = row.get("controlled_trace")
+                if not isinstance(trace, Mapping):
+                    raise ValueError("formal dynamic preflight is missing the executed trace")
+                count = trace.get("executed_target_count")
+                total = trace.get("executed_target_raw_gas")
+                if count != 1 or isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+                    raise ValueError("formal dynamic preflight has invalid executed target raw gas")
+                values.append(total)
+            if len(set(values)) != 1:
+                raise ValueError("formal dynamic preflight executed totals are nondeterministic")
+            observations.append((str(ordered[0].get("relation_split")), values[0]))
+        canonical = [total for split, total in observations if split == "canonical"]
+        holdouts = sorted(
+            total for split, total in observations if split == "dynamic_holdout"
+        )
+        if (
+            len(canonical) != 1
+            or len(holdouts) != 2
+            or len({canonical[0], *holdouts}) != 3
+            or holdouts[0] < 2 * canonical[0]
+            or holdouts[1] < 4 * canonical[0]
+        ):
+            raise ValueError(f"formal dynamic relation {key} fails actual 1x/2x/4x preflight")
+
+
 def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     workload_kind = case.get("kind")
     if workload_kind in {"opcode", "precompile"}:
@@ -3053,6 +3731,10 @@ def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[st
             raise ValueError("controlled trace identity is missing a canonical SHA256")
         raw_run["workload_id"] = workload_id
         raw_run["backend_input_sha256"] = backend_input_sha256
+        if case.get("purpose") == FORMAL_RELATION_PURPOSE:
+            raw_run["actual_raw_gas_by_key"] = _formal_actual_raw_gas_map(
+                case, controlled_trace
+            )
         if trace_kind == "precompile":
             raw_run["pair_id"] = controlled_trace["pair_id"]
             raw_run["isolation"] = {
@@ -3552,6 +4234,28 @@ def _decimal_text(value: Decimal) -> str:
     return text
 
 
+def _parse_canonical_int_map(
+    value: Any, *, label: str, allow_negative: bool = False
+) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    parsed: dict[str, int] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or not key.startswith("opcode:0x"):
+            raise ValueError(f"{label} has an invalid opcode key")
+        if not isinstance(raw, str) or raw != str(int(raw)):
+            raise ValueError(f"{label} must use canonical integer strings")
+        number = int(raw)
+        if (allow_negative and number == 0) or (not allow_negative and number <= 0):
+            raise ValueError(f"{label} contains an invalid raw-gas total")
+        parsed[key] = number
+    if not parsed:
+        if allow_negative:
+            return {}
+        raise ValueError(f"{label} must not be empty")
+    return parsed
+
+
 def controlled_workload_id(workload_spec: Mapping[str, Any], **_ignored: Any) -> str:
     return sha256_bytes(
         canonical_json({"kind": "controlled", "workload_spec": workload_spec})
@@ -3924,6 +4628,526 @@ def evaluate_paired_precompile_sweep(
         generator_max_count=generator_max_count,
         require_tx_gas_limit=False,
     )
+
+
+def _signed_relation_fit(
+    counts: Mapping[int, tuple[Decimal, Decimal, Decimal]],
+    *,
+    generator_max_count: int,
+) -> dict[str, Any]:
+    """Fit target-minus-control responses while allowing either slope sign."""
+    last_reasons: list[str] = []
+    for prefix in CONTROLLED_PREFIXES:
+        if max(prefix) > generator_max_count or any(count not in counts for count in prefix):
+            continue
+        xs = [Decimal(count) for count in prefix]
+        ys = [counts[count][2] for count in prefix]
+        n = Decimal(len(xs))
+        mean_x = sum(xs) / n
+        mean_y = sum(ys) / n
+        denominator = sum((value - mean_x) ** 2 for value in xs)
+        slope = sum(
+            (x_value - mean_x) * (y_value - mean_y)
+            for x_value, y_value in zip(xs, ys)
+        ) / denominator
+        intercept = mean_y - slope * mean_x
+        predicted = [intercept + slope * value for value in xs]
+        residuals = [actual - estimate for actual, estimate in zip(ys, predicted)]
+        ss_res = sum(value * value for value in residuals)
+        ss_total = sum((value - mean_y) ** 2 for value in ys)
+        signal = abs(max(ys) - min(ys))
+        baseline = max(abs(counts[0][0]), abs(counts[0][1]))
+        reasons: list[str] = []
+        if slope == 0:
+            reasons.append("signed slope is zero")
+        if signal < max(Decimal(1000), baseline * Decimal("0.01")):
+            reasons.append("signed signal is too small")
+        if ss_total == 0:
+            r2 = Decimal(0)
+            reasons.append("signed R2 gate failed")
+        else:
+            r2 = Decimal(1) - ss_res / ss_total
+            if r2 < Decimal("0.995"):
+                reasons.append("signed R2 gate failed")
+        stderr = (ss_res / Decimal(len(xs) - 2) / denominator).sqrt()
+        if slope == 0 or stderr / abs(slope) > Decimal("0.05"):
+            reasons.append("signed slope stderr gate failed")
+        max_residual = max(abs(value) for value in residuals)
+        if signal == 0 or max_residual / signal > Decimal("0.02"):
+            reasons.append("signed residual gate failed")
+        last_reasons = reasons
+        if reasons:
+            continue
+
+        checkpoint_count = OUT_OF_FIT_CHECKPOINTS[str(max(prefix))]
+        if checkpoint_count > generator_max_count or checkpoint_count not in counts:
+            last_reasons = ["signed checkpoint is missing"]
+            continue
+        observed = counts[checkpoint_count][2] - counts[0][2]
+        predicted_checkpoint = slope * Decimal(checkpoint_count)
+        if (
+            observed == 0
+            or predicted_checkpoint == 0
+            or (observed > 0) != (predicted_checkpoint > 0)
+        ):
+            raise ValueError("formal relation checkpoint sign differs from fitted slope")
+        ape = abs(predicted_checkpoint - observed) / abs(observed)
+        if ape > Decimal("0.10"):
+            raise ValueError("formal relation signed checkpoint APE gate failed")
+        return {
+            "selected_counts": list(prefix),
+            "slope": slope,
+            "intercept": intercept,
+            "r2": r2,
+            "stderr": stderr,
+            "signal": signal,
+            "max_residual": max_residual,
+            "checkpoint": {
+                "count": checkpoint_count,
+                "observed_delta_p": _decimal_text(observed),
+                "predicted_delta_p": _decimal_text(predicted_checkpoint),
+                "ape_p": _decimal_text(ape),
+                "status": "passed",
+            },
+        }
+    raise ValueError(
+        "formal relation quality gate failed: "
+        + ", ".join(last_reasons or ["exhausted signed prefix search"])
+    )
+
+
+def _relation_row_map(row: Mapping[str, Any], field: str) -> dict[str, int]:
+    return _parse_canonical_int_map(
+        row.get(field),
+        label=field.replace("_", " "),
+        allow_negative=field == "signed_raw_gas_by_key",
+    )
+
+
+def _subtract_int_maps(left: Mapping[str, int], right: Mapping[str, int]) -> dict[str, int]:
+    return {
+        key: left.get(key, 0) - right.get(key, 0)
+        for key in left.keys() | right.keys()
+        if left.get(key, 0) != right.get(key, 0)
+    }
+
+
+def _fit_one_opcode_relation(
+    relation: OpcodeRelationSpec,
+    rows: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    expected_target = dict(relation.target_raw_gas_by_key)
+    expected_control = dict(relation.control_raw_gas_by_key)
+    expected_signed = dict(relation.signed_raw_gas_by_key)
+    grouped: dict[tuple[int, str], list[Mapping[str, Any]]] = {}
+    generator_bounds: set[int] = set()
+    for row in rows:
+        if row.get("purpose") != FORMAL_RELATION_PURPOSE:
+            raise ValueError("formal relation fit received a non-formal row")
+        if row.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND:
+            raise ValueError("formal relation row has the wrong signal kind")
+        validate_sp1_execution_provenance(row, workload_kind="opcode")
+        if row.get("relation_split") != relation.split or row.get(
+            "scenario_id"
+        ) != relation.scenario_id or row.get("dynamic_key") != relation.dynamic_key:
+            raise ValueError("formal relation row differs from manifest scenario identity")
+        if _relation_row_map(row, "target_raw_gas_by_key") != expected_target:
+            raise ValueError("formal relation target raw-gas units differ from manifest")
+        if _relation_row_map(row, "control_raw_gas_by_key") != expected_control:
+            raise ValueError("formal relation control raw-gas units differ from manifest")
+        if _relation_row_map(row, "signed_raw_gas_by_key") != expected_signed:
+            raise ValueError("formal relation signed raw-gas units differ from manifest")
+        count = row.get("diagnostic_count")
+        repeat_index = row.get("repeat_index")
+        lane = row.get("lane")
+        generator_max = row.get("generator_max_count")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or lane not in {"target", "control"}
+            or isinstance(repeat_index, bool)
+            or not isinstance(repeat_index, int)
+            or isinstance(generator_max, bool)
+            or not isinstance(generator_max, int)
+            or generator_max <= 0
+        ):
+            raise ValueError("formal relation row has invalid count/lane identity")
+        generator_bounds.add(generator_max)
+        grouped.setdefault((count, str(lane)), []).append(row)
+    if len(generator_bounds) != 1:
+        raise ValueError("formal relation rows do not share one generator bound")
+    generator_max_count = next(iter(generator_bounds))
+    counts: dict[int, tuple[Decimal, Decimal, Decimal]] = {}
+    for count in sorted({key[0] for key in grouped}):
+        lanes: dict[str, tuple[Decimal, dict[str, int]]] = {}
+        for lane in ("target", "control"):
+            repeats = sorted(
+                grouped.get((count, lane), []),
+                key=lambda row: int(row.get("repeat_index", -1)),
+            )
+            if [row.get("repeat_index") for row in repeats] != [0, 1, 2]:
+                raise ValueError("formal relation requires exactly three repeats")
+            gas_values = [
+                _decimal(row.get("prover_gas", row.get("gas")), label="formal proverGas")
+                for row in repeats
+            ]
+            if max(gas_values) - min(gas_values) != 0:
+                raise ValueError("formal relation repeat noise is nonzero")
+            for field in ("backend_input_sha256", "public_values", "exit_code"):
+                if len({str(row.get(field)) for row in repeats}) != 1:
+                    raise ValueError("formal relation repeat identity differs")
+            if any(row.get("exit_code") != 0 for row in repeats):
+                raise ValueError("formal relation repeat exit code is nonzero")
+            actual_maps = [
+                _parse_canonical_int_map(
+                    row.get("actual_raw_gas_by_key"), label="actual raw-gas map"
+                )
+                for row in repeats
+            ]
+            if any(actual != actual_maps[0] for actual in actual_maps[1:]):
+                raise ValueError("formal relation repeat actual raw-gas map differs")
+            lanes[lane] = gas_values[0], actual_maps[0]
+        actual_delta = _subtract_int_maps(lanes["target"][1], lanes["control"][1])
+        expected_delta = {
+            key: value * count for key, value in expected_signed.items() if value * count
+        }
+        if actual_delta != expected_delta:
+            raise ValueError("formal relation actual trace has wrong raw-gas units")
+        counts[count] = (
+            lanes["target"][0],
+            lanes["control"][0],
+            lanes["target"][0] - lanes["control"][0],
+        )
+
+    if not expected_signed:
+        if relation.key_id not in OPCODE_RELATION_ANCHORS or any(
+            target != control or delta != 0
+            for target, control, delta in counts.values()
+        ):
+            raise ValueError("formal self-control must have exact zero delta")
+        return {
+            "relation_id": relation.id,
+            "key_id": relation.key_id,
+            "scenario_id": relation.scenario_id,
+            "status": "passed",
+            "exact_zero": True,
+        }
+
+    fit = _signed_relation_fit(counts, generator_max_count=generator_max_count)
+    return {
+        "relation_id": relation.id,
+        "key_id": relation.key_id,
+        "split": relation.split,
+        "scenario_id": relation.scenario_id,
+        "dynamic_key": relation.dynamic_key,
+        "target_raw_gas_by_key": {
+            key: str(value) for key, value in sorted(expected_target.items())
+        },
+        "control_raw_gas_by_key": {
+            key: str(value) for key, value in sorted(expected_control.items())
+        },
+        "signed_raw_gas_by_key": {
+            key: str(value) for key, value in sorted(expected_signed.items())
+        },
+        "slope_p": _decimal_text(fit["slope"]),
+        "intercept_p": _decimal_text(fit["intercept"]),
+        "r2_p": _decimal_text(fit["r2"]),
+        "slope_stderr_p": _decimal_text(fit["stderr"]),
+        "relative_slope_stderr": _decimal_text(fit["stderr"] / abs(fit["slope"])),
+        "signal_p": _decimal_text(fit["signal"]),
+        "max_residual_p": _decimal_text(fit["max_residual"]),
+        "selected_counts": fit["selected_counts"],
+        "checkpoint": fit["checkpoint"],
+        "status": "accepted",
+    }
+
+
+def _fraction_text(value: Fraction) -> str:
+    return (
+        str(value.numerator)
+        if value.denominator == 1
+        else f"{value.numerator}/{value.denominator}"
+    )
+
+
+def _serialize_affine_model(model: Any) -> dict[str, Any]:
+    payload = {
+        "opcode_keys": list(model.opcode_keys),
+        "anchor_keys": list(model.anchor_keys),
+        "rank": model.rank,
+        "nullity": model.nullity,
+        "mu_zero": {
+            key: _decimal_text(model.mu_zero[key]) for key in model.opcode_keys
+        },
+        "B": {
+            key: {
+                anchor: _fraction_text(model.anchor_basis[key][anchor])
+                for anchor in model.anchor_keys
+            }
+            for key in model.opcode_keys
+        },
+    }
+    payload["model_sha256"] = sha256_bytes(canonical_json(payload))
+    return payload
+
+
+def fit_opcode_relations(
+    manifest: Manifest,
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    rows = list(rows)
+    expected = {relation.id: relation for relation in manifest.opcode_relations}
+    actual_ids = {str(row.get("relation_id")) for row in rows}
+    missing = set(expected) - actual_ids
+    extra = actual_ids - set(expected)
+    if missing:
+        raise ValueError(f"missing canonical relation rows: {sorted(missing)!r}")
+    if extra:
+        raise ValueError(f"unknown formal relation rows: {sorted(extra)!r}")
+    provenance_fields = (
+        "calibration_id",
+        "calibration_identity_sha256",
+        "implementation_revision",
+        "controlled_manifest_sha256",
+        "controlled_manifest_rows_sha256",
+    )
+    provenance = {field: rows[0].get(field) for field in provenance_fields}
+    if any(row.get(field) != value for row in rows for field, value in provenance.items()):
+        raise ValueError("formal relation rows do not share durable provenance")
+    if (
+        not isinstance(provenance["calibration_id"], str)
+        or len(provenance["calibration_id"]) != 24
+        or not _is_sha256(provenance["calibration_identity_sha256"])
+        or not _is_git_revision(provenance["implementation_revision"])
+        or not _is_sha256(provenance["controlled_manifest_sha256"])
+        or not _is_sha256(provenance["controlled_manifest_rows_sha256"])
+    ):
+        raise ValueError("formal relation provenance is invalid")
+
+    results = []
+    for relation in manifest.opcode_relations:
+        relation_rows = [row for row in rows if row.get("relation_id") == relation.id]
+        results.append(_fit_one_opcode_relation(relation, relation_rows))
+
+    self_controls = [row for row in results if row.get("exact_zero") is True]
+    equations = [
+        row
+        for row in results
+        if row.get("split") == "canonical" and row.get("status") == "accepted"
+    ]
+    holdouts = [
+        row
+        for row in results
+        if row.get("split") == "dynamic_holdout" and row.get("status") == "accepted"
+    ]
+    if len(self_controls) != 4 or {row["key_id"] for row in self_controls} != set(
+        manifest.opcode_relation_anchors
+    ):
+        raise ValueError("formal relation self-control set is incomplete")
+    if len(equations) != 98:
+        raise ValueError(f"formal relation matrix requires 98 equations, got {len(equations)}")
+    if len(holdouts) != 12:
+        raise ValueError("formal dynamic holdout set is incomplete")
+    for key in manifest.dynamic_raw_gas_keys:
+        observed = [
+            relation.target_raw_gas_by_key[key]
+            for relation in manifest.opcode_relations
+            if relation.dynamic_key == key
+        ]
+        if len(observed) != 3 or observed[1] < 2 * observed[0] or observed[2] < 4 * observed[0]:
+            raise ValueError(f"formal dynamic relation {key} fails actual 1x/2x/4x preflight")
+
+    opcode_keys = tuple(
+        f"opcode:0x{case.opcode:02x}"
+        for case in manifest.cases
+        if case.kind == "opcode"
+        and case.opcode is not None
+        and case.opcode in PURE_OPCODE_DEFAULTS
+        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
+    )
+    algebra_equations = tuple(
+        RelationEquation(
+            relation_id=row["relation_id"],
+            coefficients={
+                key: Fraction(value)
+                for key, value in row["signed_raw_gas_by_key"].items()
+            },
+            slope=Decimal(row["slope_p"]),
+        )
+        for row in equations
+    )
+    model = derive_affine_opcode_model(
+        opcode_keys,
+        algebra_equations,
+        manifest.opcode_relation_anchors,
+    )
+    affine = _serialize_affine_model(model)
+    matrix_sha256 = sha256_bytes(
+        canonical_json(
+            [
+                {
+                    "relation_id": equation.relation_id,
+                    "coefficients": {
+                        key: _fraction_text(value)
+                        for key, value in sorted(equation.coefficients.items())
+                    },
+                    "slope": _decimal_text(equation.slope),
+                }
+                for equation in algebra_equations
+            ]
+        )
+    )
+    artifact = {
+        "schema_version": 1,
+        "purpose": FORMAL_RELATION_PURPOSE,
+        "signal_kind": FORMAL_RELATION_SIGNAL_KIND,
+        "status": "accepted",
+        "provenance": provenance,
+        "quality_gates": {
+            "repeats": 3,
+            "r2_min": "0.995",
+            "relative_slope_stderr_max": "0.05",
+            "residual_signal_max": "0.02",
+            "checkpoint_ape_max": "0.10",
+            "signal_min_prover_gas": "1000",
+            "signal_min_baseline_fraction": "0.01",
+            "signal_min_repeat_noise_multiple": "20",
+        },
+        "equations": equations,
+        "self_controls": self_controls,
+        "dynamic_holdouts": holdouts,
+        "relation_matrix_sha256": matrix_sha256,
+        "raw_rows_sha256": sha256_bytes(canonical_json(rows)),
+        "affine_model": affine,
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    validate_opcode_relations_artifact(manifest, artifact)
+    return artifact
+
+
+def _parse_fraction_text(value: Any) -> Fraction:
+    if not isinstance(value, str):
+        raise ValueError("basis coefficient must be a canonical Fraction string")
+    try:
+        parsed = Fraction(value)
+    except (ValueError, ZeroDivisionError) as exc:
+        raise ValueError("basis coefficient must be a canonical Fraction string") from exc
+    if _fraction_text(parsed) != value:
+        raise ValueError("basis coefficient is rounded or noncanonical")
+    return parsed
+
+
+def validate_opcode_relations_artifact(
+    manifest: Manifest, artifact: Mapping[str, Any]
+) -> None:
+    if (
+        artifact.get("purpose") != FORMAL_RELATION_PURPOSE
+        or artifact.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND
+        or artifact.get("status") != "accepted"
+    ):
+        raise ValueError("opcode relation artifact header is invalid")
+    recorded_artifact_hash = artifact.get("artifact_sha256")
+    unhashed = {key: value for key, value in artifact.items() if key != "artifact_sha256"}
+    if not _is_sha256(recorded_artifact_hash) or recorded_artifact_hash != sha256_bytes(
+        canonical_json(unhashed)
+    ):
+        raise ValueError("opcode relation artifact content hash differs")
+    equations = artifact.get("equations")
+    if not isinstance(equations, list) or len(equations) != 98:
+        raise ValueError("opcode relation artifact must contain 98 equations")
+    expected_relations = {
+        relation.id: relation
+        for relation in manifest.opcode_relations
+        if relation.split == "canonical" and relation.signed_raw_gas_by_key
+    }
+    algebra: list[RelationEquation] = []
+    for row in equations:
+        relation_id = row.get("relation_id")
+        relation = expected_relations.get(relation_id)
+        if relation is None:
+            raise ValueError("opcode relation artifact has an unknown equation")
+        signed = _parse_canonical_int_map(
+            row.get("signed_raw_gas_by_key"),
+            label="artifact signed raw-gas map",
+            allow_negative=True,
+        )
+        if signed != dict(relation.signed_raw_gas_by_key):
+            raise ValueError("opcode relation artifact coefficient map differs from manifest")
+        slope_text = row.get("slope_p")
+        slope = _decimal(slope_text, label="artifact relation slope")
+        if not isinstance(slope_text, str) or _decimal_text(slope) != slope_text:
+            raise ValueError("artifact relation slope is noncanonical")
+        algebra.append(
+            RelationEquation(
+                str(relation_id),
+                {key: Fraction(value) for key, value in signed.items()},
+                slope,
+            )
+        )
+    opcode_keys = tuple(
+        f"opcode:0x{case.opcode:02x}"
+        for case in manifest.cases
+        if case.kind == "opcode"
+        and case.opcode is not None
+        and case.opcode in PURE_OPCODE_DEFAULTS
+        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
+    )
+    expected_model = _serialize_affine_model(
+        derive_affine_opcode_model(
+            opcode_keys, tuple(algebra), manifest.opcode_relation_anchors
+        )
+    )
+    expected_matrix_hash = sha256_bytes(
+        canonical_json(
+            [
+                {
+                    "relation_id": equation.relation_id,
+                    "coefficients": {
+                        key: _fraction_text(value)
+                        for key, value in sorted(equation.coefficients.items())
+                    },
+                    "slope": _decimal_text(equation.slope),
+                }
+                for equation in algebra
+            ]
+        )
+    )
+    if artifact.get("relation_matrix_sha256") != expected_matrix_hash:
+        raise ValueError("opcode relation artifact matrix hash differs")
+    actual_model = artifact.get("affine_model")
+    if not isinstance(actual_model, Mapping):
+        raise ValueError("opcode relation artifact basis is missing")
+    basis = actual_model.get("B")
+    if not isinstance(basis, Mapping):
+        raise ValueError("opcode relation artifact basis is missing")
+    try:
+        for row in basis.values():
+            if not isinstance(row, Mapping):
+                raise ValueError("basis row is invalid")
+            for value in row.values():
+                _parse_fraction_text(value)
+    except ValueError as exc:
+        raise ValueError(f"opcode relation artifact basis is invalid: {exc}") from exc
+    if dict(actual_model) != expected_model:
+        raise ValueError("opcode relation artifact basis differs from exact derivation")
+
+
+def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = pathlib.Path(name)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def case_primary_value(case_result: Mapping[str, Any]) -> tuple[str, Decimal]:
@@ -5762,12 +6986,53 @@ def cmd_prepare_integration_smoke(args: argparse.Namespace) -> None:
 
 
 def cmd_prepare_calibration(args: argparse.Namespace) -> None:
+    output_root = _resolve_repo_path(args.out, field_name="calibration_output")
     experiment = prepare_calibration(
-        _resolve_repo_path(args.out, field_name="calibration_output"),
+        output_root,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
         implementation_revision=args.implementation_revision,
     )
+    if args.run_path_file is not None:
+        write_run_path_file(
+            args.run_path_file,
+            output_root / "runs" / experiment["calibration_id"],
+        )
     print(f"prepared calibration {experiment['calibration_id']}")
+
+
+def write_run_path_file(path: pathlib.Path, run: pathlib.Path) -> None:
+    """Durably publish one machine-readable run path without partial contents."""
+    provenance = run / "provenance.json"
+    if not provenance.is_file():
+        raise ValueError("calibration provenance must be durable before run-path handoff")
+    if path.exists() and path.read_bytes():
+        raise ValueError("run-path file already exists and is non-empty")
+    with provenance.open("rb") as input_file:
+        os.fsync(input_file.fileno())
+    run_fd = os.open(run, os.O_RDONLY)
+    try:
+        os.fsync(run_fd)
+    finally:
+        os.close(run_fd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(str(run) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def cmd_prepare_validation(args: argparse.Namespace) -> None:
@@ -5808,6 +7073,31 @@ def cmd_generate(args: argparse.Namespace) -> None:
         operand_profile=getattr(args, "operand_profile", "zero"),
     )
     print(f"wrote {len(written)} case metadata files")
+
+
+def cmd_generate_relations(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    validate_calibration_execution_identity(calibration_run)
+    manifest, identity = verify_frozen_controlled_manifest(
+        calibration_run,
+        _resolve_repo_path(args.manifest, field_name="controlled_manifest"),
+    )
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
+        "implementation_revision": identity["implementation_revision"],
+        "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    written = generate_relation_cases(
+        manifest,
+        _resolve_repo_path(args.out, field_name="generated_relation_fixtures"),
+        provenance=provenance,
+        generator_max_count=args.generator_max_count,
+    )
+    print(f"wrote {len(written)} formal relation metadata files")
 
 
 def cmd_fit(args: argparse.Namespace) -> None:
@@ -6028,6 +7318,20 @@ def cmd_fit_controlled_costs(args: argparse.Namespace) -> None:
         + "\n"
     )
     print(f"fit {len(results)} controlled case(s)")
+
+
+def cmd_fit_relations(args: argparse.Namespace) -> None:
+    manifest = load_manifest(
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest")
+    )
+    artifact = fit_opcode_relations(
+        manifest,
+        iter_jsonl(_resolve_repo_path(args.runs, field_name="formal_relation_runs")),
+    )
+    output = _resolve_repo_path(args.out, field_name="opcode_relations")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(output, artifact)
+    print(f"fit {len(artifact['equations'])} formal opcode relation(s)")
 
 
 CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
@@ -7259,6 +8563,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     matched_generate.set_defaults(func=cmd_generate, matched_control_diagnostic=True)
 
+    relation_generate = subcommands.add_parser(
+        "generate-relations",
+        help="generate the frozen formal opcode relation campaign",
+    )
+    relation_generate.add_argument("--manifest", type=pathlib.Path, required=True)
+    relation_generate.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    relation_generate.add_argument("--out", type=pathlib.Path, required=True)
+    relation_generate.add_argument(
+        "--generator-max-count",
+        type=int,
+        choices=tuple(OUT_OF_FIT_CHECKPOINTS.values()),
+        default=8,
+    )
+    relation_generate.set_defaults(
+        func=cmd_generate_relations,
+        formal_relation_purpose=FORMAL_RELATION_PURPOSE,
+    )
+
     run = subcommands.add_parser("run", help="run generated guest-input cases")
     _add_controlled_run_arguments(run)
     run.set_defaults(func=cmd_run, expected_purpose=None)
@@ -7284,6 +8606,28 @@ def build_parser() -> argparse.ArgumentParser:
         opcode_stage="revm-opcode-lab",
     )
 
+    relation_run = subcommands.add_parser(
+        "run-relations",
+        help="run every formal opcode relation lane three times",
+    )
+    _add_controlled_run_arguments(
+        relation_run,
+        opcode_stage_choices=("revm-opcode-lab",),
+        opcode_stage_default="revm-opcode-lab",
+        opcode_elf_default=pathlib.Path(
+            "crates/guests/elf/sp1_revm_opcode_lab.elf"
+        ),
+        opcode_elf_choices=(
+            pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+        ),
+    )
+    relation_run.set_defaults(
+        func=cmd_run,
+        expected_purpose=FORMAL_RELATION_PURPOSE,
+        repeats=3,
+        opcode_stage="revm-opcode-lab",
+    )
+
     run_controlled = subcommands.add_parser(
         "run-controlled",
         help="run every controlled SP1 workload three times",
@@ -7304,6 +8648,15 @@ def build_parser() -> argparse.ArgumentParser:
     fit_controlled.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     fit_controlled.add_argument("--out", type=pathlib.Path, required=True)
     fit_controlled.set_defaults(func=cmd_fit_controlled_costs)
+
+    fit_relations = subcommands.add_parser(
+        "fit-relations",
+        help="fit and seal the exact formal opcode relation artifact",
+    )
+    fit_relations.add_argument("--runs", type=pathlib.Path, required=True)
+    fit_relations.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    fit_relations.add_argument("--out", type=pathlib.Path, required=True)
+    fit_relations.set_defaults(func=cmd_fit_relations)
 
     candidate = subcommands.add_parser(
         "build-candidate", help="seal the controlled SP1 proverGas candidate"
@@ -7393,6 +8746,7 @@ def build_parser() -> argparse.ArgumentParser:
     calibration.add_argument("--out", type=pathlib.Path, required=True)
     calibration.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     calibration.add_argument("--implementation-revision")
+    calibration.add_argument("--run-path-file", type=pathlib.Path)
     calibration.set_defaults(func=cmd_prepare_calibration)
 
     validation = subcommands.add_parser("prepare-validation", help="bind candidate, bridge, and frozen corpus")
@@ -7408,12 +8762,18 @@ def cmd_run(args: argparse.Namespace) -> None:
     if repeats <= 0:
         raise ValueError("controlled run repeats must be positive")
     expected_purpose = getattr(args, "expected_purpose", None)
+    if expected_purpose == FORMAL_RELATION_PURPOSE and repeats != 3:
+        raise ValueError("formal relation run requires exactly three repeats")
+    relation_or_diagnostic = expected_purpose in {
+        MATCHED_CONTROL_PURPOSE,
+        FORMAL_RELATION_PURPOSE,
+    }
     if (
-        expected_purpose == MATCHED_CONTROL_PURPOSE
+        relation_or_diagnostic
         and args.opcode_stage != "revm-opcode-lab"
     ):
         raise ValueError("matched-control run requires revm-opcode-lab")
-    if expected_purpose == MATCHED_CONTROL_PURPOSE and args.elf != pathlib.Path(
+    if relation_or_diagnostic and args.elf != pathlib.Path(
         "crates/guests/elf/sp1_revm_opcode_lab.elf"
     ):
         raise ValueError("matched-control run requires the frozen revm opcode-lab ELF")
@@ -7449,7 +8809,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 raise ValueError("controlled GuestInput does not match sealed case provenance")
             cases_by_kind.setdefault(case.get("kind", "opcode"), []).append((case, input_path))
             loaded_cases.append(case)
-            if expected_purpose == MATCHED_CONTROL_PURPOSE:
+            if relation_or_diagnostic:
                 try:
                     guest_input = json.loads(input_path.read_text())
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -7458,9 +8818,10 @@ def cmd_run(args: argparse.Namespace) -> None:
                     raise ValueError("controlled GuestInput must be a JSON object")
                 loaded_guest_inputs[expected_input_sha256] = guest_input
     matched_fixture_pairs = None
-    if expected_purpose == MATCHED_CONTROL_PURPOSE:
+    if relation_or_diagnostic:
         matched_fixture_pairs = validate_matched_control_fixture_pairs(
             loaded_cases,
+            expected_purpose=expected_purpose,
             calibration_execution_identity={
                 "calibration_id": calibration_run.name,
                 "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
@@ -7530,6 +8891,13 @@ def cmd_run(args: argparse.Namespace) -> None:
             expected_pair_ids=set(matched_fixture_pairs),
             expected_repeats=repeats,
         )
+        with out.open("w") as output:
+            for raw_run in raw_runs:
+                output.write(json.dumps(raw_run, sort_keys=True) + "\n")
+        ran = len(raw_runs)
+    elif expected_purpose == FORMAL_RELATION_PURPOSE:
+        raw_runs = list(normalized_raw_runs())
+        validate_formal_dynamic_raw_gas_preflight(raw_runs)
         with out.open("w") as output:
             for raw_run in raw_runs:
                 output.write(json.dumps(raw_run, sort_keys=True) + "\n")

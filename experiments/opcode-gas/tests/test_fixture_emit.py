@@ -8,6 +8,7 @@ from dataclasses import replace
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import opcode_gas
 from test_manifest import CONTROLLED_SCHEDULE_KEYS, controlled_manifest_data
@@ -97,6 +98,84 @@ def emit_matched_control_pair(
 
 
 class FixtureEmitTests(unittest.TestCase):
+    def test_formal_relation_generation_binds_dynamic_programs_and_exact_raw_gas_rows(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        exp_relations = tuple(
+            relation
+            for relation in manifest.opcode_relations
+            if relation.dynamic_key == "opcode:0x0a"
+        )
+        manifest = replace(
+            manifest,
+            variants=[1],
+            opcode_relations=exp_relations,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            rows = [opcode_gas.json.loads(path.read_text()) for path in written]
+            inputs = {
+                row["fixture_sha256"]: opcode_gas.json.loads(
+                    path.with_name("guest-input.json").read_text()
+                )
+                for row, path in zip(rows, written)
+            }
+
+        self.assertEqual(len(rows), 6)
+        self.assertEqual({row["purpose"] for row in rows}, {"formal_opcode_relation"})
+        self.assertEqual({row["diagnostic_only"] for row in rows}, {False})
+        self.assertEqual({row["signal_kind"] for row in rows}, {"signed_raw_gas_relation"})
+        targets = sorted(
+            (row for row in rows if row["lane"] == "target"),
+            key=lambda row: row["target_raw_gas"],
+        )
+        self.assertEqual([row["target_raw_gas"] for row in targets], [60, 410, 1610])
+        self.assertEqual(
+            [row["target_raw_gas_by_key"] for row in targets],
+            [
+                {"opcode:0x0a": "60"},
+                {"opcode:0x0a": "410"},
+                {"opcode:0x0a": "1610"},
+            ],
+        )
+        self.assertEqual(
+            {row["control_raw_gas_by_key"]["opcode:0x50"] for row in rows},
+            {"2"},
+        )
+        self.assertEqual(
+            {row["signed_raw_gas_by_key"]["opcode:0x50"] for row in rows},
+            {"-2"},
+        )
+        pairs = opcode_gas.validate_matched_control_fixture_pairs(
+            rows,
+            expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+            guest_inputs=inputs,
+        )
+        self.assertEqual(len(pairs), 3)
+        altered = [dict(row) for row in rows]
+        first_relation_id = altered[0]["relation_id"]
+        for row in altered:
+            if row["relation_id"] == first_relation_id:
+                row["target_raw_gas_by_key"] = {"opcode:0x0a": "61"}
+        with self.assertRaisesRegex(ValueError, "target raw-gas map"):
+            opcode_gas.validate_matched_control_fixture_pairs(
+                altered,
+                expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+                guest_inputs=inputs,
+            )
+
     def test_matched_control_binary_emits_equal_footprint_op_minus_pop_pair(self):
         data = controlled_manifest_data()
         data["variants"] = [2]

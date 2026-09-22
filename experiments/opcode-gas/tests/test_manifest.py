@@ -1,6 +1,7 @@
 import pathlib
 import sys
 import tempfile
+import tomllib
 import unittest
 from copy import deepcopy
 from decimal import Decimal
@@ -26,6 +27,8 @@ def controlled_manifest_data():
         "normalization_reference_key": "opcode:0x01",
         "system_operation_ownership": "block_base",
         "anchor_operation_ownership": "block_base",
+        "opcode_relation_anchors": list(opcode_gas.OPCODE_RELATION_ANCHORS),
+        "dynamic_raw_gas_keys": list(opcode_gas.DYNAMIC_RAW_GAS_KEYS),
         "q_formula": list(opcode_gas.Q_FORMULA),
         "bridge_key_ids": [
             "opcode:0x01",
@@ -207,6 +210,92 @@ CONTROLLED_SCHEDULE_KEYS = {"opcode:0x01", "opcode:0x02", "precompile:0x04"}
 
 
 class ManifestTests(unittest.TestCase):
+    def test_v1_freezes_formal_relation_anchors_and_dynamic_scenario_triples(self):
+        path = (
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml"
+        )
+
+        manifest = opcode_gas.load_manifest(path, schedule=fixture_schedule())
+
+        self.assertEqual(manifest.opcode_relation_anchors, opcode_gas.OPCODE_RELATION_ANCHORS)
+        self.assertEqual(manifest.dynamic_raw_gas_keys, opcode_gas.DYNAMIC_RAW_GAS_KEYS)
+        scenarios = {}
+        for relation in manifest.opcode_relations:
+            if relation.dynamic_key is not None:
+                scenarios.setdefault(relation.dynamic_key, []).append(relation)
+        self.assertEqual(set(scenarios), set(opcode_gas.DYNAMIC_RAW_GAS_KEYS))
+        for key, relations in scenarios.items():
+            with self.subTest(key=key):
+                self.assertEqual(len(relations), 3)
+                self.assertEqual(
+                    [relation.split for relation in relations],
+                    ["canonical", "dynamic_holdout", "dynamic_holdout"],
+                )
+
+        self.assertEqual(
+            [relation.scenario["exponent_byte_length"] for relation in scenarios["opcode:0x0a"]],
+            [1, 8, 32],
+        )
+        self.assertEqual(
+            [relation.scenario["input_length"] for relation in scenarios["opcode:0x20"]],
+            [32, 256, 1024],
+        )
+        for key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
+            self.assertEqual(
+                [relation.scenario["highest_touched_offset"] for relation in scenarios[key]],
+                [0, 0x0100, 0x1000],
+            )
+        self.assertEqual(
+            [relation.scenario["copy_length"] for relation in scenarios["opcode:0x5e"]],
+            [32, 256, 1024],
+        )
+
+    def test_formal_relation_manifest_rejects_anchor_dynamic_and_relation_contract_drift(self):
+        path = (
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml"
+        )
+        base = tomllib.loads(path.read_text())
+        schedule_keys = {
+            *(f"opcode:0x{opcode:02x}" for opcode in opcode_gas.UZEN_OPCODE_NAMES),
+            *(f"precompile:0x{address:02x}" for address in opcode_gas.UZEN_PRECOMPILE_NAMES),
+        }
+
+        mutations = []
+        reordered = deepcopy(base)
+        reordered["opcode_relation_anchors"] = list(reversed(reordered["opcode_relation_anchors"]))
+        mutations.append((reordered, "anchors"))
+        missing_dynamic = deepcopy(base)
+        missing_dynamic["dynamic_raw_gas_keys"].remove("opcode:0x0a")
+        mutations.append((missing_dynamic, "dynamic raw-gas"))
+        duplicate = deepcopy(base)
+        duplicate["opcode_relation_scenarios"].append(
+            deepcopy(duplicate["opcode_relation_scenarios"][0])
+        )
+        mutations.append((duplicate, "duplicate relation ID"))
+        wrong_units = deepcopy(base)
+        wrong_units["opcode_relation_scenarios"][0]["target_raw_gas"] += 1
+        mutations.append((wrong_units, "target raw-gas total"))
+
+        for data, message in mutations:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                opcode_gas.parse_controlled_manifest(data, schedule_keys=schedule_keys)
+
+        unmarked = controlled_manifest_data()
+        unmarked["cases"][0]["template"] = "stack_exp"
+        unmarked["cases"][0]["target_raw_gas"] = 60
+        with self.assertRaisesRegex(ValueError, "unmarked dynamic raw-gas template"):
+            opcode_gas.parse_controlled_manifest(
+                unmarked, schedule_keys=CONTROLLED_SCHEDULE_KEYS
+            )
+
     def test_materialized_v1_enumerates_every_case_key_and_keeps_state_diagnostics_out_of_q(self):
         path = (
             ROOT

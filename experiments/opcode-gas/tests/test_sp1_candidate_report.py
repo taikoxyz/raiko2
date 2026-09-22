@@ -1,13 +1,16 @@
 import copy
+import hashlib
 import pathlib
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest import mock
 from decimal import Decimal, getcontext
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import opcode_gas
 from test_manifest import CONTROLLED_SCHEDULE_KEYS, controlled_manifest_data
@@ -18,6 +21,99 @@ def controlled_manifest():
     return opcode_gas.parse_controlled_manifest(
         controlled_manifest_data(), schedule_keys=CONTROLLED_SCHEDULE_KEYS
     )
+
+
+def formal_relation_manifest():
+    return opcode_gas.load_manifest(
+        ROOT
+        / "experiments"
+        / "opcode-gas"
+        / "manifests"
+        / "sp1-calibration-v1.toml",
+        schedule=fixture_schedule(),
+    )
+
+
+def formal_relation_rows(manifest, *, slope_overrides=None):
+    slope_overrides = slope_overrides or {}
+    rows = []
+    provenance = {
+        "calibration_id": "a" * 24,
+        "calibration_identity_sha256": "b" * 64,
+        "implementation_revision": "c" * 40,
+        "controlled_manifest_sha256": "d" * 64,
+        "controlled_manifest_rows_sha256": "e" * 64,
+    }
+    for index, relation in enumerate(manifest.opcode_relations):
+        slope = Decimal(
+            str(
+                slope_overrides.get(
+                    relation.id, 5000 + index if relation.signed_raw_gas_by_key else 0
+                )
+            )
+        )
+        pair_id = hashlib.sha256(relation.id.encode()).hexdigest()
+        control_map = {
+            key: value * 8 for key, value in relation.control_raw_gas_by_key.items()
+        }
+        for count in (0, 1, 2, 4, 8):
+            target_map = {
+                key: value * (8 - count)
+                for key, value in relation.control_raw_gas_by_key.items()
+            }
+            for key, value in relation.target_raw_gas_by_key.items():
+                target_map[key] = target_map.get(key, 0) + value * count
+            for repeat_index in range(3):
+                for lane, actual_map, prover_gas in (
+                    ("target", target_map, Decimal(100_000) + slope * count),
+                    ("control", control_map, Decimal(100_000)),
+                ):
+                    backend_input = hashlib.sha256(
+                        f"{relation.id}:{count}:{lane}".encode()
+                    ).hexdigest()
+                    rows.append(
+                        {
+                            **provenance,
+                            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+                            "signal_kind": opcode_gas.FORMAL_RELATION_SIGNAL_KIND,
+                            "relation_id": relation.id,
+                            "relation_split": relation.split,
+                            "scenario_id": relation.scenario_id,
+                            "dynamic_key": relation.dynamic_key,
+                            "pair_id": pair_id,
+                            "lane": lane,
+                            "diagnostic_count": count,
+                            "generator_max_count": 8,
+                            "repeat_index": repeat_index,
+                            "prover_gas": int(prover_gas),
+                            "total_instruction_count": 200_000,
+                            "exit_code": 0,
+                            "public_values": "0x01",
+                            "workload_id": hashlib.sha256(
+                                f"workload:{relation.id}:{count}:{lane}".encode()
+                            ).hexdigest(),
+                            "backend_input_sha256": backend_input,
+                            "sp1_execution_engine": "gas-estimator",
+                            "sp1_gas_trace_chunk_threshold": 134_217_728,
+                            "sp1_gas_trace_chunk_slots": 2,
+                            "target_raw_gas_by_key": {
+                                key: str(value)
+                                for key, value in relation.target_raw_gas_by_key.items()
+                            },
+                            "control_raw_gas_by_key": {
+                                key: str(value)
+                                for key, value in relation.control_raw_gas_by_key.items()
+                            },
+                            "signed_raw_gas_by_key": {
+                                key: str(value)
+                                for key, value in relation.signed_raw_gas_by_key.items()
+                            },
+                            "actual_raw_gas_by_key": {
+                                key: str(value) for key, value in actual_map.items() if value
+                            },
+                        }
+                    )
+    return rows
 
 
 def opcode_execution_provenance():
@@ -345,6 +441,170 @@ class MeasurementGateTests(unittest.TestCase):
         self.assertEqual(result["g_p"], "1200")
         self.assertEqual(result["c_p"], "400")
         self.assertIn("secondary", result)
+
+
+class FormalOpcodeRelationTests(unittest.TestCase):
+    def test_fits_rank_98_artifact_with_negative_slope_and_exact_serialization(self):
+        manifest = formal_relation_manifest()
+        negative = next(
+            relation for relation in manifest.opcode_relations if relation.signed_raw_gas_by_key
+        )
+        rows = formal_relation_rows(
+            manifest, slope_overrides={negative.id: -5000}
+        )
+
+        artifact = opcode_gas.fit_opcode_relations(manifest, rows)
+
+        self.assertEqual(artifact["status"], "accepted")
+        self.assertEqual(len(artifact["equations"]), 98)
+        self.assertEqual(len(artifact["self_controls"]), 4)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 12)
+        self.assertEqual(artifact["affine_model"]["rank"], 98)
+        self.assertEqual(artifact["affine_model"]["nullity"], 4)
+        self.assertEqual(
+            artifact["artifact_sha256"],
+            opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {
+                        key: value
+                        for key, value in artifact.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            ),
+        )
+        self.assertEqual(
+            artifact["affine_model"]["anchor_keys"],
+            list(opcode_gas.OPCODE_RELATION_ANCHORS),
+        )
+        equation = next(
+            row for row in artifact["equations"] if row["relation_id"] == negative.id
+        )
+        self.assertEqual(equation["slope_p"], "-5000")
+        self.assertEqual(
+            equation["signed_raw_gas_by_key"],
+            {
+                key: str(value)
+                for key, value in sorted(negative.signed_raw_gas_by_key.items())
+            },
+        )
+        for value in artifact["affine_model"]["mu_zero"].values():
+            self.assertNotIn("e", value.lower())
+        opcode_gas.validate_opcode_relations_artifact(manifest, artifact)
+
+    def test_rejects_signed_quality_trace_completeness_and_rank_failures(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            relation for relation in manifest.opcode_relations if relation.signed_raw_gas_by_key
+        )
+        base_rows = formal_relation_rows(manifest)
+
+        missing = [row for row in base_rows if row["relation_id"] != relation.id]
+        with self.assertRaisesRegex(ValueError, "missing canonical relation"):
+            opcode_gas.fit_opcode_relations(manifest, missing)
+
+        tiny = copy.deepcopy(base_rows)
+        for row in tiny:
+            if row["relation_id"] == relation.id and row["lane"] == "target":
+                row["prover_gas"] = 100_000 + 10 * row["diagnostic_count"]
+        with self.assertRaisesRegex(ValueError, "signal"):
+            opcode_gas.fit_opcode_relations(manifest, tiny)
+
+        noisy = copy.deepcopy(base_rows)
+        noisy_row = next(
+            row
+            for row in noisy
+            if row["relation_id"] == relation.id
+            and row["lane"] == "target"
+            and row["diagnostic_count"] == 1
+            and row["repeat_index"] == 2
+        )
+        noisy_row["prover_gas"] += 1
+        with self.assertRaisesRegex(ValueError, "repeat noise"):
+            opcode_gas.fit_opcode_relations(manifest, noisy)
+
+        wrong_sign = copy.deepcopy(base_rows)
+        for row in wrong_sign:
+            if (
+                row["relation_id"] == relation.id
+                and row["lane"] == "target"
+                and row["diagnostic_count"] == 8
+            ):
+                row["prover_gas"] = 50_000
+        with self.assertRaisesRegex(ValueError, "checkpoint sign"):
+            opcode_gas.fit_opcode_relations(manifest, wrong_sign)
+
+        wrong_units = copy.deepcopy(base_rows)
+        unit_row = next(
+            row
+            for row in wrong_units
+            if row["relation_id"] == relation.id
+            and row["lane"] == "target"
+            and row["diagnostic_count"] == 1
+        )
+        key = next(iter(unit_row["actual_raw_gas_by_key"]))
+        for row in wrong_units:
+            if (
+                row["relation_id"] == relation.id
+                and row["lane"] == "target"
+                and row["diagnostic_count"] == 1
+            ):
+                row["actual_raw_gas_by_key"][key] = str(
+                    int(row["actual_raw_gas_by_key"][key]) + 1
+                )
+        with self.assertRaisesRegex(ValueError, "raw-gas units"):
+            opcode_gas.fit_opcode_relations(manifest, wrong_units)
+
+        canonical = [
+            item
+            for item in manifest.opcode_relations
+            if item.split == "canonical" and item.signed_raw_gas_by_key
+        ]
+        dependent = replace(
+            canonical[1],
+            target_raw_gas_by_key=canonical[0].target_raw_gas_by_key,
+            control_raw_gas_by_key=canonical[0].control_raw_gas_by_key,
+            signed_raw_gas_by_key=canonical[0].signed_raw_gas_by_key,
+        )
+        mutated_relations = tuple(
+            dependent if item.id == dependent.id else item
+            for item in manifest.opcode_relations
+        )
+        rank_97_manifest = replace(manifest, opcode_relations=mutated_relations)
+        with self.assertRaisesRegex(ValueError, "rank"):
+            opcode_gas.fit_opcode_relations(
+                rank_97_manifest, formal_relation_rows(rank_97_manifest)
+            )
+
+    def test_rejects_rounded_or_tampered_exact_basis_coefficients(self):
+        manifest = formal_relation_manifest()
+        artifact = opcode_gas.fit_opcode_relations(
+            manifest, formal_relation_rows(manifest)
+        )
+        tampered = copy.deepcopy(artifact)
+        opcode_key = next(
+            key
+            for key, row in tampered["affine_model"]["B"].items()
+            if any(value != "0" for value in row.values())
+        )
+        anchor_key = next(
+            key
+            for key, value in tampered["affine_model"]["B"][opcode_key].items()
+            if value != "0"
+        )
+        tampered["affine_model"]["B"][opcode_key][anchor_key] = "0.5"
+        tampered["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in tampered.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "basis"):
+            opcode_gas.validate_opcode_relations_artifact(manifest, tampered)
 
 
 class CandidateConstructionTests(unittest.TestCase):
@@ -1499,7 +1759,7 @@ class CandidateConstructionTests(unittest.TestCase):
         self.assertEqual(values["opcode:0x01"]["c_p"], f"{Decimal(10**40 + 1) / Decimal(3)}")
         self.assertEqual(values["opcode:0x02"]["m_p"], "1.2")
         self.assertEqual(values["precompile:0x04"]["m_p"], "1")
-        self.assertEqual(getcontext().prec, 50)
+        self.assertEqual(getcontext().prec, 80)
 
     def test_missing_rejected_or_confounded_required_case_excludes_complete_key(self):
         manifest_data = controlled_manifest_data()

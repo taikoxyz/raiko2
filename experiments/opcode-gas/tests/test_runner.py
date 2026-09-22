@@ -63,6 +63,93 @@ def write_execution_identity(root):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_parser_exposes_formal_relation_commands_and_run_path_handoff(self):
+        parser = opcode_gas.build_parser()
+        generated = parser.parse_args(
+            [
+                "generate-relations",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
+                "--calibration-run",
+                "/tmp/calibration",
+                "--out",
+                "/tmp/relations",
+            ]
+        )
+        run = parser.parse_args(
+            [
+                "run-relations",
+                "--fixtures",
+                "/tmp/relations",
+                "--guest-launcher",
+                "target/release/guest-launcher",
+                "--calibration-run",
+                "/tmp/calibration",
+                "--controlled-manifest",
+                "/tmp/controlled.toml",
+                "--out",
+                "/tmp/formal.jsonl",
+            ]
+        )
+        fit = parser.parse_args(
+            [
+                "fit-relations",
+                "--runs",
+                "/tmp/formal.jsonl",
+                "--controlled-manifest",
+                "/tmp/controlled.toml",
+                "--out",
+                "/tmp/opcode-relations.json",
+            ]
+        )
+        prepare = parser.parse_args(
+            [
+                "prepare-calibration",
+                "--out",
+                "experiments/opcode-gas",
+                "--controlled-manifest",
+                "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
+                "--run-path-file",
+                "/tmp/run-path",
+            ]
+        )
+
+        self.assertEqual(generated.formal_relation_purpose, "formal_opcode_relation")
+        self.assertEqual(run.expected_purpose, "formal_opcode_relation")
+        self.assertEqual(run.repeats, 3)
+        self.assertEqual(run.opcode_stage, "revm-opcode-lab")
+        self.assertEqual(
+            run.elf, pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf")
+        )
+        self.assertIs(fit.func, opcode_gas.cmd_fit_relations)
+        self.assertEqual(prepare.run_path_file, pathlib.Path("/tmp/run-path"))
+        with self.assertRaisesRegex(ValueError, "exactly three repeats"):
+            opcode_gas.cmd_run(
+                opcode_gas.argparse.Namespace(
+                    repeats=2,
+                    expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+                    opcode_stage="revm-opcode-lab",
+                    elf=pathlib.Path(
+                        "crates/guests/elf/sp1_revm_opcode_lab.elf"
+                    ),
+                )
+            )
+
+    def test_run_path_handoff_is_atomic_and_rejects_nonempty_existing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run = root / "runs" / ("a" * 24)
+            run.mkdir(parents=True)
+            (run / "provenance.json").write_text("{}\n")
+            target = root / "run-path"
+
+            opcode_gas.write_run_path_file(target, run)
+
+            self.assertEqual(target.read_text(), str(run) + "\n")
+            self.assertEqual(list(root.glob(".run-path.*.tmp")), [])
+            with self.assertRaisesRegex(ValueError, "non-empty"):
+                opcode_gas.write_run_path_file(target, run)
+
     def test_runner_uses_guest_launcher_directly(self):
         calls = []
 
@@ -276,6 +363,108 @@ class RunnerTests(unittest.TestCase):
                 "tx_gas_limit": 1_000_024,
             },
         )
+
+    def test_formal_relation_raw_run_reconstructs_actual_raw_gas_map_and_rejects_units(self):
+        case = {
+            "case": "add__relation_target",
+            "kind": "opcode",
+            "purpose": "formal_opcode_relation",
+            "opcode": "0x01",
+            "target_count": 2,
+            "target_raw_gas": 3,
+            "tx_gas_limit": 1_000_024,
+        }
+        trace = {
+            "schema_version": 1,
+            "workload_id": "a" * 64,
+            "backend_input_sha256": "b" * 64,
+            "backend_input_len": 48,
+            "target_opcode": 1,
+            "declared_target_count": 2,
+            "declared_target_raw_gas": 3,
+            "executed_target_count": 2,
+            "executed_target_raw_gas": 6,
+            "non_target_counts": {"opcode:0x50": 6, "opcode:0x60": 16},
+            "non_target_raw_gas": 60,
+            "total_raw_gas": 66,
+            "tx_gas_limit": 1_000_024,
+            "bytecode_len": 584,
+        }
+        report = {
+            "gas": 160,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "controlled_trace": trace,
+        }
+
+        raw_run = opcode_gas.raw_run_from_report(case, report)
+
+        self.assertEqual(
+            raw_run["actual_raw_gas_by_key"],
+            {"opcode:0x01": "6", "opcode:0x50": "12", "opcode:0x60": "48"},
+        )
+        with self.assertRaisesRegex(ValueError, "executed target raw gas"):
+            opcode_gas.raw_run_from_report(
+                case,
+                {
+                    **report,
+                    "controlled_trace": {
+                        **trace,
+                        "executed_target_raw_gas": 7,
+                        "total_raw_gas": 67,
+                    },
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "total raw gas"):
+            opcode_gas.raw_run_from_report(
+                case,
+                {**report, "controlled_trace": {**trace, "total_raw_gas": 65}},
+            )
+        with self.assertRaisesRegex(ValueError, "non-target raw gas"):
+            opcode_gas.raw_run_from_report(
+                case,
+                {
+                    **report,
+                    "controlled_trace": {
+                        **trace,
+                        "non_target_raw_gas": 61,
+                        "total_raw_gas": 67,
+                    },
+                },
+            )
+
+    def test_formal_dynamic_preflight_uses_executed_trace_totals_before_publish(self):
+        rows = []
+        for key in opcode_gas.DYNAMIC_RAW_GAS_KEYS:
+            for index, (split, total) in enumerate(
+                (("canonical", 10), ("dynamic_holdout", 20), ("dynamic_holdout", 40))
+            ):
+                for repeat_index in range(3):
+                    rows.append(
+                        {
+                            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+                            "dynamic_key": key,
+                            "relation_id": f"{key}:scenario-{index}",
+                            "relation_split": split,
+                            "lane": "target",
+                            "diagnostic_count": 1,
+                            "repeat_index": repeat_index,
+                            "controlled_trace": {
+                                "executed_target_count": 1,
+                                "executed_target_raw_gas": total,
+                            },
+                        }
+                    )
+
+        opcode_gas.validate_formal_dynamic_raw_gas_preflight(rows)
+
+        largest_relation_id = rows[-1]["relation_id"]
+        for row in rows:
+            if row["relation_id"] == largest_relation_id:
+                row["controlled_trace"]["executed_target_raw_gas"] = 39
+        with self.assertRaisesRegex(ValueError, "1x/2x/4x"):
+            opcode_gas.validate_formal_dynamic_raw_gas_preflight(rows)
 
     def test_raw_run_rejects_host_trace_that_does_not_match_case_identity(self):
         case = {

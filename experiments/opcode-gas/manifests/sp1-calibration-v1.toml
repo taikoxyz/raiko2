@@ -1,6 +1,20 @@
 name = "sp1-calibration-v1"
 backend = "sp1"
 variants = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+opcode_relation_anchors = [
+  "opcode:0x50",
+  "opcode:0x5f",
+  "opcode:0x80",
+  "opcode:0x90",
+]
+dynamic_raw_gas_keys = [
+  "opcode:0x0a",
+  "opcode:0x20",
+  "opcode:0x51",
+  "opcode:0x52",
+  "opcode:0x53",
+  "opcode:0x5e",
+]
 normalization_reference_key = "opcode:0x01"
 system_operation_ownership = "block_base"
 anchor_operation_ownership = "block_base"
@@ -133,6 +147,186 @@ bridge_key_ids = [
 bridge_model = "through_origin_equal_key_median"
 bridge_controlled_max_ape = "0.10"
 bridge_proposal_max_ape = "0.10"
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-1"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "canonical"
+scenario_id = "exp-bytes-1"
+scenario = { exponent_byte_length = 1, initial_memory_words = 0 }
+target_raw_gas = 60
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-8"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+scenario_id = "exp-bytes-8"
+scenario = { exponent_byte_length = 8, initial_memory_words = 0 }
+target_raw_gas = 410
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-32"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+scenario_id = "exp-bytes-32"
+scenario = { exponent_byte_length = 32, initial_memory_words = 0 }
+target_raw_gas = 1610
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-32"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "canonical"
+scenario_id = "input-32"
+scenario = { input_length = 32, initial_memory_words = 1 }
+target_raw_gas = 36
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-256"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+scenario_id = "input-256"
+scenario = { input_length = 256, initial_memory_words = 1 }
+target_raw_gas = 99
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-1024"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+scenario_id = "input-1024"
+scenario = { input_length = 1024, initial_memory_words = 1 }
+target_raw_gas = 317
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x00"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "canonical"
+scenario_id = "offset-0x00"
+scenario = { highest_touched_offset = 0, initial_memory_words = 1 }
+target_raw_gas = 3
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x0100"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+scenario_id = "offset-0x0100"
+scenario = { highest_touched_offset = 256, initial_memory_words = 1 }
+target_raw_gas = 27
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x1000"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+scenario_id = "offset-0x1000"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 1 }
+target_raw_gas = 419
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x00"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "canonical"
+scenario_id = "offset-0x00"
+scenario = { highest_touched_offset = 0, initial_memory_words = 1 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x0100"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+scenario_id = "offset-0x0100"
+scenario = { highest_touched_offset = 256, initial_memory_words = 1 }
+target_raw_gas = 27
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x1000"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+scenario_id = "offset-0x1000"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 1 }
+target_raw_gas = 419
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x00"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "canonical"
+scenario_id = "offset-0x00"
+scenario = { highest_touched_offset = 0, initial_memory_words = 1 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x0100"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+scenario_id = "offset-0x0100"
+scenario = { highest_touched_offset = 256, initial_memory_words = 1 }
+target_raw_gas = 27
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x1000"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+scenario_id = "offset-0x1000"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 1 }
+target_raw_gas = 419
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-32"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "canonical"
+scenario_id = "copy-32"
+scenario = { copy_length = 32, initial_memory_words = 1 }
+target_raw_gas = 6
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-256"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+scenario_id = "copy-256"
+scenario = { copy_length = 256, initial_memory_words = 1 }
+target_raw_gas = 48
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-1024"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+scenario_id = "copy-1024"
+scenario = { copy_length = 1024, initial_memory_words = 1 }
+target_raw_gas = 194
+reference_raw_gas_total = 10
 
 [[cases]]
 name = "add"

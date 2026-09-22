@@ -3,6 +3,7 @@ import hashlib
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 from dataclasses import replace
 from unittest import mock
@@ -1024,6 +1025,13 @@ class CandidateConstructionTests(unittest.TestCase):
     def test_task4_step1_cli_entrypoints_are_executable(self):
         parser = opcode_gas.build_parser()
         commands = {
+            "run-block-calibration": [
+                "--guest-launcher", "guest-launcher",
+                "--calibration-run", "run",
+                "--controlled-manifest", "manifest.toml",
+                "--relations", "run/opcode-relations.json",
+                "--out", "run/block-calibration-rows.jsonl",
+            ],
             "run-controlled": [
                 "--fixtures", "fixtures",
                 "--guest-launcher", "guest-launcher",
@@ -1058,6 +1066,10 @@ class CandidateConstructionTests(unittest.TestCase):
         run = parser.parse_args(["run-controlled", *commands["run-controlled"]])
         self.assertEqual(run.repeats, 3)
         self.assertEqual(run.opcode_stage, "revm-opcode-lab")
+        block = parser.parse_args(
+            ["run-block-calibration", *commands["run-block-calibration"]]
+        )
+        self.assertEqual(block.repeats, 3)
 
     def test_candidate_and_bridge_cli_join_marginal_controlled_artifacts(self):
         manifest = controlled_manifest()
@@ -2012,6 +2024,115 @@ class CandidateConstructionTests(unittest.TestCase):
 
 
 class IdentityAndValidationTests(unittest.TestCase):
+    def test_block_calibration_preflight_requires_exact_rank_and_frozen_scope(self):
+        manifest = formal_relation_manifest()
+        opcode_keys = tuple(
+            sorted(
+                {
+                    key
+                    for row in manifest.block_calibration_rows
+                    for key in row.expected_raw_gas_by_key
+                }
+            )
+        )
+        model = types.SimpleNamespace(
+            opcode_keys=opcode_keys,
+            anchor_keys=opcode_gas.OPCODE_RELATION_ANCHORS,
+            anchor_basis={
+                key: {
+                    anchor: opcode_gas.Fraction(int(key == anchor), 1)
+                    for anchor in opcode_gas.OPCODE_RELATION_ANCHORS
+                }
+                for key in opcode_keys
+            },
+        )
+
+        result = opcode_gas.preflight_block_calibration_rows(manifest, model)
+        self.assertEqual(result["fit_row_count"], 40)
+        self.assertEqual(result["holdout_row_count"], 8)
+        self.assertEqual(result["fit_rank"], 8)
+        self.assertEqual(
+            set(result["holdout_families"]),
+            {
+                "pop_family",
+                "push_family",
+                "dup_family",
+                "swap_family",
+                "proposal_startup",
+                "block_base",
+                "tx_base",
+                "native_value_transfer",
+            },
+        )
+
+        fit_rows = tuple(
+            row for row in manifest.block_calibration_rows if row.split == "fit"
+        )
+        with self.assertRaisesRegex(ValueError, "40 fit rows"):
+            opcode_gas.preflight_block_calibration_rows(
+                replace(manifest, block_calibration_rows=fit_rows[:-1]), model
+            )
+
+        dynamic = replace(
+            manifest.block_calibration_rows[0],
+            expected_raw_gas_by_key={
+                **manifest.block_calibration_rows[0].expected_raw_gas_by_key,
+                "opcode:0x0a": 10,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "dynamic raw-gas"):
+            opcode_gas.preflight_block_calibration_rows(
+                replace(
+                    manifest,
+                    block_calibration_rows=(dynamic, *manifest.block_calibration_rows[1:]),
+                ),
+                model,
+            )
+
+        precompile = replace(
+            manifest.block_calibration_rows[0],
+            expected_raw_gas_by_key={"precompile:0x04": 18},
+        )
+        with self.assertRaisesRegex(ValueError, "precompile or spawned"):
+            opcode_gas.preflight_block_calibration_rows(
+                replace(
+                    manifest,
+                    block_calibration_rows=(precompile, *manifest.block_calibration_rows[1:]),
+                ),
+                model,
+            )
+
+        rounded_basis = {
+            key: dict(coefficients)
+            for key, coefficients in model.anchor_basis.items()
+        }
+        rounded_basis[opcode_keys[0]][opcode_gas.OPCODE_RELATION_ANCHORS[0]] = 0.0
+        with self.assertRaisesRegex(ValueError, "rounded basis"):
+            opcode_gas.preflight_block_calibration_rows(
+                manifest,
+                types.SimpleNamespace(
+                    opcode_keys=model.opcode_keys,
+                    anchor_keys=model.anchor_keys,
+                    anchor_basis=rounded_basis,
+                ),
+            )
+
+        missing_family = replace(
+            manifest.block_calibration_rows[-1],
+            workload_family="pop_family",
+        )
+        with self.assertRaisesRegex(ValueError, "does not have one holdout row"):
+            opcode_gas.preflight_block_calibration_rows(
+                replace(
+                    manifest,
+                    block_calibration_rows=(
+                        *manifest.block_calibration_rows[:-1],
+                        missing_family,
+                    ),
+                ),
+                model,
+            )
+
     def test_controlled_workload_and_execution_identity_boundaries(self):
         spec = {
             "schema_version": 1,

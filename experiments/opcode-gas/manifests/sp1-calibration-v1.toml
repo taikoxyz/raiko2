@@ -2602,3 +2602,534 @@ overhead_key_id = "dirty_state_entry"
 target_template = "dirty_state_entries_target"
 control_template = "dirty_state_entries_control"
 expected_changed_feature_keys = ["dirty_state_entry"]
+
+# Production-guest block calibration rows. Every expectation was materialized from the
+# production Shasta reconstruction trace before any SP1 execution.
+
+[[block_calibration_rows]]
+row_id = "19ea46b48b86bd5196b704a930b9e1bd44316b796fe839cf102b4696ea6381d9"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 1, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 2, "opcode:0x5f" = 2 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "654e02e5bd9d5d8ee146754bd39fd68e77c096b7b66858dbf0bd6cde8295c608"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 2, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7d6889b3573084ea1737ddc93d05de3443af033608472d99e33cb80aaebfafeb"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 4, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 8, "opcode:0x5f" = 8 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7ef366e208b08607702a2e516fbb2c6fc4a763adf116c37b9ae588b99b3b8dc9"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 8, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 16, "opcode:0x5f" = 16 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7b1919d01b4a1a5677bd1a02dd804997591e9ad43c903b42d3a536ac635a56b5"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 16, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 32, "opcode:0x5f" = 32 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "6ce7596195c57e7aa786c59ecc6ac2e2a630128d3a914fe67ce6f78d305b1e0f"
+workload_family = "pop_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 32, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 64, "opcode:0x5f" = 64 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "e75912c0a1cd60a91eb9079269d191400c41a0bed6c2e214fd4f86d947af96f4"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "push_family", "count" = 1, "scenario" = "push0_stack" }
+expected_raw_gas_by_key = { "opcode:0x5f" = 2 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "3face65b58d57f56b5aece96ffdbe73772e5048a75cfef2fb99b32f4d18e5d36"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "push_family", "count" = 2, "scenario" = "push0_stack" }
+expected_raw_gas_by_key = { "opcode:0x5f" = 4 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "5a82f2dce23fb02494e074dbe98b091a45f6869ad9725406cd05331e4b6a7315"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "push_family", "count" = 4, "scenario" = "push0_stack" }
+expected_raw_gas_by_key = { "opcode:0x5f" = 8 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7a8541407ed6d59134f8773e127352ead8b34cdaeaf4b59f0727d71903f5d497"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "push_family", "count" = 8, "scenario" = "push0_stack" }
+expected_raw_gas_by_key = { "opcode:0x5f" = 16 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "5c8627591f917b2345842e2861c5cd9e41cdeac02881eef37d00ecfbeabfa617"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "push_family", "count" = 16, "scenario" = "push0_stack" }
+expected_raw_gas_by_key = { "opcode:0x5f" = 32 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7de43e15960cf41262b92e77d967b878a58c8d78a220c4b1decfe2f61be51a5d"
+workload_family = "push_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "push_family", "count" = 32, "scenario" = "push0_stack" }
+expected_raw_gas_by_key = { "opcode:0x5f" = 64 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "ba276da153a99a0b656770667fe406a510132ac9d6d20631431d6160a3b11376"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 1, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 2, "opcode:0x80" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "fef6150b27a19ecadb339c62dc3e359f6e0cdabdd2a8bf57e5fabd0c593fbfd3"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 2, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 6, "opcode:0x5f" = 2, "opcode:0x80" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "51dea27ccaccd1f502035d3b7a442a2149740a84a7684b3298f16928746d36df"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 4, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 10, "opcode:0x5f" = 2, "opcode:0x80" = 12 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "fc821b75bb891d632ce02c55a0b781af2b778513d5385dd3ee4d07b5968f7d62"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 8, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 18, "opcode:0x5f" = 2, "opcode:0x80" = 24 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "8d88d47d3eb6068500cc80fc5a67bb55ed2f483455b22de9feb9709654207c8c"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 16, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 34, "opcode:0x5f" = 2, "opcode:0x80" = 48 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "50eb430b7f160255c7d4c0fcb455daf016807ff41b5f8c36bc669524c6801864"
+workload_family = "dup_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 32, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 66, "opcode:0x5f" = 2, "opcode:0x80" = 96 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "485f384bf95bf435c1210f98f00bbe673c38f19b7409fd18a7391a80e888512d"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "swap_family", "count" = 1, "scenario" = "push0_pair_swap1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4, "opcode:0x90" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "61a1e8cfa2a3f033122a9f37a0db0ff94223f2068d5bb2281dd3b4cab453af28"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "swap_family", "count" = 2, "scenario" = "push0_pair_swap1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "217d5a8ec425def5f0591d0457635f5c3dcc9e8e64b4a27051cf2a04ad5558d4"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "swap_family", "count" = 4, "scenario" = "push0_pair_swap1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4, "opcode:0x90" = 12 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "0f376f1d4275cc317577a237c6226ccea543db5b8ce23825aa883b2f38face75"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "swap_family", "count" = 8, "scenario" = "push0_pair_swap1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4, "opcode:0x90" = 24 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "26819ad2482d62d89716b99cc6ea25dab1a108acc1aca1551499667311ef9e8a"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "swap_family", "count" = 16, "scenario" = "push0_pair_swap1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4, "opcode:0x90" = 48 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "372aa12d321fa02a20fa1914b9b541d5d8ec67986c9588c3e0431b6fc09d38d3"
+workload_family = "swap_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "swap_family", "count" = 32, "scenario" = "push0_pair_swap1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x5f" = 4, "opcode:0x90" = 96 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "d3ca3f7cf135732ac7121f24c556aa14e34661f3a38b8895c191670e3c8c90e9"
+workload_family = "block_base"
+split = "fit"
+block_count = 1
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 331684, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 297, "witness_node_count" = 3 }
+
+[[block_calibration_rows]]
+row_id = "482f2bdfc5efba4b0e420ed02ba57ee60e7aef4e8c129aebc56b70b63e229f0e"
+workload_family = "block_base"
+split = "fit"
+block_count = 2
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 341404, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 1088, "witness_node_count" = 12 }
+
+[[block_calibration_rows]]
+row_id = "31e39fc0758bffdfdae1e79e0c2142b6959d2959ba917fb2cea6bb044fb3ad87"
+workload_family = "block_base"
+split = "fit"
+block_count = 4
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 4, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 360806, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 3024, "witness_node_count" = 34 }
+
+[[block_calibration_rows]]
+row_id = "514f7c9d13acb87c186ce8a4b93b9a7a7d744f710514615816642e541720eee1"
+workload_family = "block_base"
+split = "fit"
+block_count = 8
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 8, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 399950, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 8363, "witness_node_count" = 95 }
+
+[[block_calibration_rows]]
+row_id = "b34999099fa46100368ed7d048e8a0bc87b423ff13db02b20da2386460504a5c"
+workload_family = "block_base"
+split = "fit"
+block_count = 16
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 16, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 479968, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 25169, "witness_node_count" = 290 }
+
+[[block_calibration_rows]]
+row_id = "c7468bc77570986e1b7a4fb9c789327bf5493d9b6dfcf4af7bc16534c3bda248"
+workload_family = "block_base"
+split = "holdout"
+block_count = 32
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 32, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 644300, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 80778, "witness_node_count" = 923 }
+
+[[block_calibration_rows]]
+row_id = "26fd0b94f36da4a6fb2c205b8314bfb515b6bb10583ebd4b73be57398c7da22b"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "dc21f5e9738151f9b0dbf5c1eaeaf6ed29fa7a6e9cc65dafbe3ffa94a83f128b"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 2
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 2 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332658, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "9b90f40f3598419a0e2d241a9d53f801f22c62613f0bb55a711050a98b2ba9b0"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 4
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 4 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 333140, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "c3d66abc888ede66f3d61439802541ec6022b329676be5a86ce0db6ae17c98a1"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 8
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 8 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 334104, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "80404457a87cc8dc294e4ada188e863a45ffae2a8791d9a410a2b1cb979d50b4"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 16
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 16 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 336032, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "47c9c1956a84e3d90ef467d0b9e6bfd35d919bba18e15df54145e6d95eabd29c"
+workload_family = "tx_base"
+split = "holdout"
+block_count = 1
+transaction_count = 32
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 32 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 339888, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "d3e56d98ac455b4dedfada95da71ba7b31a867ce009c1a3f110dc695e2b43bda"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 1, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "e5fdb7b5c4c8170e3043efc12d91f5453050925c8e8452fbef15583cbad2501f"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 2
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 2, "proposal_startup" = 1, "tx_base" = 2 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332658, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "65365900306189cd6ef47426b152143ad86f8c6f067f5590b7cdc399a4eb7ef5"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 4
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 4, "proposal_startup" = 1, "tx_base" = 4 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 333140, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "f080d1668fcf6843bd3008980967428d8d63fd1e14ff93d53e9acae695b685d4"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 8
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 8, "proposal_startup" = 1, "tx_base" = 8 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 334104, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "e5aa006c5b7f8ee59b2d9e18e9f41a0648d94651d2b07d3541f8316db6efe1de"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 16
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 16, "proposal_startup" = 1, "tx_base" = 16 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 336032, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "f66da5eca5f1a4c8c2df2d3ecfc738d0a3c99b05765e624a756cab0eb2e9493c"
+workload_family = "native_value_transfer"
+split = "holdout"
+block_count = 1
+transaction_count = 32
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 32, "proposal_startup" = 1, "tx_base" = 32 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 339888, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "6d13474455ac596a076a99405028a59278bca48fffd1e7f9c5cd5902d2e4aff1"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 331684, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 297, "witness_node_count" = 3 }
+
+[[block_calibration_rows]]
+row_id = "5ea0636fe115e47f54007cd01f89dd803c99297c68836e0b130a6c7f3597c410"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 2
+transaction_count = 0
+program = { "kind" = "empty" }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 341404, "kzg_invocation_count" = 1, "touched_state_key_count" = 3, "witness_byte_count" = 1088, "witness_node_count" = 12 }
+
+[[block_calibration_rows]]
+row_id = "8d8628ebb719db1920f93b17c4a837935e2b8ea86452a813f7a0e1f5bb6fb247"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "native_transfer", "value" = 0 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "cf020560efa4fa9cb59f4077c8adebf3037d5390de768f5bee74f8eae44da567"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "native_transfer", "value" = 1 }
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 1, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "9c6013c25a39e08450e465ae0eaee8ff4cd0225db95f305decb3b957ae416dc2"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "pop_family", "count" = 1, "scenario" = "push0_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 2, "opcode:0x5f" = 2 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "eb1e3a23c89e8f3a4fdb101a22db73c01875415ea38bcda7d8c2b99f3b324cd0"
+workload_family = "proposal_startup"
+split = "holdout"
+block_count = 2
+transaction_count = 1
+program = { "kind" = "opcode_loop", "family" = "dup_family", "count" = 2, "scenario" = "push0_dup1_then_pop" }
+expected_raw_gas_by_key = { "opcode:0x50" = 6, "opcode:0x5f" = 2, "opcode:0x80" = 6 }
+expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 343203, "kzg_invocation_count" = 1, "touched_state_key_count" = 5, "witness_byte_count" = 1909, "witness_node_count" = 19 }

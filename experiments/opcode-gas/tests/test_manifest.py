@@ -210,6 +210,82 @@ CONTROLLED_SCHEDULE_KEYS = {"opcode:0x01", "opcode:0x02", "precompile:0x04"}
 
 
 class ManifestTests(unittest.TestCase):
+    def test_v1_materializes_exact_block_calibration_inventory(self):
+        path = (
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml"
+        )
+        manifest = opcode_gas.load_manifest(path, schedule=fixture_schedule())
+        rows = manifest.block_calibration_rows
+        families = {
+            "pop_family",
+            "push_family",
+            "dup_family",
+            "swap_family",
+            "proposal_startup",
+            "block_base",
+            "tx_base",
+            "native_value_transfer",
+        }
+        diagnostics = {
+            "guest_input_bincode_length",
+            "witness_node_count",
+            "witness_byte_count",
+            "blob_count",
+            "kzg_invocation_count",
+            "calldata_length",
+            "bytecode_length",
+            "touched_state_key_count",
+        }
+
+        self.assertEqual(len(rows), 48)
+        self.assertEqual({row.workload_family for row in rows}, families)
+        self.assertEqual(len({row.row_id for row in rows}), 48)
+        for family in families:
+            family_rows = [row for row in rows if row.workload_family == family]
+            self.assertEqual(
+                [row.split for row in family_rows],
+                ["fit", "fit", "fit", "fit", "fit", "holdout"],
+            )
+            self.assertEqual(
+                {key for row in family_rows for key in row.expected_diagnostics},
+                diagnostics,
+            )
+            self.assertTrue(
+                all(set(row.expected_diagnostics) == diagnostics for row in family_rows)
+            )
+
+        for family in (
+            "pop_family",
+            "push_family",
+            "dup_family",
+            "swap_family",
+            "block_base",
+            "tx_base",
+            "native_value_transfer",
+        ):
+            fit_rows = [
+                row
+                for row in rows
+                if row.workload_family == family and row.split == "fit"
+            ]
+            counts = [
+                row.program.count
+                if row.program.kind == "opcode_loop"
+                else row.block_count
+                if family == "block_base"
+                else row.transaction_count
+                for row in fit_rows
+            ]
+            self.assertEqual(counts, [1, 2, 4, 8, 16])
+
+        startup = [row for row in rows if row.workload_family == "proposal_startup"]
+        self.assertEqual(len({row.row_id for row in startup}), 6)
+        self.assertTrue(all(row.expected_features["proposal_startup"] == 1 for row in rows))
+
     def test_v1_freezes_formal_relation_anchors_and_dynamic_scenario_triples(self):
         path = (
             ROOT

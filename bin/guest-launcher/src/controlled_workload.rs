@@ -30,8 +30,8 @@ use raiko2_protocol_shasta::{
 };
 use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources;
 use raiko2_zkgas_trace::{
-    OperationComponent, OperationPhase, PricingBasis, ProposalTraceStatus, TransactionDisposition,
-    trace_shasta_proposal,
+    OperationComponent, OperationPhase, PricingBasis, ProposalTrace, ProposalTraceStatus,
+    TransactionDisposition, trace_shasta_proposal,
 };
 use reth_ethereum_primitives::TransactionSigned;
 use revm::{
@@ -230,6 +230,77 @@ pub struct ControlledOverheadObservation {
     pub unattempted_candidate_transaction_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledBlockSplit {
+    Fit,
+    Holdout,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ControlledProgram {
+    Empty,
+    NativeTransfer {
+        value: u64,
+    },
+    OpcodeLoop {
+        family: String,
+        count: u64,
+        scenario: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ControlledBlockRowSpec {
+    pub row_id: String,
+    pub workload_family: String,
+    pub split: ControlledBlockSplit,
+    pub block_count: usize,
+    pub transaction_count: u64,
+    pub program: ControlledProgram,
+    pub expected_raw_gas_by_key: BTreeMap<String, i64>,
+    pub expected_features: BTreeMap<String, i64>,
+    pub expected_diagnostics: BTreeMap<String, i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ControlledBlockFixture {
+    pub spec: ControlledBlockRowSpec,
+    pub guest_input: GuestInput,
+    controlled_bytecode_length: usize,
+    touched_state_key_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledBlockObservation {
+    pub row_id: String,
+    pub workload_family: String,
+    pub split: ControlledBlockSplit,
+    pub backend_input_sha256: String,
+    pub guest_input_bincode_length: usize,
+    pub public_output: B256,
+    pub actual_raw_gas_by_key: BTreeMap<String, i64>,
+    pub actual_features: BTreeMap<String, i64>,
+    pub actual_diagnostics: BTreeMap<String, i64>,
+    pub unzen_activation_timestamp: u64,
+    pub minimum_block_timestamp: u64,
+    pub operation_phase_ownership: &'static str,
+    pub system_operation_ownership: &'static str,
+    pub anchor_operation_ownership: &'static str,
+}
+
+pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> {
+    let mut semantics = serde_json::to_value(spec)?;
+    semantics
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("controlled block row must serialize as an object"))?
+        .remove("row_id");
+    Ok(alloy_primitives::hex::encode(Sha256::digest(
+        serde_json::to_vec(&semantics)?,
+    )))
+}
+
 fn controlled_overhead_workload_spec(
     fixture: &ControlledOverheadFixture,
 ) -> Result<ControlledOverheadWorkloadSpec> {
@@ -263,27 +334,10 @@ pub fn controlled_overhead_workload_id(fixture: &ControlledOverheadFixture) -> R
     sha256_json(&value)
 }
 
-fn observe_overhead_fixture(
-    fixture: &ControlledOverheadFixture,
-) -> Result<ControlledOverheadObservation> {
-    let trace = trace_shasta_proposal(&fixture.guest_input)?;
-    if trace.status != ProposalTraceStatus::Complete
-        || !trace.parity.passed
-        || !trace.partial_blocks.is_empty()
-        || !trace.recovery_failures.is_empty()
-    {
-        let (stage, error) = trace
-            .failure
-            .as_ref()
-            .map(|failure| (failure.stage.as_str(), failure.error.as_str()))
-            .unwrap_or(("unknown", "trace failed without typed failure diagnostics"));
-        bail!(
-            "controlled overhead fixture {} {:?} did not complete the production trace path: trace stage={stage}, error={error}",
-            fixture.case_id,
-            fixture.lane,
-        );
-    }
-    let mut absolute_operation_pricing_units = BTreeMap::new();
+fn absolute_transaction_operation_units(
+    trace: &ProposalTrace,
+) -> Result<BTreeMap<String, ControlledOperationUnits>> {
+    let mut absolute = BTreeMap::new();
     for block in &trace.blocks {
         let anchor_started_indices = block
             .transactions
@@ -352,13 +406,10 @@ fn observe_overhead_fixture(
             if units == 0 {
                 continue;
             }
-            let entry =
-                absolute_operation_pricing_units
-                    .entry(key)
-                    .or_insert(ControlledOperationUnits {
-                        pricing_basis,
-                        units: 0,
-                    });
+            let entry = absolute.entry(key).or_insert(ControlledOperationUnits {
+                pricing_basis,
+                units: 0,
+            });
             if entry.pricing_basis != pricing_basis {
                 bail!("one measurement identity has multiple pricing bases");
             }
@@ -368,6 +419,30 @@ fn observe_overhead_fixture(
                 .ok_or_else(|| anyhow::anyhow!("controlled operation pricing units overflow"))?;
         }
     }
+    Ok(absolute)
+}
+
+fn observe_overhead_fixture(
+    fixture: &ControlledOverheadFixture,
+) -> Result<ControlledOverheadObservation> {
+    let trace = trace_shasta_proposal(&fixture.guest_input)?;
+    if trace.status != ProposalTraceStatus::Complete
+        || !trace.parity.passed
+        || !trace.partial_blocks.is_empty()
+        || !trace.recovery_failures.is_empty()
+    {
+        let (stage, error) = trace
+            .failure
+            .as_ref()
+            .map(|failure| (failure.stage.as_str(), failure.error.as_str()))
+            .unwrap_or(("unknown", "trace failed without typed failure diagnostics"));
+        bail!(
+            "controlled overhead fixture {} {:?} did not complete the production trace path: trace stage={stage}, error={error}",
+            fixture.case_id,
+            fixture.lane,
+        );
+    }
+    let absolute_operation_pricing_units = absolute_transaction_operation_units(&trace)?;
     let transactions = trace.blocks.iter().flat_map(|block| &block.transactions);
     let transaction_rows = transactions.collect::<Vec<_>>();
     let started_candidate_transaction_count = transaction_rows
@@ -561,13 +636,13 @@ pub fn validate_required_overhead_fixtures(
     Ok(observations)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum CandidateKind {
     None,
     NoCodeNoValue,
-    MinimalContractCall,
+    ControlledContract(Bytes),
     NativeZero,
-    NativeValue,
+    NativeValue(u64),
 }
 
 fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
@@ -616,18 +691,17 @@ fn controlled_candidate_signer() -> Result<PrivateKeySigner> {
     Ok(PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11))?)
 }
 
-fn candidate_transactions(kind: CandidateKind, count: u64) -> Result<Vec<TransactionSigned>> {
+fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<TransactionSigned>> {
     if matches!(kind, CandidateKind::None) {
         return Ok(Vec::new());
     }
     let recipient = match kind {
-        CandidateKind::MinimalContractCall => Address::repeat_byte(0x66),
+        CandidateKind::ControlledContract(_) => Address::repeat_byte(0x66),
         _ => Address::repeat_byte(0x55),
     };
-    let value = if matches!(kind, CandidateKind::NativeValue) {
-        U256::from(1)
-    } else {
-        U256::ZERO
+    let value = match kind {
+        CandidateKind::NativeValue(value) => U256::from(*value),
+        _ => U256::ZERO,
     };
     let signer = controlled_candidate_signer()?;
     (0..count)
@@ -798,7 +872,7 @@ fn controlled_anchor_code(anchor_address: Address) -> Result<Bytes> {
 fn overhead_prestate(
     chain_spec: &raiko2_primitives::ChainSpec,
     candidates: &[TransactionSigned],
-    contract_call: bool,
+    controlled_contract_code: Option<&Bytes>,
 ) -> Result<(ControlledTrieState, Vec<Bytes>)> {
     let anchor_address = chain_spec
         .l2_contract
@@ -827,10 +901,9 @@ fn overhead_prestate(
         let recipient = candidate
             .to()
             .ok_or_else(|| anyhow::anyhow!("controlled candidate must be a call"))?;
-        let code = Bytes::from_static(&[0x5f]);
-        let code_hash = if contract_call {
+        let code_hash = if let Some(code) = controlled_contract_code {
             codes.push(code.clone());
-            keccak256(&code)
+            keccak256(code)
         } else {
             KECCAK_EMPTY
         };
@@ -925,12 +998,13 @@ fn build_overhead_guest_input(
         };
     let runtime_chain_spec = builtin_taiko_chain_spec(OVERHEAD_CHAIN_ID)?;
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
-    let candidates = candidate_transactions(kind, candidate_count)?;
-    let (mut controlled_state, codes) = overhead_prestate(
-        &chain_spec,
-        &candidates,
-        matches!(kind, CandidateKind::MinimalContractCall),
-    )?;
+    let candidates = candidate_transactions(&kind, candidate_count)?;
+    let controlled_contract_code = match &kind {
+        CandidateKind::ControlledContract(code) => Some(code),
+        _ => None,
+    };
+    let (mut controlled_state, codes) =
+        overhead_prestate(&chain_spec, &candidates, controlled_contract_code)?;
     let (mut prestate_root, mut state_nodes) = controlled_state.witness();
     let l1_header = sample_l1_header(OVERHEAD_PARENT_ANCHOR_BLOCK_NUMBER, B256::repeat_byte(0x66));
     let checkpoint = AnchorV4Checkpoint {
@@ -1132,6 +1206,291 @@ fn build_overhead_guest_input(
     Ok(guest_input)
 }
 
+const CONTROLLED_BLOCK_BYTECODE_LENGTH: usize = 256;
+
+fn controlled_opcode_bytecode(family: &str, count: u64, scenario: &str) -> Result<Bytes> {
+    let count = usize::try_from(count)?;
+    let mut code = Vec::new();
+    match (family, scenario) {
+        ("pop_family", "push0_pop") => {
+            for _ in 0..count {
+                code.extend([0x5f, 0x50]);
+            }
+        }
+        ("push_family", "push0_stack") => {
+            code.extend(std::iter::repeat_n(0x5f, count));
+        }
+        ("dup_family", "push0_dup1_then_pop") => {
+            code.push(0x5f);
+            code.extend(std::iter::repeat_n(0x80, count));
+            code.extend(std::iter::repeat_n(0x50, count.saturating_add(1)));
+        }
+        ("swap_family", "push0_pair_swap1_then_pop") => {
+            code.extend([0x5f, 0x5f]);
+            code.extend(std::iter::repeat_n(0x90, count));
+            code.extend([0x50, 0x50]);
+        }
+        _ => bail!("unknown controlled opcode family/scenario {family}/{scenario}"),
+    }
+    code.push(0x00);
+    if code.len() > CONTROLLED_BLOCK_BYTECODE_LENGTH {
+        bail!("controlled opcode bytecode exceeds frozen code-length class");
+    }
+    code.resize(CONTROLLED_BLOCK_BYTECODE_LENGTH, 0x00);
+    Ok(code.into())
+}
+
+pub fn build_controlled_block_fixture(
+    spec: &ControlledBlockRowSpec,
+) -> Result<ControlledBlockFixture> {
+    let derived_row_id = controlled_block_row_id(spec)?;
+    if spec.row_id != derived_row_id {
+        bail!(
+            "controlled block row ID differs from semantic content: declared={}, derived={derived_row_id}",
+            spec.row_id
+        );
+    }
+    let (kind, bytecode_length, touched_state_key_count) = match &spec.program {
+        ControlledProgram::Empty => {
+            if spec.transaction_count != 0 {
+                bail!("empty controlled program requires zero transactions");
+            }
+            (CandidateKind::None, 0, 3)
+        }
+        ControlledProgram::NativeTransfer { value } => (
+            if *value == 0 {
+                CandidateKind::NativeZero
+            } else {
+                CandidateKind::NativeValue(*value)
+            },
+            0,
+            5,
+        ),
+        ControlledProgram::OpcodeLoop {
+            family,
+            count,
+            scenario,
+        } => {
+            if family != &spec.workload_family && spec.workload_family != "proposal_startup" {
+                bail!("controlled opcode program family differs from workload family");
+            }
+            if spec.transaction_count == 0 {
+                bail!("controlled opcode program requires at least one transaction");
+            }
+            let bytecode = controlled_opcode_bytecode(family, *count, scenario)?;
+            let bytecode_length = bytecode.len();
+            (
+                CandidateKind::ControlledContract(bytecode),
+                bytecode_length,
+                5,
+            )
+        }
+    };
+    let guest_input = build_overhead_guest_input(kind, spec.block_count, spec.transaction_count)?;
+    Ok(ControlledBlockFixture {
+        spec: spec.clone(),
+        guest_input,
+        controlled_bytecode_length: bytecode_length,
+        touched_state_key_count,
+    })
+}
+
+fn observe_controlled_block_fixture(
+    fixture: &ControlledBlockFixture,
+) -> Result<ControlledBlockObservation> {
+    let trace = trace_shasta_proposal(&fixture.guest_input)?;
+    if trace.status != ProposalTraceStatus::Complete
+        || !trace.parity.passed
+        || !trace.partial_blocks.is_empty()
+        || !trace.recovery_failures.is_empty()
+    {
+        let (stage, error) = trace
+            .failure
+            .as_ref()
+            .map(|failure| (failure.stage.as_str(), failure.error.as_str()))
+            .unwrap_or(("unknown", "trace failed without typed failure diagnostics"));
+        bail!(
+            "controlled block row {} did not complete the production trace path: trace stage={stage}, error={error}",
+            fixture.spec.row_id
+        );
+    }
+    let operation_units = absolute_transaction_operation_units(&trace)?;
+    if operation_units
+        .values()
+        .any(|units| units.pricing_basis != PricingBasis::RawGasSlope)
+    {
+        bail!("controlled block row contains spawned fixed-per-event work");
+    }
+    let actual_raw_gas_by_key = operation_units
+        .into_iter()
+        .map(|(key, value)| (key, value.units))
+        .collect::<BTreeMap<_, _>>();
+    if actual_raw_gas_by_key
+        .keys()
+        .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
+    {
+        bail!("controlled block row contains precompile or spawned work");
+    }
+
+    let started_candidate_transactions = trace
+        .blocks
+        .iter()
+        .flat_map(|block| &block.transactions)
+        .filter(|transaction| {
+            !transaction.is_anchor && transaction.disposition != TransactionDisposition::Unattempted
+        })
+        .count();
+    let native_value_transfers = trace
+        .blocks
+        .iter()
+        .map(|block| block.native_value_transfer_count)
+        .sum::<usize>();
+    let actual_features = BTreeMap::from([
+        ("proposal_startup".into(), 1),
+        ("block_base".into(), i64::try_from(trace.blocks.len())?),
+        (
+            "tx_base".into(),
+            i64::try_from(started_candidate_transactions)?,
+        ),
+        (
+            "native_value_transfer".into(),
+            i64::try_from(native_value_transfers)?,
+        ),
+    ]);
+    let witness_node_count = fixture
+        .guest_input
+        .witnesses
+        .iter()
+        .map(|witness| witness.witness.state.len())
+        .sum::<usize>();
+    let witness_byte_count = fixture
+        .guest_input
+        .witnesses
+        .iter()
+        .flat_map(|witness| &witness.witness.state)
+        .map(|node| node.bytes.len())
+        .sum::<usize>();
+    let blob_count = fixture
+        .guest_input
+        .taiko
+        .data_sources
+        .iter()
+        .map(|source| source.tx_data_from_blob.len())
+        .sum::<usize>();
+    let kzg_invocation_count = fixture
+        .guest_input
+        .taiko
+        .data_sources
+        .iter()
+        .map(|source| source.blob_commitments.len())
+        .sum::<usize>();
+    let calldata_length = fixture
+        .guest_input
+        .taiko
+        .data_sources
+        .iter()
+        .map(|source| source.tx_data_from_calldata.len())
+        .sum::<usize>();
+    let actual_diagnostics = BTreeMap::from([
+        (
+            "guest_input_bincode_length".into(),
+            i64::try_from(trace.guest_input_bincode_length)?,
+        ),
+        (
+            "witness_node_count".into(),
+            i64::try_from(witness_node_count)?,
+        ),
+        (
+            "witness_byte_count".into(),
+            i64::try_from(witness_byte_count)?,
+        ),
+        ("blob_count".into(), i64::try_from(blob_count)?),
+        (
+            "kzg_invocation_count".into(),
+            i64::try_from(kzg_invocation_count)?,
+        ),
+        ("calldata_length".into(), i64::try_from(calldata_length)?),
+        (
+            "bytecode_length".into(),
+            i64::try_from(fixture.controlled_bytecode_length)?,
+        ),
+        (
+            "touched_state_key_count".into(),
+            i64::try_from(fixture.touched_state_key_count)?,
+        ),
+    ]);
+    let chain_spec = SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(OVERHEAD_CHAIN_ID)
+        .ok_or_else(|| anyhow::anyhow!("missing controlled Taiko chain spec"))?;
+    let unzen_activation_timestamp =
+        match chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) {
+            Some(ForkCondition::Timestamp(timestamp)) => *timestamp,
+            _ => bail!("controlled Taiko chain is missing timestamp-based Unzen activation"),
+        };
+    let minimum_block_timestamp = fixture
+        .guest_input
+        .witnesses
+        .iter()
+        .map(|witness| witness.block.header.timestamp)
+        .min()
+        .ok_or_else(|| anyhow::anyhow!("controlled block row has no witnesses"))?;
+    if minimum_block_timestamp <= unzen_activation_timestamp {
+        bail!("controlled block row is not strictly post-Unzen");
+    }
+    Ok(ControlledBlockObservation {
+        row_id: fixture.spec.row_id.clone(),
+        workload_family: fixture.spec.workload_family.clone(),
+        split: fixture.spec.split,
+        backend_input_sha256: trace
+            .guest_input_sha256
+            .trim_start_matches("0x")
+            .to_string(),
+        guest_input_bincode_length: trace.guest_input_bincode_length,
+        public_output: trace
+            .public_output
+            .ok_or_else(|| anyhow::anyhow!("complete controlled trace is missing public output"))?,
+        actual_raw_gas_by_key,
+        actual_features,
+        actual_diagnostics,
+        unzen_activation_timestamp,
+        minimum_block_timestamp,
+        operation_phase_ownership: "transaction_non_anchor_only",
+        system_operation_ownership: "block_base",
+        anchor_operation_ownership: "block_base",
+    })
+}
+
+pub fn validate_controlled_block_fixture(
+    fixture: &ControlledBlockFixture,
+) -> Result<ControlledBlockObservation> {
+    let observation = observe_controlled_block_fixture(fixture)?;
+    if observation.actual_raw_gas_by_key != fixture.spec.expected_raw_gas_by_key {
+        bail!(
+            "controlled block row {} raw-gas mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_raw_gas_by_key,
+            observation.actual_raw_gas_by_key
+        );
+    }
+    if observation.actual_features != fixture.spec.expected_features {
+        bail!(
+            "controlled block row {} feature mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_features,
+            observation.actual_features
+        );
+    }
+    if observation.actual_diagnostics != fixture.spec.expected_diagnostics {
+        bail!(
+            "controlled block row {} diagnostic mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_diagnostics,
+            observation.actual_diagnostics
+        );
+    }
+    Ok(observation)
+}
+
 pub fn build_required_overhead_fixtures(
     target_count: u64,
 ) -> Result<Vec<ControlledOverheadFixture>> {
@@ -1143,9 +1502,13 @@ pub fn build_required_overhead_fixtures(
     )?;
     let no_code = build_overhead_guest_input(CandidateKind::NoCodeNoValue, 1, target_count)?;
     let no_code_one = build_overhead_guest_input(CandidateKind::NoCodeNoValue, 1, 1)?;
-    let contract = build_overhead_guest_input(CandidateKind::MinimalContractCall, 1, target_count)?;
+    let contract = build_overhead_guest_input(
+        CandidateKind::ControlledContract(Bytes::from_static(&[0x5f])),
+        1,
+        target_count,
+    )?;
     let native_zero = build_overhead_guest_input(CandidateKind::NativeZero, 1, target_count)?;
-    let native_value = build_overhead_guest_input(CandidateKind::NativeValue, 1, target_count)?;
+    let native_value = build_overhead_guest_input(CandidateKind::NativeValue(1), 1, target_count)?;
     let empty_operations = BTreeMap::new();
     let count_delta = i64::try_from(target_count)?;
     let push0_units = count_delta

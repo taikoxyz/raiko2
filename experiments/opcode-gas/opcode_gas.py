@@ -22,7 +22,12 @@ from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
-from calibration_model import RelationEquation, derive_affine_opcode_model
+from calibration_model import (
+    AffineOpcodeModel,
+    RelationEquation,
+    derive_affine_opcode_model,
+    exact_rank,
+)
 
 
 getcontext().prec = 80
@@ -135,6 +140,28 @@ class OpcodeRelationSpec:
 
 
 @dataclass(frozen=True)
+class ControlledBlockProgramSpec:
+    kind: str
+    value: int | None = None
+    family: str | None = None
+    count: int | None = None
+    scenario: str | None = None
+
+
+@dataclass(frozen=True)
+class ControlledBlockRowSpec:
+    row_id: str
+    workload_family: str
+    split: str
+    block_count: int
+    transaction_count: int
+    program: ControlledBlockProgramSpec
+    expected_raw_gas_by_key: Mapping[str, int]
+    expected_features: Mapping[str, int]
+    expected_diagnostics: Mapping[str, int]
+
+
+@dataclass(frozen=True)
 class Manifest:
     name: str
     backend: str
@@ -155,6 +182,7 @@ class Manifest:
     opcode_relation_anchors: tuple[str, ...] = ()
     dynamic_raw_gas_keys: tuple[str, ...] = ()
     opcode_relations: tuple[OpcodeRelationSpec, ...] = ()
+    block_calibration_rows: tuple[ControlledBlockRowSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -813,6 +841,123 @@ def _subtract_closures(overheads: tuple[OverheadKeySpec, ...]) -> dict[str, tupl
     return result
 
 
+BLOCK_CALIBRATION_FAMILIES = (
+    "pop_family", "push_family", "dup_family", "swap_family",
+    "proposal_startup", "block_base", "tx_base", "native_value_transfer",
+)
+BLOCK_CALIBRATION_DIAGNOSTICS = (
+    "guest_input_bincode_length", "witness_node_count", "witness_byte_count",
+    "blob_count", "kzg_invocation_count", "calldata_length", "bytecode_length",
+    "touched_state_key_count",
+)
+
+
+def _strict_nonnegative_int_map(value: Any, *, label: str) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    result = {}
+    for key, number in value.items():
+        if not isinstance(key, str) or type(number) is not int or number < 0:
+            raise ValueError(f"{label} must contain non-negative integer values")
+        result[key] = number
+    return result
+
+
+def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBlockRowSpec, ...]:
+    rows = []
+    seen = set()
+    for item in data.get("block_calibration_rows", []):
+        if not isinstance(item, Mapping):
+            raise ValueError("block calibration row must be an object")
+        program_data = item.get("program")
+        if not isinstance(program_data, Mapping):
+            raise ValueError("block calibration program must be an object")
+        kind = program_data.get("kind")
+        if kind == "empty":
+            if set(program_data) != {"kind"}:
+                raise ValueError("empty block calibration program has extra fields")
+            program = ControlledBlockProgramSpec(kind=kind)
+        elif kind == "native_transfer":
+            if (
+                set(program_data) != {"kind", "value"}
+                or type(program_data.get("value")) is not int
+                or program_data["value"] < 0
+            ):
+                raise ValueError("native transfer block calibration program is invalid")
+            program = ControlledBlockProgramSpec(kind=kind, value=program_data["value"])
+        elif kind == "opcode_loop":
+            if (
+                set(program_data) != {"kind", "family", "count", "scenario"}
+                or not isinstance(program_data.get("family"), str)
+                or type(program_data.get("count")) is not int
+                or program_data["count"] <= 0
+                or not isinstance(program_data.get("scenario"), str)
+                or not program_data["scenario"]
+            ):
+                raise ValueError("opcode-loop block calibration program is invalid")
+            program = ControlledBlockProgramSpec(
+                kind=kind,
+                family=program_data["family"],
+                count=program_data["count"],
+                scenario=program_data["scenario"],
+            )
+        else:
+            raise ValueError("unknown block calibration program kind")
+        row_id = item.get("row_id")
+        family = item.get("workload_family")
+        split = item.get("split")
+        block_count = item.get("block_count")
+        transaction_count = item.get("transaction_count")
+        if not _is_sha256(row_id) or row_id in seen:
+            raise ValueError("block calibration row ID is invalid or duplicate")
+        if family not in BLOCK_CALIBRATION_FAMILIES or split not in {"fit", "holdout"}:
+            raise ValueError("block calibration row family or split is invalid")
+        if type(block_count) is not int or not 1 <= block_count <= 768:
+            raise ValueError("block calibration block_count is invalid")
+        if type(transaction_count) is not int or transaction_count < 0:
+            raise ValueError("block calibration transaction_count is invalid")
+        raw = _strict_nonnegative_int_map(
+            item.get("expected_raw_gas_by_key"), label="block calibration raw-gas map"
+        )
+        if any(not key.startswith("opcode:0x") for key in raw):
+            raise ValueError("block calibration raw-gas map contains precompile or spawned work")
+        features = _strict_nonnegative_int_map(
+            item.get("expected_features"), label="block calibration feature map"
+        )
+        if set(features) != set(Q_FORMULA) or features["proposal_startup"] != 1:
+            raise ValueError("block calibration feature map differs from frozen Q_formula")
+        diagnostics = _strict_nonnegative_int_map(
+            item.get("expected_diagnostics"), label="block calibration diagnostic map"
+        )
+        if set(diagnostics) != set(BLOCK_CALIBRATION_DIAGNOSTICS):
+            raise ValueError("block calibration diagnostic map is incomplete")
+        semantics = {
+            "workload_family": family,
+            "split": split,
+            "block_count": block_count,
+            "transaction_count": transaction_count,
+            "program": dict(program_data),
+            "expected_raw_gas_by_key": raw,
+            "expected_features": features,
+            "expected_diagnostics": diagnostics,
+        }
+        if sha256_bytes(canonical_json(semantics)) != row_id:
+            raise ValueError("block calibration row ID differs from semantic content")
+        seen.add(row_id)
+        rows.append(ControlledBlockRowSpec(
+            row_id=row_id,
+            workload_family=family,
+            split=split,
+            block_count=block_count,
+            transaction_count=transaction_count,
+            program=program,
+            expected_raw_gas_by_key=MappingProxyType(raw),
+            expected_features=MappingProxyType(features),
+            expected_diagnostics=MappingProxyType(diagnostics),
+        ))
+    return tuple(rows)
+
+
 def parse_controlled_manifest(
     data: Mapping[str, Any], *, schedule_keys: set[str]
 ) -> Manifest:
@@ -1083,6 +1228,7 @@ def parse_controlled_manifest(
     relation_anchors, dynamic_raw_gas_keys, opcode_relations = (
         _parse_opcode_relations(data, cases)
     )
+    block_calibration_rows = _parse_block_calibration_rows(data)
 
     return Manifest(
         name=str(data["name"]),
@@ -1104,6 +1250,7 @@ def parse_controlled_manifest(
         opcode_relation_anchors=relation_anchors,
         dynamic_raw_gas_keys=dynamic_raw_gas_keys,
         opcode_relations=opcode_relations,
+        block_calibration_rows=block_calibration_rows,
     )
 
 
@@ -5413,6 +5560,70 @@ def validate_opcode_relations_artifact(
         raise ValueError("opcode relation artifact basis differs from exact derivation")
 
 
+def preflight_block_calibration_rows(
+    manifest: Manifest,
+    affine_model: AffineOpcodeModel,
+) -> dict[str, Any]:
+    rows = manifest.block_calibration_rows
+    fit_rows = [row for row in rows if row.split == "fit"]
+    holdout_rows = [row for row in rows if row.split == "holdout"]
+    if len(fit_rows) != 40:
+        raise ValueError(f"block calibration requires exactly 40 fit rows, got {len(fit_rows)}")
+    if len(holdout_rows) != 8:
+        raise ValueError(
+            f"block calibration requires exactly 8 holdout rows, got {len(holdout_rows)}"
+        )
+    expected_families = set(BLOCK_CALIBRATION_FAMILIES)
+    for family in BLOCK_CALIBRATION_FAMILIES:
+        if sum(row.workload_family == family for row in fit_rows) != 5:
+            raise ValueError(f"block calibration family {family} does not have five fit rows")
+        if sum(row.workload_family == family for row in holdout_rows) != 1:
+            raise ValueError(f"block calibration family {family} does not have one holdout row")
+    if tuple(affine_model.anchor_keys) != OPCODE_RELATION_ANCHORS:
+        raise ValueError("block calibration affine model has wrong natural anchors")
+    opcode_keys = set(affine_model.opcode_keys)
+    matrix = []
+    for row in rows:
+        raw = row.expected_raw_gas_by_key
+        if any(key.startswith("precompile:") or ":spawned" in key for key in raw):
+            raise ValueError("block calibration contains precompile or spawned work")
+        if any(raw.get(key, 0) != 0 for key in manifest.dynamic_raw_gas_keys):
+            raise ValueError("block calibration dynamic raw-gas totals must be zero")
+        unknown = set(raw) - opcode_keys
+        if unknown:
+            raise ValueError(f"block calibration contains unknown opcode keys: {sorted(unknown)!r}")
+        projected = []
+        for anchor in affine_model.anchor_keys:
+            value = Fraction(0)
+            for key, units in raw.items():
+                coefficient = affine_model.anchor_basis[key][anchor]
+                if not isinstance(coefficient, Fraction):
+                    raise ValueError("block calibration rejects rounded basis coefficients")
+                value += Fraction(units) * coefficient
+            projected.append(value)
+        q = []
+        for key in Q_FORMULA:
+            units = row.expected_features[key]
+            if type(units) is not int:
+                raise ValueError("block calibration fixed/base feature is not exact")
+            q.append(Fraction(units))
+        if row.split == "fit":
+            matrix.append([*projected, *q])
+    rank = exact_rank(matrix)
+    if rank != 8:
+        raise ValueError(f"block calibration exact [xB,q] fit matrix rank must be eight, got {rank}")
+    holdout_families = sorted(row.workload_family for row in holdout_rows)
+    if set(holdout_families) != expected_families:
+        raise ValueError("block calibration holdouts do not cover all parameter families")
+    return {
+        "fit_row_count": len(fit_rows),
+        "holdout_row_count": len(holdout_rows),
+        "fit_rank": rank,
+        "holdout_families": holdout_families,
+        "fit_matrix": [[_fraction_text(value) for value in row] for row in matrix],
+    }
+
+
 def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
     """Atomically create one JSON artifact without replacing any prior run."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -7694,6 +7905,215 @@ def cmd_fit_relations(args: argparse.Namespace) -> None:
     print(f"fit {len(artifact['equations'])} formal opcode relation(s)")
 
 
+def _affine_model_from_validated_artifact(
+    manifest: Manifest, artifact: Mapping[str, Any]
+) -> AffineOpcodeModel:
+    opcode_keys = tuple(
+        f"opcode:0x{case.opcode:02x}"
+        for case in manifest.cases
+        if case.kind == "opcode"
+        and case.opcode is not None
+        and case.opcode in PURE_OPCODE_DEFAULTS
+        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
+    )
+    equations = tuple(
+        RelationEquation(
+            relation_id=str(row["relation_id"]),
+            coefficients={
+                key: Fraction(value)
+                for key, value in row["signed_raw_gas_by_key"].items()
+            },
+            slope=Decimal(row["slope_p"]),
+        )
+        for row in artifact["equations"]
+    )
+    return derive_affine_opcode_model(
+        opcode_keys, equations, manifest.opcode_relation_anchors
+    )
+
+
+def _controlled_block_row_payload(row: ControlledBlockRowSpec) -> dict[str, Any]:
+    program = {"kind": row.program.kind}
+    if row.program.kind == "native_transfer":
+        program["value"] = row.program.value
+    elif row.program.kind == "opcode_loop":
+        program.update(
+            family=row.program.family,
+            count=row.program.count,
+            scenario=row.program.scenario,
+        )
+    return {
+        "row_id": row.row_id,
+        "workload_family": row.workload_family,
+        "split": row.split,
+        "block_count": row.block_count,
+        "transaction_count": row.transaction_count,
+        "program": program,
+        "expected_raw_gas_by_key": dict(row.expected_raw_gas_by_key),
+        "expected_features": dict(row.expected_features),
+        "expected_diagnostics": dict(row.expected_diagnostics),
+    }
+
+
+def run_block_calibration_rows(
+    *,
+    manifest: Manifest,
+    affine_model: AffineOpcodeModel,
+    guest_launcher: pathlib.Path,
+    calibration_run_id: str,
+    relation_artifact_sha256: str,
+    relation_raw_rows_sha256: str,
+    out: pathlib.Path,
+    repeats: int = 3,
+) -> list[dict[str, Any]]:
+    preflight = preflight_block_calibration_rows(manifest, affine_model)
+    if repeats != 3:
+        raise ValueError("block calibration requires exactly three SP1 repeats")
+    output_rows = []
+    with tempfile.TemporaryDirectory() as temporary_name:
+        temporary = pathlib.Path(temporary_name)
+        for row_index, row in enumerate(manifest.block_calibration_rows):
+            payload = _controlled_block_row_payload(row)
+            spec_path = temporary / f"block-row-{row_index}.json"
+            report_path = temporary / f"block-report-{row_index}.jsonl"
+            spec_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            for repeat_index in range(repeats):
+                report_path.unlink(missing_ok=True)
+                subprocess.run(
+                    [
+                        str(guest_launcher),
+                        "--stage", "controlled-block",
+                        "--proof-type", "sp1",
+                        "--mode", "execute",
+                        "--sp1-prover", "local",
+                        "--input", str(spec_path),
+                        "--jsonl-out", str(report_path),
+                    ],
+                    check=True,
+                )
+                reports = list(iter_jsonl(report_path))
+                if len(reports) != 1:
+                    raise ValueError("controlled-block launcher must emit exactly one row")
+                report = reports[0]
+                controlled = report.get("controlled_block")
+                if not isinstance(controlled, Mapping) or controlled.get("row_id") != row.row_id:
+                    raise ValueError("controlled-block launcher row identity differs")
+                normalized = {
+                    **payload,
+                    "schema_version": 1,
+                    "purpose": "block_calibration",
+                    "status": controlled.get("status"),
+                    "repeat_index": repeat_index,
+                    "calibration_id": calibration_run_id,
+                    "relation_artifact_sha256": relation_artifact_sha256,
+                    "relation_raw_rows_sha256": relation_raw_rows_sha256,
+                    "preflight_fit_rank": preflight["fit_rank"],
+                }
+                if controlled.get("status") != "accepted":
+                    normalized.update(
+                        reasons=list(controlled.get("reasons", [])),
+                        error=controlled.get("error"),
+                    )
+                    output_rows.append(normalized)
+                    break
+                observation = controlled.get("observation")
+                if not isinstance(observation, Mapping):
+                    raise ValueError("accepted controlled-block row is missing host observation")
+                if (
+                    observation.get("actual_raw_gas_by_key")
+                    != payload["expected_raw_gas_by_key"]
+                    or observation.get("actual_features") != payload["expected_features"]
+                    or observation.get("actual_diagnostics")
+                    != payload["expected_diagnostics"]
+                ):
+                    raise ValueError("controlled-block host observation differs from manifest")
+                validate_sp1_execution_provenance(report, workload_kind="overhead")
+                backend_input_sha256 = observation.get("backend_input_sha256")
+                if not _is_sha256(backend_input_sha256):
+                    raise ValueError("controlled-block host observation has invalid input identity")
+                normalized.update(
+                    prover_gas=report.get("gas"),
+                    total_instruction_count=report.get("total_instruction_count"),
+                    exit_code=report.get("exit_code"),
+                    public_values=report.get("public_values"),
+                    backend_input_sha256=backend_input_sha256,
+                    sp1_execution_engine=report.get("sp1_execution_engine"),
+                    sp1_gas_trace_chunk_threshold=report.get(
+                        "sp1_gas_trace_chunk_threshold"
+                    ),
+                    sp1_gas_trace_chunk_slots=report.get(
+                        "sp1_gas_trace_chunk_slots"
+                    ),
+                    execution_row_id=controlled_execution_row_id(
+                        row.row_id,
+                        backend="sp1",
+                        execution_engine="standard",
+                        run_id=calibration_run_id,
+                        repeat_index=repeat_index,
+                        backend_input_sha256=backend_input_sha256,
+                    ),
+                    actual_raw_gas_by_key=observation.get("actual_raw_gas_by_key"),
+                    actual_features=observation.get("actual_features"),
+                    actual_diagnostics=observation.get("actual_diagnostics"),
+                )
+                output_rows.append(normalized)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in output_rows))
+    return output_rows
+
+
+def cmd_run_block_calibration(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run,
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+    )
+    if execution_identity != frozen_identity:
+        raise ValueError("block calibration identity changed during validation")
+    relations_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.relations, field_name="opcode_relations"),
+        "opcode-relations.json",
+    )
+    raw_rows_path = calibration_run / "raw" / "formal-relations.jsonl"
+    if not raw_rows_path.is_file():
+        raise ValueError("block calibration requires canonical formal relation raw rows")
+    artifact = json.loads(relations_path.read_text())
+    raw_rows = list(iter_jsonl(raw_rows_path))
+    expected_provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    validate_opcode_relations_artifact(
+        manifest, artifact, raw_rows, expected_provenance
+    )
+    if artifact.get("purpose") in {"proposal", "integration_smoke"}:
+        raise ValueError("block calibration rejects proposal/integration-smoke purpose")
+    affine_model = _affine_model_from_validated_artifact(manifest, artifact)
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="block_calibration_rows"),
+        "block-calibration-rows.jsonl",
+    )
+    rows = run_block_calibration_rows(
+        manifest=manifest,
+        affine_model=affine_model,
+        guest_launcher=_resolve_repo_path(args.guest_launcher, field_name="guest_launcher"),
+        calibration_run_id=calibration_run.name,
+        relation_artifact_sha256=artifact["artifact_sha256"],
+        relation_raw_rows_sha256=artifact["raw_rows_sha256"],
+        out=output,
+        repeats=args.repeats,
+    )
+    print(f"wrote {len(rows)} controlled block calibration observation(s)")
+
+
 CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
 CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT = 128
 
@@ -8999,6 +9419,17 @@ def build_parser() -> argparse.ArgumentParser:
         opcode_stage="revm-opcode-lab",
         expected_purpose=None,
     )
+
+    run_block = subcommands.add_parser(
+        "run-block-calibration",
+        help="host-trace and run every frozen production-guest block row three times",
+    )
+    run_block.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    run_block.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    run_block.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    run_block.add_argument("--relations", type=pathlib.Path, required=True)
+    run_block.add_argument("--out", type=pathlib.Path, required=True)
+    run_block.set_defaults(func=cmd_run_block_calibration, repeats=3)
 
     fit_controlled = subcommands.add_parser(
         "fit-controlled-costs",

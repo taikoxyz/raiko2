@@ -4,12 +4,13 @@ mod controlled_workload;
 use std::collections::BTreeMap;
 
 use controlled_workload::{
-    ControlledExecutionIdentity, ControlledFootprint, ControlledLane, ControlledOverheadLane,
-    ControlledTrace, ControlledWorkloadSpec, PairedPrecompileShape,
-    build_required_overhead_fixtures, controlled_execution_row_id, controlled_overhead_workload_id,
-    controlled_precompile_workload_spec, controlled_workload_id, trace_precompile_workload,
-    trace_revm_opcode_workload, validate_fixed_footprint, validate_precompile_pair,
-    validate_required_overhead_fixtures,
+    ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
+    ControlledLane, ControlledOverheadLane, ControlledProgram, ControlledTrace,
+    ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
+    build_required_overhead_fixtures, controlled_block_row_id, controlled_execution_row_id,
+    controlled_overhead_workload_id, controlled_precompile_workload_spec, controlled_workload_id,
+    trace_precompile_workload, trace_revm_opcode_workload, validate_controlled_block_fixture,
+    validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
     OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
@@ -33,6 +34,125 @@ fn workload_spec() -> ControlledWorkloadSpec {
         expected_operation_deltas: BTreeMap::from([("opcode:0x01".into(), 4)]),
         expected_feature_deltas: BTreeMap::new(),
     }
+}
+
+fn block_row_spec() -> ControlledBlockRowSpec {
+    ControlledBlockRowSpec {
+        row_id: String::new(),
+        workload_family: "pop_family".into(),
+        split: ControlledBlockSplit::Fit,
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::OpcodeLoop {
+            family: "pop_family".into(),
+            count: 1,
+            scenario: "push0_pop".into(),
+        },
+        expected_raw_gas_by_key: BTreeMap::from([
+            ("opcode:0x50".into(), 2),
+            ("opcode:0x5f".into(), 2),
+        ]),
+        expected_features: BTreeMap::from([
+            ("proposal_startup".into(), 1),
+            ("block_base".into(), 1),
+            ("tx_base".into(), 1),
+            ("native_value_transfer".into(), 0),
+        ]),
+        expected_diagnostics: BTreeMap::from([
+            ("guest_input_bincode_length".into(), 332_681),
+            ("witness_node_count".into(), 6),
+            ("witness_byte_count".into(), 633),
+            ("blob_count".into(), 1),
+            ("kzg_invocation_count".into(), 1),
+            ("calldata_length".into(), 0),
+            ("bytecode_length".into(), 256),
+            ("touched_state_key_count".into(), 5),
+        ]),
+    }
+}
+
+#[test]
+fn controlled_block_row_id_binds_every_semantic_field() {
+    let original = block_row_spec();
+    let original_id = controlled_block_row_id(&original).unwrap();
+    assert_eq!(original_id.len(), 64);
+
+    let mut mutations = Vec::new();
+    let mut changed = original.clone();
+    changed.workload_family = "push_family".into();
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed.split = ControlledBlockSplit::Holdout;
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed.block_count = 2;
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed.transaction_count = 2;
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed.program = ControlledProgram::Empty;
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed
+        .expected_raw_gas_by_key
+        .insert("opcode:0x50".into(), 4);
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed.expected_features.insert("tx_base".into(), 2);
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed
+        .expected_diagnostics
+        .insert("bytecode_length".into(), 257);
+    mutations.push(changed);
+
+    for changed in mutations {
+        assert_ne!(controlled_block_row_id(&changed).unwrap(), original_id);
+    }
+
+    let mut stored_id_only = original;
+    stored_id_only.row_id = "manifest-owned-copy".into();
+    assert_eq!(
+        controlled_block_row_id(&stored_id_only).unwrap(),
+        original_id
+    );
+}
+
+#[test]
+fn controlled_block_fixture_uses_post_unzen_trace_and_matches_frozen_row() {
+    let mut spec = block_row_spec();
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("build production GuestInput");
+    let observation = validate_controlled_block_fixture(&fixture)
+        .expect("host trace must match every frozen block-row field");
+
+    assert_eq!(observation.row_id, spec.row_id);
+    assert_eq!(
+        observation.actual_raw_gas_by_key,
+        spec.expected_raw_gas_by_key
+    );
+    assert_eq!(observation.actual_features, spec.expected_features);
+    assert_eq!(observation.actual_diagnostics, spec.expected_diagnostics);
+    assert!(observation.minimum_block_timestamp > observation.unzen_activation_timestamp);
+    assert_eq!(
+        observation.operation_phase_ownership,
+        "transaction_non_anchor_only"
+    );
+    assert_eq!(observation.system_operation_ownership, "block_base");
+    assert_eq!(observation.anchor_operation_ownership, "block_base");
+}
+
+#[test]
+fn controlled_block_fixture_rejects_frozen_trace_drift_before_sp1() {
+    let mut spec = block_row_spec();
+    spec.expected_diagnostics
+        .insert("witness_byte_count".into(), 632);
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("build production GuestInput");
+    let error = validate_controlled_block_fixture(&fixture)
+        .expect_err("host trace drift must reject the row before a caller can launch SP1");
+    assert!(error.to_string().contains("diagnostic mismatch"));
 }
 
 #[test]

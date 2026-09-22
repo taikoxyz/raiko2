@@ -128,6 +128,8 @@ enum Stage {
     PrecompileLab,
     #[value(name = "controlled-overhead")]
     ControlledOverhead,
+    #[value(name = "controlled-block")]
+    ControlledBlock,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -216,6 +218,7 @@ struct BenchReport {
     memory_snapshots: Vec<BenchMemoryEntry>,
     controlled_trace: Option<controlled_workload::ControlledTrace>,
     controlled_overhead: Option<ControlledOverheadRunResult>,
+    controlled_block: Option<ControlledBlockRunResult>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -234,6 +237,17 @@ struct ControlledOverheadRunResult {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<controlled_workload::ControlledOverheadObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ControlledBlockRunResult {
+    status: &'static str,
+    row_id: String,
+    reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation: Option<controlled_workload::ControlledBlockObservation>,
 }
 
 impl BenchReport {
@@ -275,6 +289,7 @@ impl BenchReport {
             memory_snapshots: Vec::new(),
             controlled_trace: None,
             controlled_overhead: None,
+            controlled_block: None,
         }
     }
 
@@ -354,6 +369,7 @@ impl Stage {
             Stage::RevmOpcodeLab => "revm-opcode-lab",
             Stage::PrecompileLab => "precompile-lab",
             Stage::ControlledOverhead => "controlled-overhead",
+            Stage::ControlledBlock => "controlled-block",
         }
     }
 }
@@ -559,7 +575,8 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
         Stage::Proposal
         | Stage::ProposalTrace
         | Stage::PrecompileLab
-        | Stage::ControlledOverhead => {
+        | Stage::ControlledOverhead
+        | Stage::ControlledBlock => {
             unreachable!("not an opcode lab stage")
         }
     }
@@ -639,6 +656,9 @@ async fn main() -> Result<()> {
     }
     if args.stage == Stage::ControlledOverhead {
         return run_controlled_overhead(args).await;
+    }
+    if args.stage == Stage::ControlledBlock {
+        return run_controlled_block(args).await;
     }
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
         return run_opcode_lab(args).await;
@@ -1130,6 +1150,102 @@ async fn run_controlled_overhead(args: Args) -> Result<()> {
         output.push('\n');
     }
     fs::write(output_path, output).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
+async fn run_controlled_block(args: Args) -> Result<()> {
+    if args.proof_type != ProofType::Sp1 || args.mode != Mode::Execute {
+        bail!("controlled-block supports only SP1 execute mode");
+    }
+    if args.elf.is_some() || args.input_list.is_some() || !args.aggregate.is_empty() {
+        bail!("controlled-block always uses the production SP1 proposal guest");
+    }
+    if args.output.is_some() || args.json_out.is_some() {
+        bail!("controlled-block writes only --jsonl-out benchmark rows");
+    }
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args
+        .jsonl_out
+        .as_ref()
+        .context("controlled-block requires --jsonl-out")?;
+    let spec: controlled_workload::ControlledBlockRowSpec = serde_json::from_slice(
+        &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
+    )
+    .context("parse controlled-block input")?;
+    let mut report = BenchReport::new(
+        "controlled-block",
+        "execute",
+        "compressed",
+        spec.row_id.clone(),
+    );
+    let fixture = match controlled_workload::build_controlled_block_fixture(&spec) {
+        Ok(fixture) => fixture,
+        Err(error) => {
+            report.controlled_block = Some(ControlledBlockRunResult {
+                status: "rejected",
+                row_id: spec.row_id,
+                reasons: vec!["generation_failure".into()],
+                error: Some(format!("{error:#}")),
+                observation: None,
+            });
+            fs::write(output_path, serde_json::to_string(&report)? + "\n")
+                .with_context(|| format!("write {}", output_path.display()))?;
+            return Ok(());
+        }
+    };
+    let observation = match controlled_workload::validate_controlled_block_fixture(&fixture) {
+        Ok(observation) => observation,
+        Err(error) => {
+            report.controlled_block = Some(ControlledBlockRunResult {
+                status: "rejected",
+                row_id: spec.row_id,
+                reasons: vec!["host_trace_mismatch".into()],
+                error: Some(format!("{error:#}")),
+                observation: None,
+            });
+            fs::write(output_path, serde_json::to_string(&report)? + "\n")
+                .with_context(|| format!("write {}", output_path.display()))?;
+            return Ok(());
+        }
+    };
+    report.guest_input_sha256 = Some(format!("0x{}", observation.backend_input_sha256));
+    report.guest_input_bincode_length = Some(observation.guest_input_bincode_length);
+    let sp1_config = args.sp1_config()?;
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load production SP1 Shasta guest ELFs")?;
+    let prover = Sp1Prover::new(sp1_config);
+    record_memory_snapshot(&mut report, "controlled-block:before_sp1_prover");
+    let start = Instant::now();
+    let proof = prover
+        .prove(fixture.guest_input, &serde_json::Value::Null, &backend)
+        .await
+        .with_context(|| format!("production SP1 proposal failed for {}", spec.row_id))?;
+    report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let metadata_value = proof
+        .extra_data
+        .as_ref()
+        .and_then(|extra_data| extra_data.get("sp1"))
+        .cloned()
+        .context("controlled-block SP1 execute is missing production metadata")?;
+    let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
+        .context("parse controlled-block SP1 execution metadata")?;
+    apply_sp1_metadata(&mut report, &metadata);
+    if report.public_values != format!("{:#x}", observation.public_output).to_lowercase() {
+        bail!(
+            "controlled-block trace/SP1 public output mismatch for {}",
+            spec.row_id
+        );
+    }
+    report.controlled_block = Some(ControlledBlockRunResult {
+        status: "accepted",
+        row_id: spec.row_id,
+        reasons: Vec::new(),
+        error: None,
+        observation: Some(observation),
+    });
+    fs::write(output_path, serde_json::to_string(&report)? + "\n")
+        .with_context(|| format!("write {}", output_path.display()))?;
     Ok(())
 }
 
@@ -1772,6 +1888,29 @@ mod tests {
         .expect("parse args");
 
         assert_eq!(args.stage, Stage::ControlledOverhead);
+        assert!(args.elf.is_none(), "production proposal ELF is built in");
+    }
+
+    #[test]
+    fn parses_controlled_block_production_proposal_stage() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-block",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--input",
+            "controlled-block.json",
+            "--jsonl-out",
+            "controlled-block-runs.jsonl",
+        ])
+        .expect("parse args");
+
+        assert_eq!(args.stage, Stage::ControlledBlock);
         assert!(args.elf.is_none(), "production proposal ELF is built in");
     }
 

@@ -365,7 +365,7 @@ async fn canonical_preflight_publication_roundtrips_and_reuses_identical_content
         bytes
     );
     let object_name = store.canonical_preflight_object_name(&key)?;
-    assert!(object_name.contains("/preflights/v1/"));
+    assert!(object_name.contains(&format!("/preflights/v{CANONICAL_PREFLIGHT_SCHEMA_V1}/")));
     assert!(object_name.ends_with(&format!("{:x}.preflight.bincode", key.digest()?)));
     assert_ne!(
         store.canonical_preflight_version_prefix(key.schema),

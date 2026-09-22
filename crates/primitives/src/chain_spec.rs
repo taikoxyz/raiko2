@@ -21,16 +21,102 @@ pub const SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
 const SHASTA_TAIKO_L2_ADDRESS_SUFFIX: &str = "10001";
 const SHASTA_CHECKPOINT_STORE_ADDRESS_SUFFIX: &str = "5";
 
-#[must_use]
-pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
-    let mut encoded = [0u8; 64];
-    encoded[..32].copy_from_slice(&U256::from(block_number).to_be_bytes::<32>());
-    encoded[32..]
-        .copy_from_slice(&U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT).to_be_bytes::<32>());
+/// On-chain `SignalService.VERSION` for the nested checkpoint mapping layout
+/// (`mapping(uint256 version => mapping(uint48 blockNumber => CheckpointRecord))`, introduced by
+/// taiko-mono #21820 and first tagged in `taiko-alethia-protocol-v3.1.0`). The flat layout, which
+/// every live chain (mainnet, hoodi, devnet) still runs as of 2026-09-05, has no version key.
+///
+/// The stalled-anchor probe covers the flat layout plus exactly this version, so this constant must
+/// track the on-chain value:
+///
+/// - It is compiled into both zk guests (through `raiko2-guest-common`) and the SGX runtime.
+///   Changing it is a guest release, not a config change: rebuild every guest ELF, regenerate the
+///   provenance manifests, register the new image ids, verifying keys and enclave measurement
+///   on-chain, and cut the remote prover images over.
+/// - After an on-chain `VERSION` bump, block numbers first written under the new version have no
+///   candidate here and fail closed. Block numbers written under an older version stay readable,
+///   because their records remain provable in the old slots (the contract never clears them) even
+///   though the upgraded contract's `getCheckpoint` no longer serves them. That fallback is what
+///   makes a flat -> nested migration seamless, and it is only safe while the old records are still
+///   truthful: a bump that repudiates old checkpoints (the hack-recovery use case that introduced
+///   `VERSION`) needs the guest release before the upgrade, not after it.
+pub const SHASTA_CHECKPOINT_VERSION: u64 = 1;
 
-    let block_hash_slot = U256::from_be_slice(keccak256(encoded).as_slice());
-    let state_root_slot = block_hash_slot + U256::from(1);
-    (block_hash_slot, state_root_slot)
+/// A `SignalService` checkpoint storage layout the stalled-anchor probe knows how to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShastaCheckpointLayout {
+    /// `mapping(uint256 version => mapping(uint48 blockNumber => CheckpointRecord))` at slot 254,
+    /// read at `_checkpoints[SHASTA_CHECKPOINT_VERSION][blockNumber]` (taiko-mono #21820,
+    /// `taiko-alethia-protocol-v3.1.0` and later; not yet deployed on any live chain).
+    NestedV1,
+    /// `mapping(uint48 blockNumber => CheckpointRecord)` at slot 254
+    /// (`taiko-alethia-protocol-v3.0.0` and earlier; deployed on every live chain today).
+    Flat,
+}
+
+impl ShastaCheckpointLayout {
+    /// Read-precedence order shared by the host witness builder and the guest reader: nested v1
+    /// first, then flat. A block number is written under exactly one layout, so the order only
+    /// decides which layout is probed first.
+    pub const PROBE_ORDER: [Self; 2] = [Self::NestedV1, Self::Flat];
+
+    /// Label used in errors so a failed read names the layout it probed.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NestedV1 => "nested v1",
+            Self::Flat => "flat",
+        }
+    }
+
+    /// `(blockHash_slot, stateRoot_slot)` of the `CheckpointRecord { blockHash; stateRoot; }` for
+    /// `block_number` under this layout; `stateRoot` is the slot right after `blockHash`.
+    #[must_use]
+    pub fn storage_slots(self, block_number: u64) -> (U256, U256) {
+        let base = U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT);
+        let record_slot = match self {
+            Self::NestedV1 => {
+                let inner_base = mapping_slot(U256::from(SHASTA_CHECKPOINT_VERSION), base);
+                mapping_slot(U256::from(block_number), inner_base)
+            }
+            Self::Flat => mapping_slot(U256::from(block_number), base),
+        };
+        (record_slot, record_slot + U256::from(1))
+    }
+}
+
+/// Solidity mapping slot: `keccak256(key_padded32 ++ base_slot_padded32)`.
+fn mapping_slot(key: U256, base_slot: U256) -> U256 {
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&key.to_be_bytes::<32>());
+    encoded[32..].copy_from_slice(&base_slot.to_be_bytes::<32>());
+    U256::from_be_slice(keccak256(encoded).as_slice())
+}
+
+/// Candidate `(layout, (blockHash_slot, stateRoot_slot))` entries in
+/// [`ShastaCheckpointLayout::PROBE_ORDER`]. The host witness builder and the guest reader both
+/// consume this single source of truth so their slot derivations cannot drift.
+#[must_use]
+pub fn shasta_checkpoint_storage_slot_candidates(
+    block_number: u64,
+) -> [(ShastaCheckpointLayout, (U256, U256)); 2] {
+    ShastaCheckpointLayout::PROBE_ORDER.map(|layout| (layout, layout.storage_slots(block_number)))
+}
+
+/// Storage keys whose proofs a stalled-anchor witness must carry for `block_number`: for each
+/// candidate layout in probe order, the `blockHash` key followed by the `stateRoot` key.
+#[must_use]
+pub fn shasta_checkpoint_storage_keys(block_number: u64) -> [B256; 4] {
+    let mut keys = [B256::ZERO; 4];
+    for (index, (_, (block_hash_slot, state_root_slot))) in
+        shasta_checkpoint_storage_slot_candidates(block_number)
+            .into_iter()
+            .enumerate()
+    {
+        keys[index * 2] = storage_slot_key(block_hash_slot);
+        keys[index * 2 + 1] = storage_slot_key(state_root_slot);
+    }
+    keys
 }
 
 #[must_use]
@@ -1806,5 +1892,103 @@ mod tests {
         );
 
         assert!(spec.to_taiko_chain_spec().is_err());
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_slot_tests {
+    use super::{
+        ShastaCheckpointLayout, shasta_checkpoint_storage_keys,
+        shasta_checkpoint_storage_slot_candidates, storage_slot_key,
+    };
+    use alloy_primitives::{U256, uint};
+
+    // Golden vectors derived outside this crate with foundry, so a wrong mapping encoding, base
+    // slot, or version key cannot pass by comparing the implementation with a copy of itself:
+    //   cast index uint48 7 254                                 -> FLAT_BLOCK_HASH_SLOT_7
+    //   cast index uint48 7 $(cast index uint256 1 254)         -> NESTED_V1_BLOCK_HASH_SLOT_7
+    //   cast index uint48 25907683 254                          -> FLAT_BLOCK_HASH_SLOT_MAINNET
+    //   cast index uint48 25907683 $(cast index uint256 1 254)  -> NESTED_V1_BLOCK_HASH_SLOT_MAINNET
+    // On 2026-09-05 the mainnet flat slot held the `blockHash` that `getCheckpoint(25907683)`
+    // returned from the chain 167000 SignalService predeploy, while the nested slot was zero.
+    const FLAT_BLOCK_HASH_SLOT_7: U256 =
+        uint!(0xd7dde9a727dcafed608e9a8d7c0d77d6459c099e6c3a127022df1bd0e8b17c1c_U256);
+    const NESTED_V1_BLOCK_HASH_SLOT_7: U256 =
+        uint!(0x21df3991f7109ef7244729bbd9259122320b58a76fe31a3914e60293880bdfc3_U256);
+    const FLAT_BLOCK_HASH_SLOT_MAINNET: U256 =
+        uint!(0x966b42907142031cef64a1a488f04eb709096d6283545b4a3cb6371e54391106_U256);
+    const NESTED_V1_BLOCK_HASH_SLOT_MAINNET: U256 =
+        uint!(0xb5508cf57c20f938581d66ae96b1bc6b2be4ca1c45e683c17d7138a3fc9c0d76_U256);
+    const MAINNET_ANCHOR_BLOCK_NUMBER: u64 = 25_907_683;
+
+    fn record_slots(block_hash_slot: U256) -> (U256, U256) {
+        (block_hash_slot, block_hash_slot + U256::from(1))
+    }
+
+    #[test]
+    fn flat_layout_matches_foundry_vectors() {
+        assert_eq!(
+            ShastaCheckpointLayout::Flat.storage_slots(7),
+            record_slots(FLAT_BLOCK_HASH_SLOT_7)
+        );
+        assert_eq!(
+            ShastaCheckpointLayout::Flat.storage_slots(MAINNET_ANCHOR_BLOCK_NUMBER),
+            record_slots(FLAT_BLOCK_HASH_SLOT_MAINNET)
+        );
+    }
+
+    #[test]
+    fn nested_v1_layout_matches_foundry_vectors() {
+        assert_eq!(
+            ShastaCheckpointLayout::NestedV1.storage_slots(7),
+            record_slots(NESTED_V1_BLOCK_HASH_SLOT_7)
+        );
+        assert_eq!(
+            ShastaCheckpointLayout::NestedV1.storage_slots(MAINNET_ANCHOR_BLOCK_NUMBER),
+            record_slots(NESTED_V1_BLOCK_HASH_SLOT_MAINNET)
+        );
+    }
+
+    #[test]
+    fn candidates_follow_probe_order() {
+        assert_eq!(
+            ShastaCheckpointLayout::PROBE_ORDER,
+            [
+                ShastaCheckpointLayout::NestedV1,
+                ShastaCheckpointLayout::Flat
+            ]
+        );
+        assert_eq!(
+            shasta_checkpoint_storage_slot_candidates(7),
+            [
+                (
+                    ShastaCheckpointLayout::NestedV1,
+                    record_slots(NESTED_V1_BLOCK_HASH_SLOT_7)
+                ),
+                (
+                    ShastaCheckpointLayout::Flat,
+                    record_slots(FLAT_BLOCK_HASH_SLOT_7)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_keys_pair_block_hash_then_state_root_per_layout_in_probe_order() {
+        assert_eq!(
+            shasta_checkpoint_storage_keys(7),
+            [
+                storage_slot_key(NESTED_V1_BLOCK_HASH_SLOT_7),
+                storage_slot_key(NESTED_V1_BLOCK_HASH_SLOT_7 + U256::from(1)),
+                storage_slot_key(FLAT_BLOCK_HASH_SLOT_7),
+                storage_slot_key(FLAT_BLOCK_HASH_SLOT_7 + U256::from(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_labels_name_each_layout() {
+        assert_eq!(ShastaCheckpointLayout::NestedV1.label(), "nested v1");
+        assert_eq!(ShastaCheckpointLayout::Flat.label(), "flat");
     }
 }

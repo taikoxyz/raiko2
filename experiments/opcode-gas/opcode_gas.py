@@ -156,6 +156,7 @@ class ControlledBlockRowSpec:
     block_count: int
     transaction_count: int
     program: ControlledBlockProgramSpec
+    expected_final_state_root: str
     expected_raw_gas_by_key: Mapping[str, int]
     expected_features: Mapping[str, int]
     expected_diagnostics: Mapping[str, int]
@@ -908,6 +909,7 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
         split = item.get("split")
         block_count = item.get("block_count")
         transaction_count = item.get("transaction_count")
+        final_state_root = item.get("expected_final_state_root")
         if not _is_sha256(row_id) or row_id in seen:
             raise ValueError("block calibration row ID is invalid or duplicate")
         if family not in BLOCK_CALIBRATION_FAMILIES or split not in {"fit", "holdout"}:
@@ -916,6 +918,13 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
             raise ValueError("block calibration block_count is invalid")
         if type(transaction_count) is not int or transaction_count < 0:
             raise ValueError("block calibration transaction_count is invalid")
+        if (
+            not isinstance(final_state_root, str)
+            or len(final_state_root) != 66
+            or not final_state_root.startswith("0x")
+            or any(char not in "0123456789abcdef" for char in final_state_root[2:])
+        ):
+            raise ValueError("block calibration final state root is invalid")
         raw = _strict_nonnegative_int_map(
             item.get("expected_raw_gas_by_key"), label="block calibration raw-gas map"
         )
@@ -937,6 +946,7 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
             "block_count": block_count,
             "transaction_count": transaction_count,
             "program": dict(program_data),
+            "expected_final_state_root": final_state_root,
             "expected_raw_gas_by_key": raw,
             "expected_features": features,
             "expected_diagnostics": diagnostics,
@@ -951,6 +961,7 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
             block_count=block_count,
             transaction_count=transaction_count,
             program=program,
+            expected_final_state_root=final_state_root,
             expected_raw_gas_by_key=MappingProxyType(raw),
             expected_features=MappingProxyType(features),
             expected_diagnostics=MappingProxyType(diagnostics),
@@ -7949,6 +7960,7 @@ def _controlled_block_row_payload(row: ControlledBlockRowSpec) -> dict[str, Any]
         "block_count": row.block_count,
         "transaction_count": row.transaction_count,
         "program": program,
+        "expected_final_state_root": row.expected_final_state_root,
         "expected_raw_gas_by_key": dict(row.expected_raw_gas_by_key),
         "expected_features": dict(row.expected_features),
         "expected_diagnostics": dict(row.expected_diagnostics),
@@ -7977,6 +7989,7 @@ def run_block_calibration_rows(
             spec_path = temporary / f"block-row-{row_index}.json"
             report_path = temporary / f"block-report-{row_index}.jsonl"
             spec_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            repeat_rows = []
             for repeat_index in range(repeats):
                 report_path.unlink(missing_ok=True)
                 subprocess.run(
@@ -7996,8 +8009,8 @@ def run_block_calibration_rows(
                     raise ValueError("controlled-block launcher must emit exactly one row")
                 report = reports[0]
                 controlled = report.get("controlled_block")
-                if not isinstance(controlled, Mapping) or controlled.get("row_id") != row.row_id:
-                    raise ValueError("controlled-block launcher row identity differs")
+                if not isinstance(controlled, Mapping):
+                    raise ValueError("controlled-block launcher is missing its result")
                 normalized = {
                     **payload,
                     "schema_version": 1,
@@ -8019,18 +8032,11 @@ def run_block_calibration_rows(
                 observation = controlled.get("observation")
                 if not isinstance(observation, Mapping):
                     raise ValueError("accepted controlled-block row is missing host observation")
-                if (
-                    observation.get("actual_raw_gas_by_key")
-                    != payload["expected_raw_gas_by_key"]
-                    or observation.get("actual_features") != payload["expected_features"]
-                    or observation.get("actual_diagnostics")
-                    != payload["expected_diagnostics"]
-                ):
-                    raise ValueError("controlled-block host observation differs from manifest")
                 validate_sp1_execution_provenance(report, workload_kind="overhead")
                 backend_input_sha256 = observation.get("backend_input_sha256")
                 if not _is_sha256(backend_input_sha256):
                     raise ValueError("controlled-block host observation has invalid input identity")
+                guest_input_sha256 = str(report.get("guest_input_sha256", ""))
                 normalized.update(
                     prover_gas=report.get("gas"),
                     total_instruction_count=report.get("total_instruction_count"),
@@ -8055,8 +8061,94 @@ def run_block_calibration_rows(
                     actual_raw_gas_by_key=observation.get("actual_raw_gas_by_key"),
                     actual_features=observation.get("actual_features"),
                     actual_diagnostics=observation.get("actual_diagnostics"),
+                    actual_final_state_root=observation.get("actual_final_state_root"),
+                    host_public_output=observation.get("public_output"),
+                    guest_input_sha256=guest_input_sha256,
+                    reported_row_id=controlled.get("row_id"),
+                    observation_row_id=observation.get("row_id"),
                 )
-                output_rows.append(normalized)
+                repeat_rows.append(normalized)
+            if len(repeat_rows) != repeats:
+                continue
+            stable_fields = (
+                "prover_gas",
+                "total_instruction_count",
+                "exit_code",
+                "public_values",
+                "host_public_output",
+                "backend_input_sha256",
+                "guest_input_sha256",
+                "reported_row_id",
+                "observation_row_id",
+                "actual_raw_gas_by_key",
+                "actual_features",
+                "actual_diagnostics",
+                "actual_final_state_root",
+            )
+            repeat_mismatches = [
+                field
+                for field in stable_fields
+                if len({canonical_json(item.get(field)) for item in repeat_rows}) != 1
+            ]
+            if any(item["exit_code"] != 0 for item in repeat_rows):
+                repeat_mismatches.append("successful_exit")
+            if any(
+                item["reported_row_id"] != row.row_id
+                or item["observation_row_id"] != row.row_id
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("semantic_row_identity")
+            if any(
+                item["actual_raw_gas_by_key"]
+                != payload["expected_raw_gas_by_key"]
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("host_trace_ledger")
+            if any(
+                item["actual_features"] != payload["expected_features"]
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("host_trace_features")
+            if any(
+                item["actual_diagnostics"] != payload["expected_diagnostics"]
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("host_trace_diagnostics")
+            if any(
+                item["actual_final_state_root"]
+                != payload["expected_final_state_root"]
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("host_final_state_root")
+            if any(
+                item["guest_input_sha256"] != "0x" + item["backend_input_sha256"]
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("report_observation_input_identity")
+            if any(
+                str(item["public_values"]).lower()
+                != str(item["host_public_output"]).lower()
+                for item in repeat_rows
+            ):
+                repeat_mismatches.append("trace_public_output")
+            if repeat_mismatches:
+                output_rows.append(
+                    {
+                        **payload,
+                        "schema_version": 1,
+                        "purpose": "block_calibration",
+                        "status": "rejected",
+                        "reasons": ["repeat_instability"],
+                        "repeat_mismatches": sorted(set(repeat_mismatches)),
+                        "repeat_indices": [item["repeat_index"] for item in repeat_rows],
+                        "calibration_id": calibration_run_id,
+                        "relation_artifact_sha256": relation_artifact_sha256,
+                        "relation_raw_rows_sha256": relation_raw_rows_sha256,
+                        "preflight_fit_rank": preflight["fit_rank"],
+                    }
+                )
+                continue
+            output_rows.extend(repeat_rows)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in output_rows))
     return output_rows

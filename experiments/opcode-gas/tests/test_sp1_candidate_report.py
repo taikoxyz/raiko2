@@ -35,6 +35,29 @@ def formal_relation_manifest():
     )
 
 
+def block_affine_model(manifest):
+    opcode_keys = tuple(
+        sorted(
+            {
+                key
+                for row in manifest.block_calibration_rows
+                for key in row.expected_raw_gas_by_key
+            }
+        )
+    )
+    return types.SimpleNamespace(
+        opcode_keys=opcode_keys,
+        anchor_keys=opcode_gas.OPCODE_RELATION_ANCHORS,
+        anchor_basis={
+            key: {
+                anchor: opcode_gas.Fraction(int(key == anchor), 1)
+                for anchor in opcode_gas.OPCODE_RELATION_ANCHORS
+            }
+            for key in opcode_keys
+        },
+    )
+
+
 def formal_relation_rows(manifest, *, slope_overrides=None):
     slope_overrides = slope_overrides or {}
     rows = []
@@ -712,6 +735,103 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
 
 class CandidateConstructionTests(unittest.TestCase):
+    def _run_block_calibration_with_drift(self, drift_field):
+        manifest = formal_relation_manifest()
+        first_row_id = manifest.block_calibration_rows[0].row_id
+        repeats_by_row = {}
+
+        def fake_run(cmd, *, check):
+            self.assertTrue(check)
+            spec_path = pathlib.Path(cmd[cmd.index("--input") + 1])
+            report_path = pathlib.Path(cmd[cmd.index("--jsonl-out") + 1])
+            spec = opcode_gas.json.loads(spec_path.read_text())
+            repeat_index = repeats_by_row.get(spec["row_id"], 0)
+            repeats_by_row[spec["row_id"]] = repeat_index + 1
+            drift = spec["row_id"] == first_row_id and repeat_index == 1
+            backend_input = ("c" if drift and drift_field == "backend_input" else "b") * 64
+            guest_input = ("d" if drift and drift_field == "guest_input" else "b") * 64
+            public_values = "0x02" if drift and drift_field == "public_values" else "0x01"
+            public_output = "0x03" if drift and drift_field == "public_output" else "0x01"
+            prover_gas = 101 if drift and drift_field == "prover_gas" else 100
+            reported_row_id = (
+                "f" * 64 if drift and drift_field == "reported_row_id" else spec["row_id"]
+            )
+            observation_row_id = (
+                "e" * 64
+                if drift and drift_field == "observation_row_id"
+                else spec["row_id"]
+            )
+            report_path.write_text(
+                opcode_gas.json.dumps(
+                    {
+                        "guest_input_sha256": "0x" + guest_input,
+                        "sp1_execution_engine": "standard",
+                        "sp1_gas_trace_chunk_threshold": None,
+                        "sp1_gas_trace_chunk_slots": None,
+                        "gas": prover_gas,
+                        "total_instruction_count": 200,
+                        "exit_code": 0,
+                        "public_values": public_values,
+                        "controlled_block": {
+                            "status": "accepted",
+                            "row_id": reported_row_id,
+                            "reasons": [],
+                            "observation": {
+                                "row_id": observation_row_id,
+                                "backend_input_sha256": backend_input,
+                                "public_output": public_output,
+                                "actual_final_state_root": spec[
+                                    "expected_final_state_root"
+                                ],
+                                "actual_raw_gas_by_key": spec["expected_raw_gas_by_key"],
+                                "actual_features": spec["expected_features"],
+                                "actual_diagnostics": spec["expected_diagnostics"],
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas.subprocess, "run", fake_run
+        ):
+            output = pathlib.Path(tmp) / "block-calibration-rows.jsonl"
+            rows = opcode_gas.run_block_calibration_rows(
+                manifest=manifest,
+                affine_model=block_affine_model(manifest),
+                guest_launcher=pathlib.Path("guest-launcher"),
+                calibration_run_id="calibration",
+                relation_artifact_sha256="a" * 64,
+                relation_raw_rows_sha256="b" * 64,
+                out=output,
+            )
+        return first_row_id, rows
+
+    def test_block_calibration_rejects_nondeterministic_prover_gas_as_one_row(self):
+        row_id, rows = self._run_block_calibration_with_drift("prover_gas")
+        matching = [row for row in rows if row["row_id"] == row_id]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["status"], "rejected")
+        self.assertIn("repeat_instability", matching[0]["reasons"])
+        self.assertIn("prover_gas", matching[0]["repeat_mismatches"])
+
+    def test_block_calibration_rejects_public_or_input_identity_drift(self):
+        for field in (
+            "public_values",
+            "public_output",
+            "backend_input",
+            "guest_input",
+            "reported_row_id",
+            "observation_row_id",
+        ):
+            with self.subTest(field=field):
+                row_id, rows = self._run_block_calibration_with_drift(field)
+                matching = [row for row in rows if row["row_id"] == row_id]
+                self.assertEqual(len(matching), 1)
+                self.assertEqual(matching[0]["status"], "rejected")
+                self.assertIn("repeat_instability", matching[0]["reasons"])
+
     def test_overhead_residual_uses_raw_gas_units_not_operation_event_count(self):
         rows = []
         for count in [0, 1, 2, 4, 8]:

@@ -259,6 +259,7 @@ pub struct ControlledBlockRowSpec {
     pub block_count: usize,
     pub transaction_count: u64,
     pub program: ControlledProgram,
+    pub expected_final_state_root: B256,
     pub expected_raw_gas_by_key: BTreeMap<String, i64>,
     pub expected_features: BTreeMap<String, i64>,
     pub expected_diagnostics: BTreeMap<String, i64>,
@@ -280,6 +281,7 @@ pub struct ControlledBlockObservation {
     pub backend_input_sha256: String,
     pub guest_input_bincode_length: usize,
     pub public_output: B256,
+    pub actual_final_state_root: B256,
     pub actual_raw_gas_by_key: BTreeMap<String, i64>,
     pub actual_features: BTreeMap<String, i64>,
     pub actual_diagnostics: BTreeMap<String, i64>,
@@ -640,10 +642,22 @@ pub fn validate_required_overhead_fixtures(
 enum CandidateKind {
     None,
     NoCodeNoValue,
-    ControlledContract(Bytes),
+    ControlledContract {
+        code: Bytes,
+        input: Bytes,
+        fee_neutral: bool,
+    },
     NativeZero,
     NativeValue(u64),
 }
+
+struct BuiltOverheadGuestInput {
+    guest_input: GuestInput,
+    touched_state_key_count: usize,
+}
+
+const CONTROLLED_CANDIDATE_FINAL_BALANCE: U256 =
+    U256::from_limbs([10_000_000_000_000_000, 0, 0, 0]);
 
 fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
     alloy_consensus::Header {
@@ -696,7 +710,7 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
         return Ok(Vec::new());
     }
     let recipient = match kind {
-        CandidateKind::ControlledContract(_) => Address::repeat_byte(0x66),
+        CandidateKind::ControlledContract { .. } => Address::repeat_byte(0x66),
         _ => Address::repeat_byte(0x55),
     };
     let value = match kind {
@@ -704,6 +718,10 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
         _ => U256::ZERO,
     };
     let signer = controlled_candidate_signer()?;
+    let input = match kind {
+        CandidateKind::ControlledContract { input, .. } => input.clone(),
+        _ => Bytes::new(),
+    };
     (0..count)
         .map(|nonce| {
             let tx = TxEip1559 {
@@ -715,7 +733,7 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
                 to: TxKind::Call(recipient),
                 value,
                 access_list: Default::default(),
-                input: Bytes::new(),
+                input: input.clone(),
             };
             let signature = signer.sign_hash_sync(&tx.signature_hash())?;
             Ok(tx.into_signed(signature).into())
@@ -740,6 +758,16 @@ impl ControlledTrieState {
                 code_hash,
             },
         );
+    }
+
+    fn topology_key_count(&self) -> usize {
+        self.accounts.len() + self.storages.values().map(BTreeMap::len).sum::<usize>()
+    }
+
+    fn account_balance(&self, address: Address) -> Option<U256> {
+        self.accounts
+            .get(&keccak256(address))
+            .map(|account| account.balance)
     }
 
     fn apply(&mut self, outcome: &raiko2_stateless::FilteredBlockExecutionOutcome) {
@@ -873,6 +901,7 @@ fn overhead_prestate(
     chain_spec: &raiko2_primitives::ChainSpec,
     candidates: &[TransactionSigned],
     controlled_contract_code: Option<&Bytes>,
+    extra_prestate_accounts: &[Address],
 ) -> Result<(ControlledTrieState, Vec<Bytes>)> {
     let anchor_address = chain_spec
         .l2_contract
@@ -892,12 +921,7 @@ fn overhead_prestate(
         let signer = candidate
             .recover_signer()
             .map_err(|_| anyhow::anyhow!("controlled candidate signature is unrecoverable"))?;
-        state.insert_account(
-            signer,
-            U256::from(10_000_000_000_000_000u64),
-            0,
-            KECCAK_EMPTY,
-        );
+        state.insert_account(signer, CONTROLLED_CANDIDATE_FINAL_BALANCE, 0, KECCAK_EMPTY);
         let recipient = candidate
             .to()
             .ok_or_else(|| anyhow::anyhow!("controlled candidate must be a call"))?;
@@ -908,6 +932,9 @@ fn overhead_prestate(
             KECCAK_EMPTY
         };
         state.insert_account(recipient, U256::ZERO, 0, code_hash);
+    }
+    for address in extra_prestate_accounts {
+        state.insert_account(*address, U256::from(1), 0, KECCAK_EMPTY);
     }
     Ok((state, codes))
 }
@@ -977,11 +1004,12 @@ fn kona_blob(payload: &[u8]) -> Result<Vec<u8>> {
     Ok(blob)
 }
 
-fn build_overhead_guest_input(
+fn build_overhead_guest_input_with_topology(
     kind: CandidateKind,
     block_count: usize,
     candidate_count: u64,
-) -> Result<GuestInput> {
+    extra_prestate_accounts: &[Address],
+) -> Result<BuiltOverheadGuestInput> {
     if !(1..=768).contains(&block_count) {
         bail!("controlled overhead fixture exceeds the frozen Unzen block bound");
     }
@@ -1000,11 +1028,23 @@ fn build_overhead_guest_input(
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
     let candidates = candidate_transactions(&kind, candidate_count)?;
     let controlled_contract_code = match &kind {
-        CandidateKind::ControlledContract(code) => Some(code),
+        CandidateKind::ControlledContract { code, .. } => Some(code),
         _ => None,
     };
-    let (mut controlled_state, codes) =
-        overhead_prestate(&chain_spec, &candidates, controlled_contract_code)?;
+    let fee_neutral = matches!(
+        &kind,
+        CandidateKind::ControlledContract {
+            fee_neutral: true,
+            ..
+        }
+    );
+    let base_fee_per_gas = 10_000_000;
+    let (mut controlled_state, codes) = overhead_prestate(
+        &chain_spec,
+        &candidates,
+        controlled_contract_code,
+        extra_prestate_accounts,
+    )?;
     let (mut prestate_root, mut state_nodes) = controlled_state.witness();
     let l1_header = sample_l1_header(OVERHEAD_PARENT_ANCHOR_BLOCK_NUMBER, B256::repeat_byte(0x66));
     let checkpoint = AnchorV4Checkpoint {
@@ -1024,7 +1064,7 @@ fn build_overhead_guest_input(
                 timestamp: overhead_parent_timestamp
                     - (OVERHEAD_BLOCK_NUMBER - 1).saturating_sub(number),
                 gas_limit: 31_000_000,
-                base_fee_per_gas: Some(10_000_000),
+                base_fee_per_gas: Some(base_fee_per_gas),
                 state_root: prestate_root,
                 ..Default::default()
             };
@@ -1039,7 +1079,13 @@ fn build_overhead_guest_input(
         .clone()
         .expect("controlled ancestors retain full headers");
     let proposer = Address::repeat_byte(0x33);
-    let extra_data = encode_extra_data(7, 42);
+    let fee_recipient = if fee_neutral {
+        controlled_candidate_signer()?.address()
+    } else {
+        proposer
+    };
+    let base_fee_share_pctg = if fee_neutral { 100 } else { 7 };
+    let extra_data = encode_extra_data(base_fee_share_pctg, 42);
     let mut ancestor_headers = ancestor_headers;
     let proposal_ancestor_headers = ancestor_headers.clone();
     let mut parent = parent_header;
@@ -1064,14 +1110,14 @@ fn build_overhead_guest_input(
         };
         let block_env = TaikoNextBlockEnvAttributes {
             timestamp: block_timestamp,
-            suggested_fee_recipient: proposer,
+            suggested_fee_recipient: fee_recipient,
             prev_randao: calculate_shasta_difficulty(
                 B256::from(parent.difficulty.to_be_bytes::<32>()),
                 block_number,
             ),
             gas_limit: 31_000_000,
             extra_data: extra_data.clone(),
-            base_fee_per_gas: 10_000_000,
+            base_fee_per_gas,
             parent_beacon_block_root: None,
         };
         let anchor_nonce = u64::try_from(index)?;
@@ -1088,41 +1134,36 @@ fn build_overhead_guest_input(
             &runtime_chain_spec,
             &evm_config,
         )?;
-        let next_prestate = if index + 1 < block_count {
-            controlled_state.apply(&outcome);
-            let (next_prestate_root, next_state_nodes) = controlled_state.witness();
-            let golden_touch_hash = keccak256(Address::from([
-                0x00, 0x00, 0x77, 0x77, 0x35, 0x36, 0x7b, 0x36, 0xbc, 0x9b, 0x61, 0xc5, 0x00, 0x22,
-                0xd9, 0xd0, 0x70, 0x0d, 0xb4, 0xec,
-            ]));
-            let next_nonce = outcome
-                .hashed_state
-                .accounts
-                .get(&golden_touch_hash)
-                .and_then(Option::as_ref)
-                .map(|account| account.nonce);
-            if next_nonce != Some(anchor_nonce.saturating_add(1)) {
-                bail!("multi-block repeated anchor produced an unexpected golden-touch nonce");
-            }
-            Some((next_prestate_root, next_state_nodes))
-        } else {
-            None
-        };
+        controlled_state.apply(&outcome);
+        let (post_state_root, post_state_nodes) = controlled_state.witness();
+        let golden_touch_hash = keccak256(Address::from([
+            0x00, 0x00, 0x77, 0x77, 0x35, 0x36, 0x7b, 0x36, 0xbc, 0x9b, 0x61, 0xc5, 0x00, 0x22,
+            0xd9, 0xd0, 0x70, 0x0d, 0xb4, 0xec,
+        ]));
+        let next_nonce = outcome
+            .hashed_state
+            .accounts
+            .get(&golden_touch_hash)
+            .and_then(Option::as_ref)
+            .map(|account| account.nonce);
+        if next_nonce != Some(anchor_nonce.saturating_add(1)) {
+            bail!("repeated anchor produced an unexpected golden-touch nonce");
+        }
         let hashed_state = format!("{:?}", outcome.hashed_state);
         let block = outcome.filtered_block.into_block();
-        if let Some((next_prestate_root, next_state_nodes)) = next_prestate {
-            if block.header.state_root != next_prestate_root {
-                bail!(
-                    "multi-block controlled fixture hashed post-state does not equal next witness pre-state root: pre={prestate_root}, post={}, next={next_prestate_root}, hashed={hashed_state}",
-                    block.header.state_root,
-                );
-            }
-            prestate_root = next_prestate_root;
-            state_nodes = next_state_nodes;
+        if block.header.state_root != post_state_root {
+            bail!(
+                "controlled fixture hashed post-state differs from rebuilt state: pre={prestate_root}, post={}, rebuilt={post_state_root}, hashed={hashed_state}",
+                block.header.state_root,
+            );
+        }
+        if index + 1 < block_count {
+            prestate_root = post_state_root;
+            state_nodes = post_state_nodes;
         }
         manifest_blocks.push(BlockManifest {
             timestamp: block_timestamp,
-            coinbase: proposer,
+            coinbase: fee_recipient,
             anchor_block_number: OVERHEAD_PARENT_ANCHOR_BLOCK_NUMBER,
             gas_limit: 30_000_000,
             transactions: transactions
@@ -1175,7 +1216,7 @@ fn build_overhead_guest_input(
                     parentProposalHash: B256::repeat_byte(0x44),
                     originBlockNumber: l1_header.number.try_into()?,
                     originBlockHash: l1_header.hash_slow(),
-                    basefeeSharingPctg: 7,
+                    basefeeSharingPctg: base_fee_share_pctg,
                     sources: vec![source],
                     ..Default::default()
                 },
@@ -1203,36 +1244,63 @@ fn build_overhead_guest_input(
         build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Sp1)?;
     guest_input.proof_carry_data.transition_input.proposal_hash =
         hash_proposal(&guest_input.taiko.proposal_event.proposal);
-    Ok(guest_input)
+    if fee_neutral
+        && controlled_state.account_balance(controlled_candidate_signer()?.address())
+            != Some(CONTROLLED_CANDIDATE_FINAL_BALANCE)
+    {
+        bail!("fee-neutral controlled sender did not finish at the frozen balance");
+    }
+    Ok(BuiltOverheadGuestInput {
+        guest_input,
+        touched_state_key_count: controlled_state.topology_key_count(),
+    })
+}
+
+fn build_overhead_guest_input(
+    kind: CandidateKind,
+    block_count: usize,
+    candidate_count: u64,
+) -> Result<GuestInput> {
+    Ok(
+        build_overhead_guest_input_with_topology(kind, block_count, candidate_count, &[])?
+            .guest_input,
+    )
 }
 
 const CONTROLLED_BLOCK_BYTECODE_LENGTH: usize = 256;
 
-fn controlled_opcode_bytecode(family: &str, count: u64, scenario: &str) -> Result<Bytes> {
-    let count = usize::try_from(count)?;
-    let mut code = Vec::new();
+fn controlled_opcode_bytecode(family: &str, scenario: &str) -> Result<Bytes> {
+    let mut code = vec![0x5f, 0x35]; // PUSH0; CALLDATALOAD
+    let loop_offset = code.len();
+    code.extend([0x5b, 0x80, 0x15, 0x60, 0x00, 0x57]); // JUMPDEST; DUP1; ISZERO; PUSH1 done; JUMPI
+    let done_immediate_index = 6;
     match (family, scenario) {
         ("pop_family", "push0_pop") => {
-            for _ in 0..count {
-                code.extend([0x5f, 0x50]);
-            }
+            code.extend([0x60, 0x00, 0x50]); // PUSH1 0; POP
         }
         ("push_family", "push0_stack") => {
-            code.extend(std::iter::repeat_n(0x5f, count));
+            code.extend([0x5f, 0x50]); // PUSH0; POP
         }
         ("dup_family", "push0_dup1_then_pop") => {
-            code.push(0x5f);
-            code.extend(std::iter::repeat_n(0x80, count));
-            code.extend(std::iter::repeat_n(0x50, count.saturating_add(1)));
+            code.extend([0x80, 0x50]); // DUP1; POP
         }
         ("swap_family", "push0_pair_swap1_then_pop") => {
-            code.extend([0x5f, 0x5f]);
-            code.extend(std::iter::repeat_n(0x90, count));
-            code.extend([0x50, 0x50]);
+            code.extend([0x80, 0x5f, 0x90, 0x50, 0x50]); // DUP1; PUSH0; SWAP1; POP; POP
         }
         _ => bail!("unknown controlled opcode family/scenario {family}/{scenario}"),
     }
-    code.push(0x00);
+    code.extend([
+        0x60,
+        0x01,
+        0x90,
+        0x03, // PUSH1 1; SWAP1; SUB
+        0x60,
+        u8::try_from(loop_offset)?,
+        0x56, // PUSH1 loop; JUMP
+    ]);
+    let done_offset = code.len();
+    code.extend([0x5b, 0x50, 0x00]); // JUMPDEST; POP; STOP
+    code[done_immediate_index] = u8::try_from(done_offset)?;
     if code.len() > CONTROLLED_BLOCK_BYTECODE_LENGTH {
         bail!("controlled opcode bytecode exceeds frozen code-length class");
     }
@@ -1240,8 +1308,19 @@ fn controlled_opcode_bytecode(family: &str, count: u64, scenario: &str) -> Resul
     Ok(code.into())
 }
 
+fn controlled_opcode_input(count: u64) -> Bytes {
+    U256::from(count).to_be_bytes::<32>().to_vec().into()
+}
+
 pub fn build_controlled_block_fixture(
     spec: &ControlledBlockRowSpec,
+) -> Result<ControlledBlockFixture> {
+    build_controlled_block_fixture_with_topology(spec, &[])
+}
+
+fn build_controlled_block_fixture_with_topology(
+    spec: &ControlledBlockRowSpec,
+    extra_prestate_accounts: &[Address],
 ) -> Result<ControlledBlockFixture> {
     let derived_row_id = controlled_block_row_id(spec)?;
     if spec.row_id != derived_row_id {
@@ -1250,12 +1329,12 @@ pub fn build_controlled_block_fixture(
             spec.row_id
         );
     }
-    let (kind, bytecode_length, touched_state_key_count) = match &spec.program {
+    let (kind, bytecode_length) = match &spec.program {
         ControlledProgram::Empty => {
             if spec.transaction_count != 0 {
                 bail!("empty controlled program requires zero transactions");
             }
-            (CandidateKind::None, 0, 3)
+            (CandidateKind::None, 0)
         }
         ControlledProgram::NativeTransfer { value } => (
             if *value == 0 {
@@ -1264,7 +1343,6 @@ pub fn build_controlled_block_fixture(
                 CandidateKind::NativeValue(*value)
             },
             0,
-            5,
         ),
         ControlledProgram::OpcodeLoop {
             family,
@@ -1277,25 +1355,41 @@ pub fn build_controlled_block_fixture(
             if spec.transaction_count == 0 {
                 bail!("controlled opcode program requires at least one transaction");
             }
-            let bytecode = controlled_opcode_bytecode(family, *count, scenario)?;
+            let bytecode = controlled_opcode_bytecode(family, scenario)?;
             let bytecode_length = bytecode.len();
             (
-                CandidateKind::ControlledContract(bytecode),
+                CandidateKind::ControlledContract {
+                    code: bytecode,
+                    input: controlled_opcode_input(*count),
+                    fee_neutral: true,
+                },
                 bytecode_length,
-                5,
             )
         }
     };
-    let guest_input = build_overhead_guest_input(kind, spec.block_count, spec.transaction_count)?;
+    let built = build_overhead_guest_input_with_topology(
+        kind,
+        spec.block_count,
+        spec.transaction_count,
+        extra_prestate_accounts,
+    )?;
     Ok(ControlledBlockFixture {
         spec: spec.clone(),
-        guest_input,
+        guest_input: built.guest_input,
         controlled_bytecode_length: bytecode_length,
-        touched_state_key_count,
+        touched_state_key_count: built.touched_state_key_count,
     })
 }
 
-fn observe_controlled_block_fixture(
+#[cfg(test)]
+pub fn build_controlled_block_fixture_with_extra_prestate_account_for_test(
+    spec: &ControlledBlockRowSpec,
+    address: Address,
+) -> Result<ControlledBlockFixture> {
+    build_controlled_block_fixture_with_topology(spec, &[address])
+}
+
+pub fn observe_controlled_block_fixture(
     fixture: &ControlledBlockFixture,
 ) -> Result<ControlledBlockObservation> {
     let trace = trace_shasta_proposal(&fixture.guest_input)?;
@@ -1449,6 +1543,14 @@ fn observe_controlled_block_fixture(
         public_output: trace
             .public_output
             .ok_or_else(|| anyhow::anyhow!("complete controlled trace is missing public output"))?,
+        actual_final_state_root: fixture
+            .guest_input
+            .witnesses
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("controlled block row has no final witness"))?
+            .block
+            .header
+            .state_root,
         actual_raw_gas_by_key,
         actual_features,
         actual_diagnostics,
@@ -1488,6 +1590,14 @@ pub fn validate_controlled_block_fixture(
             observation.actual_diagnostics
         );
     }
+    if observation.actual_final_state_root != fixture.spec.expected_final_state_root {
+        bail!(
+            "controlled block row {} final-state mismatch: declared={}, observed={}",
+            fixture.spec.row_id,
+            fixture.spec.expected_final_state_root,
+            observation.actual_final_state_root,
+        );
+    }
     Ok(observation)
 }
 
@@ -1503,7 +1613,11 @@ pub fn build_required_overhead_fixtures(
     let no_code = build_overhead_guest_input(CandidateKind::NoCodeNoValue, 1, target_count)?;
     let no_code_one = build_overhead_guest_input(CandidateKind::NoCodeNoValue, 1, 1)?;
     let contract = build_overhead_guest_input(
-        CandidateKind::ControlledContract(Bytes::from_static(&[0x5f])),
+        CandidateKind::ControlledContract {
+            code: Bytes::from_static(&[0x5f]),
+            input: Bytes::new(),
+            fee_neutral: false,
+        },
         1,
         target_count,
     )?;

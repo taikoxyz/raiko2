@@ -3,14 +3,17 @@ mod controlled_workload;
 
 use std::collections::BTreeMap;
 
+use alloy_primitives::{Address, B256};
 use controlled_workload::{
     ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
     ControlledLane, ControlledOverheadLane, ControlledProgram, ControlledTrace,
     ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
+    build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_required_overhead_fixtures, controlled_block_row_id, controlled_execution_row_id,
     controlled_overhead_workload_id, controlled_precompile_workload_spec, controlled_workload_id,
-    trace_precompile_workload, trace_revm_opcode_workload, validate_controlled_block_fixture,
-    validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
+    observe_controlled_block_fixture, trace_precompile_workload, trace_revm_opcode_workload,
+    validate_controlled_block_fixture, validate_fixed_footprint, validate_precompile_pair,
+    validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
     OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
@@ -48,9 +51,24 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             count: 1,
             scenario: "push0_pop".into(),
         },
+        expected_final_state_root: B256::from_slice(
+            &alloy_primitives::hex::decode(
+                "6a396f93aa17ce5deed6656426b2dac73ff05800a07ac42b3616c95464ae9363",
+            )
+            .unwrap(),
+        ),
         expected_raw_gas_by_key: BTreeMap::from([
-            ("opcode:0x50".into(), 2),
+            ("opcode:0x03".into(), 3),
+            ("opcode:0x15".into(), 6),
+            ("opcode:0x35".into(), 3),
+            ("opcode:0x50".into(), 4),
+            ("opcode:0x56".into(), 8),
+            ("opcode:0x57".into(), 20),
+            ("opcode:0x5b".into(), 3),
             ("opcode:0x5f".into(), 2),
+            ("opcode:0x60".into(), 15),
+            ("opcode:0x80".into(), 6),
+            ("opcode:0x90".into(), 3),
         ]),
         expected_features: BTreeMap::from([
             ("proposal_startup".into(), 1),
@@ -59,14 +77,14 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("native_value_transfer".into(), 0),
         ]),
         expected_diagnostics: BTreeMap::from([
-            ("guest_input_bincode_length".into(), 332_681),
+            ("guest_input_bincode_length".into(), 332_713),
             ("witness_node_count".into(), 6),
             ("witness_byte_count".into(), 633),
             ("blob_count".into(), 1),
             ("kzg_invocation_count".into(), 1),
             ("calldata_length".into(), 0),
             ("bytecode_length".into(), 256),
-            ("touched_state_key_count".into(), 5),
+            ("touched_state_key_count".into(), 9),
         ]),
     }
 }
@@ -96,7 +114,7 @@ fn controlled_block_row_id_binds_every_semantic_field() {
     let mut changed = original.clone();
     changed
         .expected_raw_gas_by_key
-        .insert("opcode:0x50".into(), 4);
+        .insert("opcode:0x50".into(), 5);
     mutations.push(changed);
     let mut changed = original.clone();
     changed.expected_features.insert("tx_base".into(), 2);
@@ -105,6 +123,9 @@ fn controlled_block_row_id_binds_every_semantic_field() {
     changed
         .expected_diagnostics
         .insert("bytecode_length".into(), 257);
+    mutations.push(changed);
+    let mut changed = original.clone();
+    changed.expected_final_state_root = B256::repeat_byte(0x55);
     mutations.push(changed);
 
     for changed in mutations {
@@ -117,6 +138,110 @@ fn controlled_block_row_id_binds_every_semantic_field() {
         controlled_block_row_id(&stored_id_only).unwrap(),
         original_id
     );
+}
+
+fn materialize_opcode_block_row(
+    family: &str,
+    scenario: &str,
+    count: u64,
+) -> (
+    ControlledBlockRowSpec,
+    controlled_workload::ControlledBlockObservation,
+) {
+    let mut spec = ControlledBlockRowSpec {
+        row_id: String::new(),
+        workload_family: family.into(),
+        split: if count == 32 {
+            ControlledBlockSplit::Holdout
+        } else {
+            ControlledBlockSplit::Fit
+        },
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::OpcodeLoop {
+            family: family.into(),
+            count,
+            scenario: scenario.into(),
+        },
+        expected_final_state_root: B256::ZERO,
+        expected_raw_gas_by_key: BTreeMap::new(),
+        expected_features: BTreeMap::new(),
+        expected_diagnostics: BTreeMap::new(),
+    };
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("build production GuestInput");
+    let observed = observe_controlled_block_fixture(&fixture).expect("trace production GuestInput");
+    spec.expected_final_state_root = observed.actual_final_state_root;
+    spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
+    spec.expected_features = observed.actual_features.clone();
+    spec.expected_diagnostics = observed.actual_diagnostics.clone();
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture =
+        build_controlled_block_fixture(&spec).expect("rebuild frozen production GuestInput");
+    let validated = validate_controlled_block_fixture(&fixture).expect("validate frozen row");
+    (spec, validated)
+}
+
+#[test]
+fn opcode_family_counts_change_trace_but_preserve_final_state_root() {
+    for (family, scenario, anchor) in [
+        ("pop_family", "push0_pop", "opcode:0x50"),
+        ("push_family", "push0_stack", "opcode:0x5f"),
+        ("dup_family", "push0_dup1_then_pop", "opcode:0x80"),
+        ("swap_family", "push0_pair_swap1_then_pop", "opcode:0x90"),
+    ] {
+        let observations = [1, 2, 4, 8, 16, 32]
+            .into_iter()
+            .map(|count| materialize_opcode_block_row(family, scenario, count).1)
+            .collect::<Vec<_>>();
+        let final_state_root = observations[0].actual_final_state_root;
+        assert!(
+            observations
+                .iter()
+                .all(|observation| observation.actual_final_state_root == final_state_root),
+            "{family} count variants changed final state root"
+        );
+        let anchor_units = observations
+            .iter()
+            .map(|observation| observation.actual_raw_gas_by_key[anchor])
+            .collect::<Vec<_>>();
+        assert!(
+            anchor_units.windows(2).all(|pair| pair[0] < pair[1]),
+            "{family} trace did not increase anchor work: {anchor_units:?}"
+        );
+    }
+}
+
+#[test]
+fn touched_state_key_count_comes_from_built_topology_and_rejects_stale_manifest() {
+    let (spec, normal) = materialize_opcode_block_row("pop_family", "push0_pop", 1);
+    let extra_account = Address::repeat_byte(0x99);
+    let mutated_fixture =
+        build_controlled_block_fixture_with_extra_prestate_account_for_test(&spec, extra_account)
+            .expect("build topology-mutated production GuestInput");
+    let mutated = observe_controlled_block_fixture(&mutated_fixture)
+        .expect("trace topology-mutated production GuestInput");
+    assert_eq!(
+        mutated.actual_diagnostics["touched_state_key_count"],
+        normal.actual_diagnostics["touched_state_key_count"] + 1,
+    );
+
+    let mut stale = spec;
+    stale.expected_final_state_root = mutated.actual_final_state_root;
+    stale.expected_raw_gas_by_key = mutated.actual_raw_gas_by_key;
+    stale.expected_features = mutated.actual_features;
+    stale.expected_diagnostics = mutated.actual_diagnostics;
+    stale.expected_diagnostics.insert(
+        "touched_state_key_count".into(),
+        normal.actual_diagnostics["touched_state_key_count"],
+    );
+    stale.row_id = controlled_block_row_id(&stale).unwrap();
+    let stale_fixture =
+        build_controlled_block_fixture_with_extra_prestate_account_for_test(&stale, extra_account)
+            .expect("rebuild topology-mutated production GuestInput");
+    let error = validate_controlled_block_fixture(&stale_fixture)
+        .expect_err("stale topology diagnostic must fail closed");
+    assert!(error.to_string().contains("diagnostic mismatch"));
 }
 
 #[test]

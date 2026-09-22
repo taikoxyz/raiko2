@@ -8329,6 +8329,7 @@ def _validated_block_calibration_rows(
         "preflight_fit_rank",
         "block_count",
         "transaction_count",
+        "prover_gas",
         "total_instruction_count",
         "exit_code",
     )

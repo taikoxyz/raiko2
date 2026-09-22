@@ -1313,7 +1313,7 @@ class CandidateConstructionTests(unittest.TestCase):
                             "total_instruction_count": 100,
                             "public_values": "0x01",
                             "host_public_output": "0x01",
-                            "prover_gas": str(parameter),
+                            "prover_gas": int(parameter),
                             "actual_raw_gas_by_key": raw,
                             "actual_features": q,
                             "actual_diagnostics": spec.expected_diagnostics,
@@ -1371,7 +1371,7 @@ class CandidateConstructionTests(unittest.TestCase):
                     "total_instruction_count": 100,
                     "public_values": "0x01",
                     "host_public_output": "0x01",
-                    "prover_gas": str(sum(parameters)),
+                    "prover_gas": int(sum(parameters)),
                     "actual_raw_gas_by_key": holdout_raw,
                     "actual_features": holdout_q,
                     "actual_diagnostics": holdout_spec.expected_diagnostics,
@@ -1539,6 +1539,20 @@ class CandidateConstructionTests(unittest.TestCase):
         assert_bool_mutation_rejected(
             "nested_semantic_count", mutate_nested_program_count
         )
+
+        for label, value in (
+            ("integer_valued_float", 2.0),
+            ("numeric_string", "2"),
+            ("bool", True),
+        ):
+            with self.subTest(prover_gas_type=label):
+                mutated = copy.deepcopy(raw_rows)
+                for repeat in first_repeats(mutated):
+                    repeat["prover_gas"] = value
+                with self.assertRaises(ValueError):
+                    opcode_gas.fit_block_calibration_artifact(
+                        manifest, affine_model, relation_artifact, mutated
+                    )
 
         for field in (
             "block_count",

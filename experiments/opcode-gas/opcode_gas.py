@@ -8270,6 +8270,29 @@ _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS = {
 }
 
 
+def _exact_json_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON values without allowing Python's bool/int aliases."""
+    if isinstance(expected, Mapping):
+        return (
+            isinstance(actual, Mapping)
+            and set(actual) == set(expected)
+            and all(
+                _exact_json_equal(actual[key], expected[key])
+                for key in expected
+            )
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(
+                _exact_json_equal(actual_item, expected_item)
+                for actual_item, expected_item in zip(actual, expected)
+            )
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
 def _validated_block_calibration_rows(
     manifest: Manifest,
     relation_artifact: Mapping[str, Any],
@@ -8300,6 +8323,21 @@ def _validated_block_calibration_rows(
         for row in raw_rows
     ):
         raise ValueError("block calibration accepted row schema is incomplete or unexpected")
+    integer_fields = (
+        "schema_version",
+        "repeat_index",
+        "preflight_fit_rank",
+        "block_count",
+        "transaction_count",
+        "total_instruction_count",
+        "exit_code",
+    )
+    if any(
+        type(row.get(field)) is not int
+        for row in raw_rows
+        for field in integer_fields
+    ):
+        raise ValueError("block calibration accepted row schema requires exact integers")
     actual_ids = {str(row.get("row_id")) for row in raw_rows}
     if actual_ids != set(expected):
         raise ValueError("block calibration raw row identities differ from the manifest")
@@ -8330,14 +8368,14 @@ def _validated_block_calibration_rows(
             "exit_code": 0,
         }
         if any(
-            row.get(key) != value
+            not _exact_json_equal(row.get(key), value)
             for row in repeats
             for key, value in required.items()
         ):
             raise ValueError("block calibration raw row provenance or identity differs")
         payload = _controlled_block_row_payload(spec)
         if any(
-            repeat.get(field) != value
+            not _exact_json_equal(repeat.get(field), value)
             for repeat in repeats
             for field, value in payload.items()
         ):
@@ -8395,10 +8433,19 @@ def _validated_block_calibration_rows(
             if public_values != host_public_output:
                 raise ValueError("block calibration public output join differs")
         if (
-            first.get("actual_raw_gas_by_key") != dict(spec.expected_raw_gas_by_key)
-            or first.get("actual_features") != dict(spec.expected_features)
-            or first.get("actual_diagnostics") != dict(spec.expected_diagnostics)
-            or first.get("actual_final_state_root") != spec.expected_final_state_root
+            not _exact_json_equal(
+                first.get("actual_raw_gas_by_key"),
+                dict(spec.expected_raw_gas_by_key),
+            )
+            or not _exact_json_equal(
+                first.get("actual_features"), dict(spec.expected_features)
+            )
+            or not _exact_json_equal(
+                first.get("actual_diagnostics"), dict(spec.expected_diagnostics)
+            )
+            or not _exact_json_equal(
+                first.get("actual_final_state_root"), spec.expected_final_state_root
+            )
         ):
             raise ValueError("block calibration traced inputs differ from the manifest")
         collapsed.append(

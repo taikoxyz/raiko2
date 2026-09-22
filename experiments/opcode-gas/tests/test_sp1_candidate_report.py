@@ -1254,17 +1254,27 @@ class CandidateConstructionTests(unittest.TestCase):
                 else:
                     q[features[parameter_index - 4]] = 1
                 row_id = f"family-{family_index}-parameter-{parameter_index}"
+                program = (
+                    types.SimpleNamespace(
+                        kind="opcode_loop",
+                        family="pop_family",
+                        count=1,
+                        scenario="canonical",
+                    )
+                    if family_index == 0 and parameter_index == 0
+                    else types.SimpleNamespace(kind="empty")
+                )
                 spec = types.SimpleNamespace(
                     row_id=row_id,
                     workload_family=f"family-{family_index}",
                     split="fit",
                     block_count=1,
                     transaction_count=1,
-                    program=types.SimpleNamespace(kind="empty"),
+                    program=program,
                     expected_final_state_root="0x" + "1" * 64,
                     expected_raw_gas_by_key=raw,
                     expected_features=q,
-                    expected_diagnostics={"witness_node_count": 0},
+                    expected_diagnostics={"witness_node_count": 1},
                 )
                 specs.append(spec)
                 payload = opcode_gas._controlled_block_row_payload(spec)
@@ -1431,6 +1441,105 @@ class CandidateConstructionTests(unittest.TestCase):
                 manifest, affine_model, relation_artifact, tampered_rows
             )
 
+        def assert_bool_mutation_rejected(label, mutate):
+            with self.subTest(bool_alias=label):
+                mutated = copy.deepcopy(raw_rows)
+                mutate(mutated)
+                with self.assertRaises(ValueError):
+                    opcode_gas.fit_block_calibration_artifact(
+                        manifest, affine_model, relation_artifact, mutated
+                    )
+
+        first_row_id = "family-0-parameter-0"
+        first_repeats = lambda rows: [
+            row for row in rows if row["row_id"] == first_row_id
+        ]
+
+        assert_bool_mutation_rejected(
+            "schema_version",
+            lambda rows: first_repeats(rows)[0].__setitem__("schema_version", True),
+        )
+        assert_bool_mutation_rejected(
+            "exit_code",
+            lambda rows: first_repeats(rows)[0].__setitem__("exit_code", False),
+        )
+        assert_bool_mutation_rejected(
+            "preflight_fit_rank",
+            lambda rows: first_repeats(rows)[0].__setitem__("preflight_fit_rank", True),
+        )
+        assert_bool_mutation_rejected(
+            "block_count",
+            lambda rows: first_repeats(rows)[0].__setitem__("block_count", True),
+        )
+        assert_bool_mutation_rejected(
+            "transaction_count",
+            lambda rows: first_repeats(rows)[0].__setitem__("transaction_count", True),
+        )
+        assert_bool_mutation_rejected(
+            "instruction_count",
+            lambda rows: first_repeats(rows)[0].__setitem__(
+                "total_instruction_count", True
+            ),
+        )
+
+        def mutate_repeat_index(rows):
+            repeat = first_repeats(rows)[0]
+            repeat["repeat_index"] = False
+            repeat["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+                first_row_id,
+                backend="sp1",
+                execution_engine="standard",
+                run_id="b" * 24,
+                repeat_index=False,
+                backend_input_sha256="d" * 64,
+            )
+
+        assert_bool_mutation_rejected("repeat_index", mutate_repeat_index)
+
+        def mutate_integer_map(rows, row_id, expected_field, actual_field, key):
+            for repeat in (row for row in rows if row["row_id"] == row_id):
+                repeat[expected_field][key] = True
+                repeat[actual_field][key] = True
+
+        assert_bool_mutation_rejected(
+            "raw_gas",
+            lambda rows: mutate_integer_map(
+                rows,
+                first_row_id,
+                "expected_raw_gas_by_key",
+                "actual_raw_gas_by_key",
+                "A0",
+            ),
+        )
+        assert_bool_mutation_rejected(
+            "feature_count",
+            lambda rows: mutate_integer_map(
+                rows,
+                "family-0-parameter-4",
+                "expected_features",
+                "actual_features",
+                features[0],
+            ),
+        )
+        assert_bool_mutation_rejected(
+            "diagnostic_count",
+            lambda rows: mutate_integer_map(
+                rows,
+                first_row_id,
+                "expected_diagnostics",
+                "actual_diagnostics",
+                "witness_node_count",
+            ),
+        )
+
+        def mutate_nested_program_count(rows):
+            for repeat in first_repeats(rows):
+                repeat["program"]["count"] = True
+
+        assert_bool_mutation_rejected(
+            "nested_semantic_count", mutate_nested_program_count
+        )
+
         for field in (
             "block_count",
             "prover_gas",
@@ -1452,7 +1561,7 @@ class CandidateConstructionTests(unittest.TestCase):
             "block_count": 2,
             "prover_gas": "999",
             "public_values": "0x02",
-            "actual_diagnostics": {"witness_node_count": 1},
+            "actual_diagnostics": {"witness_node_count": 2},
             "actual_final_state_root": "0x" + "f" * 64,
             "total_instruction_count": 101,
             "sp1_gas_trace_chunk_threshold": 1,

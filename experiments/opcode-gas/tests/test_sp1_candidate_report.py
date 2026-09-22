@@ -2562,24 +2562,29 @@ class IdentityAndValidationTests(unittest.TestCase):
     def test_block_calibration_preflight_requires_exact_rank_and_frozen_scope(self):
         manifest = formal_relation_manifest()
         opcode_keys = tuple(
-            sorted(
-                {
-                    key
-                    for row in manifest.block_calibration_rows
-                    for key in row.expected_raw_gas_by_key
-                }
-            )
+            f"opcode:0x{case.opcode:02x}"
+            for case in manifest.cases
+            if case.kind == "opcode"
+            and case.opcode is not None
+            and case.opcode in opcode_gas.PURE_OPCODE_DEFAULTS
+            and opcode_gas.PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
         )
-        model = types.SimpleNamespace(
+        equations = tuple(
+            opcode_gas.RelationEquation(
+                relation.id,
+                {
+                    key: opcode_gas.Fraction(value)
+                    for key, value in relation.signed_raw_gas_by_key.items()
+                },
+                Decimal(0),
+            )
+            for relation in manifest.opcode_relations
+            if relation.split == "canonical" and relation.signed_raw_gas_by_key
+        )
+        model = opcode_gas.derive_affine_opcode_model(
             opcode_keys=opcode_keys,
+            equations=equations,
             anchor_keys=opcode_gas.OPCODE_RELATION_ANCHORS,
-            anchor_basis={
-                key: {
-                    anchor: opcode_gas.Fraction(int(key == anchor), 1)
-                    for anchor in opcode_gas.OPCODE_RELATION_ANCHORS
-                }
-                for key in opcode_keys
-            },
         )
 
         result = opcode_gas.preflight_block_calibration_rows(manifest, model)
@@ -2641,7 +2646,10 @@ class IdentityAndValidationTests(unittest.TestCase):
             key: dict(coefficients)
             for key, coefficients in model.anchor_basis.items()
         }
-        rounded_basis[opcode_keys[0]][opcode_gas.OPCODE_RELATION_ANCHORS[0]] = 0.0
+        used_key = next(
+            iter(manifest.block_calibration_rows[0].expected_raw_gas_by_key)
+        )
+        rounded_basis[used_key][opcode_gas.OPCODE_RELATION_ANCHORS[0]] = 0.0
         with self.assertRaisesRegex(ValueError, "rounded basis"):
             opcode_gas.preflight_block_calibration_rows(
                 manifest,

@@ -3,6 +3,7 @@ mod controlled_workload;
 
 use std::collections::BTreeMap;
 
+use alloy_consensus::Transaction as _;
 use alloy_primitives::{Address, B256};
 use controlled_workload::{
     ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
@@ -53,22 +54,22 @@ fn block_row_spec() -> ControlledBlockRowSpec {
         },
         expected_final_state_root: B256::from_slice(
             &alloy_primitives::hex::decode(
-                "6a396f93aa17ce5deed6656426b2dac73ff05800a07ac42b3616c95464ae9363",
+                "37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5",
             )
             .unwrap(),
         ),
         expected_raw_gas_by_key: BTreeMap::from([
-            ("opcode:0x03".into(), 3),
+            ("opcode:0x03".into(), 6),
             ("opcode:0x15".into(), 6),
-            ("opcode:0x35".into(), 3),
             ("opcode:0x50".into(), 4),
             ("opcode:0x56".into(), 8),
             ("opcode:0x57".into(), 20),
+            ("opcode:0x5a".into(), 2),
             ("opcode:0x5b".into(), 3),
-            ("opcode:0x5f".into(), 2),
             ("opcode:0x60".into(), 15),
+            ("opcode:0x62".into(), 3),
             ("opcode:0x80".into(), 6),
-            ("opcode:0x90".into(), 3),
+            ("opcode:0x90".into(), 6),
         ]),
         expected_features: BTreeMap::from([
             ("proposal_startup".into(), 1),
@@ -77,7 +78,7 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("native_value_transfer".into(), 0),
         ]),
         expected_diagnostics: BTreeMap::from([
-            ("guest_input_bincode_length".into(), 332_713),
+            ("guest_input_bincode_length".into(), 332_681),
             ("witness_node_count".into(), 6),
             ("witness_byte_count".into(), 633),
             ("blob_count".into(), 1),
@@ -147,6 +148,7 @@ fn materialize_opcode_block_row(
 ) -> (
     ControlledBlockRowSpec,
     controlled_workload::ControlledBlockObservation,
+    (Vec<u8>, usize, u64),
 ) {
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
@@ -170,6 +172,20 @@ fn materialize_opcode_block_row(
     };
     spec.row_id = controlled_block_row_id(&spec).unwrap();
     let fixture = build_controlled_block_fixture(&spec).expect("build production GuestInput");
+    let code = fixture.guest_input.witnesses[0]
+        .witness
+        .codes
+        .iter()
+        .find(|code| code.len() == 256)
+        .expect("controlled 256-byte contract code")
+        .to_vec();
+    let candidate = fixture.guest_input.witnesses[0]
+        .block
+        .body
+        .transactions
+        .last()
+        .expect("controlled candidate transaction");
+    let shape = (code, candidate.input().len(), candidate.gas_limit());
     let observed = observe_controlled_block_fixture(&fixture).expect("trace production GuestInput");
     spec.expected_final_state_root = observed.actual_final_state_root;
     spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
@@ -179,7 +195,7 @@ fn materialize_opcode_block_row(
     let fixture =
         build_controlled_block_fixture(&spec).expect("rebuild frozen production GuestInput");
     let validated = validate_controlled_block_fixture(&fixture).expect("validate frozen row");
-    (spec, validated)
+    (spec, validated, shape)
 }
 
 #[test]
@@ -190,9 +206,14 @@ fn opcode_family_counts_change_trace_but_preserve_final_state_root() {
         ("dup_family", "push0_dup1_then_pop", "opcode:0x80"),
         ("swap_family", "push0_pair_swap1_then_pop", "opcode:0x90"),
     ] {
-        let observations = [1, 2, 4, 8, 16, 32]
+        let counts = [1, 2, 4, 8, 16, 32];
+        let materialized = counts
             .into_iter()
-            .map(|count| materialize_opcode_block_row(family, scenario, count).1)
+            .map(|count| materialize_opcode_block_row(family, scenario, count))
+            .collect::<Vec<_>>();
+        let observations = materialized
+            .iter()
+            .map(|(_, observation, _)| observation)
             .collect::<Vec<_>>();
         let final_state_root = observations[0].actual_final_state_root;
         assert!(
@@ -209,12 +230,43 @@ fn opcode_family_counts_change_trace_but_preserve_final_state_root() {
             anchor_units.windows(2).all(|pair| pair[0] < pair[1]),
             "{family} trace did not increase anchor work: {anchor_units:?}"
         );
+        assert!(
+            observations.iter().all(|observation| {
+                !observation
+                    .actual_raw_gas_by_key
+                    .contains_key("opcode:0x35")
+                    && observation
+                        .actual_raw_gas_by_key
+                        .contains_key("opcode:0x5a")
+            }),
+            "{family} trace did not replace CALLDATALOAD with modeled GAS"
+        );
+        let shapes = materialized
+            .iter()
+            .map(|(_, _, shape)| shape)
+            .collect::<Vec<_>>();
+        assert!(
+            shapes.iter().all(|shape| shape.0 == shapes[0].0),
+            "{family} count variants changed bytecode"
+        );
+        assert!(
+            shapes.iter().all(|shape| shape.1 == 0),
+            "{family} count variants must use empty transaction input"
+        );
+        let gas_limit_base = shapes[0].2 - counts[0];
+        assert!(
+            shapes
+                .iter()
+                .zip(counts)
+                .all(|(shape, count)| shape.2 == gas_limit_base + count),
+            "{family} transaction gas limits must be BASE + count"
+        );
     }
 }
 
 #[test]
 fn touched_state_key_count_comes_from_built_topology_and_rejects_stale_manifest() {
-    let (spec, normal) = materialize_opcode_block_row("pop_family", "push0_pop", 1);
+    let (spec, normal, _) = materialize_opcode_block_row("pop_family", "push0_pop", 1);
     let extra_account = Address::repeat_byte(0x99);
     let mutated_fixture =
         build_controlled_block_fixture_with_extra_prestate_account_for_test(&spec, extra_account)

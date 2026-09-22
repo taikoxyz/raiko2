@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alloy_consensus::{
@@ -646,6 +646,7 @@ enum CandidateKind {
         code: Bytes,
         input: Bytes,
         fee_neutral: bool,
+        gas_limit: u64,
     },
     NativeZero,
     NativeValue(u64),
@@ -722,12 +723,16 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
         CandidateKind::ControlledContract { input, .. } => input.clone(),
         _ => Bytes::new(),
     };
+    let gas_limit = match kind {
+        CandidateKind::ControlledContract { gas_limit, .. } => *gas_limit,
+        _ => 100_000,
+    };
     (0..count)
         .map(|nonce| {
             let tx = TxEip1559 {
                 chain_id: OVERHEAD_CHAIN_ID,
                 nonce,
-                gas_limit: 100_000,
+                gas_limit,
                 max_fee_per_gas: 25_000_000,
                 max_priority_fee_per_gas: 0,
                 to: TxKind::Call(recipient),
@@ -1268,18 +1273,130 @@ fn build_overhead_guest_input(
 }
 
 const CONTROLLED_BLOCK_BYTECODE_LENGTH: usize = 256;
+const CONTROLLED_OPCODE_GAS_LIMIT_BASE: u64 = 100_000;
+const CONTROLLED_OPCODE_MAX_COUNT: u64 = 32;
+static CONTROLLED_OPCODE_GAS_AT_BASE: OnceLock<Result<u64, String>> = OnceLock::new();
+
+fn gas_threshold_probe_bytecode(threshold: u64) -> Result<Bytes> {
+    let threshold = u32::try_from(threshold)?;
+    if threshold > 0x00ff_ffff {
+        bail!("controlled GAS threshold does not fit PUSH3");
+    }
+    let bytes = threshold.to_be_bytes();
+    let mut code = vec![
+        0x5a, // GAS
+        0x62, bytes[1], bytes[2], bytes[3], // PUSH3 threshold
+        0x11,     // GT: threshold > gas
+        0x60, 0x0e, 0x57, // PUSH1 high; JUMPI
+        0x5f, 0x5f, 0x01, 0x50, 0x00, // low marker: ADD
+        0x5b, 0x5f, 0x5f, 0x02, 0x50, 0x00, // high marker: MUL
+    ];
+    code.resize(CONTROLLED_BLOCK_BYTECODE_LENGTH, 0x00);
+    Ok(code.into())
+}
+
+fn trace_gas_threshold(gas_limit: u64, threshold: u64) -> Result<bool> {
+    let built = build_overhead_guest_input_with_topology(
+        CandidateKind::ControlledContract {
+            code: gas_threshold_probe_bytecode(threshold)?,
+            input: Bytes::new(),
+            fee_neutral: true,
+            gas_limit,
+        },
+        1,
+        1,
+        &[],
+    )?;
+    let trace = trace_shasta_proposal(&built.guest_input)?;
+    if trace.status != ProposalTraceStatus::Complete
+        || !trace.parity.passed
+        || !trace.partial_blocks.is_empty()
+        || !trace.recovery_failures.is_empty()
+    {
+        bail!("controlled GAS threshold probe did not complete the production trace path");
+    }
+    let operations = absolute_transaction_operation_units(&trace)?;
+    let low = operations
+        .get("opcode:0x01")
+        .is_some_and(|value| value.units > 0);
+    let high = operations
+        .get("opcode:0x02")
+        .is_some_and(|value| value.units > 0);
+    match (low, high) {
+        (true, false) => Ok(false),
+        (false, true) => Ok(true),
+        _ => bail!(
+            "controlled GAS threshold probe did not execute exactly one branch marker: low={low}, high={high}"
+        ),
+    }
+}
+
+fn derive_first_gas_value(gas_limit: u64) -> Result<u64> {
+    if trace_gas_threshold(gas_limit, 0)? {
+        bail!("controlled GAS threshold probe rejected the zero lower bound");
+    }
+    if !trace_gas_threshold(gas_limit, gas_limit)? {
+        bail!("controlled GAS threshold probe rejected the transaction-gas upper bound");
+    }
+    let mut lower = 0;
+    let mut upper = gas_limit;
+    while upper - lower > 1 {
+        let middle = lower + (upper - lower) / 2;
+        if trace_gas_threshold(gas_limit, middle)? {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    Ok(lower)
+}
+
+fn controlled_opcode_gas_at_base() -> Result<u64> {
+    match CONTROLLED_OPCODE_GAS_AT_BASE.get_or_init(|| {
+        let result = (|| -> Result<u64> {
+            let base = derive_first_gas_value(CONTROLLED_OPCODE_GAS_LIMIT_BASE)?;
+            let upper_gas_limit = CONTROLLED_OPCODE_GAS_LIMIT_BASE
+                .checked_add(CONTROLLED_OPCODE_MAX_COUNT)
+                .ok_or_else(|| anyhow::anyhow!("controlled opcode gas limit overflow"))?;
+            let upper = derive_first_gas_value(upper_gas_limit)?;
+            if upper.checked_sub(base) != Some(CONTROLLED_OPCODE_MAX_COUNT) {
+                bail!(
+                    "production trace GAS value is not affine in gas_limit: base={base}, upper={upper}"
+                );
+            }
+            if base > 0x00ff_ffff {
+                bail!("production trace GAS value does not fit frozen PUSH3 encoding");
+            }
+            Ok(base)
+        })();
+        result.map_err(|error| error.to_string())
+    }) {
+        Ok(value) => Ok(*value),
+        Err(error) => bail!("failed to derive controlled opcode GAS offset: {error}"),
+    }
+}
 
 fn controlled_opcode_bytecode(family: &str, scenario: &str) -> Result<Bytes> {
-    let mut code = vec![0x5f, 0x35]; // PUSH0; CALLDATALOAD
+    let gas_at_base = u32::try_from(controlled_opcode_gas_at_base()?)?;
+    let gas_bytes = gas_at_base.to_be_bytes();
+    let mut code = vec![
+        0x5a, // GAS
+        0x62,
+        gas_bytes[1],
+        gas_bytes[2],
+        gas_bytes[3], // PUSH3 GAS-at-base
+        0x90,
+        0x03, // SWAP1; SUB => gas - GAS-at-base
+    ];
     let loop_offset = code.len();
     code.extend([0x5b, 0x80, 0x15, 0x60, 0x00, 0x57]); // JUMPDEST; DUP1; ISZERO; PUSH1 done; JUMPI
-    let done_immediate_index = 6;
+    let done_immediate_index = loop_offset + 4;
     match (family, scenario) {
         ("pop_family", "push0_pop") => {
             code.extend([0x60, 0x00, 0x50]); // PUSH1 0; POP
         }
         ("push_family", "push0_stack") => {
-            code.extend([0x5f, 0x50]); // PUSH0; POP
+            code.extend([0x5f, 0x90]); // PUSH0; SWAP1, retaining the counter on top
         }
         ("dup_family", "push0_dup1_then_pop") => {
             code.extend([0x80, 0x50]); // DUP1; POP
@@ -1306,10 +1423,6 @@ fn controlled_opcode_bytecode(family: &str, scenario: &str) -> Result<Bytes> {
     }
     code.resize(CONTROLLED_BLOCK_BYTECODE_LENGTH, 0x00);
     Ok(code.into())
-}
-
-fn controlled_opcode_input(count: u64) -> Bytes {
-    U256::from(count).to_be_bytes::<32>().to_vec().into()
 }
 
 pub fn build_controlled_block_fixture(
@@ -1349,6 +1462,9 @@ fn build_controlled_block_fixture_with_topology(
             count,
             scenario,
         } => {
+            if !(1..=CONTROLLED_OPCODE_MAX_COUNT).contains(count) {
+                bail!("controlled opcode count is outside the frozen 1..=32 range");
+            }
             if family != &spec.workload_family && spec.workload_family != "proposal_startup" {
                 bail!("controlled opcode program family differs from workload family");
             }
@@ -1360,8 +1476,11 @@ fn build_controlled_block_fixture_with_topology(
             (
                 CandidateKind::ControlledContract {
                     code: bytecode,
-                    input: controlled_opcode_input(*count),
+                    input: Bytes::new(),
                     fee_neutral: true,
+                    gas_limit: CONTROLLED_OPCODE_GAS_LIMIT_BASE
+                        .checked_add(*count)
+                        .ok_or_else(|| anyhow::anyhow!("controlled opcode gas limit overflow"))?,
                 },
                 bytecode_length,
             )
@@ -1617,6 +1736,7 @@ pub fn build_required_overhead_fixtures(
             code: Bytes::from_static(&[0x5f]),
             input: Bytes::new(),
             fee_neutral: false,
+            gas_limit: 100_000,
         },
         1,
         target_count,

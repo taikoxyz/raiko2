@@ -17,20 +17,34 @@ import tarfile
 import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field, replace
-from decimal import Decimal, InvalidOperation, getcontext
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 from calibration_model import (
     AffineOpcodeModel,
+    BlockCalibrationRow,
+    DynamicRelationObservation,
     RelationEquation,
     derive_affine_opcode_model,
     exact_rank,
+    fit_block_calibration,
+    validate_dynamic_holdouts,
 )
 
 
-getcontext().prec = 80
+_OPCODE_DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
+
+
+def _isolated_decimal_context(function):
+    """Run Decimal-heavy library entrypoints without mutating caller state."""
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        with localcontext(_OPCODE_DECIMAL_CONTEXT):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 FORMAL_RELATION_PURPOSE = "formal_opcode_relation"
@@ -5727,6 +5741,7 @@ def fixed_startup_residual(panel_repeat_residuals: Iterable[Iterable[Any]]) -> D
     return sum(case_values) / Decimal(len(case_values))
 
 
+@_isolated_decimal_context
 def construct_measurement_values(
     manifest: Manifest, case_results: Iterable[Mapping[str, Any]]
 ) -> dict[str, dict[str, Any]]:
@@ -8206,6 +8221,276 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
     print(f"wrote {len(rows)} controlled block calibration observation(s)")
 
 
+def _validated_block_calibration_rows(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    raw_rows: list[Mapping[str, Any]],
+) -> tuple[BlockCalibrationRow, ...]:
+    if (
+        relation_artifact.get("purpose") != FORMAL_RELATION_PURPOSE
+        or relation_artifact.get("status") != "accepted"
+    ):
+        raise ValueError("block calibration requires an accepted opcode relation artifact")
+    relation_sha256 = relation_artifact.get("artifact_sha256")
+    relation_raw_sha256 = relation_artifact.get("raw_rows_sha256")
+    provenance = relation_artifact.get("provenance")
+    calibration_id = (
+        provenance.get("calibration_id") if isinstance(provenance, Mapping) else None
+    )
+    if (
+        not _is_sha256(relation_sha256)
+        or not _is_sha256(relation_raw_sha256)
+        or not isinstance(calibration_id, str)
+    ):
+        raise ValueError("block calibration relation provenance is invalid")
+
+    expected = {row.row_id: row for row in manifest.block_calibration_rows}
+    actual_ids = {str(row.get("row_id")) for row in raw_rows}
+    if actual_ids != set(expected):
+        raise ValueError("block calibration raw row identities differ from the manifest")
+    collapsed = []
+    for row_id, spec in expected.items():
+        repeats = [row for row in raw_rows if row.get("row_id") == row_id]
+        if len(repeats) != 3 or sorted(
+            row.get("repeat_index") for row in repeats
+        ) != [0, 1, 2]:
+            raise ValueError("block calibration requires exactly three indexed repeats")
+        required = {
+            "purpose": "block_calibration",
+            "status": "accepted",
+            "calibration_id": calibration_id,
+            "relation_artifact_sha256": relation_sha256,
+            "relation_raw_rows_sha256": relation_raw_sha256,
+            "preflight_fit_rank": 8,
+            "workload_family": spec.workload_family,
+            "split": spec.split,
+            "reported_row_id": row_id,
+            "observation_row_id": row_id,
+            "sp1_execution_engine": "standard",
+            "exit_code": 0,
+        }
+        if any(
+            row.get(key) != value
+            for row in repeats
+            for key, value in required.items()
+        ):
+            raise ValueError("block calibration raw row provenance or identity differs")
+        stable_fields = (
+            "prover_gas",
+            "actual_raw_gas_by_key",
+            "actual_features",
+            "backend_input_sha256",
+            "guest_input_sha256",
+        )
+        if any(
+            len({canonical_json(row.get(field)) for row in repeats}) != 1
+            for field in stable_fields
+        ):
+            raise ValueError("block calibration repeats are not deterministic")
+        first = repeats[0]
+        for repeat in repeats:
+            backend_input_sha256 = repeat.get("backend_input_sha256")
+            repeat_index = repeat["repeat_index"]
+            expected_execution_row_id = (
+                controlled_execution_row_id(
+                    row_id,
+                    backend="sp1",
+                    execution_engine="standard",
+                    run_id=calibration_id,
+                    repeat_index=repeat_index,
+                    backend_input_sha256=backend_input_sha256,
+                )
+                if _is_sha256(backend_input_sha256)
+                else None
+            )
+            if (
+                repeat.get("execution_row_id") != expected_execution_row_id
+                or repeat.get("guest_input_sha256")
+                != "0x" + str(backend_input_sha256)
+            ):
+                raise ValueError("block calibration execution row identity differs")
+        if (
+            first.get("actual_raw_gas_by_key") != dict(spec.expected_raw_gas_by_key)
+            or first.get("actual_features") != dict(spec.expected_features)
+        ):
+            raise ValueError("block calibration traced inputs differ from the manifest")
+        collapsed.append(
+            BlockCalibrationRow(
+                row_id=row_id,
+                workload_family=spec.workload_family,
+                split=spec.split,
+                prover_gas=_decimal(first.get("prover_gas"), label="block prover gas"),
+                raw_gas_by_key=dict(spec.expected_raw_gas_by_key),
+                feature_counts=dict(spec.expected_features),
+            )
+        )
+    if len(raw_rows) != 3 * len(expected):
+        raise ValueError("block calibration raw rows contain duplicate observations")
+    return tuple(collapsed)
+
+
+def _dynamic_observations_from_relation_artifact(
+    relation_artifact: Mapping[str, Any],
+) -> tuple[DynamicRelationObservation, ...]:
+    rows = [
+        *relation_artifact.get("equations", []),
+        *relation_artifact.get("dynamic_holdouts", []),
+    ]
+    observations = []
+    for row in rows:
+        dynamic_key = row.get("dynamic_key") if isinstance(row, Mapping) else None
+        if dynamic_key is None:
+            continue
+        signed = row.get("signed_raw_gas_by_key")
+        if not isinstance(signed, Mapping):
+            raise ValueError("dynamic relation coefficient map is missing")
+        observations.append(
+            DynamicRelationObservation(
+                dynamic_key=str(dynamic_key),
+                scenario_id=str(row.get("scenario_id")),
+                split=str(row.get("split")),
+                equation=RelationEquation(
+                    relation_id=str(row.get("relation_id")),
+                    coefficients={key: Fraction(value) for key, value in signed.items()},
+                    slope=_decimal(row.get("slope_p"), label="dynamic relation slope"),
+                ),
+            )
+        )
+    return tuple(observations)
+
+
+def _serialize_decimal_tree(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return _decimal_text(value)
+    if isinstance(value, Fraction):
+        return _fraction_text(value)
+    if isinstance(value, Mapping):
+        return {key: _serialize_decimal_tree(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_serialize_decimal_tree(item) for item in value]
+    return value
+
+
+def fit_block_calibration_artifact(
+    manifest: Manifest,
+    affine_model: AffineOpcodeModel,
+    relation_artifact: Mapping[str, Any],
+    raw_rows: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Fit and serialize the canonical controlled block calibration artifact."""
+    rows = _validated_block_calibration_rows(manifest, relation_artifact, raw_rows)
+    result = fit_block_calibration(affine_model, rows, tuple(Q_FORMULA))
+    dynamic = validate_dynamic_holdouts(
+        affine_model,
+        result.opcode_multipliers,
+        _dynamic_observations_from_relation_artifact(relation_artifact),
+        tuple(manifest.dynamic_raw_gas_keys),
+    )
+    normalization_key = manifest.normalization_reference_key
+    if normalization_key not in result.opcode_multipliers:
+        raise ValueError("block calibration ADD normalization reference is missing")
+    normalization = result.opcode_multipliers[normalization_key]
+    with localcontext(_OPCODE_DECIMAL_CONTEXT):
+        normalized_multipliers = {
+            key: value / normalization
+            for key, value in result.opcode_multipliers.items()
+        }
+    artifact = {
+        "schema_version": 1,
+        "purpose": "block_calibration",
+        "status": result.status,
+        "provenance": dict(relation_artifact["provenance"]),
+        "relation_artifact_sha256": relation_artifact["artifact_sha256"],
+        "relation_raw_rows_sha256": relation_artifact["raw_rows_sha256"],
+        "raw_block_rows_sha256": sha256_bytes(canonical_json(raw_rows)),
+        "parameter_order": list(result.parameter_order),
+        "formulas": {
+            "fit": "p_hat = x * mu_zero + [x * B, q] * [theta, beta]",
+            "opcode": "mu = mu_zero + B * theta",
+            "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
+        },
+        "gates": {
+            "exact_fit_rank": 8,
+            "positive_parameters": True,
+            "positive_opcode_multipliers": True,
+            "fit_mape_max": "0.05",
+            "fit_max_ape_max": "0.10",
+            "holdout_max_ape_max": "0.10",
+            "dynamic_relation_ape_max": "0.10",
+            "dynamic_implied_multiplier_spread_max": "0.05",
+            "leave_one_family_out_drift_max": "0.05",
+        },
+        "anchors": _serialize_decimal_tree(result.anchors),
+        "fixed_costs": _serialize_decimal_tree(result.fixed_costs),
+        "opcode_multipliers": _serialize_decimal_tree(result.opcode_multipliers),
+        "normalization_reference_key": normalization_key,
+        "opcode_multipliers_add_normalized": _serialize_decimal_tree(
+            normalized_multipliers
+        ),
+        "fit_mape": _decimal_text(result.fit_mape),
+        "fit_max_ape": _decimal_text(result.fit_max_ape),
+        "holdout_max_ape": _decimal_text(result.holdout_max_ape),
+        "exact_fit_matrix": _serialize_decimal_tree(result.exact_design_matrix),
+        "exact_fit_rank": result.exact_rank,
+        "column_scales": _serialize_decimal_tree(result.column_scales),
+        "solver_residual": _decimal_text(result.solver_residual),
+        "predictions": _serialize_decimal_tree(result.predictions),
+        "leave_one_family_out": _serialize_decimal_tree(result.leave_one_family_out),
+        "dynamic_holdouts": _serialize_decimal_tree(dynamic),
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
+def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
+    runs_path = _resolve_repo_path(args.runs, field_name="block_calibration_rows")
+    calibration_run = runs_path.parent
+    if runs_path.name != "block-calibration-rows.jsonl":
+        raise ValueError("block calibration runs must use the canonical persisted artifact")
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run,
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+    )
+    if execution_identity != frozen_identity:
+        raise ValueError("block calibration identity changed during validation")
+    relations_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.relations, field_name="opcode_relations"),
+        "opcode-relations.json",
+    )
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="block_calibration"),
+        "block-calibration.json",
+    )
+    relation_rows_path = calibration_run / "raw" / "formal-relations.jsonl"
+    if not relation_rows_path.is_file():
+        raise ValueError("block calibration requires canonical formal relation raw rows")
+    relation_artifact = json.loads(relations_path.read_text())
+    relation_rows = list(iter_jsonl(relation_rows_path))
+    expected_provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    validate_opcode_relations_artifact(
+        manifest, relation_artifact, relation_rows, expected_provenance
+    )
+    artifact = fit_block_calibration_artifact(
+        manifest,
+        _affine_model_from_validated_artifact(manifest, relation_artifact),
+        relation_artifact,
+        list(iter_jsonl(runs_path)),
+    )
+    _atomic_write_json(output, artifact)
+    print(f"fit {len(artifact['parameter_order'])} block calibration parameter(s)")
+
+
 CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
 CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT = 128
 
@@ -9542,6 +9827,16 @@ def build_parser() -> argparse.ArgumentParser:
     fit_relations.add_argument("--out", type=pathlib.Path, required=True)
     fit_relations.set_defaults(func=cmd_fit_relations)
 
+    fit_block = subcommands.add_parser(
+        "fit-block-calibration",
+        help="fit and seal opcode anchors plus fixed/base costs",
+    )
+    fit_block.add_argument("--relations", type=pathlib.Path, required=True)
+    fit_block.add_argument("--runs", type=pathlib.Path, required=True)
+    fit_block.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    fit_block.add_argument("--out", type=pathlib.Path, required=True)
+    fit_block.set_defaults(func=cmd_fit_block_calibration)
+
     candidate = subcommands.add_parser(
         "build-candidate", help="seal the controlled SP1 proverGas candidate"
     )
@@ -9829,7 +10124,8 @@ def cmd_run_proposal(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    with localcontext(_OPCODE_DECIMAL_CONTEXT):
+        args.func(args)
 
 
 if __name__ == "__main__":

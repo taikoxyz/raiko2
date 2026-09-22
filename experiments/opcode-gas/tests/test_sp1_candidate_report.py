@@ -1191,6 +1191,196 @@ class CandidateConstructionTests(unittest.TestCase):
         )
         self.assertEqual(block.repeats, 3)
 
+    def test_fit_block_calibration_serializes_canonical_evidence(self):
+        anchors = ("A0", "A1", "A2", "A3")
+        features = tuple(opcode_gas.Q_FORMULA)
+        opcode_keys = (*anchors, "DERIVED")
+        affine_model = opcode_gas.AffineOpcodeModel(
+            opcode_keys=opcode_keys,
+            anchor_keys=anchors,
+            rank=1,
+            nullity=4,
+            mu_zero={**{key: Decimal(0) for key in anchors}, "DERIVED": Decimal("5")},
+            anchor_basis={
+                key: {
+                    anchor: opcode_gas.Fraction(int(key == anchor))
+                    for anchor in anchors
+                }
+                for key in opcode_keys
+            },
+        )
+        parameters = tuple(map(Decimal, ("2", "3", "4", "5", "6", "7", "8", "9")))
+        specs = []
+        raw_rows = []
+        for family_index in range(2):
+            for parameter_index, parameter in enumerate(parameters):
+                raw = {key: 0 for key in opcode_keys}
+                q = {key: 0 for key in features}
+                if parameter_index < 4:
+                    raw[anchors[parameter_index]] = 1
+                else:
+                    q[features[parameter_index - 4]] = 1
+                row_id = f"family-{family_index}-parameter-{parameter_index}"
+                specs.append(
+                    types.SimpleNamespace(
+                        row_id=row_id,
+                        workload_family=f"family-{family_index}",
+                        split="fit",
+                        expected_raw_gas_by_key=raw,
+                        expected_features=q,
+                    )
+                )
+                for repeat_index in range(3):
+                    raw_rows.append(
+                        {
+                            "row_id": row_id,
+                            "workload_family": f"family-{family_index}",
+                            "split": "fit",
+                            "purpose": "block_calibration",
+                            "status": "accepted",
+                            "repeat_index": repeat_index,
+                            "calibration_id": "b" * 24,
+                            "relation_artifact_sha256": "a" * 64,
+                            "relation_raw_rows_sha256": "c" * 64,
+                            "preflight_fit_rank": 8,
+                            "backend_input_sha256": "d" * 64,
+                            "guest_input_sha256": "0x" + "d" * 64,
+                            "execution_row_id": opcode_gas.controlled_execution_row_id(
+                                row_id,
+                                backend="sp1",
+                                execution_engine="standard",
+                                run_id="b" * 24,
+                                repeat_index=repeat_index,
+                                backend_input_sha256="d" * 64,
+                            ),
+                            "reported_row_id": row_id,
+                            "observation_row_id": row_id,
+                            "sp1_execution_engine": "standard",
+                            "exit_code": 0,
+                            "prover_gas": str(parameter),
+                            "actual_raw_gas_by_key": raw,
+                            "actual_features": q,
+                        }
+                    )
+        holdout_raw = {**{key: 1 for key in anchors}, "DERIVED": 0}
+        holdout_q = {key: 1 for key in features}
+        specs.append(
+            types.SimpleNamespace(
+                row_id="holdout",
+                workload_family="holdout-family",
+                split="holdout",
+                expected_raw_gas_by_key=holdout_raw,
+                expected_features=holdout_q,
+            )
+        )
+        for repeat_index in range(3):
+            raw_rows.append(
+                {
+                    "row_id": "holdout",
+                    "workload_family": "holdout-family",
+                    "split": "holdout",
+                    "purpose": "block_calibration",
+                    "status": "accepted",
+                    "repeat_index": repeat_index,
+                    "calibration_id": "b" * 24,
+                    "relation_artifact_sha256": "a" * 64,
+                    "relation_raw_rows_sha256": "c" * 64,
+                    "preflight_fit_rank": 8,
+                    "backend_input_sha256": "d" * 64,
+                    "guest_input_sha256": "0x" + "d" * 64,
+                    "execution_row_id": opcode_gas.controlled_execution_row_id(
+                        "holdout",
+                        backend="sp1",
+                        execution_engine="standard",
+                        run_id="b" * 24,
+                        repeat_index=repeat_index,
+                        backend_input_sha256="d" * 64,
+                    ),
+                    "reported_row_id": "holdout",
+                    "observation_row_id": "holdout",
+                    "sp1_execution_engine": "standard",
+                    "exit_code": 0,
+                    "prover_gas": str(sum(parameters)),
+                    "actual_raw_gas_by_key": holdout_raw,
+                    "actual_features": holdout_q,
+                }
+            )
+        dynamic_rows = []
+        for scenario_id, split, raw_units in (
+            ("canonical", "canonical", 1),
+            ("medium", "dynamic_holdout", 2),
+            ("large", "dynamic_holdout", 4),
+        ):
+            dynamic_rows.append(
+                {
+                    "relation_id": scenario_id,
+                    "scenario_id": scenario_id,
+                    "split": split,
+                    "dynamic_key": "A0",
+                    "signed_raw_gas_by_key": {
+                        "A0": str(raw_units),
+                        "A1": "-1",
+                    },
+                    "slope_p": str(raw_units * 2 - 3),
+                }
+            )
+        relation_artifact = {
+            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "status": "accepted",
+            "artifact_sha256": "a" * 64,
+            "raw_rows_sha256": "c" * 64,
+            "provenance": {"calibration_id": "b" * 24},
+            "equations": [dynamic_rows[0]],
+            "dynamic_holdouts": dynamic_rows[1:],
+        }
+        manifest = types.SimpleNamespace(
+            block_calibration_rows=tuple(specs),
+            dynamic_raw_gas_keys=("A0",),
+            normalization_reference_key="A0",
+        )
+
+        artifact = opcode_gas.fit_block_calibration_artifact(
+            manifest, affine_model, relation_artifact, raw_rows
+        )
+
+        self.assertEqual(artifact["status"], "accepted")
+        self.assertEqual(artifact["parameter_order"], [*anchors, *features])
+        self.assertEqual(artifact["exact_fit_rank"], 8)
+        self.assertEqual(artifact["opcode_multipliers_add_normalized"]["A0"], "1")
+        self.assertEqual(len(artifact["dynamic_holdouts"]["A0"]["observations"]), 3)
+        self.assertEqual(
+            artifact["raw_block_rows_sha256"],
+            opcode_gas.sha256_bytes(opcode_gas.canonical_json(raw_rows)),
+        )
+        self.assertEqual(
+            artifact["artifact_sha256"],
+            opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {key: value for key, value in artifact.items() if key != "artifact_sha256"}
+                )
+            ),
+        )
+
+        tampered_rows = copy.deepcopy(raw_rows)
+        tampered_rows[0]["execution_row_id"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "execution row identity"):
+            opcode_gas.fit_block_calibration_artifact(
+                manifest, affine_model, relation_artifact, tampered_rows
+            )
+
+    def test_task5_fit_block_calibration_cli_is_executable(self):
+        args = opcode_gas.build_parser().parse_args(
+            [
+                "fit-block-calibration",
+                "--relations", "run/opcode-relations.json",
+                "--runs", "run/block-calibration-rows.jsonl",
+                "--controlled-manifest", "manifest.toml",
+                "--out", "run/block-calibration.json",
+            ]
+        )
+        self.assertEqual(args.command, "fit-block-calibration")
+        self.assertTrue(callable(args.func))
+
     def test_candidate_and_bridge_cli_join_marginal_controlled_artifacts(self):
         manifest = controlled_manifest()
         revision = "a" * 40
@@ -1984,6 +2174,7 @@ class CandidateConstructionTests(unittest.TestCase):
             )
 
     def test_exact_costs_required_consistency_and_add_normalization(self):
+        caller_precision = getcontext().prec
         add = accepted_case("add", "opcode:0x01", "raw_gas_slope", 10**40 + 1, 3)
         mul = accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2 * (10**40 + 1), 5)
         identity = accepted_case("identity", "precompile:0x04", "raw_gas_slope", 6 * (10**40 + 1), 18)
@@ -1991,10 +2182,13 @@ class CandidateConstructionTests(unittest.TestCase):
             controlled_manifest(), [add, mul, identity]
         )
 
-        self.assertEqual(values["opcode:0x01"]["c_p"], f"{Decimal(10**40 + 1) / Decimal(3)}")
+        self.assertEqual(
+            values["opcode:0x01"]["c_p"],
+            "3333333333333333333333333333333333333333.6666666666666666666666666666666666666667",
+        )
         self.assertEqual(values["opcode:0x02"]["m_p"], "1.2")
         self.assertEqual(values["precompile:0x04"]["m_p"], "1")
-        self.assertEqual(getcontext().prec, 80)
+        self.assertEqual(getcontext().prec, caller_precision)
 
     def test_missing_rejected_or_confounded_required_case_excludes_complete_key(self):
         manifest_data = controlled_manifest_data()

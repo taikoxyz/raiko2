@@ -1,7 +1,7 @@
 import pathlib
 import sys
 import unittest
-from decimal import Decimal
+from decimal import Decimal, Inexact, ROUND_DOWN, localcontext
 from fractions import Fraction
 
 
@@ -112,6 +112,52 @@ class CalibrationModelTests(unittest.TestCase):
             model.reconstruct_multipliers({})
         with self.assertRaisesRegex(ValueError, "unexpected anchor values"):
             model.reconstruct_multipliers({"B": Decimal("1"), "C": Decimal("2")})
+
+    def test_derived_model_mappings_cannot_be_mutated(self):
+        model = derive_affine_opcode_model(
+            ("A", "B"),
+            (RelationEquation("a-b", {"A": Fraction(1), "B": Fraction(-1)}, Decimal("1")),),
+            ("B",),
+        )
+
+        with self.assertRaises(TypeError):
+            model.mu_zero["A"] = Decimal("999")
+        with self.assertRaises(TypeError):
+            model.anchor_basis["A"]["B"] = Fraction(7)
+        self.assertEqual(
+            model.reconstruct_multipliers({"B": Decimal("2")}),
+            {"A": Decimal("3"), "B": Decimal("2")},
+        )
+
+    def test_decimal_operations_ignore_hostile_caller_context(self):
+        with localcontext() as hostile:
+            hostile.prec = 7
+            hostile.rounding = ROUND_DOWN
+            hostile.traps[Inexact] = True
+            model = derive_affine_opcode_model(
+                ("A", "B"),
+                (
+                    RelationEquation(
+                        "three-a-two-b",
+                        {"A": Fraction(3), "B": Fraction(-2)},
+                        Decimal("50"),
+                    ),
+                ),
+                ("B",),
+            )
+
+            self.assertEqual(hostile.prec, 7)
+            self.assertEqual(hostile.rounding, ROUND_DOWN)
+            self.assertTrue(hostile.traps[Inexact])
+            self.assertEqual(
+                model.reconstruct_multipliers({"B": Decimal("2")}),
+                {"A": Decimal("18"), "B": Decimal("2")},
+            )
+
+    def test_exact_rank_normalizes_large_integer_cells_without_float_rounding(self):
+        large = 2**54
+
+        self.assertEqual(exact_rank(((large, large + 1), (large + 1, large + 2))), 2)
 
     def test_current_matched_controls_have_rank_98_with_natural_anchors(self):
         cases = tuple(

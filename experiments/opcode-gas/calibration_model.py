@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
+from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
+
+
+_CALIBRATION_DECIMAL_CONTEXT = Context(
+    prec=80, rounding=ROUND_HALF_EVEN, traps=[]
+)
 
 
 @dataclass(frozen=True)
@@ -40,8 +46,7 @@ class AffineOpcodeModel:
             if not isinstance(value, Decimal) or not value.is_finite():
                 raise ValueError("anchor value must be a finite Decimal")
 
-        with localcontext() as context:
-            context.prec = 80
+        with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
             values = dict(self.mu_zero)
             for opcode_key in self.opcode_keys:
                 for anchor_key in self.anchor_keys:
@@ -62,7 +67,7 @@ def exact_rank(matrix: Sequence[Sequence[Fraction]]) -> int:
     if any(len(row) != width for row in matrix):
         raise ValueError("matrix rows must have a consistent width")
 
-    reduced = [list(row) for row in matrix]
+    reduced = [[_as_exact_fraction(value) for value in row] for row in matrix]
     pivot_row = 0
     for column in range(width):
         pivot = next(
@@ -161,8 +166,13 @@ def derive_affine_opcode_model(
         anchor_keys=anchor_keys,
         rank=rank,
         nullity=nullity,
-        mu_zero=mu_zero,
-        anchor_basis=anchor_basis,
+        mu_zero=MappingProxyType(mu_zero),
+        anchor_basis=MappingProxyType(
+            {
+                opcode_key: MappingProxyType(coefficients)
+                for opcode_key, coefficients in anchor_basis.items()
+            }
+        ),
     )
 
 
@@ -199,8 +209,7 @@ def _gauss_jordan_with_decimal_rhs(
         for row, anchor_row in zip(system, anchor_matrix)
     ]
     values = list(slopes)
-    with localcontext() as context:
-        context.prec = 80
+    with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
         for column in range(width):
             pivot = next(
                 (row for row in range(column, width) if augmented[row][column] != 0),
@@ -227,3 +236,11 @@ def _gauss_jordan_with_decimal_rhs(
 
 def _decimal_from_fraction(value: Fraction) -> Decimal:
     return Decimal(value.numerator) / Decimal(value.denominator)
+
+
+def _as_exact_fraction(value: Fraction | int) -> Fraction:
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, int):
+        return Fraction(value)
+    raise ValueError("matrix cell must be a Fraction or int")

@@ -2,7 +2,9 @@
 
 ## Status
 
-Ready for implementation. This is the authoritative plan for the offline V1 experiment. V1 removes
+Ready for implementation as amended by the approved relative-opcode and controlled-block model. This
+plan defers to `docs/plans/2026-09-06-zkgas-multiplier-recalibration-experiment-design.md` for the
+primary candidate model. V1 removes
 every proposal-derived normalization, coefficient, residual fit, feature-selection, and
 model-selection path. It calibrates one SP1 `proverGas` candidate on controlled fixtures:
 raw-gas opcode/precompile multipliers, fixed spawned-wrapper event costs, plus proposal-startup,
@@ -18,15 +20,16 @@ validation, and table installation remain separate work.
 > independent adversarial review and an independent behavioral verification pass.
 
 **Goal:** Reuse the existing experiment foundation to produce a reproducible SP1-native `proverGas`
-raw-gas multiplier table plus explicit spawned-wrapper, startup, block, transaction, and
-native-transfer costs, then validate
+raw-gas multiplier table from frozen matched-control relations and a joint four-anchor controlled
+block fit, plus explicit spawned-wrapper, startup, block, transaction, and native-transfer costs, then validate
 the completely frozen candidate on one Mainnet/Hoodi proposal corpus while independently fitting and
 validating a non-gating SP1 instruction-count-to-`proverGas` sidecar.
 
-**Architecture:** First run isolated opcode/precompile and non-opcode controlled suites, using
-normalized SP1 `proverGas` as the sole V1 candidate metric. Build one schedule-shaped raw-gas native
-and ADD-normalized multiplier table, a fixed spawned-wrapper event table, and four required fixed/base
-costs, then seal a content digest. SP1
+**Architecture:** First run the frozen matched-control relation and dynamic raw-gas holdout suite,
+then jointly fit four opcode anchors and four fixed/base costs on controlled production-guest block
+rows, using normalized SP1 `proverGas` as the sole V1 candidate metric. Reconstruct one
+schedule-shaped raw-gas native and ADD-normalized multiplier table, add independent precompile and
+fixed spawned-wrapper components, and seal a content digest. SP1
 total instruction count is captured from the same executions. Before proposal output is visible,
 freeze an independent through-origin median bridge, eligibility, and 10% thresholds; it never gates
 the candidate. Only after sealing both roots, measure each proposal with the normal SP1 guest and trace the
@@ -54,8 +57,9 @@ JSON/JSONL/Markdown artifacts.
 - SP1 bridge inputs and results cannot change candidate acceptance, digest, prediction, or validation.
 - V1 performs no RISC0 proposal execution or cross-backend bridge fit.
 - Proposal rows validate a sealed candidate only; they never fit, rescale, select, or repair it.
-- Every slope-derived controlled cost must pass the frozen, non-fitting out-of-fit checkpoint at APE
-  `<= 0.10`; fixed `proposal_startup` is exempt.
+- Every required relation must pass its frozen, non-fitting checkpoint and the dynamic raw-gas
+  holdouts; the exact block fit/holdout matrix must pass its declared rank, positivity, APE, and
+  leave-one-family-out gates.
 - Experiment commands never modify the production schedule, runtime, Boundless configuration, or
   generated guest artifacts.
 - The measured SP1 guest and RISC0 guest never depend on the host-only raiko2 trace crate.
@@ -95,12 +99,14 @@ Use these names consistently in code and artifacts:
 - `s`: SP1 `ExecutionReport::total_instruction_count()`, exposed as
   `extra_data.sp1.total_instruction_count`, serialized as `sp1_instruction_count`, and treated as a
   secondary cycle proxy rather than RISC0 user cycles;
-- `r`: raw EVM gas charged for one synthetic target operation;
+- `r`: actual interpreter raw EVM gas charged by a synthetic execution;
+- `mu(k)`: reconstructed pure-opcode `proverGas / raw EVM gas` multiplier;
 - `g_p(k)` and `g_s(k)`: controlled marginal `proverGas / operation` and secondary
-  `SP1 instruction count / operation`;
+  `SP1 instruction count / operation` for precompile or fixed-event measurements, not independently
+  required pure-opcode costs;
 - `basis(k)`: frozen `raw_gas_slope|fixed_per_event` pricing basis;
-- `c_p(k) = g_p(k)/r(k)`: the V1 backend-native proving-gas multiplier per raw EVM gas for
-  `raw_gas_slope` keys;
+- `c_p(k) = mu(k)` for pure opcodes and `c_p(k) = g_p(k)/r(k)` for direct precompiles: the V1
+  backend-native proving-gas multiplier per raw EVM gas;
 - `f_p(k) = g_p(k)`: V1 proving-gas cost per event for `fixed_per_event` keys;
 - `m_p(k)`: the corresponding dimensionless multiplier normalized to
   `normalization_reference_key = "opcode:0x01"`;
@@ -116,6 +122,23 @@ Use these names consistently in code and artifacts:
   repeat, SDK/ELF, backend input encoding, and measured results;
 - `execution_row_id`: identity of one backend execution; it includes `workload_id`, run ID, backend,
   repeat, and the backend-specific input hash.
+
+Pure opcode costs are reconstructed from accepted matched-control relations instead of requiring one
+isolated positive `g_p(k) / operation` value per key. The canonical primary model is:
+
+```text
+A * mu = d
+theta = [mu(POP), mu(PUSH0), mu(DUP1), mu(SWAP1)]
+mu = mu_zero + B * theta
+
+p_hat_j = x_j * mu_zero + [x_j * B, q_j] * [theta, beta]
+beta = [proposal_startup, block_base, tx_base, native_value_transfer]
+```
+
+`A_i` and `x_j` are per-key actual raw-gas totals, not execution counts. The frozen 102-key relation
+matrix has rank 98; `mu_zero` and `B` come from that matrix, while only the four natural anchors and
+the four fixed/base coefficients are fitted from predeclared controlled block rows. Proposal rows
+cannot modify a relation, anchor, coefficient, threshold, or row set.
 
 `p` is the sole V1 candidate and validation target. `s` is captured from the same executions for the
 independently sealed, non-gating V1 bridge sidecar and cannot reject, rescue, normalize, or validate
@@ -194,6 +217,35 @@ Use `decimal.localcontext(prec=50, rounding=ROUND_HALF_EVEN)` for slopes, coeffi
 sample diagnostics, predictions, and metrics. Parse integer observations directly into `Decimal`; never route
 canonical values through binary `float`. Serialize canonical numeric fields as normalized decimal
 strings, reject non-finite values, and compare every quality threshold in `Decimal` arithmetic.
+
+### Relative Relations And Controlled Block Artifacts
+
+The former sequential overhead-residualization implementation is superseded for the primary
+candidate. It must not fit `proposal_startup`, `block_base`, `tx_base`, or
+`native_value_transfer` one at a time after isolated absolute opcode slopes. Instead, freeze the
+relation cohort, dynamic raw-gas holdouts, controlled block fit rows, and controlled block holdout
+rows before running SP1. The fit/holdout rows use the production `sp1-shasta-proposal` guest, exclude
+precompile and spawned-wrapper work, and are rejected unless the exact eight-column design matrix is
+full rank. System and Anchor work remain owned by `block_base`; trie, Merkle, hashing, and other
+block baseline work are not split below that owner. Bridge inputs stay independently isolated and
+cannot alter the primary fit.
+
+The primary artifact sequence is exactly:
+
+```text
+opcode-relations.json
+block-calibration-rows.jsonl
+block-calibration.json
+controlled-fit.json                 # precompile and fixed-event results only
+candidate/candidate-manifest.json
+candidate/candidate.sha256
+```
+
+Candidate sealing transitively binds the relation matrix and natural-anchor verification, all
+dynamic raw-gas holdouts, the controlled block matrix/rows/holdouts, precompile and fixed-event
+components, provenance, coverage, formula, and thresholds. `candidate.sha256` is required before
+`prepare-validation` may access final proposal rows. Failed/missing rows preserve raw artifacts and
+emit no seal; neither proposal results nor the current production table may repair a candidate.
 
 ### Complete Schedule Identity
 
@@ -551,13 +603,13 @@ until it has an isolated scenario.
 
 Each direct-precompile case has a paired control lane in the same synthetic ELF. The control runs the
 same loop, branching, input handling, and output folding over deterministic fixture output with the
-same `gas_used` and output length, but does not invoke the precompile. Define the fitted response as:
+same `gas_used` and output length, but does not invoke the precompile. Pure opcodes instead emit the
+signed formal relation `p_target(x) - p_control(x)` with its exact per-key raw-gas row in `A`; no
+pure-opcode fixture creates an absolute candidate coefficient. Define the precompile response as:
 
 ```text
-z_p(x) = p_target(x)                           for an isolation-proven opcode case
-z_p(x) = p_target(x) - p_control(x)            for a direct-precompile case
-z_s(x) = s_target(x)                           for an isolation-proven opcode case
-z_s(x) = s_target(x) - s_control(x)            for a direct-precompile case
+z_p,precompile(x) = p_target(x) - p_control(x)
+z_s,precompile(x) = s_target(x) - s_control(x)
 ```
 
 This prevents growing helper bytecode and per-iteration lab overhead from being assigned to the
@@ -1382,6 +1434,34 @@ The RISC0 requirement here is build/artifact isolation, not proposal execution.
 - Create: `bin/guest-launcher/tests/controlled_workload.rs`
 - Modify: `bin/guest-launcher/src/main.rs`
 - Regenerate, never hand-edit: SP1 ELF/VK/provenance files under `crates/guests/elf/`
+
+### Approved Replacement: Relative Relations And Joint Block Fit
+
+This replacement supersedes the sequential overhead-residualization instructions in the historical
+Task 3 detail below. Implement and test the following primary path instead:
+
+1. Derive the frozen 102-key matched-control relation matrix from per-key actual raw-gas totals;
+   require 98 independent nonzero rows, exactly the four natural anchors, signed relation gates, and
+   dynamic-gas canonical plus holdout scenarios. Early-STOP controls remain non-candidate.
+2. Derive `mu_zero` and `B` from the accepted relation matrix, validating rank and anchor ordering
+   from the manifest. Do not hand-code a relation offset or fit a relation from a block/proposal row.
+3. Materialize predeclared post-Unzen `sp1-shasta-proposal` block fit and holdout rows. Require exact
+   rank eight before SP1 execution, three identical repeats, declared workload-family coverage, and
+   no precompile, spawned-wrapper, system/Anchor ownership violation, unresolved operation, or
+   dynamic-gas variation in anchor-fit rows.
+4. Fit `[theta, beta]` with Decimal OLS using
+   `p_hat_j = x_j * mu_zero + [x_j * B, q_j] * [theta, beta]`, reconstruct all opcode multipliers,
+   apply dynamic holdouts without refitting, and reject non-positive values, fit/holdout failures, or
+   leave-one-family-out instability.
+5. Measure precompile and confirmed fixed-event wrapper components independently, then write exactly
+   `opcode-relations.json`, `block-calibration-rows.jsonl`, `block-calibration.json`,
+   `controlled-fit.json`, and the candidate manifest/digest sequence recorded above. The candidate
+   root binds provenance, coverage, bridge isolation, all primary artifacts, thresholds, and formula.
+6. Refuse to acquire, execute, read, or use final proposal results until `candidate.sha256` exists;
+   proposal validation is forward-only and cannot repair the candidate.
+
+The remaining historical detail is retained only for reusable trace, provenance, bridge, and
+proposal-barrier requirements. Where it conflicts with this replacement, the replacement controls.
 
 ### Step 1: Test The Synthetic Gates
 

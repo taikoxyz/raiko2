@@ -130,11 +130,14 @@ Use these exact controlled-measurement quantities:
 - `p`: SP1 normalized `ExecutionReport::gas()` in `proverGas` units;
 - `s`: SP1 `ExecutionReport::total_instruction_count()`, named `sp1_instruction_count` in artifacts;
   it is a secondary cycle proxy and is not RISC0 user cycles;
-- `r(k)`: raw EVM gas for one controlled operation represented by measurement key `k`;
-- `g_p(k)`: marginal `proverGas / operation` fitted only from controlled case `k`;
+- `r(k)`: actual interpreter raw EVM gas for one controlled operation represented by measurement
+  key `k`;
+- `mu(k)`: the reconstructed SP1 `proverGas / raw EVM gas` multiplier for a pure opcode `k`;
+- `g_p(k)`: a marginal `proverGas / operation` only for precompile or fixed-event controlled
+  measurements, never an independently required pure-opcode slope;
 - `basis(k)`: either `raw_gas_slope` or `fixed_per_event`, frozen in the controlled manifest;
-- `c_p(k) = g_p(k) / r(k)`: proving-gas multiplier in `proverGas / raw EVM gas` for
-  `raw_gas_slope` keys only;
+- `c_p(k) = mu(k)` for pure opcodes and `c_p(k) = g_p(k) / r(k)` for direct precompiles: the
+  proving-gas multiplier in `proverGas / raw EVM gas`;
 - `f_p(k) = g_p(k)`: proving-gas cost per executed event for `fixed_per_event` keys;
 - `o_p(q)`: controlled proving-gas cost for a non-opcode workload dimension `q`;
 - `g_s(k)`, `c_s(k) = g_s(k)/r(k)`, `f_s(k) = g_s(k)` for fixed-event keys, and `o_s(q)`: optional
@@ -142,8 +145,27 @@ Use these exact controlled-measurement quantities:
   They remain in the sampling artifact and never enter V1 candidate acceptance, normalization,
   prediction, or validation.
 
+Pure opcode coefficients are a relative relation system, not 102 isolated positive
+`g_p(k) / operation` fits. For accepted matched-control relations, `A_i` and controlled-block
+rows' `x_j` contain per-key actual raw-gas totals, never execution counts:
+
+```text
+A * mu = d
+theta = [mu(POP), mu(PUSH0), mu(DUP1), mu(SWAP1)]
+mu = mu_zero + B * theta
+
+p_hat_j = x_j * mu_zero + [x_j * B, q_j] * [theta, beta]
+beta = [proposal_startup, block_base, tx_base, native_value_transfer]
+```
+
+The frozen 102-key relation matrix has rank 98. `mu_zero` and `B` are derived from that accepted
+matrix after setting the four natural anchors to zero; the solver rechecks rank and anchor ordering
+from the manifest. Only `[theta, beta]` is fitted from the predeclared controlled production-guest
+block rows. The 98 accepted relation slopes remain frozen, and proposal rows cannot change them.
+
 The controlled manifest freezes `normalization_reference_key = "opcode:0x01"` (ADD) before any
-measurement. The reference must pass every required case and the `proverGas` gates. Emit the
+measurement. The reconstructed reference must be positive and pass the relation, block-fit, and
+holdout gates. Emit the
 dimensionless candidate view for `raw_gas_slope` keys without rounding:
 
 ```text
@@ -203,10 +225,11 @@ An unconfirmed `NewFrame` trace row has no pricing basis. Only a confirmed dispa
 accounting. This keeps charge-rejected wrapper selection observable without assigning it a cost from
 a successful spawn measurement.
 
-The candidate artifacts contain every accepted raw-gas `c_p(k)` and `m_p(k)`, every accepted fixed
-spawn `f_p(k)`, and explicit missing/rejected entries at full decimal precision. Together with the
-accepted `o_p(q)` values, these form the experiment's only V1 candidate. They are not rounded to the
-current integer zkGas representation and do not choose a production block-budget scale.
+The candidate artifacts contain the reconstructed raw-gas `c_p(k)` and `m_p(k)` for every accepted
+pure opcode, direct-precompile costs, every accepted fixed spawn `f_p(k)`, and explicit
+missing/rejected entries at full decimal precision. Together with the fitted `beta` values, these
+form the experiment's only V1 candidate. They are not rounded to the current integer zkGas
+representation and do not choose a production block-budget scale.
 
 Write the simultaneously observed `(s, p)` values, controlled `g_s/o_s` slopes, repeat ranges, and
 workload identities to separately hashed controlled/proposal cycle-cost sample files. These files and
@@ -353,43 +376,27 @@ precompile work is represented by the raw-gas operation sum. A successfully spaw
 wrapper is represented by the fixed-event sum; the child opcode/precompile work is represented by its
 own events and forwarded gas is never priced twice.
 
-Their frozen subtraction DAG is:
+The four fixed/base costs are fitted jointly with the four opcode anchors from the frozen controlled
+block cohort. The old sequential overhead residualization DAG is not a candidate construction path.
+Each row supplies the exact non-Anchor opcode raw-gas vector `x_j` and the four-element feature vector
+`q_j`; the fit uses the four-anchor model above. It must have exact rank eight before SP1 execution,
+at least 40 predeclared fit rows, and at least eight separately predeclared holdout rows. Every fit
+and holdout row runs three times through `sp1-shasta-proposal`; block rows with precompile or spawned
+wrapper work are ineligible.
 
-```text
-tx_base                -> []
-native_value_transfer  -> [tx_base]
-block_base              -> [tx_base, native_value_transfer]
-proposal_startup        -> [block_base]
-```
+`tx_base` is counted when Alethia's executor pulls a non-Anchor candidate transaction. A committed,
+successful non-create transaction with positive native value, no executable recipient code, and no
+precompile dispatch contributes the additional `native_value_transfer` feature. The Anchor transaction
+and all system work belong exclusively to `block_base`, together with its fixed MPT/trie/Merkle/hash
+baseline. This ownership is not a license to split those actions below `block_base`. Witness bytes,
+unique accesses, dirty-state entries, blob data, and KZG work remain diagnostic/unmeasured and cannot
+enter `q_j`, the candidate, or the bridge. The trace derives every classification from structured
+execution/state facts; free-text scenario names never establish ownership.
 
-Transitive subtraction is deduplicated, so `tx_base` is removed exactly once from a block or startup
-residual even though it is also a dependency of native transfer.
-
-`tx_base` and `native_value_transfer` are deliberately distinct. One `tx_base` unit is counted when
-Alethia's existing executor pulls a non-Anchor candidate transaction from the raiko2 tracing iterator;
-the Anchor transaction belongs exclusively to `block_base`. Its controlled coefficient is the common
-per-started-non-Anchor-transaction residual after modeled block, transfer,
-opcode, and precompile work is removed. It does not claim that all of that work occurs before the
-iterator boundary. `native_value_transfer` is an additional exclusive residual for a non-create
-transaction whose recipient executes no code and whose positive native value is applied. After
-execution, the collector joins the original transaction facts, top-level frame facts observed without
-an extra database read, precompile-dispatch facts, the committed transaction hashes, and aligned
-receipt status. A precompile recipient is never a native transfer. Only a committed successful row
-with the exact structured classification `native_value_transfer` contributes to this feature.
-It excludes `tx_base`, block work, and all observed opcode/precompile work. The trace must emit this
-classification from structured execution/state facts; calldata shape or a free-text scenario name is
-not sufficient. Signer-recovery failures and transactions after the truncation boundary do not
-silently receive either cost; any guest work they caused remains explicitly unmeasured until a later
-controlled component models it.
-
-`block_base` is the exclusive per-successful-block residual after non-Anchor transaction,
-native-transfer, opcode, and precompile contributions are subtracted. It includes system/Anchor
-execution plus the controlled block-loop/header, block-finalization, and fixed MPT/trie/hash work
-that remains under that definition. Witness bytes/nodes, unique accesses, and dirty-state entries
-remain diagnostic/unmeasured and do not enter `Q_formula`, the candidate, or the bridge. A future V2
-may split these actions only after defining independently controlled units. `proposal_startup` is not fitted as an ordinary operation slope.
-It is the repeat-stable residual of a frozen minimal proposal panel after all block, transaction,
-transfer, opcode, and precompile terms have been subtracted. It is never a proposal-corpus intercept.
+The six dynamic-gas pure opcode keys (`EXP`, `KECCAK256`, `MLOAD`, `MSTORE`, `MSTORE8`, and `MCOPY`)
+have a canonical relation scenario plus at least two frozen non-fitting raw-gas holdouts. They do not
+vary across block-anchor fit rows. Their holdouts apply the reconstructed `c_p` without refitting and
+must pass the frozen relation APE and per-key consistency gates before sealing.
 
 This is a controlled-measurement and validation decomposition, not a new runtime metering formula.
 Every term is calibrated before proposal execution. Proposal observations may test the sum but may
@@ -409,60 +416,12 @@ coefficients. At minimum, proposal validation records:
 - observed SP1 `proverGas` and SP1 instruction count;
 - the frozen-candidate prediction, explicit unmeasured-work coverage, and residuals.
 
-The controlled suite contains paired fixtures for proposal startup, block base, transaction base,
-native value transfer, and every other explicit non-opcode component admitted to the forward
-formula. Witness/input bytes and nodes, blob payload bytes, and KZG work are collected as diagnostics
-in V1; promoting any of them to a required formula term requires a reviewed new manifest and fresh
-validation corpus. Physical features overlap: adding blocks, transactions, or transfers can add
-serialization, state, and operation work. The manifest therefore freezes a residualization DAG before
-measurement. Each overhead key declares
-`subtract_keys`; target/control deltas record every induced operation and overhead-feature delta, then
-subtract every already-accepted descendant cost exactly once before fitting the exclusive residual:
-
-```text
-delta_p_exclusive(q) = p_target - p_control
-                     - sum(delta_raw_operation_gas(k) * c_p(k))
-                     - sum(delta_fixed_operation_count(k) * f_p(k))
-                     - sum(delta_feature(t) * o_p(t) for t in subtract_closure(q))
-
-delta_s_sample(q) = s_target - s_control
-                  - sum(delta_operation_count(k) * g_s(k))
-                  - sum(delta_feature(t) * o_s(t) for t in subtract_closure(q))
-```
-
-Only `delta_p_exclusive` and `o_p` participate in V1 candidate acceptance and prediction. The `s`
-calculation is stored for the independently sealed V1 bridge when its dependencies are available;
-failure leaves a marked secondary sample and may make the bridge `insufficient_data`, but it never
-invalidates a valid `proverGas` component.
-
-`subtract_closure(q)` is the deduplicated transitive closure, so a descendant reachable through
-several paths is subtracted once. The DAG is acyclic, children are measured before parents, and every
-changed child dimension must be either listed in `subtract_keys` or explicitly bundled into the
-parent's exclusive unit while that child is omitted from `Q_formula`. Every transitive subtract child
-of a required parent is itself
-required and present in `Q_formula`; only a bundled child may remain outside the formula. A key whose
-induced deltas cannot be completely accounted for is
-`confounded_overhead` and cannot enter the formula. This prevents double-counting stdin/witness/blob
-bytes or block/transaction execution. Blob bytes and KZG invocations remain distinct only if a
-controlled fixture and this accounting prove their independent deltas; otherwise the manifest uses
-one explicit bundled blob unit or leaves the unsupported dimension unmeasured.
-
-Each overhead entry freezes `unit`, `formula_role = required|diagnostic`, `subtract_keys`,
-`bundled_keys`, and one exact positive rational `bundled_ratio(child_per_parent)` for each bundled
-child. Every target/control trace must enumerate its operation deltas and all changed
-overhead features. A changed feature is valid only when it is the target, a transitive subtract key,
-or a declared bundled key. Bundled keys cannot appear elsewhere in `Q_formula`. The manifest is
-rejected for cycles, ambiguous ownership, or an ordering in which a parent is measured before a
-subtracted child. Any nonzero induced operation delta that does not resolve to an accepted operation
-key with the matching execution basis makes the overhead case `confounded_overhead`. These rules, not
-a claim that overlapping raw features remain physically constant, define the non-overlapping
-attribution basis.
-
-For every bundled child, each controlled target/control delta and each proposal feature row must
-satisfy the frozen ratio exactly in integer arithmetic. Equivalently, the parent is a compound feature
-whose internal child composition is fixed by the manifest. A missing or different ratio is
-`bundle_relation_mismatch`; that parent contributes no prediction and a required parent makes final
-validation fail. The experiment never extrapolates a fixture-specific bundled ratio.
+The controlled suite declares relation, block-fit, and block-holdout rows before any output is
+opened. Physical overlap is addressed by the exact joint design matrix, not by sequentially
+residualizing overhead rows. A row with an undeclared changed feature, unresolved opcode, ambiguous
+measurement key, system/Anchor ownership violation, precompile, or spawned wrapper is ineligible.
+The independently sealed instruction-count bridge retains its existing same-unit measurement and
+isolation rules; it cannot alter the primary candidate.
 
 The candidate artifacts remain in backend-native high-precision units. This experiment does not round
 them into the current alethia-reth integer schedule because the production block-budget scale,
@@ -491,13 +450,14 @@ For each supported scenario, generate a matched baseline and an adaptive count s
 keep setup, environment, calldata shape, and cleanup as constant as practical while changing the
 target feature count.
 
-The synthetic manifest freezes every measurement key's production-schedule identity, exact proposal
-event match, nonempty required case set, and any explicitly diagnostic-only cases. A measurement key
-enters the SP1 vector only when every required case completes and passes all isolation, signal, and
-fit gates, and the resulting required-case coefficients differ by at most 5%. Its coefficient is the
-exact arithmetic mean of those required coefficients. A missing, rejected, or confounded required
-case makes the complete measurement key unmeasured. Diagnostic-only cases remain visible but never
-define, rescue, or veto `c(k)`.
+The synthetic manifest freezes every relation's target/control programs, production-schedule
+identities, exact proposal event matches, raw-gas totals, required scenarios, and any diagnostic-only
+cases. A non-self relation enters the equation matrix only when every required scenario completes and
+passes the signed signal, slope, checkpoint, determinism, and exact raw-gas-total gates. It contributes
+one frozen row `A_i * mu = d_i`; it does not independently define `c_p(k)`. A missing, rejected, or
+confounded required relation prevents the complete 102-key candidate from sealing. Self-controls are
+zero-delta fixture checks only. Diagnostic-only cases remain visible but never define, rescue, or veto
+the relation system.
 
 Reject the manifest before measurement when a referenced case, event match, and production schedule
 key do not describe the same opcode or precompile address, or when their structured execution context
@@ -553,8 +513,9 @@ The observed checkpoint delta must be finite and positive. Using the delta preve
 cost from hiding a bad slope. An unavailable, confounded, or failed
 primary checkpoint rejects that case without trying a later prefix. Apply the same checkpoint as a
 non-gating diagnostic to the fitted instruction-count response; failure makes its secondary slope
-unavailable. This rule also applies to every opcode, precompile, or non-opcode controlled cost derived
-from a slope. The fixed `proposal_startup` residual is not slope-derived and is exempt.
+unavailable. Relation checkpoints validate signed target/control deltas; precompile and fixed-event
+measurements keep their own declared slope gates. The block model is evaluated only through its
+predeclared fit and holdout rows, never through a proposal-corpus intercept.
 
 State- and environment-dependent opcodes, CALL/CREATE families, halting behavior, and unsupported
 entries use explicit scenarios or explicit unsupported classifications. Precompiles with
@@ -563,30 +524,22 @@ results.
 
 All SP1 runs use local execute mode. They never request a proof and never call a remote prover.
 
-### 3. Controlled Non-Opcode Measurements
+### 3. Controlled Block Anchor Measurements
 
-Run the controlled overhead fixtures through the production `sp1-shasta-proposal` guest without
-access to corpus proposal observations. These are constructed synthetic GuestInputs, not Mainnet or
-Hoodi proposal samples. Each fixture has a target and matched control, a predeclared unit, an adaptive
-sweep, and an isolation trace proving that only the target plus its declared transitive subtract/
-bundled closure changed. At minimum the
-manifest separately covers proposal startup, block base, transaction base, and native value transfer.
-Witness bytes/nodes, stdin or serialization bytes, blob payload bytes, and KZG invocations are V1
-diagnostics. A required dimension that cannot be isolated is rejected and remains explicitly
-unmeasured; it is never recovered through proposal regression.
+Run the frozen controlled block fit and holdout rows through the production `sp1-shasta-proposal`
+guest without access to final-validation proposal observations. These are post-Unzen synthetic
+GuestInputs, not Mainnet or Hoodi samples. They jointly fit the four natural opcode anchors and
+`beta = [proposal_startup, block_base, tx_base, native_value_transfer]` from the exact model in this
+document. They never re-fit a matched-control relation.
 
-Block, transaction, transfer, and any diagnostic variable-count dimension use matched count sweeps.
-Their slope acceptance includes the same frozen out-of-fit checkpoint and 10% APE gate as opcode and
-precompile slopes.
-Proposal startup instead uses the fixed residual of a frozen minimal-proposal panel: subtract every
-accepted variable contribution, require three identical `p` repeats per fixture and at most 5%
-dispersion between the residuals of the predeclared panel members, then take their exact arithmetic
-mean. A single proposal row or an intercept fitted on the final corpus is invalid.
-
-The accepted primary output is `o_p(q)` plus its repeat/fit or fixed-residual evidence. Store `o_s(q)`
-when its secondary diagnostics pass. Freeze the primary costs with the opcode/precompile table before
-any proposal result is opened; keep the secondary rows in the separate cycle-cost sample artifact and
-use them only through the independently sealed, non-gating bridge sidecar.
+The manifest freezes at least 40 fit rows and eight holdout rows, all row identities, every exact
+raw-gas and fixed/base feature vector, and the workload-family assignments before execution. It
+requires exact rank eight pre-execution, three identical runs per row, fit MAPE at most 5%, maximum
+fit and holdout APE at most 10%, positive reconstructed costs, and leave-one-family-out stability.
+Precompile and spawned-wrapper execution are excluded from the anchor rows; witness/input/blob/KZG
+work remains diagnostic/unmeasured. A failed row is rejected rather than recovered through proposal
+regression. Secondary instruction-count observations remain bridge-only and cannot alter the primary
+fit or candidate.
 
 ### 4. Fixed Proposal Feature Extraction
 
@@ -721,7 +674,11 @@ experiments/opcode-gas/
   runs/<calibration-id>/
     experiment.json
     raw/
-      controlled-prover-gas.jsonl
+      formal-relations.jsonl
+    opcode-relations.json
+    block-calibration-rows.jsonl
+    block-calibration.json
+    controlled-fit.json
     samples/
       controlled-cycle-cost-samples.json
       controlled-cycle-cost-samples.sha256
@@ -733,14 +690,8 @@ experiments/opcode-gas/
       controlled-bridge.json
       bridge-root.json
       bridge.sha256
-    costs/
-      sp1-opcode-precompile-costs.json
-      sp1-spawn-event-costs.json
-      sp1-controlled-overheads.json
     candidate/
       candidate-manifest.json
-      sp1-native-multipliers.json
-      controlled-overheads.json
       candidate.sha256
   validations/<validation-id>/
       candidate-ref.json
@@ -758,17 +709,23 @@ experiments/opcode-gas/
       report.md
 ```
 
-`candidate-manifest.json` is the canonical root of the candidate. It contains the SHA256 and schema
-identity of every normalized primary raw and cost file, the accepted/rejected status and pricing
-basis of every controlled key, `Q_formula`, the residualization DAG, normalization anchor, exact
-prediction formula, thresholds, the frozen prefix-to-checkpoint mapping, and review-only provenance.
-The hashed primary artifacts contain the checkpoint count, observed and predicted delta, APE, and
-status for every candidate-referenced slope-derived cost. `sp1-spawn-event-costs.json` stores
-full-precision per-event costs separately from raw-gas multipliers. Diagnostic slope costs store
-equivalent checkpoint evidence under their independent artifact digest. `candidate.sha256` is the
-SHA256 of the canonical compact bytes of that manifest, so every formula input is transitively
-covered. A formula-referenced key without an accepted artifact, or an accepted slope-derived cost
-without a passing checkpoint, prevents sealing.
+The primary candidate artifact sequence is exactly:
+
+```text
+opcode-relations.json
+block-calibration-rows.jsonl
+block-calibration.json
+controlled-fit.json                 # precompile and fixed-event results only
+candidate/candidate-manifest.json
+candidate/candidate.sha256
+```
+
+`candidate-manifest.json` is the canonical root of the candidate. It hashes and identifies the
+relation matrix and natural-anchor verification, dynamic raw-gas holdouts, exact controlled block
+fit/holdout matrices, reconstructed opcode table, precompile/fixed-event results, `Q_formula`,
+thresholds, provenance, and review-only status. `candidate.sha256` is the SHA256 of the canonical
+compact bytes of that manifest, so every formula input is transitively covered. A missing relation,
+rank/positivity/holdout failure, or absent required component prevents sealing.
 
 `controlled-prover-gas.jsonl` is a primary-only projection and contains no instruction-count field.
 The controlled and proposal cycle-cost sample files each have their own digest and contain paired
@@ -858,9 +815,11 @@ side-effects:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration ...
-~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate ...
-~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-controlled --backend sp1 ...
-~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-controlled-costs ...
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-relations ...
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-relations ...
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-relations ...
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-block-calibration ...
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration ...
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py build-candidate ...
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py build-sp1-bridge ...
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-corpus ...

@@ -32,16 +32,60 @@ cargo run -r -p xtask -- build-guest sp1 --bench
 cargo build -r -p guest-launcher --features sp1-sdk/profiling
 ```
 
-First freeze a controlled manifest with explicit cases, `q_formula`, and
-`bridge_key_ids` (the broad `sp1-smoke.toml` inventory manifest is not a
-controlled calibration manifest). `prepare-calibration` prints the derived
-calibration ID; use that same run for generation and execution:
+First freeze the controlled manifest. `CALIBRATION_RUN` must be the exact directory emitted by
+`prepare-calibration`; do not discover the newest run directory. The machine-readable
+`--run-path-file` flow captures that directory for every subsequent command:
 
 ```bash
+RUN_PATH_FILE="$(mktemp)"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
-  --controlled-manifest experiments/opcode-gas/manifests/<controlled>.toml \
-  --out experiments/opcode-gas
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --out experiments/opcode-gas \
+  --run-path-file "$RUN_PATH_FILE"
+CALIBRATION_RUN="$(<"$RUN_PATH_FILE")"
 ```
+
+### Authoritative Relative-Relation And Block-Calibration Flow
+
+Run these commands in this order. They use the exact `CALIBRATION_RUN` emitted above; do not replace
+it with a discovered or manually selected run directory.
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-relations \
+  --manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --calibration-run "$CALIBRATION_RUN" \
+  --out "$CALIBRATION_RUN/generated/formal-relations"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-relations \
+  --fixtures "$CALIBRATION_RUN/generated/formal-relations" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --calibration-run "$CALIBRATION_RUN" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --out "$CALIBRATION_RUN/raw/formal-relations.jsonl"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-relations \
+  --runs "$CALIBRATION_RUN/raw/formal-relations.jsonl" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --out "$CALIBRATION_RUN/opcode-relations.json"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-block-calibration \
+  --guest-launcher target/release/guest-launcher \
+  --calibration-run "$CALIBRATION_RUN" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --out "$CALIBRATION_RUN/block-calibration-rows.jsonl"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration \
+  --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --runs "$CALIBRATION_RUN/block-calibration-rows.jsonl" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --out "$CALIBRATION_RUN/block-calibration.json"
+```
+
+The relation fit reconstructs pure-opcode costs from the frozen rank-98 system and its four natural
+anchors; `A_i` and `x_j` use actual per-key raw-gas totals, not execution counts. The controlled
+block fit jointly solves those anchors with `proposal_startup`, `block_base`, `tx_base`, and
+`native_value_transfer`. Dynamic raw-gas scenarios are holdouts and never refit the model.
+
+The commands below are retained as exploratory predecessor workflows only. They are not the current
+candidate path, and the old early-STOP opcode fit is explicitly non-candidate.
 
 Generate sealed controlled case metadata and lab inputs:
 
@@ -157,7 +201,10 @@ recovery rules.
 
 [opcode-calibration-pitfalls]: ../../docs/solutions/experiment-correctness/sp1-opcode-prover-gas-calibration.md
 
-Run the adaptive controlled opcode, precompile, and production-proposal overhead suite. Each round
+### Exploratory Predecessor: Matched Controls And Sequential Overheads
+
+The following legacy matched-control and sequential-overhead commands are exploratory evidence only;
+they must not create, repair, or seal the relative-relation/block-fit candidate. Each round
 regenerates and reruns one complete frozen footprint; resume verifies the sealed round decisions and
 never mixes rows from different generator maxima:
 

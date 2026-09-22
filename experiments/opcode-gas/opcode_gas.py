@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import functools
 import hashlib
 import json
 import os
 import pathlib
 import statistics
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -5058,7 +5060,7 @@ def fit_opcode_relations(
         "affine_model": affine,
     }
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
-    validate_opcode_relations_artifact(manifest, artifact)
+    validate_opcode_relations_artifact(manifest, artifact, rows, provenance)
     return artifact
 
 
@@ -5208,8 +5210,13 @@ def _validate_artifact_relation_rows(
 
 
 def validate_opcode_relations_artifact(
-    manifest: Manifest, artifact: Mapping[str, Any]
+    manifest: Manifest,
+    artifact: Mapping[str, Any],
+    rows: Iterable[Mapping[str, Any]],
+    expected_provenance: Mapping[str, Any],
 ) -> None:
+    rows = list(rows)
+    expected_provenance = _validate_formal_relation_provenance(expected_provenance)
     if (
         artifact.get("purpose") != FORMAL_RELATION_PURPOSE
         or artifact.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND
@@ -5238,11 +5245,59 @@ def validate_opcode_relations_artifact(
         "artifact_sha256",
     } or artifact.get("schema_version") != 1:
         raise ValueError("opcode relation artifact schema is invalid")
-    _validate_formal_relation_provenance(artifact.get("provenance"))
+    artifact_provenance = _validate_formal_relation_provenance(
+        artifact.get("provenance")
+    )
+    if artifact_provenance != expected_provenance:
+        raise ValueError("opcode relation artifact provenance differs from calibration run")
     if artifact.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES:
         raise ValueError("opcode relation artifact quality gates differ from frozen gates")
-    if not _is_sha256(artifact.get("raw_rows_sha256")):
-        raise ValueError("opcode relation artifact raw rows hash is invalid")
+    raw_rows_sha256 = sha256_bytes(canonical_json(rows))
+    if artifact.get("raw_rows_sha256") != raw_rows_sha256:
+        raise ValueError("opcode relation artifact raw rows hash differs")
+    if not rows:
+        raise ValueError("opcode relation artifact raw rows are empty")
+    row_provenance = {
+        field: rows[0].get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS
+    }
+    if any(
+        row.get(field) != value
+        for row in rows
+        for field, value in expected_provenance.items()
+    ) or _validate_formal_relation_provenance(row_provenance) != expected_provenance:
+        raise ValueError("opcode relation artifact raw rows differ from calibration run")
+    expected_relation_ids = {relation.id for relation in manifest.opcode_relations}
+    actual_relation_ids = {str(row.get("relation_id")) for row in rows}
+    if actual_relation_ids != expected_relation_ids:
+        raise ValueError("opcode relation artifact raw relation set differs from manifest")
+    recomputed_results = [
+        _fit_one_opcode_relation(
+            relation,
+            [row for row in rows if row.get("relation_id") == relation.id],
+        )
+        for relation in manifest.opcode_relations
+    ]
+    recomputed_self_controls = [
+        row for row in recomputed_results if row.get("exact_zero") is True
+    ]
+    recomputed_equations = [
+        row
+        for row in recomputed_results
+        if row.get("split") == "canonical" and row.get("status") == "accepted"
+    ]
+    recomputed_holdouts = [
+        row
+        for row in recomputed_results
+        if row.get("split") == "dynamic_holdout" and row.get("status") == "accepted"
+    ]
+    if artifact.get("self_controls") != recomputed_self_controls:
+        raise ValueError("opcode relation artifact self controls differ from raw rows")
+    if artifact.get("equations") != recomputed_equations:
+        raise ValueError("opcode relation artifact equations quality evidence differs from raw rows")
+    if artifact.get("dynamic_holdouts") != recomputed_holdouts:
+        raise ValueError(
+            "opcode relation artifact dynamic holdouts quality evidence differs from raw rows"
+        )
     self_relations = [
         relation for relation in manifest.opcode_relations if not relation.signed_raw_gas_by_key
     ]
@@ -7268,9 +7323,28 @@ def write_run_path_file(path: pathlib.Path, run: pathlib.Path) -> None:
         try:
             os.link(temporary, path)
         except FileExistsError as exc:
-            raise ValueError(
-                f"run-path file already exists and may be non-empty: {path}"
-            ) from exc
+            try:
+                existing_fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            except OSError as open_exc:
+                raise ValueError(f"run-path target cannot be claimed: {path}") from open_exc
+            with os.fdopen(existing_fd, "r+b") as existing:
+                try:
+                    fcntl.flock(existing.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as lock_exc:
+                    raise ValueError("run-path file has a concurrent writer") from lock_exc
+                existing_stat = os.fstat(existing.fileno())
+                try:
+                    path_stat = path.stat(follow_symlinks=False)
+                except FileNotFoundError as stat_exc:
+                    raise ValueError("run-path file changed during publication") from stat_exc
+                if (
+                    not stat.S_ISREG(existing_stat.st_mode)
+                    or existing_stat.st_size != 0
+                    or (existing_stat.st_dev, existing_stat.st_ino)
+                    != (path_stat.st_dev, path_stat.st_ino)
+                ):
+                    raise ValueError("run-path file already exists and is non-empty") from exc
+                os.replace(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -7567,9 +7641,20 @@ def cmd_fit_controlled_costs(args: argparse.Namespace) -> None:
 
 
 def cmd_fit_relations(args: argparse.Namespace) -> None:
-    calibration_run = _resolve_repo_path(
-        args.calibration_run, field_name="calibration_run"
-    )
+    runs_path = _resolve_repo_path(args.runs, field_name="formal_relation_runs")
+    if runs_path.name != "formal-relations.jsonl" or runs_path.parent.name != "raw":
+        raise ValueError(
+            "formal relation runs must use $CALIBRATION_RUN/raw/formal-relations.jsonl"
+        )
+    calibration_run = runs_path.parent.parent
+    if args.calibration_run is not None:
+        supplied_run = _resolve_repo_path(
+            args.calibration_run, field_name="calibration_run"
+        )
+        if supplied_run != calibration_run:
+            raise ValueError(
+                "supplied calibration run differs from canonical formal relation runs path"
+            )
     execution_identity = validate_calibration_execution_identity(calibration_run)
     controlled_manifest = _resolve_repo_path(
         args.controlled_manifest, field_name="controlled_manifest"
@@ -7592,9 +7677,7 @@ def cmd_fit_relations(args: argparse.Namespace) -> None:
             "controlled_manifest_rows_sha256"
         ],
     }
-    rows = list(
-        iter_jsonl(_resolve_repo_path(args.runs, field_name="formal_relation_runs"))
-    )
+    rows = list(iter_jsonl(runs_path))
     if any(
         row.get(field) != value
         for row in rows
@@ -8931,7 +9014,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="fit and seal the exact formal opcode relation artifact",
     )
     fit_relations.add_argument("--runs", type=pathlib.Path, required=True)
-    fit_relations.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    fit_relations.add_argument("--calibration-run", type=pathlib.Path)
     fit_relations.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     fit_relations.add_argument("--out", type=pathlib.Path, required=True)
     fit_relations.set_defaults(func=cmd_fit_relations)

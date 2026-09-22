@@ -116,6 +116,13 @@ def formal_relation_rows(manifest, *, slope_overrides=None):
     return rows
 
 
+def formal_relation_provenance(rows):
+    return {
+        field: rows[0][field]
+        for field in opcode_gas.FORMAL_RELATION_PROVENANCE_FIELDS
+    }
+
+
 def opcode_execution_provenance():
     return {
         "sp1_execution_engine": "gas-estimator",
@@ -506,7 +513,9 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         )
         for value in artifact["affine_model"]["mu_zero"].values():
             self.assertNotIn("e", value.lower())
-        opcode_gas.validate_opcode_relations_artifact(manifest, artifact)
+        opcode_gas.validate_opcode_relations_artifact(
+            manifest, artifact, rows, formal_relation_provenance(rows)
+        )
 
     def test_rejects_signed_quality_trace_completeness_and_rank_failures(self):
         manifest = formal_relation_manifest()
@@ -616,9 +625,8 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
     def test_artifact_validation_rechecks_all_formal_evidence_after_rehash(self):
         manifest = formal_relation_manifest()
-        artifact = opcode_gas.fit_opcode_relations(
-            manifest, formal_relation_rows(manifest)
-        )
+        rows = formal_relation_rows(manifest)
+        artifact = opcode_gas.fit_opcode_relations(manifest, rows)
 
         mutations = []
         missing_self = copy.deepcopy(artifact)
@@ -639,6 +647,12 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         noncanonical_count = copy.deepcopy(artifact)
         noncanonical_count["equations"][0]["selected_counts"][0] = False
         mutations.append(("quality evidence", noncanonical_count))
+        arbitrary_raw_hash = copy.deepcopy(artifact)
+        arbitrary_raw_hash["raw_rows_sha256"] = "f" * 64
+        mutations.append(("raw rows hash", arbitrary_raw_hash))
+        plausible_but_false_r2 = copy.deepcopy(artifact)
+        plausible_but_false_r2["equations"][0]["r2_p"] = "0.999"
+        mutations.append(("quality evidence", plausible_but_false_r2))
 
         for label, tampered in mutations:
             with self.subTest(label=label):
@@ -652,7 +666,12 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                     )
                 )
                 with self.assertRaisesRegex(ValueError, label):
-                    opcode_gas.validate_opcode_relations_artifact(manifest, tampered)
+                    opcode_gas.validate_opcode_relations_artifact(
+                        manifest,
+                        tampered,
+                        rows,
+                        formal_relation_provenance(rows),
+                    )
 
     def test_rejects_rounded_or_tampered_exact_basis_coefficients(self):
         manifest = formal_relation_manifest()
@@ -682,7 +701,13 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "basis"):
-            opcode_gas.validate_opcode_relations_artifact(manifest, tampered)
+            rows = formal_relation_rows(manifest)
+            opcode_gas.validate_opcode_relations_artifact(
+                manifest,
+                tampered,
+                rows,
+                formal_relation_provenance(rows),
+            )
 
 
 class CandidateConstructionTests(unittest.TestCase):

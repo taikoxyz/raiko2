@@ -95,9 +95,7 @@ class RunnerTests(unittest.TestCase):
             [
                 "fit-relations",
                 "--runs",
-                "/tmp/formal.jsonl",
-                "--calibration-run",
-                "/tmp/calibration",
+                "/tmp/calibration/raw/formal-relations.jsonl",
                 "--controlled-manifest",
                 "/tmp/controlled.toml",
                 "--out",
@@ -124,6 +122,7 @@ class RunnerTests(unittest.TestCase):
             run.elf, pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf")
         )
         self.assertIs(fit.func, opcode_gas.cmd_fit_relations)
+        self.assertIsNone(fit.calibration_run)
         self.assertEqual(prepare.run_path_file, pathlib.Path("/tmp/run-path"))
         with self.assertRaisesRegex(ValueError, "exactly three repeats"):
             opcode_gas.cmd_run(
@@ -154,9 +153,20 @@ class RunnerTests(unittest.TestCase):
 
             empty_target = root / "empty-run-path"
             empty_target.touch()
-            with self.assertRaisesRegex(ValueError, "already exists"):
-                opcode_gas.write_run_path_file(empty_target, run)
-            self.assertEqual(empty_target.read_bytes(), b"")
+            opcode_gas.write_run_path_file(empty_target, run)
+            self.assertEqual(empty_target.read_text(), str(run) + "\n")
+
+            racing_target = root / "racing-run-path"
+            racing_target.touch()
+
+            def racing_writer(_descriptor, _operation):
+                racing_target.write_text("racer\n")
+
+            with mock.patch("fcntl.flock", side_effect=racing_writer), self.assertRaisesRegex(
+                ValueError, "non-empty"
+            ):
+                opcode_gas.write_run_path_file(racing_target, run)
+            self.assertEqual(racing_target.read_text(), "racer\n")
 
     def test_formal_artifact_write_is_create_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,14 +193,14 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             calibration_run = root / identity_sha256[:24]
-            calibration_run.mkdir()
-            runs = root / "formal.jsonl"
+            (calibration_run / "raw").mkdir(parents=True)
+            runs = calibration_run / "raw" / "formal-relations.jsonl"
             runs.write_text("{}\n")
             manifest_path = root / "controlled.toml"
             manifest_path.write_text("fixture\n")
             output = root / "opcode-relations.json"
             args = opcode_gas.argparse.Namespace(
-                calibration_run=calibration_run,
+                calibration_run=None,
                 controlled_manifest=manifest_path,
                 runs=runs,
                 out=output,
@@ -220,6 +230,12 @@ class RunnerTests(unittest.TestCase):
             verify.assert_called_once_with(calibration_run, manifest_path)
             fit.assert_called_once_with(manifest, [row])
             write.assert_called_once_with(output, artifact)
+
+            args.calibration_run = root / "different-run"
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), self.assertRaisesRegex(
+                ValueError, "differs from canonical"
+            ):
+                opcode_gas.cmd_fit_relations(args)
 
     def test_runner_uses_guest_launcher_directly(self):
         calls = []

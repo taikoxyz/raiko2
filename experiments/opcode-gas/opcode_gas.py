@@ -42,6 +42,23 @@ DYNAMIC_RAW_GAS_KEYS = (
     "opcode:0x53",
     "opcode:0x5e",
 )
+FORMAL_RELATION_QUALITY_GATES = {
+    "repeats": 3,
+    "r2_min": "0.995",
+    "relative_slope_stderr_max": "0.05",
+    "residual_signal_max": "0.02",
+    "checkpoint_ape_max": "0.10",
+    "signal_min_prover_gas": "1000",
+    "signal_min_baseline_fraction": "0.01",
+    "signal_min_repeat_noise_multiple": "20",
+}
+FORMAL_RELATION_PROVENANCE_FIELDS = (
+    "calibration_id",
+    "calibration_identity_sha256",
+    "implementation_revision",
+    "controlled_manifest_sha256",
+    "controlled_manifest_rows_sha256",
+)
 
 
 @dataclass(frozen=True)
@@ -3623,6 +3640,7 @@ def _formal_actual_raw_gas_map(
         raise ValueError("formal relation total raw gas differs from host trace components")
     target_opcode = parse_opcode(case.get("opcode"))
     actual: dict[str, int] = {f"opcode:0x{target_opcode:02x}": executed_raw_gas}
+    unresolved_non_target_keys: list[str] = []
     for raw_key, count in non_target_counts.items():
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ValueError("formal relation trace has invalid non-target opcode counts")
@@ -3630,10 +3648,22 @@ def _formal_actual_raw_gas_map(
             component, opcode = _parse_schedule_key(raw_key)
         except (TypeError, ValueError):
             continue
-        if component != "opcode" or opcode not in PURE_OPCODE_DEFAULTS:
+        if component != "opcode" or opcode == 0x00:
             continue
         key = f"opcode:0x{opcode:02x}"
+        if opcode not in PURE_OPCODE_DEFAULTS:
+            if count:
+                unresolved_non_target_keys.append(key)
+            continue
         actual[key] = actual.get(key, 0) + PURE_OPCODE_DEFAULTS[opcode][2] * count
+    unresolved_raw_gas = total_raw_gas - sum(actual.values())
+    if unresolved_raw_gas < 0:
+        raise ValueError("formal relation non-target raw gas differs from opcode counts")
+    if unresolved_raw_gas:
+        if len(unresolved_non_target_keys) != 1:
+            raise ValueError("formal relation non-target raw gas is ambiguous")
+        key = unresolved_non_target_keys[0]
+        actual[key] = actual.get(key, 0) + unresolved_raw_gas
     if sum(actual.values()) != total_raw_gas:
         raise ValueError("formal relation non-target raw gas differs from opcode counts")
     return {key: str(value) for key, value in sorted(actual.items()) if value}
@@ -4656,7 +4686,7 @@ def _signed_relation_fit(
         ss_res = sum(value * value for value in residuals)
         ss_total = sum((value - mean_y) ** 2 for value in ys)
         signal = abs(max(ys) - min(ys))
-        baseline = max(abs(counts[0][0]), abs(counts[0][1]))
+        baseline = abs(counts[0][2])
         reasons: list[str] = []
         if slope == 0:
             reasons.append("signed slope is zero")
@@ -4821,6 +4851,9 @@ def _fit_one_opcode_relation(
         )
 
     if not expected_signed:
+        expected_counts = controlled_round_counts(generator_max_count)
+        if tuple(sorted(counts)) != expected_counts:
+            raise ValueError("formal self-control counts omit a frozen prefix or checkpoint")
         if relation.key_id not in OPCODE_RELATION_ANCHORS or any(
             target != control or delta != 0
             for target, control, delta in counts.values()
@@ -4832,6 +4865,12 @@ def _fit_one_opcode_relation(
             "scenario_id": relation.scenario_id,
             "status": "passed",
             "exact_zero": True,
+            "checked_counts": list(expected_counts),
+            "checkpoint": {
+                "count": generator_max_count,
+                "observed_delta_p": "0",
+                "status": "passed_exact_zero",
+            },
         }
 
     fit = _signed_relation_fit(counts, generator_max_count=generator_max_count)
@@ -4856,6 +4895,7 @@ def _fit_one_opcode_relation(
         "slope_stderr_p": _decimal_text(fit["stderr"]),
         "relative_slope_stderr": _decimal_text(fit["stderr"] / abs(fit["slope"])),
         "signal_p": _decimal_text(fit["signal"]),
+        "zero_delta_p": _decimal_text(counts[0][2]),
         "max_residual_p": _decimal_text(fit["max_residual"]),
         "selected_counts": fit["selected_counts"],
         "checkpoint": fit["checkpoint"],
@@ -4892,6 +4932,24 @@ def _serialize_affine_model(model: Any) -> dict[str, Any]:
     return payload
 
 
+def _validate_formal_relation_provenance(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != set(
+        FORMAL_RELATION_PROVENANCE_FIELDS
+    ):
+        raise ValueError("formal relation provenance schema is invalid")
+    provenance = {field: value.get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS}
+    identity_sha256 = provenance["calibration_identity_sha256"]
+    if (
+        not _is_sha256(identity_sha256)
+        or provenance["calibration_id"] != identity_sha256[:24]
+        or not _is_git_revision(provenance["implementation_revision"])
+        or not _is_sha256(provenance["controlled_manifest_sha256"])
+        or not _is_sha256(provenance["controlled_manifest_rows_sha256"])
+    ):
+        raise ValueError("formal relation provenance is not content-addressed")
+    return provenance
+
+
 def fit_opcode_relations(
     manifest: Manifest,
     rows: Iterable[Mapping[str, Any]],
@@ -4905,25 +4963,12 @@ def fit_opcode_relations(
         raise ValueError(f"missing canonical relation rows: {sorted(missing)!r}")
     if extra:
         raise ValueError(f"unknown formal relation rows: {sorted(extra)!r}")
-    provenance_fields = (
-        "calibration_id",
-        "calibration_identity_sha256",
-        "implementation_revision",
-        "controlled_manifest_sha256",
-        "controlled_manifest_rows_sha256",
-    )
-    provenance = {field: rows[0].get(field) for field in provenance_fields}
+    provenance = {
+        field: rows[0].get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS
+    }
     if any(row.get(field) != value for row in rows for field, value in provenance.items()):
         raise ValueError("formal relation rows do not share durable provenance")
-    if (
-        not isinstance(provenance["calibration_id"], str)
-        or len(provenance["calibration_id"]) != 24
-        or not _is_sha256(provenance["calibration_identity_sha256"])
-        or not _is_git_revision(provenance["implementation_revision"])
-        or not _is_sha256(provenance["controlled_manifest_sha256"])
-        or not _is_sha256(provenance["controlled_manifest_rows_sha256"])
-    ):
-        raise ValueError("formal relation provenance is invalid")
+    provenance = _validate_formal_relation_provenance(provenance)
 
     results = []
     for relation in manifest.opcode_relations:
@@ -5004,16 +5049,7 @@ def fit_opcode_relations(
         "signal_kind": FORMAL_RELATION_SIGNAL_KIND,
         "status": "accepted",
         "provenance": provenance,
-        "quality_gates": {
-            "repeats": 3,
-            "r2_min": "0.995",
-            "relative_slope_stderr_max": "0.05",
-            "residual_signal_max": "0.02",
-            "checkpoint_ape_max": "0.10",
-            "signal_min_prover_gas": "1000",
-            "signal_min_baseline_fraction": "0.01",
-            "signal_min_repeat_noise_multiple": "20",
-        },
+        "quality_gates": dict(FORMAL_RELATION_QUALITY_GATES),
         "equations": equations,
         "self_controls": self_controls,
         "dynamic_holdouts": holdouts,
@@ -5038,6 +5074,139 @@ def _parse_fraction_text(value: Any) -> Fraction:
     return parsed
 
 
+def _artifact_decimal(row: Mapping[str, Any], field: str, *, label: str) -> Decimal:
+    raw = row.get(field)
+    value = _decimal(raw, label=f"{label} {field}")
+    if not isinstance(raw, str) or _decimal_text(value) != raw:
+        raise ValueError(f"{label} quality evidence has noncanonical {field}")
+    return value
+
+
+def _validate_artifact_relation_rows(
+    rows: Any,
+    relations: list[OpcodeRelationSpec],
+    *,
+    label: str,
+) -> list[RelationEquation]:
+    if not isinstance(rows, list) or [row.get("relation_id") for row in rows] != [
+        relation.id for relation in relations
+    ]:
+        raise ValueError(f"opcode relation artifact {label} set is incomplete")
+    expected_fields = {
+        "relation_id",
+        "key_id",
+        "split",
+        "scenario_id",
+        "dynamic_key",
+        "target_raw_gas_by_key",
+        "control_raw_gas_by_key",
+        "signed_raw_gas_by_key",
+        "slope_p",
+        "intercept_p",
+        "r2_p",
+        "slope_stderr_p",
+        "relative_slope_stderr",
+        "signal_p",
+        "zero_delta_p",
+        "max_residual_p",
+        "selected_counts",
+        "checkpoint",
+        "status",
+    }
+    algebra: list[RelationEquation] = []
+    for row, relation in zip(rows, relations):
+        if not isinstance(row, Mapping) or set(row) != expected_fields:
+            raise ValueError(f"opcode relation artifact {label} quality evidence schema is invalid")
+        if (
+            row.get("key_id") != relation.key_id
+            or row.get("split") != relation.split
+            or row.get("scenario_id") != relation.scenario_id
+            or row.get("dynamic_key") != relation.dynamic_key
+            or row.get("status") != "accepted"
+        ):
+            raise ValueError(f"opcode relation artifact {label} identity differs from manifest")
+        target = _parse_canonical_int_map(
+            row.get("target_raw_gas_by_key"), label=f"artifact {label} target map"
+        )
+        control = _parse_canonical_int_map(
+            row.get("control_raw_gas_by_key"), label=f"artifact {label} control map"
+        )
+        signed = _parse_canonical_int_map(
+            row.get("signed_raw_gas_by_key"),
+            label=f"artifact {label} signed map",
+            allow_negative=True,
+        )
+        if (
+            target != dict(relation.target_raw_gas_by_key)
+            or control != dict(relation.control_raw_gas_by_key)
+            or signed != dict(relation.signed_raw_gas_by_key)
+        ):
+            raise ValueError(f"opcode relation artifact {label} coefficient maps differ")
+        slope = _artifact_decimal(row, "slope_p", label=label)
+        _artifact_decimal(row, "intercept_p", label=label)
+        r2 = _artifact_decimal(row, "r2_p", label=label)
+        stderr = _artifact_decimal(row, "slope_stderr_p", label=label)
+        relative_stderr = _artifact_decimal(
+            row, "relative_slope_stderr", label=label
+        )
+        signal = _artifact_decimal(row, "signal_p", label=label)
+        zero_delta = _artifact_decimal(row, "zero_delta_p", label=label)
+        residual = _artifact_decimal(row, "max_residual_p", label=label)
+        if (
+            slope == 0
+            or r2 < Decimal("0.995")
+            or r2 > 1
+            or stderr < 0
+            or relative_stderr < 0
+            or relative_stderr != stderr / abs(slope)
+            or relative_stderr > Decimal("0.05")
+            or signal < max(Decimal(1000), abs(zero_delta) * Decimal("0.01"))
+            or residual < 0
+            or residual / signal > Decimal("0.02")
+        ):
+            raise ValueError(f"opcode relation artifact {label} quality evidence fails gates")
+        selected = row.get("selected_counts")
+        if (
+            not isinstance(selected, list)
+            or any(type(count) is not int for count in selected)
+            or tuple(selected) not in CONTROLLED_PREFIXES
+        ):
+            raise ValueError(f"opcode relation artifact {label} quality evidence has bad prefix")
+        checkpoint = row.get("checkpoint")
+        if not isinstance(checkpoint, Mapping) or set(checkpoint) != {
+            "count",
+            "observed_delta_p",
+            "predicted_delta_p",
+            "ape_p",
+            "status",
+        }:
+            raise ValueError(f"opcode relation artifact {label} quality evidence has bad checkpoint")
+        expected_checkpoint = OUT_OF_FIT_CHECKPOINTS[str(max(selected))]
+        observed = _artifact_decimal(checkpoint, "observed_delta_p", label=label)
+        predicted = _artifact_decimal(checkpoint, "predicted_delta_p", label=label)
+        ape = _artifact_decimal(checkpoint, "ape_p", label=label)
+        if (
+            checkpoint.get("count") != expected_checkpoint
+            or type(checkpoint.get("count")) is not int
+            or checkpoint.get("status") != "passed"
+            or observed == 0
+            or predicted != slope * Decimal(expected_checkpoint)
+            or (observed > 0) != (predicted > 0)
+            or ape != abs(predicted - observed) / abs(observed)
+            or ape < 0
+            or ape > Decimal("0.10")
+        ):
+            raise ValueError(f"opcode relation artifact {label} quality evidence fails checkpoint")
+        algebra.append(
+            RelationEquation(
+                relation.id,
+                {key: Fraction(value) for key, value in signed.items()},
+                slope,
+            )
+        )
+    return algebra
+
+
 def validate_opcode_relations_artifact(
     manifest: Manifest, artifact: Mapping[str, Any]
 ) -> None:
@@ -5053,38 +5222,94 @@ def validate_opcode_relations_artifact(
         canonical_json(unhashed)
     ):
         raise ValueError("opcode relation artifact content hash differs")
-    equations = artifact.get("equations")
-    if not isinstance(equations, list) or len(equations) != 98:
-        raise ValueError("opcode relation artifact must contain 98 equations")
-    expected_relations = {
-        relation.id: relation
+    if set(artifact) != {
+        "schema_version",
+        "purpose",
+        "signal_kind",
+        "status",
+        "provenance",
+        "quality_gates",
+        "equations",
+        "self_controls",
+        "dynamic_holdouts",
+        "relation_matrix_sha256",
+        "raw_rows_sha256",
+        "affine_model",
+        "artifact_sha256",
+    } or artifact.get("schema_version") != 1:
+        raise ValueError("opcode relation artifact schema is invalid")
+    _validate_formal_relation_provenance(artifact.get("provenance"))
+    if artifact.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES:
+        raise ValueError("opcode relation artifact quality gates differ from frozen gates")
+    if not _is_sha256(artifact.get("raw_rows_sha256")):
+        raise ValueError("opcode relation artifact raw rows hash is invalid")
+    self_relations = [
+        relation for relation in manifest.opcode_relations if not relation.signed_raw_gas_by_key
+    ]
+    self_controls = artifact.get("self_controls")
+    if not isinstance(self_controls, list) or [
+        row.get("relation_id") for row in self_controls
+    ] != [relation.id for relation in self_relations]:
+        raise ValueError("opcode relation artifact self controls are incomplete")
+    for row, relation in zip(self_controls, self_relations):
+        if not isinstance(row, Mapping) or set(row) != {
+            "relation_id",
+            "key_id",
+            "scenario_id",
+            "status",
+            "exact_zero",
+            "checked_counts",
+            "checkpoint",
+        }:
+            raise ValueError("opcode relation artifact self controls schema is invalid")
+        checkpoint = row.get("checkpoint")
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("opcode relation artifact self controls checkpoint is invalid")
+        bound = checkpoint.get("count")
+        if type(bound) is not int:
+            raise ValueError("opcode relation artifact self controls checkpoint is invalid")
+        try:
+            expected_counts = list(controlled_round_counts(bound))
+        except ValueError as exc:
+            raise ValueError(
+                "opcode relation artifact self controls checkpoint is invalid"
+            ) from exc
+        if (
+            row.get("key_id") != relation.key_id
+            or row.get("scenario_id") != relation.scenario_id
+            or row.get("status") != "passed"
+            or row.get("exact_zero") is not True
+            or row.get("checked_counts") != expected_counts
+            or dict(checkpoint)
+            != {
+                "count": bound,
+                "observed_delta_p": "0",
+                "status": "passed_exact_zero",
+            }
+        ):
+            raise ValueError("opcode relation artifact self controls evidence is invalid")
+    equation_relations = [
+        relation
         for relation in manifest.opcode_relations
         if relation.split == "canonical" and relation.signed_raw_gas_by_key
-    }
-    algebra: list[RelationEquation] = []
-    for row in equations:
-        relation_id = row.get("relation_id")
-        relation = expected_relations.get(relation_id)
-        if relation is None:
-            raise ValueError("opcode relation artifact has an unknown equation")
-        signed = _parse_canonical_int_map(
-            row.get("signed_raw_gas_by_key"),
-            label="artifact signed raw-gas map",
-            allow_negative=True,
-        )
-        if signed != dict(relation.signed_raw_gas_by_key):
-            raise ValueError("opcode relation artifact coefficient map differs from manifest")
-        slope_text = row.get("slope_p")
-        slope = _decimal(slope_text, label="artifact relation slope")
-        if not isinstance(slope_text, str) or _decimal_text(slope) != slope_text:
-            raise ValueError("artifact relation slope is noncanonical")
-        algebra.append(
-            RelationEquation(
-                str(relation_id),
-                {key: Fraction(value) for key, value in signed.items()},
-                slope,
-            )
-        )
+    ]
+    if len(equation_relations) != 98:
+        raise ValueError("opcode relation manifest must define 98 equations")
+    algebra = _validate_artifact_relation_rows(
+        artifact.get("equations"), equation_relations, label="equations"
+    )
+    holdout_relations = [
+        relation
+        for relation in manifest.opcode_relations
+        if relation.split == "dynamic_holdout"
+    ]
+    if len(holdout_relations) != 12:
+        raise ValueError("opcode relation manifest must define 12 dynamic holdouts")
+    _validate_artifact_relation_rows(
+        artifact.get("dynamic_holdouts"),
+        holdout_relations,
+        label="dynamic holdouts",
+    )
     opcode_keys = tuple(
         f"opcode:0x{case.opcode:02x}"
         for case in manifest.cases
@@ -5134,6 +5359,7 @@ def validate_opcode_relations_artifact(
 
 
 def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
+    """Atomically create one JSON artifact without replacing any prior run."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -5144,10 +5370,18 @@ def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
             output.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ValueError(f"artifact already exists: {path}") from exc
     finally:
         if temporary.exists():
             temporary.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def case_primary_value(case_result: Mapping[str, Any]) -> tuple[str, Decimal]:
@@ -7005,15 +7239,22 @@ def write_run_path_file(path: pathlib.Path, run: pathlib.Path) -> None:
     provenance = run / "provenance.json"
     if not provenance.is_file():
         raise ValueError("calibration provenance must be durable before run-path handoff")
-    if path.exists() and path.read_bytes():
-        raise ValueError("run-path file already exists and is non-empty")
-    with provenance.open("rb") as input_file:
-        os.fsync(input_file.fileno())
-    run_fd = os.open(run, os.O_RDONLY)
+    for item in sorted(run.rglob("*")):
+        if item.is_file():
+            with item.open("rb") as input_file:
+                os.fsync(input_file.fileno())
+    directories = [item for item in run.rglob("*") if item.is_dir()]
+    for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True) + [run]:
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    run_parent_fd = os.open(run.parent, os.O_RDONLY)
     try:
-        os.fsync(run_fd)
+        os.fsync(run_parent_fd)
     finally:
-        os.close(run_fd)
+        os.close(run_parent_fd)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -7024,15 +7265,20 @@ def write_run_path_file(path: pathlib.Path, run: pathlib.Path) -> None:
             output.write(str(run) + "\n")
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ValueError(
+                f"run-path file already exists and may be non-empty: {path}"
+            ) from exc
+    finally:
+        if temporary.exists():
+            temporary.unlink()
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 def cmd_prepare_validation(args: argparse.Namespace) -> None:
@@ -7321,12 +7567,43 @@ def cmd_fit_controlled_costs(args: argparse.Namespace) -> None:
 
 
 def cmd_fit_relations(args: argparse.Namespace) -> None:
-    manifest = load_manifest(
-        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest")
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
     )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    controlled_manifest = _resolve_repo_path(
+        args.controlled_manifest, field_name="controlled_manifest"
+    )
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run, controlled_manifest
+    )
+    if execution_identity != frozen_identity:
+        raise ValueError("formal relation calibration identity changed during validation")
+    expected_provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(
+            canonical_json(execution_identity)
+        ),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity[
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    rows = list(
+        iter_jsonl(_resolve_repo_path(args.runs, field_name="formal_relation_runs"))
+    )
+    if any(
+        row.get(field) != value
+        for row in rows
+        for field, value in expected_provenance.items()
+    ):
+        raise ValueError("formal relation rows differ from durable calibration provenance")
     artifact = fit_opcode_relations(
         manifest,
-        iter_jsonl(_resolve_repo_path(args.runs, field_name="formal_relation_runs")),
+        rows,
     )
     output = _resolve_repo_path(args.out, field_name="opcode_relations")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -8654,6 +8931,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="fit and seal the exact formal opcode relation artifact",
     )
     fit_relations.add_argument("--runs", type=pathlib.Path, required=True)
+    fit_relations.add_argument("--calibration-run", type=pathlib.Path, required=True)
     fit_relations.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     fit_relations.add_argument("--out", type=pathlib.Path, required=True)
     fit_relations.set_defaults(func=cmd_fit_relations)

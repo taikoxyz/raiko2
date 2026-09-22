@@ -96,6 +96,8 @@ class RunnerTests(unittest.TestCase):
                 "fit-relations",
                 "--runs",
                 "/tmp/formal.jsonl",
+                "--calibration-run",
+                "/tmp/calibration",
                 "--controlled-manifest",
                 "/tmp/controlled.toml",
                 "--out",
@@ -149,6 +151,75 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(list(root.glob(".run-path.*.tmp")), [])
             with self.assertRaisesRegex(ValueError, "non-empty"):
                 opcode_gas.write_run_path_file(target, run)
+
+            empty_target = root / "empty-run-path"
+            empty_target.touch()
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                opcode_gas.write_run_path_file(empty_target, run)
+            self.assertEqual(empty_target.read_bytes(), b"")
+
+    def test_formal_artifact_write_is_create_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "opcode-relations.json"
+            target.write_text("old artifact\n")
+
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                opcode_gas._atomic_write_json(target, {"schema_version": 1})
+
+            self.assertEqual(target.read_text(), "old artifact\n")
+
+    def test_fit_relations_cli_binds_rows_to_durable_calibration_identity(self):
+        identity = {
+            "implementation_revision": "c" * 40,
+            "controlled_manifest_sha256": "d" * 64,
+            "controlled_manifest_rows_sha256": "e" * 64,
+        }
+        identity_sha256 = opcode_gas.sha256_bytes(opcode_gas.canonical_json(identity))
+        provenance = {
+            "calibration_id": identity_sha256[:24],
+            "calibration_identity_sha256": identity_sha256,
+            **identity,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            calibration_run = root / identity_sha256[:24]
+            calibration_run.mkdir()
+            runs = root / "formal.jsonl"
+            runs.write_text("{}\n")
+            manifest_path = root / "controlled.toml"
+            manifest_path.write_text("fixture\n")
+            output = root / "opcode-relations.json"
+            args = opcode_gas.argparse.Namespace(
+                calibration_run=calibration_run,
+                controlled_manifest=manifest_path,
+                runs=runs,
+                out=output,
+            )
+            manifest = object()
+            artifact = {"equations": []}
+            row = {**provenance, "relation_id": "fixture"}
+
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas,
+                "validate_calibration_execution_identity",
+                return_value=identity,
+            ) as validate, mock.patch.object(
+                opcode_gas,
+                "verify_frozen_controlled_manifest",
+                return_value=(manifest, identity),
+            ) as verify, mock.patch.object(
+                opcode_gas, "iter_jsonl", return_value=iter([row])
+            ), mock.patch.object(
+                opcode_gas, "fit_opcode_relations", return_value=artifact
+            ) as fit, mock.patch.object(
+                opcode_gas, "_atomic_write_json"
+            ) as write:
+                opcode_gas.cmd_fit_relations(args)
+
+            validate.assert_called_once_with(calibration_run)
+            verify.assert_called_once_with(calibration_run, manifest_path)
+            fit.assert_called_once_with(manifest, [row])
+            write.assert_called_once_with(output, artifact)
 
     def test_runner_uses_guest_launcher_directly(self):
         calls = []
@@ -403,6 +474,43 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(
             raw_run["actual_raw_gas_by_key"],
             {"opcode:0x01": "6", "opcode:0x50": "12", "opcode:0x60": "48"},
+        )
+        dynamic_case = {
+            **case,
+            "case": "keccak256__relation_target",
+            "opcode": "0x20",
+            "target_count": 1,
+            "target_raw_gas": 36,
+            "tx_gas_limit": 1_000_288,
+        }
+        dynamic_trace = {
+            **trace,
+            "target_opcode": 0x20,
+            "declared_target_count": 1,
+            "declared_target_raw_gas": 36,
+            "executed_target_count": 1,
+            "executed_target_raw_gas": 36,
+            "non_target_counts": {
+                "opcode:0x00": 8,
+                "opcode:0x37": 8,
+                "opcode:0x7f": 40,
+            },
+            "non_target_raw_gas": 192,
+            "total_raw_gas": 228,
+            "tx_gas_limit": 1_000_288,
+        }
+
+        dynamic_run = opcode_gas.raw_run_from_report(
+            dynamic_case, {**report, "controlled_trace": dynamic_trace}
+        )
+
+        self.assertEqual(
+            dynamic_run["actual_raw_gas_by_key"],
+            {
+                "opcode:0x20": "36",
+                "opcode:0x37": "72",
+                "opcode:0x7f": "120",
+            },
         )
         with self.assertRaisesRegex(ValueError, "executed target raw gas"):
             opcode_gas.raw_run_from_report(

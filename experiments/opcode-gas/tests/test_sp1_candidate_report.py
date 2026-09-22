@@ -38,7 +38,7 @@ def formal_relation_rows(manifest, *, slope_overrides=None):
     slope_overrides = slope_overrides or {}
     rows = []
     provenance = {
-        "calibration_id": "a" * 24,
+        "calibration_id": "b" * 24,
         "calibration_identity_sha256": "b" * 64,
         "implementation_revision": "c" * 40,
         "controlled_manifest_sha256": "d" * 64,
@@ -444,6 +444,22 @@ class MeasurementGateTests(unittest.TestCase):
 
 
 class FormalOpcodeRelationTests(unittest.TestCase):
+    def test_signed_signal_gate_uses_zero_delta_not_shared_lane_baseline(self):
+        baseline = Decimal("1000000000")
+        counts = {
+            count: (
+                baseline + Decimal(5000 * count),
+                baseline,
+                Decimal(5000 * count),
+            )
+            for count in (0, 1, 2, 4, 8)
+        }
+
+        result = opcode_gas._signed_relation_fit(counts, generator_max_count=8)
+
+        self.assertEqual(result["slope"], Decimal(5000))
+        self.assertEqual(result["signal"], Decimal(20000))
+
     def test_fits_rank_98_artifact_with_negative_slope_and_exact_serialization(self):
         manifest = formal_relation_manifest()
         negative = next(
@@ -502,6 +518,17 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         missing = [row for row in base_rows if row["relation_id"] != relation.id]
         with self.assertRaisesRegex(ValueError, "missing canonical relation"):
             opcode_gas.fit_opcode_relations(manifest, missing)
+
+        stale_provenance = copy.deepcopy(base_rows)
+        for row in stale_provenance:
+            row["calibration_id"] = "a" * 24
+        with self.assertRaisesRegex(ValueError, "content-addressed"):
+            opcode_gas.fit_opcode_relations(manifest, stale_provenance)
+
+        mixed_provenance = copy.deepcopy(base_rows)
+        mixed_provenance[0]["controlled_manifest_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "share durable provenance"):
+            opcode_gas.fit_opcode_relations(manifest, mixed_provenance)
 
         tiny = copy.deepcopy(base_rows)
         for row in tiny:
@@ -575,6 +602,57 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             opcode_gas.fit_opcode_relations(
                 rank_97_manifest, formal_relation_rows(rank_97_manifest)
             )
+
+        self_control = next(
+            item for item in manifest.opcode_relations if not item.signed_raw_gas_by_key
+        )
+        truncated_self = [
+            row
+            for row in base_rows
+            if row["relation_id"] != self_control.id or row["diagnostic_count"] == 0
+        ]
+        with self.assertRaisesRegex(ValueError, "self-control counts"):
+            opcode_gas.fit_opcode_relations(manifest, truncated_self)
+
+    def test_artifact_validation_rechecks_all_formal_evidence_after_rehash(self):
+        manifest = formal_relation_manifest()
+        artifact = opcode_gas.fit_opcode_relations(
+            manifest, formal_relation_rows(manifest)
+        )
+
+        mutations = []
+        missing_self = copy.deepcopy(artifact)
+        missing_self["self_controls"] = []
+        mutations.append(("self controls", missing_self))
+        missing_holdouts = copy.deepcopy(artifact)
+        missing_holdouts["dynamic_holdouts"] = []
+        mutations.append(("dynamic holdouts", missing_holdouts))
+        wrong_gates = copy.deepcopy(artifact)
+        wrong_gates["quality_gates"]["repeats"] = 2
+        mutations.append(("quality gates", wrong_gates))
+        stale_provenance = copy.deepcopy(artifact)
+        stale_provenance["provenance"]["calibration_id"] = "f" * 24
+        mutations.append(("provenance", stale_provenance))
+        bad_evidence = copy.deepcopy(artifact)
+        bad_evidence["dynamic_holdouts"][0]["r2_p"] = "0"
+        mutations.append(("quality evidence", bad_evidence))
+        noncanonical_count = copy.deepcopy(artifact)
+        noncanonical_count["equations"][0]["selected_counts"][0] = False
+        mutations.append(("quality evidence", noncanonical_count))
+
+        for label, tampered in mutations:
+            with self.subTest(label=label):
+                tampered["artifact_sha256"] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(
+                        {
+                            key: value
+                            for key, value in tampered.items()
+                            if key != "artifact_sha256"
+                        }
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, label):
+                    opcode_gas.validate_opcode_relations_artifact(manifest, tampered)
 
     def test_rejects_rounded_or_tampered_exact_basis_coefficients(self):
         manifest = formal_relation_manifest()

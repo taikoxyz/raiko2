@@ -147,6 +147,33 @@ randomness and not as a coefficient. Required repeats of one row must still matc
 signal and residuals should be reported against the frozen control floor; changing the fixture,
 guest, or input encoding requires measuring a new floor under a fresh calibration identity.
 
+### Anchor Families Passed The Pre-Campaign Linearity Check
+
+Before opening a formal calibration run, the fixed-limit production-guest fixtures were exercised
+at counts `1, 2, 4, 8, 16`, with count `32` reserved as an out-of-fit checkpoint. Every input was
+run three times through the estimator and all primary gas, instruction, syscall, public-output,
+input-identity, trace, feature, diagnostic, and final-root fields matched exactly within a row.
+
+The exploratory fit produced:
+
+| family | fit slope | fit signal / data floor | R2 | count-32 delta APE |
+| --- | ---: | ---: | ---: | ---: |
+| `pop_family` | 895.13 | 94.02 | 0.999964 | 0.69% |
+| `push_family` | 1005.32 | 105.69 | 0.999961 | 0.52% |
+| `dup_family` | 882.48 | 92.41 | 0.999980 | 0.21% |
+| `swap_family` | 1140.99 | 119.46 | 0.999717 | 0.74% |
+
+The 32-count checkpoint signal was 191--245 times the 143-gas data floor. This is sufficient to
+qualify the fixed-limit fixture shape for the frozen 40-fit plus eight-holdout block campaign; it
+does not establish final coefficients. Each family program executes a trace-validated combination
+of the named anchor and helper opcodes. The later exact relation basis and joint block fit separate
+those components. Do not publish a row's family slope as the pure cost of its namesake opcode.
+
+This qualification batch was intentionally throwaway evidence collected before the candidate path
+was complete. Finish candidate construction and full implementation verification first, then create
+one fresh calibration identity and rerun formal relations and all controlled block rows. Otherwise
+the subsequent implementation commit changes the bound source revision and invalidates the data.
+
 ### Backend Metrics Were Treated As Interchangeable
 
 SP1 `ExecutionReport::gas()`, SP1 total instruction count, and RISC0 user/padded cycles are different

@@ -3237,6 +3237,7 @@ def generate_cases(
     generator_max_count: int | None = None,
     matched_control_diagnostic: bool = False,
     operand_profile: str = "zero",
+    case_ids: frozenset[str] | None = None,
 ) -> list[pathlib.Path]:
     written = []
     controlled_max = (
@@ -3252,6 +3253,8 @@ def generate_cases(
                 )
             matched_control_spec(case, operand_profile)
     for case in manifest.cases:
+        if case_ids is not None and case.name not in case_ids:
+            continue
         for variant in manifest.variants:
             if controlled_max is not None and variant > controlled_max:
                 continue
@@ -4410,6 +4413,23 @@ GENERATED_EXPERIMENT_PREFIXES = (
     "experiments/opcode-gas/runs/", "experiments/opcode-gas/validations/",
 )
 Q_FORMULA = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
+BLOCK_CALIBRATION_PARAMETER_ORDER = [*OPCODE_RELATION_ANCHORS, *Q_FORMULA]
+BLOCK_CALIBRATION_FORMULAS = {
+    "fit": "p_hat = x * mu_zero + [x * B, q] * [theta, beta]",
+    "opcode": "mu = mu_zero + B * theta",
+    "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
+}
+BLOCK_CALIBRATION_GATES = {
+    "exact_fit_rank": 8,
+    "positive_parameters": True,
+    "positive_opcode_multipliers": True,
+    "fit_mape_max": "0.05",
+    "fit_max_ape_max": "0.10",
+    "holdout_max_ape_max": "0.10",
+    "dynamic_relation_ape_max": "0.10",
+    "dynamic_implied_multiplier_spread_max": "0.05",
+    "leave_one_family_out_drift_max": "0.05",
+}
 OUT_OF_FIT_CHECKPOINTS = {"4": 8, "16": 32, "64": 128, "256": 512, "1024": 2048}
 CONTROLLED_PREFIXES = (
     (0, 1, 2, 4),
@@ -5995,42 +6015,223 @@ def _primary_case_projection(case_results: Iterable[Mapping[str, Any]]) -> list[
     return sorted(projection, key=lambda row: str(row.get("case_id")))
 
 
-def build_candidate_components(
+def _pure_opcode_measurement_keys(manifest: Manifest) -> tuple[MeasurementKeySpec, ...]:
+    return tuple(
+        key
+        for key in manifest.measurement_keys
+        if key.event_match.component == "opcode"
+        and key.pricing_basis == "raw_gas_slope"
+    )
+
+
+def _remaining_controlled_measurement_keys(
     manifest: Manifest,
-    case_results: Iterable[Mapping[str, Any]],
-    overhead_values: Mapping[str, Any],
-    provenance: Mapping[str, Any],
-    schedule: UnzenSchedule | None = None,
-) -> dict[str, Any]:
-    rows = list(case_results)
-    reject_matched_control_diagnostics(rows, context="formal candidate")
-    measurements = construct_measurement_values(manifest, rows)
-    add = measurements.get(manifest.normalization_reference_key or "")
-    if add is None or add.get("status") != "accepted":
-        raise ValueError("ADD measurement is required before candidate sealing")
-    missing_q = [key for key in Q_FORMULA if key not in overhead_values]
-    if missing_q:
-        raise ValueError(f"Q_formula value is missing: {missing_q[0]}")
-    primary_overheads = {}
-    for key in Q_FORMULA:
-        value = _decimal(overhead_values[key], label=f"overhead {key}")
-        if value <= 0:
-            raise ValueError(f"Q_formula value must be positive: {key}")
-        primary_overheads[key] = _decimal_text(value)
-    for key_id, value in measurements.items():
-        if value.get("status") != "accepted":
-            continue
+) -> tuple[MeasurementKeySpec, ...]:
+    pure_ids = {key.id for key in _pure_opcode_measurement_keys(manifest)}
+    return tuple(key for key in manifest.measurement_keys if key.id not in pure_ids)
+
+
+def _remaining_controlled_case_ids(manifest: Manifest) -> frozenset[str]:
+    return frozenset(
+        case_id
+        for key in _remaining_controlled_measurement_keys(manifest)
+        for case_id in (*key.required_case_ids, *key.diagnostic_case_ids)
+    )
+
+
+def _validate_content_addressed_artifact(
+    artifact: Mapping[str, Any], *, label: str
+) -> str:
+    recorded = artifact.get("artifact_sha256")
+    unhashed = {key: value for key, value in artifact.items() if key != "artifact_sha256"}
+    if not _is_sha256(recorded) or recorded != sha256_bytes(canonical_json(unhashed)):
+        raise ValueError(f"{label} artifact content hash differs")
+    return str(recorded)
+
+
+def _candidate_source_measurements(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    block_artifact: Mapping[str, Any],
+    controlled_fit: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[Mapping[str, Any]], dict[str, str]]:
+    relation_sha = _validate_content_addressed_artifact(
+        relation_artifact, label="opcode relation"
+    )
+    if (
+        relation_artifact.get("schema_version") != 1
+        or relation_artifact.get("purpose") != FORMAL_RELATION_PURPOSE
+        or relation_artifact.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND
+        or relation_artifact.get("status") != "accepted"
+    ):
+        raise ValueError("opcode relation artifact is not accepted formal evidence")
+    if relation_artifact.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES:
+        raise ValueError("opcode relation gates differ from the frozen contract")
+    affine_model = relation_artifact.get("affine_model")
+    if (
+        not isinstance(affine_model, Mapping)
+        or affine_model.get("anchor_keys") != list(OPCODE_RELATION_ANCHORS)
+    ):
+        raise ValueError("opcode relation anchor order differs from the frozen contract")
+
+    _validate_content_addressed_artifact(block_artifact, label="block calibration")
+    if (
+        block_artifact.get("schema_version") != 1
+        or block_artifact.get("purpose") != "block_calibration"
+        or block_artifact.get("status") != "accepted"
+        or block_artifact.get("relation_artifact_sha256") != relation_sha
+        or block_artifact.get("relation_raw_rows_sha256")
+        != relation_artifact.get("raw_rows_sha256")
+    ):
+        raise ValueError("block calibration artifact is not bound to the accepted relation")
+    if block_artifact.get("parameter_order") != BLOCK_CALIBRATION_PARAMETER_ORDER:
+        raise ValueError("block calibration parameter order differs from the frozen contract")
+    if block_artifact.get("formulas") != BLOCK_CALIBRATION_FORMULAS:
+        raise ValueError("block calibration formula differs from the frozen contract")
+    gates = block_artifact.get("gates")
+    if gates != BLOCK_CALIBRATION_GATES:
+        raise ValueError("block calibration gates differ from the frozen contract")
+    if block_artifact.get("exact_fit_rank") != 8:
+        raise ValueError("block calibration rank evidence is not exact rank eight")
+
+    opcode_multipliers = block_artifact.get("opcode_multipliers")
+    normalized_multipliers = block_artifact.get("opcode_multipliers_add_normalized")
+    fixed_costs = block_artifact.get("fixed_costs")
+    anchors = block_artifact.get("anchors")
+    expected_opcode_keys = {key.id for key in _pure_opcode_measurement_keys(manifest)}
+    if (
+        not isinstance(opcode_multipliers, Mapping)
+        or set(opcode_multipliers) != expected_opcode_keys
+        or not isinstance(normalized_multipliers, Mapping)
+        or set(normalized_multipliers) != expected_opcode_keys
+        or not isinstance(fixed_costs, Mapping)
+        or set(fixed_costs) != set(Q_FORMULA)
+        or not isinstance(anchors, Mapping)
+        or set(anchors) != set(OPCODE_RELATION_ANCHORS)
+    ):
+        raise ValueError("block calibration cost table differs from the manifest")
+    for label, values in (
+        ("opcode multiplier", opcode_multipliers),
+        ("normalized opcode multiplier", normalized_multipliers),
+        ("fixed/base value", fixed_costs),
+        ("anchor value", anchors),
+    ):
+        for key, raw_value in values.items():
+            value = _decimal(raw_value, label=f"{label} {key}")
+            if (
+                not isinstance(raw_value, str)
+                or _decimal_text(value) != raw_value
+                or value <= 0
+            ):
+                raise ValueError(f"{label} must be positive: {key}")
+    if block_artifact.get("normalization_reference_key") != manifest.normalization_reference_key:
+        raise ValueError("block calibration normalization reference differs")
+    dynamic = block_artifact.get("dynamic_holdouts")
+    expected_dynamic = set(getattr(manifest, "dynamic_raw_gas_keys", ()))
+    if not isinstance(dynamic, Mapping) or set(dynamic) != expected_dynamic:
+        raise ValueError("block calibration dynamic holdout set differs")
+    if any(
+        not isinstance(evidence, Mapping) or evidence.get("status") != "accepted"
+        for evidence in dynamic.values()
+    ):
+        raise ValueError("block calibration dynamic holdout evidence failed")
+
+    rows = controlled_fit.get("case_results")
+    if controlled_fit.get("schema_version") != 1 or not isinstance(rows, list):
+        raise ValueError("controlled fit artifact is invalid")
+    remaining_case_ids = _remaining_controlled_case_ids(manifest)
+    pure_case_ids = {
+        case_id
+        for key in _pure_opcode_measurement_keys(manifest)
+        for case_id in (*key.required_case_ids, *key.diagnostic_case_ids)
+    }
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("controlled fit contains a non-object row")
+        if row.get("purpose") in {"final_validation", "integration_smoke", "proposal"}:
+            raise ValueError("proposal-purpose calibration rows cannot enter the candidate")
+        if row.get("case_id") in pure_case_ids:
+            raise ValueError("pure opcode target-only slopes cannot enter the candidate")
+        if row.get("case_id") not in remaining_case_ids:
+            raise ValueError("controlled fit contains a case outside its remaining scope")
+    controlled_measurements = construct_measurement_values(manifest, rows)
+    remaining_keys = _remaining_controlled_measurement_keys(manifest)
+    for key in remaining_keys:
+        value = controlled_measurements.get(key.id)
+        if value is None or value.get("status") != "accepted":
+            raise ValueError(f"remaining controlled component is not accepted: {key.id}")
         evidence = value.get("checkpoint_evidence")
         if not isinstance(evidence, Mapping) or any(
             not isinstance(item, Mapping) or item.get("status") != "passed"
             for item in evidence.values()
         ):
-            raise ValueError(f"checkpoint evidence is missing or failed for {key_id}")
+            raise ValueError(f"checkpoint evidence is missing or failed for {key.id}")
+
+    measurements = {
+        key: {
+            "status": "accepted",
+            "pricing_basis": "raw_gas_slope",
+            "c_p": str(opcode_multipliers[key]),
+            "m_p": str(normalized_multipliers[key]),
+            "source": "block-calibration.json",
+        }
+        for key in sorted(expected_opcode_keys)
+    }
+    measurements.update(
+        {key.id: controlled_measurements[key.id] for key in remaining_keys}
+    )
+    return measurements, list(rows), {key: str(fixed_costs[key]) for key in Q_FORMULA}
+
+
+def build_candidate_components(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    block_artifact: Mapping[str, Any],
+    controlled_fit: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    schedule: UnzenSchedule | None = None,
+) -> dict[str, Any]:
+    required_hashes = {
+        "opcode_relations_sha256",
+        "block_calibration_rows_sha256",
+        "block_calibration_sha256",
+        "controlled_fit_sha256",
+        "controlled_decisions_sha256",
+    }
+    if any(not _is_sha256(provenance.get(key)) for key in required_hashes):
+        raise ValueError("candidate provenance is missing a required artifact digest")
+    measurements, rows, primary_overheads = _candidate_source_measurements(
+        manifest, relation_artifact, block_artifact, controlled_fit
+    )
+    if provenance["opcode_relations_sha256"] != relation_artifact["artifact_sha256"]:
+        raise ValueError("candidate relation digest differs from its provenance")
+    if provenance["block_calibration_rows_sha256"] != block_artifact["raw_block_rows_sha256"]:
+        raise ValueError("candidate block rows digest differs from its provenance")
+    if provenance["block_calibration_sha256"] != block_artifact["artifact_sha256"]:
+        raise ValueError("candidate block calibration digest differs from its provenance")
     primary_rows = _primary_case_projection(rows)
     normalized = {
         "schema_version": 1,
         "measurements": measurements,
         "overheads": primary_overheads,
+        "relation": {
+            "artifact_sha256": relation_artifact["artifact_sha256"],
+            "raw_rows_sha256": relation_artifact["raw_rows_sha256"],
+            "quality_gates": relation_artifact["quality_gates"],
+            "affine_model": relation_artifact["affine_model"],
+        },
+        "block_calibration": {
+            key: block_artifact[key]
+            for key in (
+                "artifact_sha256",
+                "raw_block_rows_sha256",
+                "parameter_order",
+                "formulas",
+                "gates",
+                "exact_fit_rank",
+                "dynamic_holdouts",
+            )
+        },
         "operation_phase_ownership": "transaction_non_anchor_only",
         "system_operation_ownership": manifest.system_operation_ownership,
         "anchor_operation_ownership": manifest.anchor_operation_ownership,
@@ -6090,6 +6291,15 @@ def build_candidate_components(
             "proposal_ape_max": "0.10",
         },
         "normalization_reference_key": manifest.normalization_reference_key,
+        "source_artifacts": {
+            key: provenance[key] for key in sorted(required_hashes)
+        },
+        "relation_quality_gates": relation_artifact["quality_gates"],
+        "block_quality_gates": block_artifact["gates"],
+        "block_parameter_order": block_artifact["parameter_order"],
+        "block_exact_fit_rank": block_artifact["exact_fit_rank"],
+        "block_formulas": block_artifact["formulas"],
+        "dynamic_holdouts": block_artifact["dynamic_holdouts"],
         "out_of_fit_checkpoint_mapping": OUT_OF_FIT_CHECKPOINTS,
         "provenance": dict(provenance),
     }
@@ -6129,6 +6339,11 @@ def build_candidate_components(
             if value.get("status") == "accepted" and "f_p" in value
         },
         "o_p": primary_overheads,
+        "m_p": {
+            key: value["m_p"]
+            for key, value in measurements.items()
+            if value.get("status") == "accepted" and "m_p" in value
+        },
     }
 
 
@@ -6535,8 +6750,9 @@ def validate_sealed_candidate(
 def seal_candidate_directory(
     run: pathlib.Path,
     manifest: Manifest,
-    case_results: Iterable[Mapping[str, Any]],
-    overhead_values: Mapping[str, Any],
+    relation_artifact: Mapping[str, Any],
+    block_artifact: Mapping[str, Any],
+    controlled_fit: Mapping[str, Any],
     provenance: Mapping[str, Any],
     schedule: UnzenSchedule | None = None,
     controlled_cycle_samples: Mapping[str, Any] | None = None,
@@ -6544,7 +6760,12 @@ def seal_candidate_directory(
     if any(run.glob("**/proposal*.json*")):
         raise ValueError("proposal result already exists in calibration directory")
     components = build_candidate_components(
-        manifest, case_results, overhead_values, provenance, schedule
+        manifest,
+        relation_artifact,
+        block_artifact,
+        controlled_fit,
+        provenance,
+        schedule,
     )
     if controlled_cycle_samples is not None:
         components["cycle_samples"] = dict(controlled_cycle_samples)
@@ -6673,6 +6894,7 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     components = manifest.get("components")
     if not isinstance(components, Mapping) or not components:
         raise ValueError("candidate root has no components")
+    payloads = {}
     for relative, expected in components.items():
         if relative not in {
             "normalized-primary.json",
@@ -6687,6 +6909,82 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
             raise ValueError(f"candidate component is unreadable: {relative}") from exc
         if sha256_bytes(canonical_json(payload)) != expected:
             raise ValueError(f"candidate component digest mismatch: {relative}")
+        payloads[relative] = payload
+    source_hashes = manifest.get("source_artifacts")
+    expected_source_keys = {
+        "opcode_relations_sha256",
+        "block_calibration_rows_sha256",
+        "block_calibration_sha256",
+        "controlled_fit_sha256",
+        "controlled_decisions_sha256",
+    }
+    if (
+        not isinstance(source_hashes, Mapping)
+        or set(source_hashes) != expected_source_keys
+        or any(not _is_sha256(value) for value in source_hashes.values())
+        or any(
+            manifest.get("provenance", {}).get(key) != value
+            for key, value in source_hashes.items()
+        )
+    ):
+        raise ValueError("candidate source artifact digests differ from provenance")
+    normalized = payloads.get("normalized-primary.json")
+    observations = payloads.get("primary-observations.json")
+    if not isinstance(normalized, Mapping) or not isinstance(observations, Mapping):
+        raise ValueError("candidate primary components are missing")
+    relation = normalized.get("relation")
+    block = normalized.get("block_calibration")
+    if (
+        not isinstance(relation, Mapping)
+        or relation.get("artifact_sha256") != source_hashes["opcode_relations_sha256"]
+        or relation.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES
+        or relation.get("quality_gates") != manifest.get("relation_quality_gates")
+        or not isinstance(block, Mapping)
+        or block.get("artifact_sha256") != source_hashes["block_calibration_sha256"]
+        or block.get("raw_block_rows_sha256")
+        != source_hashes["block_calibration_rows_sha256"]
+        or block.get("parameter_order") != BLOCK_CALIBRATION_PARAMETER_ORDER
+        or block.get("parameter_order") != manifest.get("block_parameter_order")
+        or block.get("formulas") != BLOCK_CALIBRATION_FORMULAS
+        or block.get("formulas") != manifest.get("block_formulas")
+        or block.get("gates") != BLOCK_CALIBRATION_GATES
+        or block.get("gates") != manifest.get("block_quality_gates")
+        or block.get("exact_fit_rank") != 8
+        or manifest.get("block_exact_fit_rank") != 8
+        or block.get("dynamic_holdouts") != manifest.get("dynamic_holdouts")
+    ):
+        raise ValueError("candidate reconstructed source evidence differs from root")
+    root_dynamic = manifest.get("dynamic_holdouts")
+    if not isinstance(root_dynamic, Mapping) or any(
+        not isinstance(value, Mapping) or value.get("status") != "accepted"
+        for value in root_dynamic.values()
+    ):
+        raise ValueError("candidate dynamic holdout evidence is not accepted")
+    measurements = normalized.get("measurements")
+    overheads = normalized.get("overheads")
+    if not isinstance(measurements, Mapping) or not isinstance(overheads, Mapping):
+        raise ValueError("candidate cost table is invalid")
+    numeric_values = [
+        raw
+        for value in measurements.values()
+        if isinstance(value, Mapping) and value.get("status") == "accepted"
+        for field, raw in value.items()
+        if field in {"c_p", "m_p", "f_p"}
+    ] + list(overheads.values())
+    if set(overheads) != set(Q_FORMULA) or any(
+        not isinstance(raw, str)
+        or _decimal_text(_decimal(raw, label="candidate cost")) != raw
+        or _decimal(raw, label="candidate cost") <= 0
+        for raw in numeric_values
+    ):
+        raise ValueError("candidate cost table contains a non-positive or non-canonical value")
+    rows = observations.get("rows")
+    if observations.get("schema_version") != 1 or not isinstance(rows, list) or any(
+        not isinstance(row, Mapping)
+        or row.get("purpose") in {"final_validation", "integration_smoke", "proposal"}
+        for row in rows
+    ):
+        raise ValueError("candidate primary observations are invalid")
     return {
         "candidate_sha256": recorded,
         "candidate_manifest": manifest,
@@ -7802,7 +8100,9 @@ def _controlled_repeat_point(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any
 
 
 def fit_controlled_costs(
-    manifest: Manifest, rows: Iterable[Mapping[str, Any]]
+    manifest: Manifest,
+    rows: Iterable[Mapping[str, Any]],
+    case_ids: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Fit primary controlled cases after enforcing exact three-repeat identities."""
     rows = list(rows)
@@ -7821,6 +8121,8 @@ def fit_controlled_costs(
     }
     results: list[dict[str, Any]] = []
     for case in manifest.cases:
+        if case_ids is not None and case.name not in case_ids:
+            continue
         key = key_by_case[case.name]
         generator_bounds = {
             int(row.get("generator_max_count", -1))
@@ -8853,22 +9155,8 @@ def fit_block_calibration_artifact(
         "relation_raw_rows_sha256": relation_artifact["raw_rows_sha256"],
         "raw_block_rows_sha256": sha256_bytes(canonical_json(raw_rows)),
         "parameter_order": list(result.parameter_order),
-        "formulas": {
-            "fit": "p_hat = x * mu_zero + [x * B, q] * [theta, beta]",
-            "opcode": "mu = mu_zero + B * theta",
-            "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
-        },
-        "gates": {
-            "exact_fit_rank": 8,
-            "positive_parameters": True,
-            "positive_opcode_multipliers": True,
-            "fit_mape_max": "0.05",
-            "fit_max_ape_max": "0.10",
-            "holdout_max_ape_max": "0.10",
-            "dynamic_relation_ape_max": "0.10",
-            "dynamic_implied_multiplier_spread_max": "0.05",
-            "leave_one_family_out_drift_max": "0.05",
-        },
+        "formulas": dict(BLOCK_CALIBRATION_FORMULAS),
+        "gates": dict(BLOCK_CALIBRATION_GATES),
         "anchors": _serialize_decimal_tree(result.anchors),
         "fixed_costs": _serialize_decimal_tree(result.fixed_costs),
         "opcode_multipliers": _serialize_decimal_tree(result.opcode_multipliers),
@@ -9674,14 +9962,16 @@ def validate_persisted_controlled_decisions(
     validated: dict[int, Mapping[str, Any]] = {}
     for index, record in enumerate(rounds):
         generator_max_count = observed[index]
-        expected_overhead_generator_max_count = min(
-            generator_max_count, CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
-        )
-        if (
-            record.get("overhead_generator_max_count")
-            != expected_overhead_generator_max_count
-        ):
-            raise ValueError("persisted controlled overhead generator maximum changed")
+        expected_fields = {
+            "generator_max_count",
+            "raw_runs",
+            "raw_runs_sha256",
+            "fit",
+            "fit_sha256",
+            "decision",
+        }
+        if set(record) != expected_fields:
+            raise ValueError("persisted controlled decision contains non-canonical fields")
         raw_path = calibration_run / record["raw_runs"]
         fit_path = calibration_run / record["fit"]
         if (
@@ -9694,39 +9984,8 @@ def validate_persisted_controlled_decisions(
         fit_payload = json.loads(fit_path.read_text())
         if fit_payload.get("generator_max_count") != generator_max_count:
             raise ValueError("persisted controlled fit footprint changed")
-        overhead_path = calibration_run / record["overhead_fit"]
-        overhead_runs_path = calibration_run / record["overhead_runs"]
-        if (
-            not overhead_path.is_file()
-            or sha256_file(overhead_path) != record.get("overhead_fit_sha256")
-            or not overhead_runs_path.is_file()
-            or sha256_file(overhead_runs_path) != record.get("overhead_runs_sha256")
-        ):
-            raise ValueError("persisted controlled overhead artifact changed")
-        overhead_payload = json.loads(overhead_path.read_text())
-        if (
-            overhead_payload.get("generator_max_count") != generator_max_count
-            or overhead_payload.get("overhead_generator_max_count")
-            != expected_overhead_generator_max_count
-        ):
-            raise ValueError("persisted controlled overhead footprint changed")
-        if generator_max_count > CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
-            source = validated.get(CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT)
-            if source is None or (
-                record.get("overhead_runs") != source.get("overhead_runs")
-                or record.get("overhead_runs_sha256")
-                != source.get("overhead_runs_sha256")
-            ):
-                raise ValueError(
-                    "persisted controlled overhead raw does not reuse the sealed "
-                    f"{CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} round"
-                )
         decision = controlled_round_decision(
-            [
-                *fit_payload.get("case_results", []),
-                *overhead_payload.get("case_results", []),
-            ],
-            generator_max_count,
+            fit_payload.get("case_results", []), generator_max_count
         )
         if decision != record.get("decision"):
             raise ValueError("persisted controlled round decision changed")
@@ -9782,34 +10041,22 @@ def load_terminal_controlled_artifacts(
         raise ValueError("controlled decisions have no terminal complete round")
 
     fit_path = calibration_run / "controlled-fit.json"
-    overhead_path = calibration_run / "controlled-overheads.json"
     if (
         not fit_path.is_file()
         or sha256_file(fit_path) != terminal.get("fit_sha256")
-        or not overhead_path.is_file()
-        or sha256_file(overhead_path) != terminal.get("overhead_fit_sha256")
     ):
         raise ValueError("canonical controlled artifacts do not match terminal decision")
     fit = json.loads(fit_path.read_text())
-    overhead = json.loads(overhead_path.read_text())
-    if (
-        fit.get("generator_max_count") != terminal_count
-        or overhead.get("generator_max_count") != terminal_count
-        or overhead.get("overhead_generator_max_count")
-        != min(terminal_count, CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT)
-    ):
+    if fit.get("generator_max_count") != terminal_count:
         raise ValueError("canonical controlled artifact footprint is not terminal")
     return {
         "experiment": experiment,
         "provenance_declaration": declaration,
         "terminal": terminal,
         "fit": fit,
-        "overheads": overhead,
         "fit_sha256": terminal["fit_sha256"],
-        "overheads_sha256": terminal["overhead_fit_sha256"],
         "controlled_decisions_sha256": sha256_file(decisions_path),
         "generator_max_count": terminal_count,
-        "overhead_generator_max_count": overhead["overhead_generator_max_count"],
     }
 
 
@@ -9820,11 +10067,7 @@ def _sealed_candidate_provenance(
         **artifacts["provenance_declaration"],
         "controlled_decisions_sha256": artifacts["controlled_decisions_sha256"],
         "controlled_fit_sha256": artifacts["fit_sha256"],
-        "controlled_overheads_sha256": artifacts["overheads_sha256"],
         "terminal_generator_max_count": artifacts["generator_max_count"],
-        "terminal_overhead_generator_max_count": artifacts[
-            "overhead_generator_max_count"
-        ],
     }
 
 
@@ -9834,9 +10077,7 @@ def _controlled_sample_artifact(
     candidate_sha256: str,
 ) -> dict[str, Any]:
     payload = build_controlled_cycle_cost_samples(
-        manifest,
-        artifacts["fit"]["case_results"],
-        artifacts["overheads"],
+        manifest, artifacts["fit"]["case_results"], {}
     )
     payload["calibration_id"] = artifacts["provenance_declaration"]["calibration_id"]
     payload["implementation_revision"] = artifacts["provenance_declaration"][
@@ -9853,7 +10094,6 @@ def _controlled_sample_artifact(
         "controlled_decisions_sha256"
     ]
     payload["controlled_fit_sha256"] = artifacts["fit_sha256"]
-    payload["controlled_overheads_sha256"] = artifacts["overheads_sha256"]
     return payload
 
 
@@ -9886,10 +10126,6 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
             if decision == "complete":
                 final_runs.parent.mkdir(parents=True, exist_ok=True)
                 final_runs.write_bytes(raw_path.read_bytes())
-                overhead_fit = calibration_run / previous["overhead_fit"]
-                (calibration_run / "controlled-overheads.json").write_bytes(
-                    overhead_fit.read_bytes()
-                )
                 fit_path = calibration_run / previous["fit"]
                 (calibration_run / "controlled-fit.json").write_bytes(
                     fit_path.read_bytes()
@@ -9915,6 +10151,7 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
                 ],
             },
             generator_max_count=generator_max_count,
+            case_ids=_remaining_controlled_case_ids(manifest),
         )
         round_runs = calibration_run / f"controlled-runs.{round_name}.jsonl"
         cmd_run(
@@ -9930,87 +10167,25 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
                 repeats=3,
             )
         )
-        results = fit_controlled_costs(manifest, iter_jsonl(round_runs))
+        results = fit_controlled_costs(
+            manifest,
+            iter_jsonl(round_runs),
+            case_ids=_remaining_controlled_case_ids(manifest),
+        )
         fit_payload = {
             "schema_version": 1,
             "generator_max_count": generator_max_count,
-            "case_results": results,
+            "case_results": _primary_case_projection(results),
         }
         round_fit = calibration_run / f"controlled-fit.{round_name}.json"
         round_fit.write_text(json.dumps(fit_payload, indent=2, sort_keys=True) + "\n")
-        overhead_generator_max_count = min(
-            generator_max_count, CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
-        )
-        if generator_max_count <= CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
-            overhead_runs = (
-                calibration_run / f"controlled-overhead-runs.{round_name}.jsonl"
-            )
-            run_controlled_overhead_round(
-                guest_launcher=args.guest_launcher,
-                calibration_run_id=calibration_run.name,
-                generator_max_count=overhead_generator_max_count,
-                include_startup=generator_max_count == CONTROLLED_GENERATOR_ROUNDS[0],
-                out=overhead_runs,
-            )
-        else:
-            source_record = next(
-                (
-                    record
-                    for record in decisions["rounds"]
-                    if record.get("generator_max_count")
-                    == CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT
-                ),
-                None,
-            )
-            if source_record is None:
-                raise ValueError(
-                    f"controlled {generator_max_count} round has no sealed "
-                    f"{CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} overhead raw"
-                )
-            overhead_runs = calibration_run / source_record["overhead_runs"]
-            if (
-                not overhead_runs.is_file()
-                or sha256_file(overhead_runs)
-                != source_record.get("overhead_runs_sha256")
-            ):
-                raise ValueError(
-                    f"sealed {CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT} overhead raw "
-                    f"changed before {generator_max_count} reuse"
-                )
-        overhead_rows = list(iter_jsonl(overhead_runs))
-        if generator_max_count != CONTROLLED_GENERATOR_ROUNDS[0]:
-            first_record = decisions["rounds"][0]
-            first_rows = iter_jsonl(calibration_run / first_record["overhead_runs"])
-            overhead_rows.extend(
-                row
-                for row in first_rows
-                if row.get("overhead_key_id") == "proposal_startup"
-            )
-        overhead_artifact = fit_controlled_overheads(
-            manifest,
-            overhead_rows,
-            results,
-            generator_max_count=generator_max_count,
-            overhead_generator_max_count=overhead_generator_max_count,
-        )
-        round_overhead_fit = calibration_run / f"controlled-overheads.{round_name}.json"
-        round_overhead_fit.write_text(
-            json.dumps(overhead_artifact, indent=2, sort_keys=True) + "\n"
-        )
-        decision = controlled_round_decision(
-            [*results, *overhead_artifact["case_results"]], generator_max_count
-        )
+        decision = controlled_round_decision(results, generator_max_count)
         record = {
             "generator_max_count": generator_max_count,
             "raw_runs": str(round_runs.relative_to(calibration_run)),
             "raw_runs_sha256": sha256_file(round_runs),
             "fit": str(round_fit.relative_to(calibration_run)),
             "fit_sha256": sha256_file(round_fit),
-            "overhead_runs": str(overhead_runs.relative_to(calibration_run)),
-            "overhead_runs_sha256": sha256_file(overhead_runs),
-            "overhead_generator_max_count": overhead_generator_max_count,
-            "overhead_fit": str(round_overhead_fit.relative_to(calibration_run)),
-            "overhead_fit_sha256": sha256_file(round_overhead_fit),
             "decision": decision,
         }
         decisions["rounds"].append(record)
@@ -10019,9 +10194,6 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
         if decision == "complete":
             final_runs.parent.mkdir(parents=True, exist_ok=True)
             final_runs.write_bytes(round_runs.read_bytes())
-            (calibration_run / "controlled-overheads.json").write_bytes(
-                round_overhead_fit.read_bytes()
-            )
             (calibration_run / "controlled-fit.json").write_bytes(
                 round_fit.read_bytes()
             )
@@ -10032,32 +10204,65 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
 
 def cmd_build_candidate(args: argparse.Namespace) -> None:
     run = _resolve_repo_path(args.run, field_name="calibration_run")
+    execution_identity = validate_calibration_execution_identity(run)
     manifest, identity = verify_frozen_controlled_manifest(
         run,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
+    if execution_identity != identity:
+        raise ValueError("candidate calibration identity changed during validation")
     artifacts = load_terminal_controlled_artifacts(run, identity)
     fit_path = _canonical_run_artifact(
         run,
-        _resolve_repo_path(args.fit, field_name="controlled_fit"),
+        _resolve_repo_path(args.controlled_fit, field_name="controlled_fit"),
         "controlled-fit.json",
     )
-    overhead_path = _canonical_run_artifact(
+    relations_path = _canonical_run_artifact(
         run,
-        _resolve_repo_path(args.overheads, field_name="controlled_overheads"),
-        "controlled-overheads.json",
+        _resolve_repo_path(args.relations, field_name="opcode_relations"),
+        "opcode-relations.json",
     )
-    if (
-        sha256_file(fit_path) != artifacts["fit_sha256"]
-        or sha256_file(overhead_path) != artifacts["overheads_sha256"]
-    ):
-        raise ValueError("controlled fit/overhead do not match terminal decision")
+    block_path = _canonical_run_artifact(
+        run,
+        _resolve_repo_path(args.block_calibration, field_name="block_calibration"),
+        "block-calibration.json",
+    )
+    if not relations_path.is_file() or not block_path.is_file():
+        raise ValueError("candidate requires accepted relation and block calibration artifacts")
+    if sha256_file(fit_path) != artifacts["fit_sha256"]:
+        raise ValueError("controlled fit does not match terminal decision")
     fit = artifacts["fit"]
-    overhead_artifact = artifacts["overheads"]
-    if overhead_artifact.get("status") != "accepted" or not isinstance(
-        overhead_artifact.get("o_p"), Mapping
-    ):
-        raise ValueError("controlled overhead artifact is not accepted")
+    relation_rows_path = run / "raw" / "formal-relations.jsonl"
+    block_rows_path = run / "block-calibration-rows.jsonl"
+    if not relation_rows_path.is_file() or not block_rows_path.is_file():
+        raise ValueError("candidate requires canonical relation and block raw rows")
+    relation_artifact = json.loads(relations_path.read_text())
+    relation_rows = list(iter_jsonl(relation_rows_path))
+    expected_relation_provenance = {
+        "calibration_id": run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    validate_opcode_relations_artifact(
+        manifest,
+        relation_artifact,
+        relation_rows,
+        expected_relation_provenance,
+    )
+    block_artifact = json.loads(block_path.read_text())
+    block_rows = list(iter_jsonl(block_rows_path))
+    replayed_block = fit_block_calibration_artifact(
+        manifest,
+        _affine_model_from_validated_artifact(manifest, relation_artifact),
+        relation_artifact,
+        block_rows,
+    )
+    if not _exact_json_equal(block_artifact, replayed_block):
+        raise ValueError("block calibration artifact differs from exact raw-row replay")
     provenance_path = _canonical_run_artifact(
         run,
         _resolve_repo_path(args.provenance, field_name="candidate_provenance"),
@@ -10067,11 +10272,25 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     if supplied_provenance != artifacts["provenance_declaration"]:
         raise ValueError("candidate provenance does not match experiment identity")
     provenance = _sealed_candidate_provenance(artifacts)
+    provenance.update(
+        {
+            "opcode_relations_sha256": relation_artifact["artifact_sha256"],
+            "block_calibration_rows_sha256": sha256_bytes(
+                canonical_json(block_rows)
+            ),
+            "block_calibration_sha256": block_artifact["artifact_sha256"],
+        }
+    )
+    if provenance["block_calibration_rows_sha256"] != block_artifact.get(
+        "raw_block_rows_sha256"
+    ):
+        raise ValueError("block calibration raw rows digest differs from artifact")
     schedule = current_uzen_schedule()
     preview = build_candidate_components(
         manifest,
-        fit["case_results"],
-        overhead_artifact["o_p"],
+        relation_artifact,
+        block_artifact,
+        fit,
         provenance,
         schedule,
     )
@@ -10081,8 +10300,9 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     components = seal_candidate_directory(
         run,
         manifest,
-        fit["case_results"],
-        overhead_artifact["o_p"],
+        relation_artifact,
+        block_artifact,
+        fit,
         provenance,
         schedule,
         controlled_cycle_samples=samples,
@@ -10291,8 +10511,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     candidate.add_argument("--run", type=pathlib.Path, required=True)
     candidate.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
-    candidate.add_argument("--fit", type=pathlib.Path, required=True)
-    candidate.add_argument("--overheads", type=pathlib.Path, required=True)
+    candidate.add_argument("--relations", type=pathlib.Path, required=True)
+    candidate.add_argument("--block-calibration", type=pathlib.Path, required=True)
+    candidate.add_argument("--controlled-fit", type=pathlib.Path, required=True)
     candidate.add_argument("--provenance", type=pathlib.Path, required=True)
     candidate.set_defaults(func=cmd_build_candidate)
 

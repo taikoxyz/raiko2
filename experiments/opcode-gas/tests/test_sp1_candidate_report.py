@@ -210,6 +210,108 @@ def accepted_case(case_id, key_id, basis, slope, raw_gas=None):
     return result
 
 
+def candidate_input_artifacts(manifest, controlled_rows):
+    opcode_keys = [
+        key.id
+        for key in manifest.measurement_keys
+        if key.event_match.component == "opcode"
+        and key.pricing_basis == "raw_gas_slope"
+    ]
+    relation = {
+        "schema_version": 1,
+        "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+        "signal_kind": opcode_gas.FORMAL_RELATION_SIGNAL_KIND,
+        "status": "accepted",
+        "provenance": {"calibration_id": "b" * 24},
+        "quality_gates": copy.deepcopy(opcode_gas.FORMAL_RELATION_QUALITY_GATES),
+        "equations": [],
+        "self_controls": [],
+        "dynamic_holdouts": [],
+        "relation_matrix_sha256": "1" * 64,
+        "raw_rows_sha256": "2" * 64,
+        "affine_model": {
+            "anchor_keys": list(opcode_gas.OPCODE_RELATION_ANCHORS),
+            "rank": max(0, len(opcode_keys) - 4),
+            "nullity": 4,
+        },
+    }
+    relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+        opcode_gas.canonical_json(relation)
+    )
+    multipliers = {key: str(index + 10) for index, key in enumerate(opcode_keys)}
+    normalized = {
+        key: opcode_gas._decimal_text(
+            Decimal(value) / Decimal(multipliers[manifest.normalization_reference_key])
+        )
+        for key, value in multipliers.items()
+    }
+    block = {
+        "schema_version": 1,
+        "purpose": "block_calibration",
+        "status": "accepted",
+        "provenance": copy.deepcopy(relation["provenance"]),
+        "relation_artifact_sha256": relation["artifact_sha256"],
+        "relation_raw_rows_sha256": relation["raw_rows_sha256"],
+        "raw_block_rows_sha256": opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json([{}])
+        ),
+        "parameter_order": [*opcode_gas.OPCODE_RELATION_ANCHORS, *opcode_gas.Q_FORMULA],
+        "formulas": {
+            "fit": "p_hat = x * mu_zero + [x * B, q] * [theta, beta]",
+            "opcode": "mu = mu_zero + B * theta",
+            "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
+        },
+        "gates": {
+            "exact_fit_rank": 8,
+            "positive_parameters": True,
+            "positive_opcode_multipliers": True,
+            "fit_mape_max": "0.05",
+            "fit_max_ape_max": "0.10",
+            "holdout_max_ape_max": "0.10",
+            "dynamic_relation_ape_max": "0.10",
+            "dynamic_implied_multiplier_spread_max": "0.05",
+            "leave_one_family_out_drift_max": "0.05",
+        },
+        "anchors": {key: str(index + 10) for index, key in enumerate(opcode_gas.OPCODE_RELATION_ANCHORS)},
+        "fixed_costs": {key: "100" for key in opcode_gas.Q_FORMULA},
+        "opcode_multipliers": multipliers,
+        "normalization_reference_key": manifest.normalization_reference_key,
+        "opcode_multipliers_add_normalized": normalized,
+        "fit_mape": "0",
+        "fit_max_ape": "0",
+        "holdout_max_ape": "0",
+        "exact_fit_matrix": [],
+        "exact_fit_rank": 8,
+        "column_scales": {},
+        "solver_residual": "0",
+        "predictions": {},
+        "leave_one_family_out": {},
+        "dynamic_holdouts": {
+            key: {"status": "accepted", "consistency": "0", "observations": []}
+            for key in manifest.dynamic_raw_gas_keys
+        },
+    }
+    block["artifact_sha256"] = opcode_gas.sha256_bytes(
+        opcode_gas.canonical_json(block)
+    )
+    controlled_fit = {
+        "schema_version": 1,
+        "generator_max_count": 8,
+        "case_results": copy.deepcopy(controlled_rows),
+    }
+    provenance = {
+        "implementation_revision": "a" * 40,
+        "opcode_relations_sha256": relation["artifact_sha256"],
+        "block_calibration_rows_sha256": block["raw_block_rows_sha256"],
+        "block_calibration_sha256": block["artifact_sha256"],
+        "controlled_fit_sha256": opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(controlled_fit)
+        ),
+        "controlled_decisions_sha256": "4" * 64,
+    }
+    return relation, block, controlled_fit, provenance
+
+
 def persist_execution_identity(root, manifest, revision="a" * 40):
     guest_artifact = root / "sp1-test.elf"
     guest_artifact.write_bytes(b"test SP1 guest artifact")
@@ -268,30 +370,16 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
         "generator_max_count": 8,
         "case_results": rows,
     }
-    overhead = {
-        **overhead,
-        "generator_max_count": 8,
-        "overhead_generator_max_count": 8,
-    }
     fit_path = run / "controlled-fit.json"
-    overhead_path = run / "controlled-overheads.json"
     raw_path = run / "controlled-runs.generator-max-8.jsonl"
-    overhead_raw_path = run / "controlled-overhead-runs.generator-max-8.jsonl"
     fit_path.write_text(opcode_gas.json.dumps(fit) + "\n")
-    overhead_path.write_text(opcode_gas.json.dumps(overhead) + "\n")
     raw_path.write_text("{}\n")
-    overhead_raw_path.write_text("{}\n")
     decision = {
         "generator_max_count": 8,
         "raw_runs": raw_path.name,
         "raw_runs_sha256": opcode_gas.sha256_file(raw_path),
         "fit": fit_path.name,
         "fit_sha256": opcode_gas.sha256_file(fit_path),
-        "overhead_runs": overhead_raw_path.name,
-        "overhead_runs_sha256": opcode_gas.sha256_file(overhead_raw_path),
-        "overhead_generator_max_count": 8,
-        "overhead_fit": overhead_path.name,
-        "overhead_fit_sha256": opcode_gas.sha256_file(overhead_path),
         "decision": "complete",
     }
     (run / "controlled-decisions.json").write_text(
@@ -300,6 +388,14 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
     (run / "controlled-decisions.sha256").write_text(
         opcode_gas.sha256_file(run / "controlled-decisions.json") + "\n"
     )
+    relation, block, _controlled_fit, _provenance = candidate_input_artifacts(
+        manifest, rows
+    )
+    (run / "opcode-relations.json").write_text(opcode_gas.json.dumps(relation) + "\n")
+    (run / "block-calibration.json").write_text(opcode_gas.json.dumps(block) + "\n")
+    (run / "raw").mkdir()
+    (run / "raw" / "formal-relations.jsonl").write_text("{}\n")
+    (run / "block-calibration-rows.jsonl").write_text("{}\n")
     bridge = {
         "schema_version": 1,
         "implementation_revision": revision,
@@ -1420,8 +1516,9 @@ class CandidateConstructionTests(unittest.TestCase):
             "build-candidate": [
                 "--run", "run",
                 "--controlled-manifest", "manifest.toml",
-                "--fit", "fit.json",
-                "--overheads", "overheads.json",
+                "--relations", "run/opcode-relations.json",
+                "--block-calibration", "run/block-calibration.json",
+                "--controlled-fit", "run/controlled-fit.json",
                 "--provenance", "provenance.json",
             ],
             "build-sp1-bridge": [
@@ -1909,8 +2006,6 @@ class CandidateConstructionTests(unittest.TestCase):
         manifest = controlled_manifest()
         revision = "a" * 40
         rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
             accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
         ]
         overhead = {
@@ -1927,14 +2022,25 @@ class CandidateConstructionTests(unittest.TestCase):
             )
             bridge_dir = run / "bridge"
             fit_path = run / "controlled-fit.json"
-            overhead_path = run / "controlled-overheads.json"
             provenance_path = run / "provenance.json"
             manifest_path = root / "manifest.toml"
             manifest_path.write_text("test fixture is supplied by mock\n")
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "validate_calibration_execution_identity", return_value=identity
+            ), mock.patch.object(
                 opcode_gas,
                 "verify_frozen_controlled_manifest",
                 return_value=(manifest, identity),
+            ), mock.patch.object(
+                opcode_gas, "validate_opcode_relations_artifact"
+            ), mock.patch.object(
+                opcode_gas, "_affine_model_from_validated_artifact", return_value=object()
+            ), mock.patch.object(
+                opcode_gas,
+                "fit_block_calibration_artifact",
+                return_value=opcode_gas.json.loads(
+                    (run / "block-calibration.json").read_text()
+                ),
             ), mock.patch.object(
                 opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
             ):
@@ -1942,8 +2048,9 @@ class CandidateConstructionTests(unittest.TestCase):
                     opcode_gas.argparse.Namespace(
                         run=run,
                         controlled_manifest=manifest_path,
-                        fit=fit_path,
-                        overheads=overhead_path,
+                        controlled_fit=fit_path,
+                        relations=run / "opcode-relations.json",
+                        block_calibration=run / "block-calibration.json",
                         provenance=provenance_path,
                     )
                 )
@@ -1954,7 +2061,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 )
                 self.assertTrue(
                     all(
-                        sample["status"] == "available"
+                        sample["status"] in {"available", "unavailable"}
                         for sample in sample_artifact["samples"].values()
                     )
                 )
@@ -1979,8 +2086,7 @@ class CandidateConstructionTests(unittest.TestCase):
             result = opcode_gas.json.loads(
                 (bridge_dir / "controlled-bridge.json").read_text()
             )
-            self.assertEqual(result["status"], "stable_controlled")
-            self.assertEqual(result["kappa_sp1"], "0.5")
+            self.assertEqual(result["status"], "insufficient_data")
             bridge_root = opcode_gas.json.loads(
                 (bridge_dir / "bridge-root.json").read_text()
             )
@@ -2004,8 +2110,6 @@ class CandidateConstructionTests(unittest.TestCase):
     def test_candidate_cli_rejects_tampered_or_unbound_controlled_artifacts(self):
         manifest = controlled_manifest()
         rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
             accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
         ]
         overhead = {
@@ -2020,29 +2124,45 @@ class CandidateConstructionTests(unittest.TestCase):
             args = {
                 "run": run,
                 "controlled_manifest": root / "manifest.toml",
-                "fit": run / "controlled-fit.json",
-                "overheads": run / "controlled-overheads.json",
+                "controlled_fit": run / "controlled-fit.json",
+                "relations": run / "opcode-relations.json",
+                "block_calibration": run / "block-calibration.json",
                 "provenance": run / "provenance.json",
                 **overrides,
             }
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "validate_calibration_execution_identity", return_value=identity
+            ), mock.patch.object(
                 opcode_gas,
                 "verify_frozen_controlled_manifest",
                 return_value=(manifest, identity),
+            ), mock.patch.object(
+                opcode_gas, "validate_opcode_relations_artifact"
+            ), mock.patch.object(
+                opcode_gas, "_affine_model_from_validated_artifact", return_value=object()
+            ), mock.patch.object(
+                opcode_gas,
+                "fit_block_calibration_artifact",
+                return_value=opcode_gas.json.loads(
+                    (run / "block-calibration.json").read_text()
+                ),
             ), mock.patch.object(
                 opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
             ):
                 opcode_gas.cmd_build_candidate(opcode_gas.argparse.Namespace(**args))
 
         mutations = {
+            "missing relation": lambda run: (run / "opcode-relations.json").unlink(),
             "fit": lambda run: (run / "controlled-fit.json").write_text(
                 opcode_gas.json.dumps({"case_results": rows}) + "\n"
             ),
-            "overhead": lambda run: (run / "controlled-overheads.json").write_text(
+            "block": lambda run: (run / "block-calibration.json").write_text(
                 opcode_gas.json.dumps(
                     {
-                        **overhead,
-                        "o_p": {key: "101" for key in opcode_gas.Q_FORMULA},
+                        **opcode_gas.json.loads(
+                            (run / "block-calibration.json").read_text()
+                        ),
+                        "status": "rejected",
                     }
                 )
                 + "\n"
@@ -2095,7 +2215,7 @@ class CandidateConstructionTests(unittest.TestCase):
             arbitrary = root / "arbitrary-accepted-fit.json"
             arbitrary.write_bytes((run / "controlled-fit.json").read_bytes())
             with self.assertRaisesRegex(ValueError, "canonical persisted"):
-                invoke(root, run, identity, fit=arbitrary)
+                invoke(root, run, identity, controlled_fit=arbitrary)
 
     def test_experiment_identity_rejects_stale_content_id_and_duplicate_fields(self):
         manifest = controlled_manifest()
@@ -2226,12 +2346,20 @@ class CandidateConstructionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "matched-control diagnostic"):
             opcode_gas.fit_controlled_costs(controlled_manifest(), [row])
-        with self.assertRaisesRegex(ValueError, "matched-control diagnostic"):
+        manifest = controlled_manifest()
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(
+            manifest,
+            [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
+        )
+        relation["purpose"] = opcode_gas.MATCHED_CONTROL_PURPOSE
+        relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {key: value for key, value in relation.items() if key != "artifact_sha256"}
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "formal evidence"):
             opcode_gas.build_candidate_components(
-                controlled_manifest(),
-                [row],
-                {},
-                {},
+                manifest, relation, block, controlled_fit, provenance
             )
 
     def test_fit_rejects_cross_batch_precompile_pairing(self):
@@ -2282,10 +2410,11 @@ class CandidateConstructionTests(unittest.TestCase):
         generated = []
         fitted_footprints = []
 
-        def fake_generate(_manifest, out, *, provenance, generator_max_count):
+        def fake_generate(_manifest, out, *, provenance, generator_max_count, case_ids):
             generated.append(generator_max_count)
             out.mkdir(parents=True)
             self.assertRegex(provenance["calibration_id"], r"^[0-9a-f]{24}$")
+            self.assertEqual(case_ids, {"identity"})
             return []
 
         def fake_run(args):
@@ -2296,10 +2425,16 @@ class CandidateConstructionTests(unittest.TestCase):
                 + "\n"
             )
 
-        def fake_fit(_manifest, rows):
+        def fake_fit(_manifest, rows, case_ids):
             footprints = {row["generator_max_count"] for row in rows}
             fitted_footprints.append(footprints)
-            return [{"status": "accepted"}]
+            self.assertEqual(case_ids, {"identity"})
+            return [
+                {
+                    "status": "rejected" if generated[-1] == 8 else "accepted",
+                    "reasons": ["exhausted_sweep"] if generated[-1] == 8 else [],
+                }
+            ]
 
         def fake_overhead_run(*, out, **_kwargs):
             out.write_text("{}\n")
@@ -2369,7 +2504,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 (run / "controlled-decisions.json").read_text()
             )
             self.assertTrue((run / "controlled-fit.json").is_file())
-            self.assertTrue((run / "controlled-overheads.json").is_file())
+            self.assertFalse((run / "controlled-overheads.json").exists())
 
         self.assertEqual(generated, [8, 32])
         self.assertEqual(fitted_footprints, [{8}, {32}])
@@ -2378,12 +2513,12 @@ class CandidateConstructionTests(unittest.TestCase):
             ["expand_next_round", "complete"],
         )
 
-    def test_later_operation_rounds_reuse_sealed_128_overhead_raw_and_refit(self):
+    def test_controlled_runner_excludes_block_owned_overheads_at_every_round(self):
         generated = []
         overhead_runs = []
         overhead_fits = []
 
-        def fake_generate(_manifest, out, *, provenance, generator_max_count):
+        def fake_generate(_manifest, out, *, provenance, generator_max_count, case_ids):
             generated.append(generator_max_count)
             out.mkdir(parents=True)
             return []
@@ -2396,7 +2531,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 + "\n"
             )
 
-        def fake_fit(_manifest, rows):
+        def fake_fit(_manifest, rows, case_ids):
             generator_max_count = next(iter(rows))["generator_max_count"]
             return [
                 {
@@ -2486,66 +2621,24 @@ class CandidateConstructionTests(unittest.TestCase):
             decisions = opcode_gas.json.loads(decisions_path.read_text())
             records = decisions["rounds"]
             self.assertEqual(generated, [8, 32, 128, 512, 2048])
-            self.assertEqual(overhead_runs, [8, 32, 128])
-            self.assertEqual(
-                overhead_fits[-2],
-                (512, 128, {128}, {512}),
-            )
-            self.assertEqual(
-                overhead_fits[-1],
-                (2048, 128, {128}, {2048}),
-            )
-            self.assertEqual(records[-1]["overhead_generator_max_count"], 128)
-            for record in records[3:]:
-                self.assertEqual(record["overhead_generator_max_count"], 128)
-                self.assertEqual(record["overhead_runs"], records[2]["overhead_runs"])
-                self.assertEqual(
-                    record["overhead_runs_sha256"],
-                    records[2]["overhead_runs_sha256"],
-                )
+            self.assertEqual(overhead_runs, [])
+            self.assertEqual(overhead_fits, [])
+            self.assertTrue(all("overhead_fit" not in record for record in records))
             artifacts = opcode_gas.load_terminal_controlled_artifacts(
                 run,
                 identity,
             )
-            self.assertEqual(artifacts["overhead_generator_max_count"], 128)
-            self.assertEqual(
-                opcode_gas._sealed_candidate_provenance(artifacts)[
-                    "terminal_overhead_generator_max_count"
-                ],
-                128,
+            self.assertNotIn("overheads", artifacts)
+            self.assertNotIn(
+                "controlled_overheads_sha256",
+                opcode_gas._sealed_candidate_provenance(artifacts),
             )
             opcode_gas.validate_persisted_controlled_decisions(run, decisions)
 
             tampered = copy.deepcopy(decisions)
-            tampered["rounds"][-1]["overhead_generator_max_count"] = 2048
-            with self.assertRaisesRegex(ValueError, "overhead generator"):
+            tampered["rounds"][-1]["overhead_fit"] = "legacy.json"
+            with self.assertRaisesRegex(ValueError, "non-canonical"):
                 opcode_gas.validate_persisted_controlled_decisions(run, tampered)
-
-            tampered_raw = copy.deepcopy(decisions)
-            sealed_overhead_raw = run / records[2]["overhead_runs"]
-            alternate_overhead_raw = run / "alternate-overhead-runs.jsonl"
-            alternate_overhead_raw.write_bytes(
-                sealed_overhead_raw.read_bytes() + sealed_overhead_raw.read_bytes()
-            )
-            tampered_raw["rounds"][-1]["overhead_runs"] = str(
-                alternate_overhead_raw.relative_to(run)
-            )
-            tampered_raw["rounds"][-1]["overhead_runs_sha256"] = (
-                opcode_gas.sha256_file(alternate_overhead_raw)
-            )
-            with self.assertRaisesRegex(ValueError, "does not reuse the sealed 128 round"):
-                opcode_gas.validate_persisted_controlled_decisions(run, tampered_raw)
-
-            tampered_fit = copy.deepcopy(decisions)
-            overhead_fit_path = run / records[-1]["overhead_fit"]
-            overhead_payload = opcode_gas.json.loads(overhead_fit_path.read_text())
-            overhead_payload["overhead_generator_max_count"] = 2048
-            overhead_fit_path.write_text(opcode_gas.json.dumps(overhead_payload) + "\n")
-            tampered_fit["rounds"][-1]["overhead_fit_sha256"] = (
-                opcode_gas.sha256_file(overhead_fit_path)
-            )
-            with self.assertRaisesRegex(ValueError, "overhead footprint"):
-                opcode_gas.validate_persisted_controlled_decisions(run, tampered_fit)
 
     def test_adaptive_resume_rejects_gap_duplicate_and_edited_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2557,10 +2650,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 record_index += 1
                 raw = run / f"raw-{generator_max_count}-{record_index}.jsonl"
                 fit = run / f"fit-{generator_max_count}-{record_index}.json"
-                overhead_raw = run / f"overhead-raw-{generator_max_count}-{record_index}.jsonl"
-                overhead_fit = run / f"overhead-fit-{generator_max_count}-{record_index}.json"
                 raw.write_text("{}\n")
-                overhead_raw.write_text("{}\n")
                 fit.write_text(
                     opcode_gas.json.dumps(
                         {
@@ -2571,28 +2661,12 @@ class CandidateConstructionTests(unittest.TestCase):
                     )
                     + "\n"
                 )
-                overhead_fit.write_text(
-                    opcode_gas.json.dumps(
-                        {
-                            "schema_version": 1,
-                            "generator_max_count": generator_max_count,
-                            "overhead_generator_max_count": generator_max_count,
-                            "case_results": [],
-                        }
-                    )
-                    + "\n"
-                )
                 return {
                     "generator_max_count": generator_max_count,
                     "raw_runs": raw.name,
                     "raw_runs_sha256": opcode_gas.sha256_file(raw),
                     "fit": fit.name,
                     "fit_sha256": opcode_gas.sha256_file(fit),
-                    "overhead_runs": overhead_raw.name,
-                    "overhead_runs_sha256": opcode_gas.sha256_file(overhead_raw),
-                    "overhead_generator_max_count": generator_max_count,
-                    "overhead_fit": overhead_fit.name,
-                    "overhead_fit_sha256": opcode_gas.sha256_file(overhead_fit),
                     "decision": decision,
                 }
 
@@ -2745,15 +2819,17 @@ class CandidateConstructionTests(unittest.TestCase):
 
     def test_secondary_changes_do_not_change_candidate_digest(self):
         manifest = controlled_manifest()
-        rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
-            accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
-        ]
-        overheads = {key: "100" for key in opcode_gas.Q_FORMULA}
-        first = opcode_gas.build_candidate_components(manifest, rows, overheads, {"revision": "a" * 40})
-        rows[0]["secondary"] = {"status": "failed", "reason": "noise"}
-        second = opcode_gas.build_candidate_components(manifest, rows, overheads, {"revision": "a" * 40})
+        rows = [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)]
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(manifest, rows)
+        first = opcode_gas.build_candidate_components(
+            manifest, relation, block, controlled_fit, provenance
+        )
+        controlled_fit["case_results"][0]["secondary"] = {
+            "status": "failed", "reason": "noise"
+        }
+        second = opcode_gas.build_candidate_components(
+            manifest, relation, block, controlled_fit, provenance
+        )
         self.assertEqual(first["candidate_sha256"], second["candidate_sha256"])
         self.assertNotEqual(first["cycle_sample_sha256"], second["cycle_sample_sha256"])
 
@@ -2772,41 +2848,120 @@ class CandidateConstructionTests(unittest.TestCase):
         manifest = opcode_gas.parse_controlled_manifest(
             manifest_data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
         )
-        rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
-            accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
-            accepted_case(
-                "add_diagnostic", "opcode:0x01", "raw_gas_slope", 1200, 3
-            ),
-        ]
-        overheads = {key: "100" for key in opcode_gas.Q_FORMULA}
+        rows = [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)]
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(manifest, rows)
         first = opcode_gas.build_candidate_components(
-            manifest, rows, overheads, {"revision": "a" * 40}
+            manifest, relation, block, controlled_fit, provenance
         )
-        rows[-1]["secondary"] = {"status": "failed", "reason": "noise"}
+        controlled_fit["case_results"][-1]["secondary"] = {
+            "status": "failed", "reason": "noise"
+        }
         second = opcode_gas.build_candidate_components(
-            manifest, rows, overheads, {"revision": "a" * 40}
+            manifest, relation, block, controlled_fit, provenance
         )
         self.assertEqual(first["candidate_sha256"], second["candidate_sha256"])
         self.assertNotEqual(first["cycle_sample_sha256"], second["cycle_sample_sha256"])
 
-    def test_candidate_requires_add_q_and_passing_checkpoint(self):
+    def test_candidate_rejects_old_or_mutated_sources_and_failed_evidence(self):
         manifest = controlled_manifest()
-        rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
-            accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
+        rows = [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)]
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(manifest, rows)
+
+        mutations = []
+        old_fit = copy.deepcopy(controlled_fit)
+        old_fit["case_results"].append(
+            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3)
+        )
+        mutations.append((relation, block, old_fit, "pure opcode"))
+        diagnostic = copy.deepcopy(relation)
+        diagnostic["purpose"] = opcode_gas.MATCHED_CONTROL_PURPOSE
+        diagnostic["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {key: value for key, value in diagnostic.items() if key != "artifact_sha256"}
+            )
+        )
+        mutations.append((diagnostic, block, controlled_fit, "relation"))
+        rejected_relation = copy.deepcopy(relation)
+        rejected_relation["status"] = "rejected"
+        rejected_relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {key: value for key, value in rejected_relation.items() if key != "artifact_sha256"}
+            )
+        )
+        mutations.append((rejected_relation, block, controlled_fit, "relation"))
+        rejected_block = copy.deepcopy(block)
+        rejected_block["status"] = "rejected"
+        mutations.append((relation, rejected_block, controlled_fit, "block"))
+        changed_relation_raw = copy.deepcopy(relation)
+        changed_relation_raw["raw_rows_sha256"] = "e" * 64
+        changed_relation_raw["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in changed_relation_raw.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        changed_relation_block = copy.deepcopy(block)
+        changed_relation_block["relation_artifact_sha256"] = changed_relation_raw[
+            "artifact_sha256"
         ]
-        overheads = {key: "100" for key in opcode_gas.Q_FORMULA}
-        for broken_rows, broken_overheads, message in [
-            (rows[1:], overheads, "ADD"),
-            (rows, {key: value for key, value in overheads.items() if key != "tx_base"}, "Q_formula"),
-            ([{**rows[0], "checkpoint": {**rows[0]["checkpoint"], "status": "failed"}}, *rows[1:]], overheads, "checkpoint"),
-        ]:
+        changed_relation_block["relation_raw_rows_sha256"] = "e" * 64
+        changed_relation_block["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in changed_relation_block.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        mutations.append(
+            (changed_relation_raw, changed_relation_block, controlled_fit, "relation digest")
+        )
+        raw_hash = copy.deepcopy(block)
+        raw_hash["raw_block_rows_sha256"] = "f" * 64
+        mutations.append((relation, raw_hash, controlled_fit, "block"))
+        reordered = copy.deepcopy(block)
+        reordered["parameter_order"] = list(reversed(reordered["parameter_order"]))
+        mutations.append((relation, reordered, controlled_fit, "parameter"))
+        wrong_formula = copy.deepcopy(block)
+        wrong_formula["formulas"]["opcode"] = "target-only"
+        mutations.append((relation, wrong_formula, controlled_fit, "formula"))
+        nonpositive = copy.deepcopy(block)
+        nonpositive["opcode_multipliers"]["opcode:0x01"] = "0"
+        mutations.append((relation, nonpositive, controlled_fit, "positive"))
+        nonpositive_fixed = copy.deepcopy(block)
+        nonpositive_fixed["fixed_costs"]["tx_base"] = "0"
+        mutations.append((relation, nonpositive_fixed, controlled_fit, "positive"))
+        failed_dynamic = copy.deepcopy(block)
+        dynamic_key = next(iter(failed_dynamic["dynamic_holdouts"]))
+        failed_dynamic["dynamic_holdouts"][dynamic_key]["status"] = "rejected"
+        mutations.append((relation, failed_dynamic, controlled_fit, "dynamic"))
+        failed_controlled = copy.deepcopy(controlled_fit)
+        failed_controlled["case_results"][0]["checkpoint"]["status"] = "failed"
+        mutations.append((relation, block, failed_controlled, "checkpoint"))
+        proposal_controlled = copy.deepcopy(controlled_fit)
+        proposal_controlled["case_results"][0]["purpose"] = "final_validation"
+        mutations.append((relation, block, proposal_controlled, "proposal-purpose"))
+
+        for _relation, artifact, _fit, _message in mutations:
+            if artifact is not block:
+                artifact["artifact_sha256"] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(
+                        {key: value for key, value in artifact.items() if key != "artifact_sha256"}
+                    )
+                )
+
+        for broken_relation, broken_block, broken_fit, message in mutations:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 opcode_gas.build_candidate_components(
-                    manifest, broken_rows, broken_overheads, {"revision": "a" * 40}
+                    manifest,
+                    broken_relation,
+                    broken_block,
+                    broken_fit,
+                    provenance,
                 )
 
     def test_bridge_exact_median_states_and_independent_digest(self):
@@ -3202,38 +3357,48 @@ class IdentityAndValidationTests(unittest.TestCase):
 
     def test_sealing_refuses_proposal_outputs_and_validation_is_read_only(self):
         manifest = controlled_manifest()
-        rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
-            accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
-        ]
-        overheads = {key: "100" for key in opcode_gas.Q_FORMULA}
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(
+            manifest,
+            [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
+        )
         with tempfile.TemporaryDirectory() as tmp:
             run = pathlib.Path(tmp)
             (run / "proposal-results.json").write_text("{}")
             with self.assertRaisesRegex(ValueError, "proposal result"):
                 opcode_gas.seal_candidate_directory(
-                    run, manifest, rows, overheads, {"revision": "a" * 40}
+                    run, manifest, relation, block, controlled_fit, provenance
                 )
 
     def test_candidate_seal_transitively_verifies_components_and_tampering(self):
         manifest = controlled_manifest()
-        rows = [
-            accepted_case("add", "opcode:0x01", "raw_gas_slope", 1200, 3),
-            accepted_case("mul", "opcode:0x02", "raw_gas_slope", 2000, 5),
-            accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
-        ]
-        overheads = {key: "100" for key in opcode_gas.Q_FORMULA}
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(
+            manifest,
+            [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
+        )
         with tempfile.TemporaryDirectory() as tmp:
             run = pathlib.Path(tmp)
             sealed = opcode_gas.seal_candidate_directory(
-                run, manifest, rows, overheads, {"revision": "a" * 40}
+                run, manifest, relation, block, controlled_fit, provenance
             )
             verified = opcode_gas.verify_candidate_directory(run)
             self.assertEqual(verified["candidate_sha256"], sealed["candidate_sha256"])
             self.assertTrue(verified["candidate_manifest"]["review_only"])
             self.assertFalse(verified["candidate_manifest"]["production_write"])
             self.assertFalse(verified["candidate_manifest"]["integer_schedule_emitted"])
+
+            root_path = run / "candidate" / "candidate-manifest.json"
+            root = opcode_gas.json.loads(root_path.read_text())
+            root["block_formulas"]["opcode"] = "target-only"
+            root_path.write_bytes(opcode_gas.canonical_json(root))
+            (run / "candidate" / "candidate.sha256").write_text(
+                opcode_gas.sha256_bytes(opcode_gas.canonical_json(root)) + "\n"
+            )
+            with self.assertRaisesRegex(ValueError, "source evidence"):
+                opcode_gas.verify_candidate_directory(run)
+            root_path.write_bytes(opcode_gas.canonical_json(sealed["candidate_manifest"]))
+            (run / "candidate" / "candidate.sha256").write_text(
+                sealed["candidate_sha256"] + "\n"
+            )
 
             component = run / "candidate" / "normalized-primary.json"
             component.write_text("{}")

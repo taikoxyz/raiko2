@@ -200,6 +200,17 @@ class RunManifestTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["publish-corpus", "--archive", "/tmp/a.tar", "--object-uri", "gs://bucket/x.tar", "--manifest", "/tmp/manifest.json"]).command, "publish-corpus")
         self.assertEqual(parser.parse_args(["prepare-calibration", "--out", "/tmp/out", "--controlled-manifest", "/tmp/control.toml"]).command, "prepare-calibration")
         self.assertEqual(parser.parse_args(["prepare-validation", "--out", "/tmp/out", "--run", "/tmp/run", "--corpus", "/tmp/corpus.json"]).command, "prepare-validation")
+        candidate = parser.parse_args([
+            "build-candidate", "--run", "/tmp/run",
+            "--controlled-manifest", "/tmp/control.toml",
+            "--relations", "/tmp/run/opcode-relations.json",
+            "--block-calibration", "/tmp/run/block-calibration.json",
+            "--controlled-fit", "/tmp/run/controlled-fit.json",
+            "--provenance", "/tmp/run/provenance.json",
+        ])
+        self.assertEqual(candidate.command, "build-candidate")
+        self.assertFalse(hasattr(candidate, "fit"))
+        self.assertFalse(hasattr(candidate, "overheads"))
         self.assertEqual(parser.parse_args([
             "prepare-integration-smoke", "--network", "taiko_hoodi",
             "--proposal-id", "1", "--guest-input", "smoke.json",
@@ -293,6 +304,7 @@ class RunManifestTests(unittest.TestCase):
                 "opcode": "gas-estimator",
                 "precompile": "standard",
                 "overhead": "standard",
+                "block": "gas-estimator",
             },
         )
         self.assertEqual(

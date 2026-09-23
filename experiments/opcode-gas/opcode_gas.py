@@ -2003,7 +2003,7 @@ def relation_matched_control_spec(
     if case.template == "stack_exp":
         byte_length = int(scenario["exponent_byte_length"])
         exponent = 1 << (8 * (byte_length - 1))
-        operands = (2, exponent)
+        operands = (exponent, 2)
         setup = b"".join(_fixed_push(value, target_opcode=case.opcode or 0) for value in operands)
     elif case.template == "keccak_32":
         operands = (int(scenario["input_length"]), 0)

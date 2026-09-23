@@ -82,6 +82,19 @@ scenarios for an operation key. If any required scenario is missing, rejected, c
 the consistency gate, the entire key remains unmeasured unless the trace schema can distinguish and
 resolve those scenarios exactly.
 
+### EXP Dynamic Gas Used The Wrong Stack Operand
+
+An initial formal run declared the 32-byte EXP scenario as 1610 raw gas, but the host trace measured
+60. The fixture pushed `(base, exponent)`. Because EVM consumes the top item as the base and charges
+dynamic gas from the item below it as the exponent, this made the small base the charged exponent.
+The one-byte scenario did not expose the mistake because both supplied values had one significant
+byte.
+
+For an EXP program, push the exponent first and the base second. Bind the resulting bytecode order in
+the fixture test, and keep the host-native `executed_target_raw_gas == declared_target_raw_gas` check
+before opening SP1 output. A mismatch invalidates that calibration identity; preserve its artifacts,
+fix and review the generator, then prepare a new run instead of editing or resuming the failed run.
+
 ### Fast Execution Was Mistaken For A New Cost Model
 
 The `gas-estimator` engine runs the actual SP1 opcode-lab program with `GasEstimatingVM`; it does not

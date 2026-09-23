@@ -158,6 +158,20 @@ class FixtureEmitTests(unittest.TestCase):
             {row["signed_raw_gas_by_key"]["opcode:0x50"] for row in rows},
             {"-2"},
         )
+        exp_32_target = next(
+            row for row in targets if row["relation_id"] == "opcode:0x0a:exp-bytes-32"
+        )
+        exp_32_program = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(exp_32_target["bytecode"].removeprefix("0x"))
+        )[0]
+        self.assertEqual(
+            exp_32_program,
+            b"\x7f"
+            + (1 << 248).to_bytes(32, "big")
+            + b"\x7f"
+            + (2).to_bytes(32, "big")
+            + b"\x0a\x00",
+        )
         pairs = opcode_gas.validate_matched_control_fixture_pairs(
             rows,
             expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,

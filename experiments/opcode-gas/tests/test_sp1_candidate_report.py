@@ -238,6 +238,46 @@ def canonical_formal_relation_round_rows(
     return rows
 
 
+def rebind_formal_sample_identities(rows, *, placement, mutate_guest):
+    selected = [row for row in rows if row["relation_placement"] == placement]
+    for row in selected:
+        mutate_guest(row)
+        guest_input = opcode_gas._formal_opcode_guest_input(row)
+        guest_bytes = (
+            opcode_gas.json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        row["fixture_sha256"] = opcode_gas.sha256_bytes(guest_bytes)
+        workload_id = opcode_gas.controlled_workload_id(
+            opcode_gas._formal_opcode_workload_spec(guest_input)
+        )
+        backend_input = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(guest_input)
+        )
+        row["workload_id"] = workload_id
+        row["backend_input_sha256"] = backend_input
+        row["guest_input_sha256"] = "0x" + backend_input
+        row["controlled_trace"]["workload_id"] = workload_id
+        row["controlled_trace"]["backend_input_sha256"] = backend_input
+        row["controlled_trace"]["tx_gas_limit"] = guest_input["tx_gas_limit"]
+        row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+            workload_id,
+            backend="sp1",
+            execution_engine="gas-estimator",
+            run_id=row["calibration_id"],
+            repeat_index=row["repeat_index"],
+            backend_input_sha256=backend_input,
+        )
+    representatives = {
+        lane: next(row for row in selected if row["lane"] == lane)
+        for lane in ("target", "control")
+    }
+    pair_id = opcode_gas.matched_control_pair_id(
+        representatives["target"], representatives["control"]
+    )
+    for row in selected:
+        row["pair_id"] = pair_id
+
+
 def opcode_execution_provenance():
     return {
         "sp1_execution_engine": "gas-estimator",
@@ -1473,7 +1513,9 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             row["relation_placement"] = "active_tail"
             row["relation_sample_id"] = "active_tail:count-1"
         relabelled.extend(prefix_one)
-        with self.assertRaisesRegex(ValueError, "(bytecode|pair).*identity|matched layout"):
+        with self.assertRaisesRegex(
+            ValueError, "(bytecode|pair).*identity|pair_id|matched layout"
+        ):
             opcode_gas.fit_formal_relation_round(
                 manifest,
                 relabelled,
@@ -1528,6 +1570,54 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                     8,
                     expected_provenance=provenance,
                 )
+
+    def test_round_fit_rejects_rebound_tail_guest_scenario(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = canonical_formal_relation_round_rows(manifest, relation)
+        provenance = formal_relation_provenance(rows)
+        rebind_formal_sample_identities(
+            rows,
+            placement=opcode_gas.FORMAL_RELATION_TAIL_PLACEMENT,
+            mutate_guest=lambda row: row.__setitem__(
+                "scenario", row["scenario"] + "-tail-contamination"
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "canonical.*scenario|fixture declaration"):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                rows,
+                [relation.id],
+                8,
+                expected_provenance=provenance,
+            )
+
+    def test_round_fit_rejects_rebound_tail_tx_gas_limit(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = canonical_formal_relation_round_rows(manifest, relation)
+        provenance = formal_relation_provenance(rows)
+        rebind_formal_sample_identities(
+            rows,
+            placement=opcode_gas.FORMAL_RELATION_TAIL_PLACEMENT,
+            mutate_guest=lambda row: row.__setitem__(
+                "tx_gas_limit", row["tx_gas_limit"] + 1
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "canonical.*tx_gas_limit|fixture declaration"):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                rows,
+                [relation.id],
+                8,
+                expected_provenance=provenance,
+            )
 
     def test_relation_artifact_is_byte_identical_across_caller_decimal_contexts(self):
         manifest = formal_relation_manifest()
@@ -1719,7 +1809,9 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             for item in manifest.opcode_relations
         )
         rank_97_manifest = replace(manifest, opcode_relations=mutated_relations)
-        with self.assertRaisesRegex(ValueError, "rank|target raw-gas units"):
+        with self.assertRaisesRegex(
+            ValueError, "rank|target raw-gas (units|map)"
+        ):
             opcode_gas.fit_opcode_relations(
                 rank_97_manifest, base_rows
             )

@@ -122,9 +122,11 @@ Count and placement remain host-only sampling metadata. The serialized guest-vis
 stable per lane (`<case>__relation_target` or `<case>__relation_control`) across every count and
 placement; consequently all control inputs at one generator bound are byte-identical, while the
 prefix-one and tail-one target inputs differ only in bytecode slot order. Replay reconstructs the
-canonical target/control bytecode and fixture digest, then recomputes pair, workload, and execution
-row identities and joins them to the controlled trace. Identical canonical inputs may intentionally
-reuse workload/execution identities; arbitrary relabeling or reuse fails exact recomputation.
+entire canonical case and guest declaration from the manifest relation and generation formulas—not
+from persisted scenario, relation scenario, gas limit, opcode/count, length, maps, or fixture
+metadata. It then recomputes pair, workload, and execution-row identities and joins them to the
+controlled trace. Identical canonical inputs may intentionally reuse workload/execution identities;
+arbitrary relabeling, declaration changes, or reuse fails exact recomputation.
 
 An exactly constant non-self target-minus-control response across positive fit points and checkpoint
 is a valid zero-slope relation; count zero then remains activation evidence. Self-controls retain

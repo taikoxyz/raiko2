@@ -3557,6 +3557,143 @@ def generate_cases(
     return written
 
 
+def _canonical_formal_relation_fixture_pair(
+    manifest: Manifest,
+    case: CaseSpec,
+    relation: OpcodeRelationSpec,
+    *,
+    provenance: Mapping[str, Any],
+    generator_max_count: int,
+    count: int,
+    placement: str,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any], bytes]]:
+    """Derive both formal fixture lanes without trusting persisted row metadata."""
+    if not isinstance(provenance, Mapping) or set(provenance) != set(
+        FORMAL_RELATION_PROVENANCE_FIELDS
+    ):
+        raise ValueError("formal relation generation provenance schema is invalid")
+    provenance = dict(provenance)
+    if case.opcode is None or relation.case_id != case.name:
+        raise ValueError("formal opcode relation differs from its manifest case")
+    sample_id = formal_relation_sample_id(placement, count)
+    spec = relation_matched_control_spec(case, relation.scenario)
+    try:
+        target_raw_gas = relation.target_raw_gas_by_key[relation.key_id]
+    except KeyError as exc:
+        raise ValueError(
+            "formal relation target raw-gas map omits its manifest key"
+        ) from exc
+    relation_case = replace(case, target_raw_gas=target_raw_gas)
+    generated_by_lane = {
+        lane: build_relation_bytecode(
+            relation_case,
+            relation,
+            count,
+            generator_max_count,
+            lane=lane,
+            placement=placement,
+        )
+        for lane in ("target", "control")
+    }
+    target_len = len(bytes.fromhex(generated_by_lane["target"].bytes_hex))
+    if len(bytes.fromhex(generated_by_lane["control"].bytes_hex)) != target_len:
+        raise AssertionError("formal relation bytecode footprints differ")
+    control_total = sum(relation.control_raw_gas_by_key.values())
+    tx_gas_limit = 1_000_000 + generator_max_count * max(
+        target_raw_gas, control_total
+    )
+    artifacts: dict[str, tuple[dict[str, Any], dict[str, Any], bytes]] = {}
+    for lane in ("target", "control"):
+        generated = generated_by_lane[lane]
+        if lane == "target":
+            declared_opcode = case.opcode
+            declared_count = _matched_control_declared_target_count(
+                relation_case, spec, count, generator_max_count
+            )
+            declared_raw_gas = target_raw_gas
+        else:
+            declared_opcode = spec.reference_opcode
+            declared_count = _matched_control_declared_control_count(
+                spec, generator_max_count
+            )
+            declared_raw_gas = spec.reference_raw_gas
+        lane_case = f"{case.name}__relation_{lane}"
+        payload = {
+            "suite": manifest.name,
+            "backend": manifest.backend,
+            "kind": "opcode",
+            "purpose": FORMAL_RELATION_PURPOSE,
+            "diagnostic_only": False,
+            "case": lane_case,
+            "original_case": case.name,
+            "original_opcode": f"0x{case.opcode:02x}",
+            "opcode": f"0x{declared_opcode:02x}",
+            "scenario": case.scenario,
+            "operand_profile": "zero",
+            "operands": list(spec.operands),
+            "template": case.template,
+            "lane": lane,
+            "relation": spec.relation,
+            "signal_kind": FORMAL_RELATION_SIGNAL_KIND,
+            "diagnostic_count": count,
+            "final_stack_height": spec.final_stack_height,
+            "target_count": declared_count,
+            "target_raw_gas": declared_raw_gas,
+            "bytecode": "0x" + generated.bytes_hex,
+            "opcode_counts": {
+                f"0x{opcode:02x}": opcode_count
+                for opcode, opcode_count in sorted(generated.opcode_counts.items())
+            },
+            "generator_max_count": generator_max_count,
+            "fixed_bytecode_len": target_len,
+            "tx_gas_limit": tx_gas_limit,
+            "guest_input_status": "opcode_lab_guest_input",
+            "relation_id": relation.id,
+            "relation_split": relation.split,
+            "scenario_id": relation.scenario_id,
+            "relation_scenario": dict(relation.scenario),
+            "dynamic_key": relation.dynamic_key,
+            "target_raw_gas_by_key": {
+                key: str(value)
+                for key, value in sorted(relation.target_raw_gas_by_key.items())
+            },
+            "control_raw_gas_by_key": {
+                key: str(value)
+                for key, value in sorted(relation.control_raw_gas_by_key.items())
+            },
+            "signed_raw_gas_by_key": {
+                key: str(value)
+                for key, value in sorted(relation.signed_raw_gas_by_key.items())
+            },
+            "relation_placement": placement,
+            "relation_sample_id": sample_id,
+            **provenance,
+        }
+        payload.update(_matched_control_compound_metadata(spec))
+        guest_input = {
+            "case": lane_case,
+            "scenario": case.scenario,
+            "opcode": declared_opcode,
+            "target_count": declared_count,
+            "target_raw_gas": declared_raw_gas,
+            "bytecode": "0x" + generated.bytes_hex,
+            "generator_max_count": generator_max_count,
+            "fixed_bytecode_len": target_len,
+            "tx_gas_limit": tx_gas_limit,
+        }
+        guest_input_bytes = (
+            json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        payload["fixture_sha256"] = sha256_bytes(guest_input_bytes)
+        artifacts[lane] = (payload, guest_input, guest_input_bytes)
+    pair_id = matched_control_pair_id(
+        artifacts["target"][0], artifacts["control"][0]
+    )
+    for payload, _guest_input, _guest_bytes in artifacts.values():
+        payload["pair_id"] = pair_id
+    return artifacts
+
+
 def generate_relation_cases(
     manifest: Manifest,
     out_dir: pathlib.Path,
@@ -3610,9 +3747,6 @@ def generate_relation_cases(
         case = cases[relation.case_id]
         if case.opcode is None:
             raise ValueError("formal opcode relation requires an opcode case")
-        spec = relation_matched_control_spec(case, relation.scenario)
-        target_raw_gas = relation.target_raw_gas_by_key[relation.key_id]
-        relation_case = replace(case, target_raw_gas=target_raw_gas)
         samples = [
             (count, FORMAL_RELATION_PREFIX_PLACEMENT)
             for count in manifest.variants
@@ -3620,7 +3754,6 @@ def generate_relation_cases(
         ]
         samples.append((1, FORMAL_RELATION_TAIL_PLACEMENT))
         for count, placement in samples:
-            sample_id = formal_relation_sample_id(placement, count)
             case_dir = (
                 out_dir
                 / manifest.name
@@ -3631,124 +3764,19 @@ def generate_relation_cases(
                     else "tail-count-1"
                 )
             )
-            target = build_relation_bytecode(
-                relation_case,
+            lane_artifacts = _canonical_formal_relation_fixture_pair(
+                manifest,
+                case,
                 relation,
-                count,
-                generator_max_count,
-                lane="target",
+                provenance=provenance,
+                generator_max_count=generator_max_count,
+                count=count,
                 placement=placement,
             )
-            control = build_relation_bytecode(
-                relation_case,
-                relation,
-                count,
-                generator_max_count,
-                lane="control",
-                placement=placement,
-            )
-            target_len = len(bytes.fromhex(target.bytes_hex))
-            if len(bytes.fromhex(control.bytes_hex)) != target_len:
-                raise AssertionError("formal relation bytecode footprints differ")
-            control_total = sum(relation.control_raw_gas_by_key.values())
-            tx_gas_limit = 1_000_000 + generator_max_count * max(
-                target_raw_gas, control_total
-            )
-            lane_artifacts = []
-            for lane, generated in (("target", target), ("control", control)):
-                if lane == "target":
-                    declared_opcode = case.opcode
-                    declared_count = _matched_control_declared_target_count(
-                        relation_case, spec, count, generator_max_count
-                    )
-                    declared_raw_gas = target_raw_gas
-                else:
-                    declared_opcode = spec.reference_opcode
-                    declared_count = _matched_control_declared_control_count(
-                        spec, generator_max_count
-                    )
-                    declared_raw_gas = spec.reference_raw_gas
-                # Keep host-only sampling dimensions out of the serialized guest
-                # input.  In particular, the prefix/tail count-one holdout must
-                # change only bytecode slot order, and every control sample at a
-                # fixed generator bound must remain byte-identical.
-                lane_case = f"{case.name}__relation_{lane}"
-                payload = {
-                    "suite": manifest.name,
-                    "backend": manifest.backend,
-                    "kind": "opcode",
-                    "purpose": FORMAL_RELATION_PURPOSE,
-                    "diagnostic_only": False,
-                    "case": lane_case,
-                    "original_case": case.name,
-                    "original_opcode": f"0x{case.opcode:02x}",
-                    "opcode": f"0x{declared_opcode:02x}",
-                    "scenario": case.scenario,
-                    "operand_profile": "zero",
-                    "operands": list(spec.operands),
-                    "template": case.template,
-                    "lane": lane,
-                    "relation": spec.relation,
-                    "signal_kind": FORMAL_RELATION_SIGNAL_KIND,
-                    "diagnostic_count": count,
-                    "final_stack_height": spec.final_stack_height,
-                    "target_count": declared_count,
-                    "target_raw_gas": declared_raw_gas,
-                    "bytecode": "0x" + generated.bytes_hex,
-                    "opcode_counts": {
-                        f"0x{opcode:02x}": opcode_count
-                        for opcode, opcode_count in sorted(generated.opcode_counts.items())
-                    },
-                    "generator_max_count": generator_max_count,
-                    "fixed_bytecode_len": target_len,
-                    "tx_gas_limit": tx_gas_limit,
-                    "guest_input_status": "opcode_lab_guest_input",
-                    "relation_id": relation.id,
-                    "relation_split": relation.split,
-                    "scenario_id": relation.scenario_id,
-                    "relation_scenario": dict(relation.scenario),
-                    "dynamic_key": relation.dynamic_key,
-                    "target_raw_gas_by_key": {
-                        key: str(value)
-                        for key, value in sorted(relation.target_raw_gas_by_key.items())
-                    },
-                    "control_raw_gas_by_key": {
-                        key: str(value)
-                        for key, value in sorted(relation.control_raw_gas_by_key.items())
-                    },
-                    "signed_raw_gas_by_key": {
-                        key: str(value)
-                        for key, value in sorted(relation.signed_raw_gas_by_key.items())
-                    },
-                    "relation_placement": placement,
-                    "relation_sample_id": sample_id,
-                    **provenance,
-                }
-                payload.update(_matched_control_compound_metadata(spec))
-                guest_input = {
-                    "case": lane_case,
-                    "scenario": case.scenario,
-                    "opcode": declared_opcode,
-                    "target_count": declared_count,
-                    "target_raw_gas": declared_raw_gas,
-                    "bytecode": "0x" + generated.bytes_hex,
-                    "generator_max_count": generator_max_count,
-                    "fixed_bytecode_len": target_len,
-                    "tx_gas_limit": tx_gas_limit,
-                }
-                guest_input_bytes = (
-                    json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
-                ).encode()
-                payload["fixture_sha256"] = sha256_bytes(guest_input_bytes)
-                lane_artifacts.append(
-                    (case_dir / lane, payload, guest_input_bytes)
-                )
-            pair_id = matched_control_pair_id(
-                lane_artifacts[0][1], lane_artifacts[1][1]
-            )
-            for lane_dir, payload, guest_input_bytes in lane_artifacts:
+            for lane in ("target", "control"):
+                payload, _guest_input, guest_input_bytes = lane_artifacts[lane]
+                lane_dir = case_dir / lane
                 lane_dir.mkdir(parents=True, exist_ok=True)
-                payload["pair_id"] = pair_id
                 path = lane_dir / "case.json"
                 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
                 (lane_dir / "guest-input.json").write_bytes(guest_input_bytes)
@@ -5284,12 +5312,25 @@ def _validate_formal_relation_row_evidence(
     manifest: Manifest,
     relation: OpcodeRelationSpec,
     rows: list[Mapping[str, Any]],
+    generator_max_count: int,
 ) -> None:
     """Bind persisted formal rows to canonical fixtures and execution identities."""
     cases = {case.name: case for case in manifest.cases}
     case = cases.get(relation.case_id)
     if case is None or case.opcode is None:
         raise ValueError("formal relation case is absent from the manifest")
+    if not rows:
+        raise ValueError("formal relation has no persisted row evidence")
+    expected_provenance = _validate_formal_relation_provenance(
+        {
+            field: rows[0].get(field)
+            for field in FORMAL_RELATION_PROVENANCE_FIELDS
+        }
+    )
+    expected_samples: dict[
+        tuple[str, int],
+        dict[str, tuple[dict[str, Any], dict[str, Any], bytes]],
+    ] = {}
     grouped: dict[tuple[str, int], dict[str, list[Mapping[str, Any]]]] = {}
     for row in rows:
         placement = row.get("relation_placement")
@@ -5309,12 +5350,27 @@ def _validate_formal_relation_row_evidence(
             or type(count) is not int
         ):
             raise ValueError("formal relation fixture identity differs from the manifest")
-        guest_input = _formal_opcode_guest_input(row)
-        guest_bytes = (
-            json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
-        ).encode()
-        if row.get("fixture_sha256") != sha256_bytes(guest_bytes):
-            raise ValueError("formal relation fixture SHA256 differs from canonical guest input")
+        sample_key = (str(placement), count)
+        canonical_pair = expected_samples.get(sample_key)
+        if canonical_pair is None:
+            canonical_pair = _canonical_formal_relation_fixture_pair(
+                manifest,
+                case,
+                relation,
+                provenance=expected_provenance,
+                generator_max_count=generator_max_count,
+                count=count,
+                placement=str(placement),
+            )
+            expected_samples[sample_key] = canonical_pair
+        expected_fixture, guest_input, _guest_bytes = canonical_pair[str(lane)]
+        for field, expected_value in expected_fixture.items():
+            if not _exact_json_equal(row.get(field), expected_value):
+                raise ValueError(
+                    f"formal relation canonical fixture declaration differs: {field}"
+                )
+        if not _exact_json_equal(_formal_opcode_guest_input(row), guest_input):
+            raise ValueError("formal relation canonical guest input differs")
         workload_id = controlled_workload_id(
             _formal_opcode_workload_spec(guest_input)
         )
@@ -5368,6 +5424,19 @@ def _validate_formal_relation_row_evidence(
         grouped.setdefault((str(placement), count), {}).setdefault(
             str(lane), []
         ).append(row)
+
+    prefix_one = expected_samples.get((FORMAL_RELATION_PREFIX_PLACEMENT, 1))
+    tail_one = expected_samples.get((FORMAL_RELATION_TAIL_PLACEMENT, 1))
+    if prefix_one is not None and tail_one is not None:
+        for lane in ("target", "control"):
+            prefix_guest = dict(prefix_one[lane][1])
+            tail_guest = dict(tail_one[lane][1])
+            prefix_guest.pop("bytecode")
+            tail_guest.pop("bytecode")
+            if not _exact_json_equal(prefix_guest, tail_guest):
+                raise AssertionError(
+                    "canonical prefix/tail guest metadata differs outside bytecode"
+                )
 
     for lanes in grouped.values():
         if set(lanes) != {"target", "control"}:
@@ -5718,7 +5787,10 @@ def fit_formal_relation_round(
         ]
         try:
             _validate_formal_relation_row_evidence(
-                manifest, relations[relation_id], relation_rows
+                manifest,
+                relations[relation_id],
+                relation_rows,
+                generator_max_count,
             )
             fit = _fit_one_opcode_relation(
                 relations[relation_id],
@@ -5863,7 +5935,17 @@ def fit_opcode_relations(
     results = []
     for relation in manifest.opcode_relations:
         relation_rows = [row for row in rows if row.get("relation_id") == relation.id]
-        _validate_formal_relation_row_evidence(manifest, relation, relation_rows)
+        generator_bounds = {
+            row.get("generator_max_count") for row in relation_rows
+        }
+        if (
+            len(generator_bounds) != 1
+            or type(next(iter(generator_bounds), None)) is not int
+        ):
+            raise ValueError("formal relation rows do not share one generator bound")
+        _validate_formal_relation_row_evidence(
+            manifest, relation, relation_rows, next(iter(generator_bounds))
+        )
         results.append(_fit_one_opcode_relation(relation, relation_rows))
 
     self_controls = [row for row in results if row.get("self_control") is True]

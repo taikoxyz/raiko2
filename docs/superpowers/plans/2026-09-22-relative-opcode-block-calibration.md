@@ -434,8 +434,11 @@ trigger with an explicit unavailable-ratio status. Always retain the tail diagno
 Keep the guest-visible case stable per lane across every count and placement, leaving count and
 placement only in host metadata. Require fixed-bound controls to serialize identically and
 prefix-one/tail-one target inputs to differ only in bytecode slot order. Before fitting or replay,
-reconstruct canonical bytecode and fixture hashes and recompute pair, workload, execution-row, and
-controlled-trace identities. Permit identity reuse only where exact canonical inputs recur.
+reconstruct the complete canonical case/guest declaration from manifest relation plus bound,
+count, placement, lane, and generation formulas; do not take scenario, relation scenario, gas
+limit, opcode/count, fixed length, template, operands, maps, or opcode counts from persisted rows.
+Recompute fixture, pair, workload, execution-row, and controlled-trace identities. Permit identity
+reuse only where exact canonical inputs recur.
 
 Treat the sealed formal decision ledger as the terminal source of truth. Downstream relation fit,
 block-calibration run/fit, candidate build, and candidate/bridge replay must verify its seal, replay

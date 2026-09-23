@@ -153,10 +153,12 @@ part of pair identity, raw ordering, completeness, resume replay, and sealing.
 Sampling metadata does not enter the guest-visible `case`: every lane keeps one stable case string
 across counts and placements. Thus fixed-bound control GuestInputs are identical, and prefix-one
 versus tail-one target GuestInputs differ only in bytecode slot order. Formal replay reconstructs
-canonical bytecode and fixture hashes from the manifest relation/count/placement, recomputes pair,
-workload, and execution-row identities, and checks their controlled-trace joins. Repeated identical
-inputs may have identical identities; acceptance depends on exact recomputation, not global
-uniqueness.
+the complete canonical case/guest declaration from the manifest relation, generator bound, count,
+placement, lane, and generation formulas. Persisted scenario/relation-scenario, gas limit,
+opcode/count, fixed length, template, operands, maps, and opcode counts are evidence to compare,
+never reconstruction inputs. Replay then recomputes fixture, pair, workload, and execution-row
+identities and checks their controlled-trace joins. Repeated identical inputs may have identical
+identities; acceptance depends on exact recomputation, not global uniqueness.
 The resulting formal relation artifact uses schema version 2; schema version 1 does not carry the
 activation/tail evidence and is not accepted by candidate construction.
 

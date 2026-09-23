@@ -1571,6 +1571,100 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                     expected_provenance=provenance,
                 )
 
+    def test_generated_formal_fixture_preserves_static_and_report_opcode_counts(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        reference_rows = canonical_formal_relation_round_rows(manifest, relation)
+        provenance = formal_relation_provenance(reference_rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=provenance,
+                generator_max_count=8,
+                relation_ids=[relation.id],
+            )
+            cases = {
+                (
+                    case["relation_placement"],
+                    case["diagnostic_count"],
+                    case["lane"],
+                ): case
+                for case in (
+                    opcode_gas.json.loads(path.read_text()) for path in paths
+                )
+            }
+
+        risc_v_profile = [{"label": "add", "count": 123}]
+        raw_rows = []
+        for reference in reference_rows:
+            case = cases[
+                (
+                    reference["relation_placement"],
+                    reference["diagnostic_count"],
+                    reference["lane"],
+                )
+            ]
+            actual_raw_gas = {
+                key: int(value)
+                for key, value in reference["actual_raw_gas_by_key"].items()
+            }
+            target_key = f"opcode:{case['opcode']}"
+            non_target_counts = {
+                key: value // opcode_gas.PURE_OPCODE_DEFAULTS[int(key[-2:], 16)][2]
+                for key, value in actual_raw_gas.items()
+                if key != target_key
+            }
+            non_target_raw_gas = sum(
+                value for key, value in actual_raw_gas.items() if key != target_key
+            )
+            controlled_trace = {
+                **reference["controlled_trace"],
+                "backend_input_len": 48,
+                "non_target_counts": non_target_counts,
+                "non_target_raw_gas": non_target_raw_gas,
+                "total_raw_gas": sum(actual_raw_gas.values()),
+            }
+            report = {
+                "input": "guest-input.json",
+                "guest_input_sha256": reference["guest_input_sha256"],
+                "gas": reference["prover_gas"],
+                "total_instruction_count": reference["total_instruction_count"],
+                "exit_code": reference["exit_code"],
+                "public_values": reference["public_values"],
+                "sp1_execution_engine": reference["sp1_execution_engine"],
+                "sp1_gas_trace_chunk_threshold": reference[
+                    "sp1_gas_trace_chunk_threshold"
+                ],
+                "sp1_gas_trace_chunk_slots": reference[
+                    "sp1_gas_trace_chunk_slots"
+                ],
+                "controlled_trace": controlled_trace,
+                "opcode_counts": risc_v_profile,
+            }
+            raw = opcode_gas.raw_run_from_report(case, report)
+            raw["repeat_index"] = reference["repeat_index"]
+            raw["execution_row_id"] = reference["execution_row_id"]
+            self.assertEqual(raw["opcode_counts"], risc_v_profile)
+            self.assertEqual(raw["evm_opcode_counts"], case["evm_opcode_counts"])
+            raw_rows.append(raw)
+
+        with self.assertRaisesRegex(ValueError, "fixture/report fields collide"):
+            opcode_gas.raw_run_from_report(
+                case, {**report, "evm_opcode_counts": {"0x01": 999}}
+            )
+
+        results = opcode_gas.fit_formal_relation_round(
+            manifest,
+            raw_rows,
+            [relation.id],
+            8,
+            expected_provenance=provenance,
+        )
+        self.assertEqual([result["relation_id"] for result in results], [relation.id])
+
     def test_round_fit_rejects_rebound_tail_guest_scenario(self):
         manifest = formal_relation_manifest()
         relation = next(

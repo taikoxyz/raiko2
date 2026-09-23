@@ -98,6 +98,79 @@ def emit_matched_control_pair(
 
 
 class FixtureEmitTests(unittest.TestCase):
+    def test_formal_relation_fixture_keys_do_not_overlap_bench_report(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        cases = {case.name: case for case in manifest.cases}
+        selected = {}
+        for relation in manifest.opcode_relations:
+            spec = opcode_gas.relation_matched_control_spec(
+                cases[relation.case_id], relation.scenario
+            )
+            selected.setdefault(spec.compound, relation)
+        self.assertEqual(set(selected), {False, True})
+        manifest = replace(
+            manifest,
+            variants=[1],
+            opcode_relations=tuple(selected[compound] for compound in (False, True)),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            fixtures = [
+                opcode_gas.json.loads(path.read_text()) for path in written
+            ]
+
+        bench_report_fields = {
+            "stage",
+            "mode",
+            "proof_mode",
+            "sp1_execution_engine",
+            "sp1_gas_trace_chunk_threshold",
+            "sp1_gas_trace_chunk_slots",
+            "input",
+            "guest_input_sha256",
+            "guest_input_bincode_length",
+            "public_values",
+            "wall_time_ms",
+            "primary_workload_metric",
+            "workload_metrics",
+            "exit_code",
+            "gas",
+            "total_instruction_count",
+            "total_syscall_count",
+            "touched_memory_addresses",
+            "risc0_image_id",
+            "risc0_input_bytes",
+            "risc0_user_cycles",
+            "risc0_padded_cycles",
+            "risc0_segment_count",
+            "risc0_po2_counts",
+            "cycle_tracker",
+            "invocation_tracker",
+            "opcode_counts",
+            "syscall_counts",
+            "memory_snapshots",
+            "controlled_trace",
+            "controlled_overhead",
+            "controlled_block",
+        }
+        for fixture in fixtures:
+            with self.subTest(relation_id=fixture["relation_id"]):
+                self.assertFalse(set(fixture).intersection(bench_report_fields))
+                self.assertTrue(fixture["evm_opcode_counts"])
+
     def test_formal_relation_generation_adds_distinct_tail_position_holdout(self):
         manifest = opcode_gas.load_manifest(
             ROOT
@@ -144,7 +217,7 @@ class FixtureEmitTests(unittest.TestCase):
         )
         self.assertEqual(prefix_programs[0], tail_programs[-1])
         self.assertEqual(prefix_programs[1:], tail_programs[:-1])
-        self.assertEqual(prefix["opcode_counts"], tail["opcode_counts"])
+        self.assertEqual(prefix["evm_opcode_counts"], tail["evm_opcode_counts"])
 
     def test_formal_relation_generation_binds_dynamic_programs_and_exact_raw_gas_rows(self):
         manifest = opcode_gas.load_manifest(

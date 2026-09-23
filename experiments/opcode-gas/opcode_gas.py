@@ -3640,7 +3640,7 @@ def _canonical_formal_relation_fixture_pair(
             "target_count": declared_count,
             "target_raw_gas": declared_raw_gas,
             "bytecode": "0x" + generated.bytes_hex,
-            "opcode_counts": {
+            "evm_opcode_counts": {
                 f"0x{opcode:02x}": opcode_count
                 for opcode, opcode_count in sorted(generated.opcode_counts.items())
             },
@@ -4099,6 +4099,13 @@ def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[st
     workload_kind = case.get("kind")
     if workload_kind in {"opcode", "precompile"}:
         validate_sp1_execution_provenance(report, workload_kind=workload_kind)
+    if case.get("purpose") == FORMAL_RELATION_PURPOSE:
+        collisions = sorted(set(case).intersection(report))
+        if collisions:
+            raise ValueError(
+                "formal relation fixture/report fields collide: "
+                + ", ".join(collisions)
+            )
     raw_run = {**case, **report}
     controlled_trace = raw_run.get("controlled_trace")
     if isinstance(controlled_trace, Mapping):

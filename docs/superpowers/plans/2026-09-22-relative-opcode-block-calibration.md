@@ -439,6 +439,9 @@ count, placement, lane, and generation formulas; do not take scenario, relation 
 limit, opcode/count, fixed length, template, operands, maps, or opcode counts from persisted rows.
 Recompute fixture, pair, workload, execution-row, and controlled-trace identities. Permit identity
 reuse only where exact canonical inputs recur.
+Name the static EVM bytecode-count map `evm_opcode_counts` and reserve report `opcode_counts` for the
+SP1 RISC-V execution profile. Preserve both in raw rows and reject formal fixture/report key
+collisions before merging.
 
 Treat the sealed formal decision ledger as the terminal source of truth. Downstream relation fit,
 block-calibration run/fit, candidate build, and candidate/bridge replay must verify its seal, replay

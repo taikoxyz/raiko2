@@ -159,6 +159,9 @@ opcode/count, fixed length, template, operands, maps, and opcode counts are evid
 never reconstruction inputs. Replay then recomputes fixture, pair, workload, and execution-row
 identities and checks their controlled-trace joins. Repeated identical inputs may have identical
 identities; acceptance depends on exact recomputation, not global uniqueness.
+Static EVM fixture counts use `evm_opcode_counts`; SP1's `opcode_counts` remains the RISC-V execution
+profile in the guest report. Raw-row construction preserves both namespaces and rejects any formal
+fixture/report key collision instead of allowing report metadata to replace canonical evidence.
 The resulting formal relation artifact uses schema version 2; schema version 1 does not carry the
 activation/tail evidence and is not accepted by candidate construction.
 

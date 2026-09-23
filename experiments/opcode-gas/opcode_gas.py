@@ -5057,6 +5057,36 @@ def _subtract_int_maps(left: Mapping[str, int], right: Mapping[str, int]) -> dic
     }
 
 
+def _validate_formal_relation_round_row_order(
+    manifest: Manifest,
+    rows: list[Mapping[str, Any]],
+    selected_relation_ids: list[str],
+    generator_max_count: int,
+) -> None:
+    """Bind the raw order emitted by cmd_run before adaptive replay seals it."""
+    expected = [
+        (relation_id, count, lane, repeat_index)
+        for relation_id in selected_relation_ids
+        for count in controlled_round_counts(generator_max_count)
+        for lane in ("control", "target")
+        for repeat_index in range(3)
+    ]
+    actual = [
+        (
+            row.get("relation_id"),
+            row.get("diagnostic_count"),
+            row.get("lane"),
+            row.get("repeat_index"),
+        )
+        for row in rows
+    ]
+    if actual != expected:
+        raise ValueError(
+            f"formal relation round at generator bound {generator_max_count} "
+            "raw row order, duplicates, or completeness differ from the command contract"
+        )
+
+
 def _fit_one_opcode_relation(
     relation: OpcodeRelationSpec,
     rows: list[Mapping[str, Any]],
@@ -5122,9 +5152,23 @@ def _fit_one_opcode_relation(
             ]
             if max(gas_values) - min(gas_values) != 0:
                 raise ValueError("formal relation repeat noise is nonzero")
-            for field in ("backend_input_sha256", "public_values", "exit_code"):
-                if len({str(row.get(field)) for row in repeats}) != 1:
-                    raise ValueError("formal relation repeat identity differs")
+            backend_inputs = [row.get("backend_input_sha256") for row in repeats]
+            if not all(_is_sha256(value) for value in backend_inputs):
+                raise ValueError("formal relation backend input SHA256 is invalid")
+            public_outputs = [
+                _normalized_hex(
+                    row.get("public_values"),
+                    field_name="formal relation public output",
+                )
+                for row in repeats
+            ]
+            if (
+                len(set(backend_inputs)) != 1
+                or len(set(public_outputs)) != 1
+                or any(type(row.get("exit_code")) is not int for row in repeats)
+                or {row.get("exit_code") for row in repeats} != {0}
+            ):
+                raise ValueError("formal relation repeat identity differs")
             actual_maps = [
                 _parse_canonical_int_map(
                     row.get("actual_raw_gas_by_key"), label="actual raw-gas map"
@@ -5249,6 +5293,8 @@ def fit_formal_relation_round(
     rows: Iterable[Mapping[str, Any]],
     selected_relation_ids: Iterable[str],
     generator_max_count: int,
+    *,
+    expected_provenance: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Replay one relation subset, distinguishing fit quality from hard evidence errors."""
     selected_relation_ids = list(selected_relation_ids)
@@ -5269,6 +5315,54 @@ def fit_formal_relation_round(
     if generator_max_count not in CONTROLLED_GENERATOR_ROUNDS:
         raise ValueError("formal relation round has unknown generator bound")
     rows = list(rows)
+    expected_provenance = _validate_formal_relation_provenance(expected_provenance)
+    for row in rows:
+        relation_id = str(row.get("relation_id"))
+        row_bound = row.get("generator_max_count")
+        if type(row_bound) is not int or row_bound != generator_max_count:
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count} has stale row generator bound {row_bound!r}"
+            )
+        actual_provenance = {
+            field: row.get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS
+        }
+        try:
+            actual_provenance = _validate_formal_relation_provenance(
+                actual_provenance
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count} has invalid provenance: {error}"
+            ) from error
+        if not _exact_json_equal(actual_provenance, expected_provenance):
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count} provenance differs from the calibration run"
+            )
+        if not _is_sha256(row.get("backend_input_sha256")):
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count} backend input SHA256 is invalid"
+            )
+        try:
+            _normalized_hex(
+                row.get("public_values"), field_name="formal relation public output"
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count}: {error}"
+            ) from error
+        if type(row.get("exit_code")) is not int or row.get("exit_code") != 0:
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count} exit code is invalid"
+            )
+    _validate_formal_relation_round_row_order(
+        manifest, rows, selected_relation_ids, generator_max_count
+    )
     actual_ids = {str(row.get("relation_id")) for row in rows}
     if actual_ids != set(selected_relation_ids):
         raise ValueError(
@@ -5372,6 +5466,29 @@ def _validate_formal_relation_provenance(value: Any) -> dict[str, str]:
     return provenance
 
 
+def _validate_formal_relation_rows_provenance(
+    rows: Iterable[Mapping[str, Any]], expected_provenance: Mapping[str, Any]
+) -> dict[str, str]:
+    """Require every formal row to carry the complete expected run provenance."""
+    expected = _validate_formal_relation_provenance(expected_provenance)
+    for row in rows:
+        relation_id = str(row.get("relation_id"))
+        actual = {
+            field: row.get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS
+        }
+        try:
+            actual = _validate_formal_relation_provenance(actual)
+        except ValueError as error:
+            raise ValueError(
+                f"formal relation {relation_id} row provenance is invalid: {error}"
+            ) from error
+        if not _exact_json_equal(actual, expected):
+            raise ValueError(
+                f"formal relation {relation_id} row provenance differs from the calibration run"
+            )
+    return expected
+
+
 @_isolated_decimal_context
 def fit_opcode_relations(
     manifest: Manifest,
@@ -5389,9 +5506,12 @@ def fit_opcode_relations(
     provenance = {
         field: rows[0].get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS
     }
-    if any(row.get(field) != value for row in rows for field, value in provenance.items()):
-        raise ValueError("formal relation rows do not share durable provenance")
-    provenance = _validate_formal_relation_provenance(provenance)
+    try:
+        provenance = _validate_formal_relation_rows_provenance(rows, provenance)
+    except ValueError as error:
+        raise ValueError(
+            f"formal relation rows do not share durable provenance: {error}"
+        ) from error
 
     results = []
     for relation in manifest.opcode_relations:
@@ -5714,15 +5834,12 @@ def validate_opcode_relations_artifact(
         raise ValueError("opcode relation artifact raw rows hash differs")
     if not rows:
         raise ValueError("opcode relation artifact raw rows are empty")
-    row_provenance = {
-        field: rows[0].get(field) for field in FORMAL_RELATION_PROVENANCE_FIELDS
-    }
-    if any(
-        row.get(field) != value
-        for row in rows
-        for field, value in expected_provenance.items()
-    ) or _validate_formal_relation_provenance(row_provenance) != expected_provenance:
-        raise ValueError("opcode relation artifact raw rows differ from calibration run")
+    try:
+        _validate_formal_relation_rows_provenance(rows, expected_provenance)
+    except ValueError as error:
+        raise ValueError(
+            "opcode relation artifact raw rows differ from calibration run"
+        ) from error
     expected_relation_ids = {relation.id for relation in manifest.opcode_relations}
     actual_relation_ids = {str(row.get("relation_id")) for row in rows}
     if actual_relation_ids != expected_relation_ids:
@@ -9100,12 +9217,12 @@ def cmd_fit_relations(args: argparse.Namespace) -> None:
         ],
     }
     rows = list(iter_jsonl(runs_path))
-    if any(
-        row.get(field) != value
-        for row in rows
-        for field, value in expected_provenance.items()
-    ):
-        raise ValueError("formal relation rows differ from durable calibration provenance")
+    try:
+        _validate_formal_relation_rows_provenance(rows, expected_provenance)
+    except ValueError as error:
+        raise ValueError(
+            "formal relation rows differ from durable calibration provenance"
+        ) from error
     artifact = fit_opcode_relations(
         manifest,
         rows,
@@ -10106,9 +10223,11 @@ def validate_persisted_formal_relation_decisions(
     calibration_run: pathlib.Path,
     decisions: Mapping[str, Any],
     manifest: Manifest,
-    expected_identity_sha256: str,
+    expected_provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Replay every persisted adaptive relation round and return accepted sources."""
+    expected_provenance = _validate_formal_relation_provenance(expected_provenance)
+    expected_identity_sha256 = expected_provenance["calibration_identity_sha256"]
     expected_relation_ids = [relation.id for relation in manifest.opcode_relations]
     if not isinstance(decisions, Mapping) or (
         set(decisions) != {
@@ -10180,7 +10299,11 @@ def validate_persisted_formal_relation_decisions(
         if round_index == 0:
             validate_formal_dynamic_raw_gas_preflight(rows)
         replayed_results = fit_formal_relation_round(
-            manifest, rows, selected_relation_ids, generator_max_count
+            manifest,
+            rows,
+            selected_relation_ids,
+            generator_max_count,
+            expected_provenance=expected_provenance,
         )
         expected_payload = _formal_relation_result_payload(
             generator_max_count, selected_relation_ids, replayed_results
@@ -11410,8 +11533,19 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
     elif decisions_seal_path.exists():
         raise ValueError("formal relation decisions seal exists without its ledger")
 
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": identity_sha256,
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity[
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
     state = validate_persisted_formal_relation_decisions(
-        calibration_run, decisions, manifest, identity_sha256
+        calibration_run, decisions, manifest, provenance
     )
 
     def publish_if_complete(current_state: Mapping[str, Any]) -> bool:
@@ -11443,17 +11577,6 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
     if final_runs.exists():
         raise ValueError("partial formal relation campaign already has canonical rows")
 
-    provenance = {
-        "calibration_id": calibration_run.name,
-        "calibration_identity_sha256": identity_sha256,
-        "implementation_revision": execution_identity["implementation_revision"],
-        "controlled_manifest_sha256": execution_identity[
-            "controlled_manifest_sha256"
-        ],
-        "controlled_manifest_rows_sha256": execution_identity[
-            "controlled_manifest_rows_sha256"
-        ],
-    }
     start_index = len(decisions["rounds"])
     for generator_max_count in CONTROLLED_GENERATOR_ROUNDS[start_index:]:
         selected_relation_ids = list(state["remaining_relation_ids"])
@@ -11486,7 +11609,12 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
         run_args.formal_dynamic_preflight = generator_max_count == 8
         try:
             cmd_run(run_args)
-        except (KeyError, ValueError) as error:
+        except (
+            KeyError,
+            ValueError,
+            subprocess.CalledProcessError,
+            OSError,
+        ) as error:
             raise ValueError(
                 f"formal relation round {selected_relation_ids!r} at generator bound "
                 f"{generator_max_count}: {error}"
@@ -11495,7 +11623,11 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
         if generator_max_count == 8:
             validate_formal_dynamic_raw_gas_preflight(rows)
         relation_results = fit_formal_relation_round(
-            manifest, rows, selected_relation_ids, generator_max_count
+            manifest,
+            rows,
+            selected_relation_ids,
+            generator_max_count,
+            expected_provenance=provenance,
         )
         result_payload = _formal_relation_result_payload(
             generator_max_count, selected_relation_ids, relation_results
@@ -11526,7 +11658,7 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
             (sha256_bytes(decisions_bytes) + "\n").encode(),
         )
         state = validate_persisted_formal_relation_decisions(
-            calibration_run, decisions, manifest, identity_sha256
+            calibration_run, decisions, manifest, provenance
         )
         if publish_if_complete(state):
             return
@@ -11941,6 +12073,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _ordered_formal_relation_fixture_cases(
+    manifest: Manifest,
+    cases: Iterable[tuple[dict[str, Any], pathlib.Path]],
+) -> list[tuple[dict[str, Any], pathlib.Path]]:
+    """Order fixtures exactly as cmd_run emits their repeated raw rows."""
+    relation_order = {
+        relation.id: index for index, relation in enumerate(manifest.opcode_relations)
+    }
+    return sorted(
+        cases,
+        key=lambda item: (
+            relation_order.get(str(item[0].get("relation_id")), len(relation_order)),
+            int(item[0].get("diagnostic_count", -1)),
+            {"control": 0, "target": 1}.get(str(item[0].get("lane")), 2),
+        ),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     repeats = getattr(args, "repeats", 1)
     if repeats <= 0:
@@ -11965,7 +12115,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     validate_calibration_execution_identity(calibration_run)
     fixtures = _resolve_repo_path(args.fixtures, field_name="fixtures")
     out = _resolve_repo_path(args.out, field_name="runs_output")
-    _, identity = verify_frozen_controlled_manifest(
+    manifest, identity = verify_frozen_controlled_manifest(
         calibration_run,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
@@ -12019,6 +12169,25 @@ def cmd_run(args: argparse.Namespace) -> None:
             },
             guest_inputs=loaded_guest_inputs,
         )
+    formal_relation_ids: list[str] = []
+    formal_generator_max_count: int | None = None
+    if expected_purpose == FORMAL_RELATION_PURPOSE:
+        formal_cases = _ordered_formal_relation_fixture_cases(
+            manifest, cases_by_kind.get("opcode", [])
+        )
+        cases_by_kind["opcode"] = formal_cases
+        selected_set = {str(case.get("relation_id")) for case, _path in formal_cases}
+        formal_relation_ids = [
+            relation.id
+            for relation in manifest.opcode_relations
+            if relation.id in selected_set
+        ]
+        generator_bounds = {
+            case.get("generator_max_count") for case, _path in formal_cases
+        }
+        if len(generator_bounds) != 1 or type(next(iter(generator_bounds))) is not int:
+            raise ValueError("formal relation fixtures do not share one generator bound")
+        formal_generator_max_count = next(iter(generator_bounds))
     report_paths = []
     for kind, cases in sorted(cases_by_kind.items()):
         stage = args.opcode_stage if kind == "opcode" else "precompile-lab"
@@ -12089,6 +12258,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         ran = len(raw_runs)
     elif expected_purpose == FORMAL_RELATION_PURPOSE:
         raw_runs = list(normalized_raw_runs())
+        assert formal_generator_max_count is not None
+        _validate_formal_relation_round_row_order(
+            manifest,
+            raw_runs,
+            formal_relation_ids,
+            formal_generator_max_count,
+        )
         if getattr(args, "formal_dynamic_preflight", True):
             validate_formal_dynamic_raw_gas_preflight(raw_runs)
         with out.open("w") as output:

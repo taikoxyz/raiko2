@@ -64,6 +64,105 @@ def write_execution_identity(root):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_formal_relation_fixture_order_matches_real_cmd_run_output(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        first, second = manifest.opcode_relations[:2]
+        fixtures = [
+            (
+                {"relation_id": relation_id, "diagnostic_count": count, "lane": lane},
+                pathlib.Path(f"{index}/guest-input.json"),
+            )
+            for index, (relation_id, count, lane) in enumerate(
+                (
+                    (second.id, 16, "target"),
+                    (first.id, 16, "target"),
+                    (first.id, 2, "target"),
+                    (second.id, 2, "control"),
+                    (first.id, 16, "control"),
+                    (second.id, 2, "target"),
+                    (first.id, 2, "control"),
+                    (second.id, 16, "control"),
+                )
+            )
+        ]
+
+        ordered = opcode_gas._ordered_formal_relation_fixture_cases(
+            manifest, fixtures
+        )
+
+        self.assertEqual(
+            [
+                (
+                    case["relation_id"],
+                    case["diagnostic_count"],
+                    case["lane"],
+                )
+                for case, _path in ordered
+            ],
+            [
+                (first.id, 2, "control"),
+                (first.id, 2, "target"),
+                (first.id, 16, "control"),
+                (first.id, 16, "target"),
+                (second.id, 2, "control"),
+                (second.id, 2, "target"),
+                (second.id, 16, "control"),
+                (second.id, 16, "target"),
+            ],
+        )
+        raw_order = [
+            {
+                **case,
+                "repeat_index": repeat_index,
+                "generator_max_count": 8,
+            }
+            for case, _path in ordered
+            for repeat_index in range(3)
+        ]
+        self.assertEqual(
+            [
+                (row["lane"], row["repeat_index"])
+                for row in raw_order[:6]
+            ],
+            [
+                ("control", 0),
+                ("control", 1),
+                ("control", 2),
+                ("target", 0),
+                ("target", 1),
+                ("target", 2),
+            ],
+        )
+
+        canonical = opcode_gas._canonical_formal_relation_rows(
+            opcode_gas.replace(manifest, opcode_relations=(first, second)),
+            {
+                relation.id: {
+                    "generator_max_count": 8,
+                    "rows": [
+                        row for row in raw_order if row["relation_id"] == relation.id
+                    ],
+                }
+                for relation in (first, second)
+            },
+        )
+        self.assertEqual(
+            [
+                (row["lane"], row["repeat_index"])
+                for row in canonical[:6]
+            ],
+            [
+                ("target", 0),
+                ("control", 0),
+                ("target", 1),
+                ("control", 1),
+                ("target", 2),
+                ("control", 2),
+            ],
+        )
+
     def test_parser_exposes_formal_relation_commands_and_run_path_handoff(self):
         parser = opcode_gas.build_parser()
         generated = parser.parse_args(
@@ -175,7 +274,14 @@ class RunnerTests(unittest.TestCase):
                 ],
             )
 
-        def fake_fit(_manifest, rows, selected_relation_ids, generator_max_count):
+        def fake_fit(
+            _manifest,
+            rows,
+            selected_relation_ids,
+            generator_max_count,
+            *,
+            expected_provenance,
+        ):
             self.assertEqual(
                 [row["relation_id"] for row in rows], list(selected_relation_ids)
             )
@@ -340,6 +446,60 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse((run / "formal-relation-decisions.json").exists())
 
+    def test_formal_relation_runner_contextualizes_launcher_failures(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        manifest = opcode_gas.replace(
+            manifest, opcode_relations=manifest.opcode_relations[:1]
+        )
+        relation_id = manifest.opcode_relations[0].id
+        failures = (
+            opcode_gas.subprocess.CalledProcessError(7, ["guest-launcher"]),
+            FileNotFoundError("guest-launcher missing"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                run, _revision = write_execution_identity(root)
+                identity = opcode_gas.json.loads(
+                    (run / "experiment.json").read_text()
+                )["calibration_identity"]
+                fixtures = root / "fixtures"
+                fixtures.mkdir()
+                output = run / "raw" / "formal-relations.jsonl"
+                args = types.SimpleNamespace(
+                    fixtures=fixtures,
+                    guest_launcher=pathlib.Path("guest-launcher"),
+                    elf=pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+                    precompile_elf=pathlib.Path("precompile.elf"),
+                    opcode_stage="revm-opcode-lab",
+                    calibration_run=run,
+                    controlled_manifest=root / "manifest.toml",
+                    out=output,
+                    repeats=3,
+                    expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+                )
+                with mock.patch.object(
+                    opcode_gas, "REPO_ROOT", root
+                ), mock.patch.object(
+                    opcode_gas,
+                    "validate_calibration_execution_identity",
+                    return_value=identity,
+                ), mock.patch.object(
+                    opcode_gas,
+                    "verify_frozen_controlled_manifest",
+                    return_value=(manifest, identity),
+                ), mock.patch.object(
+                    opcode_gas, "cmd_run", side_effect=failure
+                ), self.assertRaisesRegex(
+                    ValueError, rf"{relation_id}.*generator bound 8"
+                ):
+                    opcode_gas.cmd_run_relations(args)
+
+                self.assertFalse(output.exists())
+                self.assertFalse((run / "formal-relation-decisions.json").exists())
+
     def test_formal_relation_resume_rejects_tampered_sources_decisions_and_identity(self):
         manifest = opcode_gas.load_manifest(
             ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
@@ -349,8 +509,17 @@ class RunnerTests(unittest.TestCase):
         )
         relation_ids = [relation.id for relation in manifest.opcode_relations]
         identity_sha256 = "a" * 64
+        expected_provenance = {
+            "calibration_id": "a" * 24,
+            "calibration_identity_sha256": identity_sha256,
+            "implementation_revision": "b" * 40,
+            "controlled_manifest_sha256": "c" * 64,
+            "controlled_manifest_rows_sha256": "d" * 64,
+        }
 
-        def fake_fit(_manifest, rows, selected, bound):
+        def fake_fit(
+            _manifest, rows, selected, bound, *, expected_provenance
+        ):
             self.assertEqual([row["relation_id"] for row in rows], list(selected))
             return [
                 {
@@ -374,7 +543,11 @@ class RunnerTests(unittest.TestCase):
                 ],
             )
             relation_results = fake_fit(
-                manifest, list(opcode_gas.iter_jsonl(raw)), relation_ids, 8
+                manifest,
+                list(opcode_gas.iter_jsonl(raw)),
+                relation_ids,
+                8,
+                expected_provenance=expected_provenance,
             )
             result.write_text(
                 opcode_gas.json.dumps(
@@ -408,7 +581,7 @@ class RunnerTests(unittest.TestCase):
                 opcode_gas, "validate_formal_dynamic_raw_gas_preflight"
             ):
                 state = opcode_gas.validate_persisted_formal_relation_decisions(
-                    run, decisions, manifest, identity_sha256
+                    run, decisions, manifest, expected_provenance
                 )
                 self.assertTrue(state["complete"])
 
@@ -442,14 +615,14 @@ class RunnerTests(unittest.TestCase):
                         ValueError, message
                     ):
                         opcode_gas.validate_persisted_formal_relation_decisions(
-                            run, changed, manifest, identity_sha256
+                            run, changed, manifest, expected_provenance
                         )
 
                 original_raw = raw.read_bytes()
                 raw.write_bytes(original_raw + b"{}\n")
                 with self.assertRaisesRegex(ValueError, "source changed"):
                     opcode_gas.validate_persisted_formal_relation_decisions(
-                        run, decisions, manifest, identity_sha256
+                        run, decisions, manifest, expected_provenance
                     )
 
     def test_run_path_handoff_is_atomic_and_rejects_nonempty_existing_target(self):

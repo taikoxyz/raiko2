@@ -87,11 +87,11 @@ def formal_relation_rows(manifest, *, slope_overrides=None):
             }
             for key, value in relation.target_raw_gas_by_key.items():
                 target_map[key] = target_map.get(key, 0) + value * count
-            for repeat_index in range(3):
-                for lane, actual_map, prover_gas in (
-                    ("target", target_map, Decimal(100_000) + slope * count),
-                    ("control", control_map, Decimal(100_000)),
-                ):
+            for lane, actual_map, prover_gas in (
+                ("control", control_map, Decimal(100_000)),
+                ("target", target_map, Decimal(100_000) + slope * count),
+            ):
+                for repeat_index in range(3):
                     backend_input = hashlib.sha256(
                         f"{relation.id}:{count}:{lane}".encode()
                     ).hexdigest()
@@ -881,7 +881,11 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                 row["prover_gas"] = 100_000 + 10 * row["diagnostic_count"]
 
         result = opcode_gas.fit_formal_relation_round(
-            manifest, rows, [relation.id], 8
+            manifest,
+            rows,
+            [relation.id],
+            8,
+            expected_provenance=formal_relation_provenance(rows),
         )
         self.assertEqual(result[0]["decision"], "expand_next_round")
         self.assertEqual(result[0]["status"], "quality_rejected")
@@ -898,16 +902,136 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             ValueError, rf"{relation.id}.*generator bound 8.*repeat noise"
         ):
             opcode_gas.fit_formal_relation_round(
-                manifest, noisy, [relation.id], 8
+                manifest,
+                noisy,
+                [relation.id],
+                8,
+                expected_provenance=formal_relation_provenance(rows),
             )
 
         mixed = copy.deepcopy(rows)
         mixed[0]["generator_max_count"] = 32
         with self.assertRaisesRegex(
-            ValueError, rf"{relation.id}.*generator bound 8.*one generator bound"
+            ValueError, rf"{relation.id}.*generator bound 8.*stale row generator bound"
         ):
             opcode_gas.fit_formal_relation_round(
-                manifest, mixed, [relation.id], 8
+                manifest,
+                mixed,
+                [relation.id],
+                8,
+                expected_provenance=formal_relation_provenance(rows),
+            )
+
+    def test_round_fit_binds_provenance_execution_identity_bound_and_row_order(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = [
+            copy.deepcopy(row)
+            for row in formal_relation_rows(manifest)
+            if row["relation_id"] == relation.id
+        ]
+        expected_provenance = formal_relation_provenance(rows)
+
+        tampered_provenance = copy.deepcopy(rows)
+        tampered_provenance[-1]["calibration_id"] = "a" * 24
+        with self.assertRaisesRegex(
+            ValueError, rf"{relation.id}.*generator bound 8.*provenance"
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                tampered_provenance,
+                [relation.id],
+                8,
+                expected_provenance=expected_provenance,
+            )
+
+        mismatched_provenance = copy.deepcopy(rows)
+        mismatched_provenance[-1]["controlled_manifest_sha256"] = "f" * 64
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"{relation.id}.*generator bound 8.*provenance differs",
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                mismatched_provenance,
+                [relation.id],
+                8,
+                expected_provenance=expected_provenance,
+            )
+
+        identity_mutations = (
+            ("backend_input_sha256", None, "backend input"),
+            ("backend_input_sha256", "not-a-sha256", "backend input"),
+            ("backend_input_sha256", "A" * 64, "backend input"),
+            ("public_values", None, "public output"),
+            ("public_values", "not-hex", "public output"),
+            ("exit_code", None, "exit code"),
+            ("exit_code", False, "exit code"),
+            ("exit_code", 1, "exit code"),
+        )
+        for field, value, message in identity_mutations:
+            malformed = copy.deepcopy(rows)
+            for row in malformed:
+                row[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                ValueError, rf"{relation.id}.*generator bound 8.*{message}"
+            ):
+                opcode_gas.fit_formal_relation_round(
+                    manifest,
+                    malformed,
+                    [relation.id],
+                    8,
+                    expected_provenance=expected_provenance,
+                )
+
+        for field, value in (
+            ("backend_input_sha256", "f" * 64),
+            ("public_values", "0x02"),
+        ):
+            mismatched = copy.deepcopy(rows)
+            next(
+                row
+                for row in mismatched
+                if row["lane"] == "target"
+                and row["diagnostic_count"] == 1
+                and row["repeat_index"] == 2
+            )[field] = value
+            with self.subTest(mismatched=field), self.assertRaisesRegex(
+                ValueError, rf"{relation.id}.*generator bound 8.*repeat identity"
+            ):
+                opcode_gas.fit_formal_relation_round(
+                    manifest,
+                    mismatched,
+                    [relation.id],
+                    8,
+                    expected_provenance=expected_provenance,
+                )
+
+        stale_bound = copy.deepcopy(rows)
+        for row in stale_bound:
+            row["generator_max_count"] = 32
+        with self.assertRaisesRegex(
+            ValueError, rf"{relation.id}.*generator bound 8.*row generator bound"
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                stale_bound,
+                [relation.id],
+                8,
+                expected_provenance=expected_provenance,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, rf"generator bound 8.*row order"
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                list(reversed(rows)),
+                [relation.id],
+                8,
+                expected_provenance=expected_provenance,
             )
 
     def test_relation_artifact_is_byte_identical_across_caller_decimal_contexts(self):

@@ -88,11 +88,39 @@ fixture, or identity failures abort instead of expanding. Each round is sealed i
 already accepted. The canonical `raw/formal-relations.jsonl` is created atomically only after every
 relation has accepted exactly one generator bound.
 
-An exactly constant target-minus-control response across every fit point and checkpoint is a valid
-zero-slope relation. This includes self-controls with a nonzero absolute intercept: only
-count-dependent drift is disqualifying. A non-self exact-flat row still binds its signed raw-gas
-coefficient map and all ordinary trace/provenance evidence; non-flat small signals keep the ordinary
-signal gate.
+Relation `count` is the number of active target-microprogram repetitions in the fixed footprint. It
+is not transaction count, block count, gas limit, or a value recovered from runtime gas. Non-self
+OLS uses only positive fit counts (`count >= 1`); count zero never enters slope, R2, standard error,
+residual, signal, or checkpoint baselining. The artifact reports
+`positive_fit_intercept_p`, `zero_delta_p`, and signed
+`activation_gap_p = zero_delta_p - positive_fit_intercept_p`. A positive gap means count zero lies
+above the positive-count line's extrapolated intercept. `activation_gap_ratio` is
+`abs(activation_gap_p) / signal_p` when signal is positive. These fields and the tail evidence are
+part of formal relation artifact schema version 2; version-1 relation artifacts cannot enter the
+new candidate path.
+
+Every selected relation round pre-generates and executes an `active_tail` count-one pair. Its target
+microprogram executes in the final slot; ordinary count one executes in the first slot. Their
+raw-gas multisets and footprint match, while structured placement/sample identity keeps grouping,
+raw order, three-repeat completeness, resume replay, and hashes distinct. If activation-gap ratio
+is strictly greater than `0.02`, the tail becomes an acceptance gate: its observed marginal is
+`delta_tail - delta_zero`, its prediction is `slope_p`, signs must match, and APE must be at most
+`0.10`. Both zero passes exactly; one zero or opposite signs fails. With zero positive signal, a
+zero gap reports ratio zero and does not trigger, while a nonzero gap reports an explicit
+`zero_signal_nonzero_gap` status and must trigger. Untriggered tail results remain diagnostics; JSON
+never uses Infinity or NaN.
+
+An exactly constant non-self target-minus-control response across positive fit points and checkpoint
+is a valid zero-slope relation; count zero then remains activation evidence. Self-controls retain
+all-count exact-flat semantics, including the tail placement. A non-self exact-flat row still binds
+its signed raw-gas coefficient map and all ordinary trace/provenance evidence; non-flat small signals
+keep the ordinary signal gate.
+
+The sealed failed run `runs/1bee0a5941fddc9984b009b8` remains read-only design evidence. Its JUMPI
+row at bound 2048 had count-zero gas `85829242`, first-slot count-one gas `85786709`, last-slot
+count-one gas `85830087`, positive-count slope about `817.4076`, positive-fit residual/signal about
+`0.000486`, and signed activation gap about `+43254.95`. It demonstrates activation/slot-order
+contamination but is not a candidate source.
 
 The relation fit reconstructs pure-opcode costs from the frozen rank-98 system and four internal
 algebraic basis coordinates; their opcode labels do not give them special physical meaning. `A_i`
@@ -153,10 +181,9 @@ or cadence.
 The fast engine is restricted to local SP1 execute-mode opcode labs. Proposal, precompile, overhead,
 aggregation, and proof-generation paths continue to use their normal engines. Use direct
 `guest-launcher --sp1-execution-engine standard` runs only for focused parity checks; do not mix
-standard and gas-estimator rows in one fit. On one representative workstation, a 23-opcode,
-322-execution matched-control sweep took about 53 seconds, while individual standard executions used
-for parity checks took tens of seconds each. These timings are observations, not performance
-contracts.
+standard and gas-estimator rows in one fit. The estimator is an offline calibration and validation
+oracle, not a production online quote or admission path. Production online behavior continues to
+use the host-native operation ledger and sealed coefficient table.
 
 ### Matched-Control Opcode Diagnostics
 

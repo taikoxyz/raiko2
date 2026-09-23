@@ -64,6 +64,35 @@ def write_execution_identity(root):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_formal_relation_round_order_includes_tail_sample_identity(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        relation = manifest.opcode_relations[0]
+        rows = [
+            {
+                "relation_id": relation.id,
+                "relation_placement": placement,
+                "relation_sample_id": sample_id,
+                "diagnostic_count": count,
+                "lane": lane,
+                "repeat_index": repeat_index,
+            }
+            for placement, sample_id, count in opcode_gas.formal_relation_round_samples(8)
+            for lane in ("control", "target")
+            for repeat_index in range(3)
+        ]
+
+        opcode_gas._validate_formal_relation_round_row_order(
+            manifest, rows, [relation.id], 8
+        )
+
+        rows[-1]["relation_sample_id"] = "active_prefix:count-1"
+        with self.assertRaisesRegex(ValueError, "order, duplicates, or completeness"):
+            opcode_gas._validate_formal_relation_round_row_order(
+                manifest, rows, [relation.id], 8
+            )
+
     def test_formal_relation_fixture_order_matches_real_cmd_run_output(self):
         manifest = opcode_gas.load_manifest(
             ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
@@ -71,7 +100,13 @@ class RunnerTests(unittest.TestCase):
         first, second = manifest.opcode_relations[:2]
         fixtures = [
             (
-                {"relation_id": relation_id, "diagnostic_count": count, "lane": lane},
+                {
+                    "relation_id": relation_id,
+                    "diagnostic_count": count,
+                    "relation_placement": "active_prefix",
+                    "relation_sample_id": f"active_prefix:count-{count}",
+                    "lane": lane,
+                },
                 pathlib.Path(f"{index}/guest-input.json"),
             )
             for index, (relation_id, count, lane) in enumerate(
@@ -1062,6 +1097,8 @@ class RunnerTests(unittest.TestCase):
                             "relation_split": split,
                             "lane": "target",
                             "diagnostic_count": 1,
+                            "relation_placement": "active_prefix",
+                            "relation_sample_id": "active_prefix:count-1",
                             "repeat_index": repeat_index,
                             "controlled_trace": {
                                 "executed_target_count": 1,

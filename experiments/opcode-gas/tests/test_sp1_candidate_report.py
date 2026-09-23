@@ -69,6 +69,7 @@ def formal_relation_rows(manifest, *, slope_overrides=None):
         "controlled_manifest_rows_sha256": "e" * 64,
     }
     for index, relation in enumerate(manifest.opcode_relations):
+        relation_rows_start = len(rows)
         slope = Decimal(
             str(
                 slope_overrides.get(
@@ -107,6 +108,8 @@ def formal_relation_rows(manifest, *, slope_overrides=None):
                             "pair_id": pair_id,
                             "lane": lane,
                             "diagnostic_count": count,
+                            "relation_placement": "active_prefix",
+                            "relation_sample_id": f"active_prefix:count-{count}",
                             "generator_max_count": 8,
                             "repeat_index": repeat_index,
                             "prover_gas": int(prover_gas),
@@ -137,6 +140,26 @@ def formal_relation_rows(manifest, *, slope_overrides=None):
                             },
                         }
                     )
+        prefix_count_one = [
+            copy.deepcopy(row)
+            for row in rows[relation_rows_start:]
+            if row["diagnostic_count"] == 1
+        ]
+        tail_pair_id = hashlib.sha256(f"{relation.id}:active_tail".encode()).hexdigest()
+        for row in prefix_count_one:
+            row["pair_id"] = tail_pair_id
+            row["relation_placement"] = "active_tail"
+            row["relation_sample_id"] = "active_tail:count-1"
+            row["prover_gas"] = int(
+                Decimal(100_000) + (slope if row["lane"] == "target" else 0)
+            )
+            row["workload_id"] = hashlib.sha256(
+                f"tail-workload:{relation.id}:{row['lane']}".encode()
+            ).hexdigest()
+            row["backend_input_sha256"] = hashlib.sha256(
+                f"tail:{relation.id}:{row['lane']}".encode()
+            ).hexdigest()
+            rows.append(row)
     return rows
 
 
@@ -290,7 +313,7 @@ def candidate_input_artifacts(manifest, controlled_rows):
         and key.pricing_basis == "raw_gas_slope"
     ]
     relation = {
-        "schema_version": 1,
+        "schema_version": opcode_gas.FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION,
         "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
         "signal_kind": opcode_gas.FORMAL_RELATION_SIGNAL_KIND,
         "status": "accepted",
@@ -808,6 +831,127 @@ class MeasurementGateTests(unittest.TestCase):
 
 
 class FormalOpcodeRelationTests(unittest.TestCase):
+    def test_signed_relation_fit_excludes_zero_activation_outlier(self):
+        counts = {
+            0: (Decimal(100_000), Decimal(100_000), Decimal(0)),
+            1: (Decimal(93_000), Decimal(100_000), Decimal(-7_000)),
+            2: (Decimal(96_000), Decimal(100_000), Decimal(-4_000)),
+            4: (Decimal(102_000), Decimal(100_000), Decimal(2_000)),
+            8: (Decimal(114_000), Decimal(100_000), Decimal(14_000)),
+        }
+
+        fit = opcode_gas._signed_relation_fit(
+            counts,
+            generator_max_count=8,
+            relation_id="opcode:0x57:zero-activation-outlier",
+        )
+
+        self.assertEqual(fit["selected_counts"], [1, 2, 4])
+        self.assertEqual(fit["slope"], Decimal(3_000))
+        self.assertLess(abs(fit["intercept"] - Decimal(-10_000)), Decimal("1e-20"))
+        self.assertEqual(fit["signal"], Decimal(9_000))
+        self.assertLess(fit["max_residual"], Decimal("1e-20"))
+        self.assertLess(
+            abs(Decimal(fit["checkpoint"]["observed_delta_p"]) - Decimal(24_000)),
+            Decimal("1e-20"),
+        )
+        self.assertEqual(fit["checkpoint"]["predicted_delta_p"], "24000")
+
+    def test_relation_fit_reports_activation_gap_and_gates_tail_holdout(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item
+            for item in manifest.opcode_relations
+            if item.split == "canonical" and item.signed_raw_gas_by_key
+        )
+        rows = [
+            copy.deepcopy(row)
+            for row in formal_relation_rows(manifest)
+            if row["relation_id"] == relation.id
+            and row["relation_placement"] == "active_prefix"
+        ]
+        deltas = {0: 0, 1: -7_000, 2: -4_000, 4: 2_000, 8: 14_000}
+        for row in rows:
+            count = row["diagnostic_count"]
+            row["relation_placement"] = "active_prefix"
+            row["relation_sample_id"] = f"active_prefix:count-{count}"
+            row["prover_gas"] = 100_000 + (deltas[count] if row["lane"] == "target" else 0)
+        tail_rows = [
+            copy.deepcopy(row)
+            for row in rows
+            if row["diagnostic_count"] == 1
+        ]
+        for row in tail_rows:
+            row["relation_placement"] = "active_tail"
+            row["relation_sample_id"] = "active_tail:count-1"
+            row["backend_input_sha256"] = hashlib.sha256(
+                f"tail:{row['lane']}".encode()
+            ).hexdigest()
+            row["workload_id"] = hashlib.sha256(
+                f"tail-workload:{row['lane']}".encode()
+            ).hexdigest()
+            row["prover_gas"] = 103_000 if row["lane"] == "target" else 100_000
+
+        result = opcode_gas._fit_one_opcode_relation(relation, rows + tail_rows)
+
+        self.assertEqual(result["selected_counts"], [1, 2, 4])
+        self.assertEqual(result["slope_p"], "3000")
+        self.assertEqual(result["zero_delta_p"], "0")
+        self.assertLess(
+            abs(Decimal(result["positive_fit_intercept_p"]) - Decimal(-10_000)),
+            Decimal("1e-20"),
+        )
+        self.assertLess(
+            abs(Decimal(result["activation_gap_p"]) - Decimal(10_000)),
+            Decimal("1e-20"),
+        )
+        self.assertEqual(result["activation_gap_ratio_status"], "finite")
+        self.assertTrue(result["tail_holdout"]["triggered"])
+        self.assertEqual(result["tail_holdout"]["observed_marginal_p"], "3000")
+        self.assertEqual(result["tail_holdout"]["predicted_marginal_p"], "3000")
+        self.assertEqual(result["tail_holdout"]["status"], "passed")
+
+        bad_tail = copy.deepcopy(rows + tail_rows)
+        for row in bad_tail:
+            if (
+                row["relation_placement"] == "active_tail"
+                and row["lane"] == "target"
+            ):
+                row["prover_gas"] = 97_000
+        with self.assertRaisesRegex(
+            opcode_gas.FormalRelationQualityError, "tail holdout failed_sign"
+        ):
+            opcode_gas._fit_one_opcode_relation(relation, bad_tail)
+
+        inaccurate_tail = copy.deepcopy(rows + tail_rows)
+        for row in inaccurate_tail:
+            if (
+                row["relation_placement"] == "active_tail"
+                and row["lane"] == "target"
+            ):
+                row["prover_gas"] = 102_000
+        with self.assertRaisesRegex(
+            opcode_gas.FormalRelationQualityError, "tail holdout failed_ape"
+        ):
+            opcode_gas._fit_one_opcode_relation(relation, inaccurate_tail)
+
+        diagnostic_only = copy.deepcopy(rows + tail_rows)
+        for row in diagnostic_only:
+            if row["lane"] != "target":
+                row["prover_gas"] = 100_000
+            elif row["relation_placement"] == "active_tail":
+                row["prover_gas"] = 97_000
+            else:
+                row["prover_gas"] = 100_000 + 3_000 * row["diagnostic_count"]
+        diagnostic_result = opcode_gas._fit_one_opcode_relation(
+            relation, diagnostic_only
+        )
+        self.assertEqual(diagnostic_result["activation_gap_ratio"], "0")
+        self.assertFalse(diagnostic_result["tail_holdout"]["triggered"])
+        self.assertEqual(diagnostic_result["tail_holdout"]["gate_mode"], "diagnostic")
+        self.assertEqual(diagnostic_result["tail_holdout"]["status"], "failed")
+        self.assertEqual(diagnostic_result["tail_holdout"]["comparison"], "failed_sign")
+
     def test_exact_flat_self_control_accepts_nonzero_intercept_with_zero_slope(self):
         manifest = formal_relation_manifest()
         relation = next(
@@ -851,6 +995,11 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertEqual(equation["slope_p"], "0")
         self.assertEqual(equation["intercept_p"], "7")
         self.assertEqual(equation["checkpoint"]["status"], "passed_exact_flat")
+        self.assertEqual(
+            equation["activation_gap_ratio_status"], "zero_signal_zero_gap"
+        )
+        self.assertEqual(equation["activation_gap_ratio"], "0")
+        self.assertFalse(equation["tail_holdout"]["triggered"])
 
         drifted = [
             copy.deepcopy(row)
@@ -865,6 +1014,41 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             rf"{relation.id}.*generator bound 8",
         ):
             opcode_gas._fit_one_opcode_relation(relation, drifted)
+
+    def test_exact_flat_positive_interval_handles_nonzero_activation_without_division(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item
+            for item in manifest.opcode_relations
+            if item.split == "canonical" and item.signed_raw_gas_by_key
+        )
+        rows = [
+            copy.deepcopy(row)
+            for row in formal_relation_rows(manifest)
+            if row["relation_id"] == relation.id
+        ]
+        for row in rows:
+            if row["lane"] != "target":
+                row["prover_gas"] = 100_000
+            elif row["relation_placement"] == "active_prefix" and row[
+                "diagnostic_count"
+            ] > 0:
+                row["prover_gas"] = 100_007
+            else:
+                row["prover_gas"] = 100_000
+
+        result = opcode_gas._fit_one_opcode_relation(relation, rows)
+
+        self.assertTrue(result["exact_flat"])
+        self.assertEqual(result["positive_fit_intercept_p"], "7")
+        self.assertEqual(result["zero_delta_p"], "0")
+        self.assertEqual(result["activation_gap_p"], "-7")
+        self.assertIsNone(result["activation_gap_ratio"])
+        self.assertEqual(
+            result["activation_gap_ratio_status"], "zero_signal_nonzero_gap"
+        )
+        self.assertTrue(result["tail_holdout"]["triggered"])
+        self.assertEqual(result["tail_holdout"]["comparison"], "passed_exact_zero")
 
     def test_round_fit_expands_only_quality_and_contextualizes_hard_failures(self):
         manifest = formal_relation_manifest()
@@ -1080,8 +1264,8 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
         result = opcode_gas._signed_relation_fit(counts, generator_max_count=8)
 
-        self.assertEqual(result["slope"], Decimal(5000))
-        self.assertEqual(result["signal"], Decimal(20000))
+        self.assertLess(abs(result["slope"] - Decimal(5000)), Decimal("1e-20"))
+        self.assertEqual(result["signal"], Decimal(15000))
 
     def test_fits_rank_98_artifact_with_negative_slope_and_exact_serialization(self):
         manifest = formal_relation_manifest()
@@ -1094,6 +1278,7 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
         artifact = opcode_gas.fit_opcode_relations(manifest, rows)
 
+        self.assertEqual(artifact["schema_version"], 2)
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)

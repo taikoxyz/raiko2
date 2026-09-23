@@ -98,6 +98,54 @@ def emit_matched_control_pair(
 
 
 class FixtureEmitTests(unittest.TestCase):
+    def test_formal_relation_generation_adds_distinct_tail_position_holdout(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        manifest = replace(manifest, variants=[0, 1], opcode_relations=(relation,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            rows = [opcode_gas.json.loads(path.read_text()) for path in written]
+
+        target_rows = [row for row in rows if row["lane"] == "target"]
+        self.assertEqual(
+            [
+                (row["relation_placement"], row["diagnostic_count"])
+                for row in target_rows
+            ],
+            [("active_prefix", 0), ("active_prefix", 1), ("active_tail", 1)],
+        )
+        self.assertEqual(len({row["relation_sample_id"] for row in target_rows}), 3)
+        prefix = next(
+            row for row in target_rows if row["relation_placement"] == "active_prefix" and row["diagnostic_count"] == 1
+        )
+        tail = next(
+            row for row in target_rows if row["relation_placement"] == "active_tail"
+        )
+        prefix_programs = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(prefix["bytecode"].removeprefix("0x"))
+        )
+        tail_programs = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(tail["bytecode"].removeprefix("0x"))
+        )
+        self.assertEqual(prefix_programs[0], tail_programs[-1])
+        self.assertEqual(prefix_programs[1:], tail_programs[:-1])
+        self.assertEqual(prefix["opcode_counts"], tail["opcode_counts"])
+
     def test_formal_relation_generation_binds_dynamic_programs_and_exact_raw_gas_rows(self):
         manifest = opcode_gas.load_manifest(
             ROOT
@@ -133,12 +181,17 @@ class FixtureEmitTests(unittest.TestCase):
                 for row, path in zip(rows, written)
             }
 
-        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(rows), 12)
         self.assertEqual({row["purpose"] for row in rows}, {"formal_opcode_relation"})
         self.assertEqual({row["diagnostic_only"] for row in rows}, {False})
         self.assertEqual({row["signal_kind"] for row in rows}, {"signed_raw_gas_relation"})
         targets = sorted(
-            (row for row in rows if row["lane"] == "target"),
+            (
+                row
+                for row in rows
+                if row["lane"] == "target"
+                and row["relation_placement"] == "active_prefix"
+            ),
             key=lambda row: row["target_raw_gas"],
         )
         self.assertEqual([row["target_raw_gas"] for row in targets], [60, 410, 1610])
@@ -177,7 +230,7 @@ class FixtureEmitTests(unittest.TestCase):
             expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
             guest_inputs=inputs,
         )
-        self.assertEqual(len(pairs), 3)
+        self.assertEqual(len(pairs), 6)
         altered = [dict(row) for row in rows]
         first_relation_id = altered[0]["relation_id"]
         for row in altered:

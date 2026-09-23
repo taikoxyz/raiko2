@@ -143,27 +143,66 @@ Each nonzero relation must have:
   signal, and checkpoint APE `<= 0.10`;
 - matching observed and predicted signs at the checkpoint.
 
+Here `count` means the number of active target-microprogram repetitions inside the fixed relation
+footprint. It is not a transaction count, block count, gas limit, or runtime gas-derived value.
+Every selected relation round also pre-generates and executes one `active_tail` sample: the same
+target microprogram executes exactly once in the final footprint slot. Its ordinary count-1 peer
+executes once in the first slot. The two samples have the same target/control raw-gas multisets and
+fixed footprint and differ only in slot order. `relation_placement` and `relation_sample_id` are
+part of pair identity, raw ordering, completeness, resume replay, and sealing.
+The resulting formal relation artifact uses schema version 2; schema version 1 does not carry the
+activation/tail evidence and is not accepted by candidate construction.
+
 For the deterministic target/control response `delta_p(x) = p_target(x) - p_control(x)`, freeze the
 signed-fit quantities as:
 
 ```text
-signal_p = abs(max(delta_p) - min(delta_p))
-baseline_p = max(abs(p_target(0)), abs(p_control(0)))
-signal_p >= max(1000 proverGas, 0.01 * baseline_p, 20 * response_repeat_noise_p)
+positive fit counts = selected counts x >= 1
+delta_p(x) = positive_fit_intercept_p + slope_p * x + residual_p(x)
+signal_p = abs(max(delta_p(x >= 1)) - min(delta_p(x >= 1)))
+signal_p >= max(1000 proverGas,
+                0.01 * abs(positive_fit_intercept_p),
+                20 * response_repeat_noise_p)
 relative_slope_stderr = se(slope_p) / abs(slope_p) <= 0.05
 max(abs(fit_residual_p)) / signal_p <= 0.02
 
-observed_delta_check = delta_p(checkpoint) - delta_p(0)
+zero_delta_p = delta_p(0)
+activation_gap_p = zero_delta_p - positive_fit_intercept_p
+activation_gap_ratio = abs(activation_gap_p) / signal_p
+
+observed_delta_check = delta_p(checkpoint) - positive_fit_intercept_p
 predicted_delta_check = slope_p * checkpoint
 checkpoint_APE = abs(predicted_delta_check - observed_delta_check) /
                  abs(observed_delta_check) <= 0.10
+
+tail_observed_marginal_p = delta_p(active_tail, count=1) - zero_delta_p
+tail_predicted_marginal_p = slope_p
 ```
 
 `response_repeat_noise_p` is the sum of the target and control repeat ranges and is expected to be
-zero under the primary determinism rule. A negative relation slope is valid. A required non-self
-relation with insufficient signal, or one that is missing, confounded, scenario-incomplete, or
-rejected, prevents the 102-key candidate from sealing. After filtering, the accepted equation
-matrix must still have exact rank 98.
+zero under the primary determinism rule. Count zero never enters a non-self slope, R2, standard
+error, residual, or signal fit; it reports activation only. A positive activation gap means count
+zero is above the positive-count line's extrapolated intercept. A non-self exact-flat relation is
+flat only when all positive fit counts plus the checkpoint are identical. Self-controls retain the
+stronger all-count exact-flat requirement.
+
+The tail holdout becomes an acceptance gate exactly when `activation_gap_ratio > 0.02`. If
+`signal_p == 0` and the gap is zero, the ratio is reported as zero and does not trigger. If
+`signal_p == 0` and the gap is nonzero, the ratio is reported as unavailable with an explicit
+`zero_signal_nonzero_gap` status and the gate must trigger; JSON never contains Infinity or NaN.
+For the tail comparison, two zero marginals pass exactly. If only one marginal is zero or their
+signs differ, it fails. Otherwise its APE must be at most `0.10`. An untriggered tail result remains
+a serialized diagnostic. A negative relation slope is valid. A required non-self relation with
+insufficient signal, or one that is missing, confounded, scenario-incomplete, or rejected, prevents
+the 102-key candidate from sealing. After filtering, the accepted equation matrix must still have
+exact rank 98.
+
+The sealed failed run `experiments/opcode-gas/runs/1bee0a5941fddc9984b009b8` is read-only design
+evidence, not a candidate input. At generator bound 2048 its JUMPI row showed count-0 gas
+`85829242`, first-slot count-1 gas `85786709`, and last-slot count-1 gas `85830087`; the positive
+fit slope was about `817.4076`, positive-fit residual/signal about `0.000486`, and the signed
+activation gap about `+43254.95`. This isolates count-0/activation and slot-order effects without
+promoting that failed artifact.
 
 ### Dynamic Raw-Gas Holdouts
 
@@ -239,6 +278,10 @@ Before the formal campaign, one frozen controlled input must demonstrate exact s
 estimator equality for proverGas, instruction count, syscall count, and public values. CLI
 `--mode execute` denotes a local no-proof run; `--sp1-execution-engine gas-estimator` selects the
 actual execution implementation.
+
+The gas estimator is an offline calibration and validation oracle only. It is not a production
+online quote or admission path; online operation continues to use the host-native operation ledger
+and the sealed coefficient table.
 
 Fixture generation must compute the exact rational design matrix before SP1 execution and reject it
 unless all eight columns have exact full rank. It must not round `B`, `x_j * B`, or the rank input.

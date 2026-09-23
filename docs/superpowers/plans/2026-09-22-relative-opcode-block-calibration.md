@@ -310,7 +310,9 @@ git commit -m "feat(zkgas): add exact opcode relation algebra"
 
 **Interfaces:**
 - Consumes: exact matched target/control programs, three repeats, actual per-key raw-gas totals,
-  frozen count prefixes, and checkpoint mapping.
+  frozen positive-count prefixes, count-zero activation diagnostics, a last-slot count-one
+  holdout, and checkpoint mapping. Relation `count` is the active target-microprogram repeat count
+  inside the fixed footprint, not transaction count, block count, gas limit, or runtime gas.
 - Produces: `opcode-relations.json` with 98 accepted canonical equations, four self-control checks,
   non-fitting dynamic relation observations, exact rank/basis metadata, signed quality gates, and
   provenance.
@@ -413,18 +415,39 @@ def fit_opcode_relations(
 ```
 
 Apply the frozen cumulative-prefix search, three-repeat determinism, signal, R2,
-`se(slope)/abs(slope)`, residual/signal, and out-of-fit signed checkpoint gates. Canonical non-self
-relations must produce 98 accepted equations. Self-controls must have exact zero delta and do not
-enter `A`. Dynamic holdouts pass the same signed slope-quality gates and are serialized as
-non-fitting observations, but cannot add rows to `A` or affect `mu_zero`/`B`. Call
+`se(slope)/abs(slope)`, residual/signal, and out-of-fit signed checkpoint gates. For every non-self
+relation, fit only counts `>= 1`; count zero cannot enter slope, intercept quality, R2, standard
+error, residual, signal, or checkpoint baselining. Serialize `positive_fit_intercept_p`,
+`zero_delta_p`, and signed `activation_gap_p = zero_delta_p - positive_fit_intercept_p`. Serialize
+`abs(activation_gap_p) / signal_p` when signal is positive, with explicit finite/zero-signal status
+instead of Infinity or NaN.
+
+Generate and execute, before reading results, one `active_tail` sample for every selected relation
+round. It executes the same target microprogram exactly once in the last fixed-footprint slot; the
+ordinary count-one row executes it in the first slot. Bind placement and sample ID into pair
+identity, raw order, completeness, resume, and hashes. When activation-gap ratio is strictly above
+`0.02`, require `tail_observed_marginal_p = delta_tail - delta_zero` to have the same sign as
+`tail_predicted_marginal_p = slope_p` and APE `<= 0.10`. Both zero passes; one zero or opposite
+signs fails. Zero signal plus zero gap does not trigger, while zero signal plus nonzero gap must
+trigger with an explicit unavailable-ratio status. Always retain the tail diagnostic.
+
+Canonical non-self relations must produce 98 accepted equations. Non-self exact-flat semantics use
+the positive fit counts plus checkpoint, while self-controls retain all-count exact-flat semantics
+and do not enter `A`. Dynamic holdouts pass the same signed slope-quality gates and are serialized
+as non-fitting observations, but cannot add rows to `A` or affect `mu_zero`/`B`. Call
 `derive_affine_opcode_model()` and serialize `mu_zero`, `B`, rank, nullity, and hashes using
 canonical Decimal/Fraction strings.
 
 - [ ] **Step 6: Prove failure cases before accepting the artifact**
 
 Add tests for negative accepted slopes, tiny-signal rejection, nonzero repeat noise, wrong sign at
-checkpoint, a missing canonical relation, wrong raw-gas units, rank 97, and rounded/tampered basis
-coefficients.
+checkpoint, count-zero activation contamination, tail placement/order/completeness, zero-signal
+activation behavior, tail sign/APE failure, a missing canonical relation, wrong raw-gas units, rank
+97, and rounded/tampered basis coefficients.
+
+Keep `experiments/opcode-gas/runs/1bee0a5941fddc9984b009b8` sealed and read-only. Its JUMPI
+count-zero/first-slot/last-slot result and positive-count linear fit are failed-run design evidence,
+not campaign input and not a candidate artifact.
 
 - [ ] **Step 7: Run the relation test lane and commit**
 
@@ -585,6 +608,11 @@ guest three times through `--sp1-execution-engine gas-estimator`. Before the cam
 frozen row once through the standard engine and once through the estimator and require exact
 proverGas, instruction-count, syscall-count, and public-values parity. A trace or parity mismatch
 emits a rejected result and no formal SP1 observations.
+
+Treat the SP1 gas estimator only as an offline calibration/validation oracle. Do not wire it into
+production online quoting or admission; those paths continue to use the host-native operation
+ledger and sealed coefficient table. Do not record an elapsed-time benchmark without a captured
+command, hardware context, and output.
 
 - [ ] **Step 7: Run focused Python and Rust tests and commit**
 

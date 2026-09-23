@@ -49,6 +49,9 @@ def _isolated_decimal_context(function):
 
 FORMAL_RELATION_PURPOSE = "formal_opcode_relation"
 FORMAL_RELATION_SIGNAL_KIND = "signed_raw_gas_relation"
+FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION = 2
+FORMAL_RELATION_PREFIX_PLACEMENT = "active_prefix"
+FORMAL_RELATION_TAIL_PLACEMENT = "active_tail"
 OPCODE_RELATION_ANCHORS = (
     "opcode:0x50",
     "opcode:0x5f",
@@ -69,6 +72,8 @@ FORMAL_RELATION_QUALITY_GATES = {
     "relative_slope_stderr_max": "0.05",
     "residual_signal_max": "0.02",
     "checkpoint_ape_max": "0.10",
+    "activation_gap_signal_ratio_trigger_gt": "0.02",
+    "tail_holdout_ape_max": "0.10",
     "signal_min_prover_gas": "1000",
     "signal_min_baseline_fraction": "0.01",
     "signal_min_repeat_noise_multiple": "20",
@@ -2364,12 +2369,20 @@ def build_relation_bytecode(
     generator_max_count: int,
     *,
     lane: str,
+    placement: str = FORMAL_RELATION_PREFIX_PLACEMENT,
 ) -> GeneratedBytecode:
     spec = relation_matched_control_spec(case, relation.scenario)
     if relation_count < 0 or relation_count > generator_max_count:
         raise ValueError("relation count exceeds generator_max_count")
     if lane not in {"target", "control"}:
         raise ValueError("formal relation lane must be target or control")
+    if placement not in {
+        FORMAL_RELATION_PREFIX_PLACEMENT,
+        FORMAL_RELATION_TAIL_PLACEMENT,
+    }:
+        raise ValueError("formal relation placement is invalid")
+    if placement == FORMAL_RELATION_TAIL_PLACEMENT and relation_count != 1:
+        raise ValueError("formal relation tail placement requires count one")
 
     def slot(execute_target: bool) -> bytes:
         if spec.compound:
@@ -2392,10 +2405,14 @@ def build_relation_bytecode(
         assert opcode is not None
         return spec.setup + bytes([opcode, 0x00])
 
-    programs = [
-        slot(lane == "target" and index < relation_count)
-        for index in range(generator_max_count)
-    ]
+    def executes_target(index: int) -> bool:
+        if lane != "target":
+            return False
+        if placement == FORMAL_RELATION_TAIL_PLACEMENT:
+            return index == generator_max_count - 1
+        return index < relation_count
+
+    programs = [slot(executes_target(index)) for index in range(generator_max_count)]
     if len({len(program) for program in programs}) > 1:
         raise AssertionError("formal relation microprogram slots must have one byte length")
     encoded = encode_fixed_microprograms(programs)
@@ -2448,7 +2465,22 @@ FORMAL_RELATION_FIELDS = (
     "target_raw_gas_by_key",
     "control_raw_gas_by_key",
     "signed_raw_gas_by_key",
+    "relation_placement",
+    "relation_sample_id",
 )
+
+
+def formal_relation_sample_id(placement: str, count: int) -> str:
+    if placement not in {
+        FORMAL_RELATION_PREFIX_PLACEMENT,
+        FORMAL_RELATION_TAIL_PLACEMENT,
+    }:
+        raise ValueError("formal relation placement is invalid")
+    if type(count) is not int or count < 0:
+        raise ValueError("formal relation sample count is invalid")
+    if placement == FORMAL_RELATION_TAIL_PLACEMENT and count != 1:
+        raise ValueError("formal relation tail sample requires count one")
+    return f"{placement}:count-{count}"
 
 
 def _matched_control_pair_spec(
@@ -2556,6 +2588,11 @@ def _matched_control_pair_spec(
     ):
         raise ValueError("matched-control control declaration is invalid")
     if purpose == FORMAL_RELATION_PURPOSE:
+        placement = target.get("relation_placement")
+        if target.get("relation_sample_id") != formal_relation_sample_id(
+            str(placement), diagnostic_count
+        ):
+            raise ValueError("formal relation sample identity is invalid")
         target_map = _parse_canonical_int_map(
             target.get("target_raw_gas_by_key"), label="target raw-gas map"
         )
@@ -2589,10 +2626,20 @@ def _matched_control_pair_spec(
             dynamic_key=target.get("dynamic_key"),
         )
         expected_target = build_relation_bytecode(
-            reconstructed_case, relation_spec, diagnostic_count, generator_max_count, lane="target"
+            reconstructed_case,
+            relation_spec,
+            diagnostic_count,
+            generator_max_count,
+            lane="target",
+            placement=str(placement),
         )
         expected_control = build_relation_bytecode(
-            reconstructed_case, relation_spec, diagnostic_count, generator_max_count, lane="control"
+            reconstructed_case,
+            relation_spec,
+            diagnostic_count,
+            generator_max_count,
+            lane="control",
+            placement=str(placement),
         )
     else:
         expected_target = build_matched_control_bytecode(
@@ -2688,6 +2735,8 @@ def validate_matched_control_fixture_pairs(
             row.get("original_case"),
             row.get("relation_id"),
             row.get("diagnostic_count"),
+            row.get("relation_placement"),
+            row.get("relation_sample_id"),
             row.get("generator_max_count"),
         )
         grouped.setdefault(key, []).append(row)
@@ -3564,20 +3613,39 @@ def generate_relation_cases(
         spec = relation_matched_control_spec(case, relation.scenario)
         target_raw_gas = relation.target_raw_gas_by_key[relation.key_id]
         relation_case = replace(case, target_raw_gas=target_raw_gas)
-        for count in manifest.variants:
-            if count > generator_max_count:
-                continue
+        samples = [
+            (count, FORMAL_RELATION_PREFIX_PLACEMENT)
+            for count in manifest.variants
+            if count <= generator_max_count
+        ]
+        samples.append((1, FORMAL_RELATION_TAIL_PLACEMENT))
+        for count, placement in samples:
+            sample_id = formal_relation_sample_id(placement, count)
             case_dir = (
                 out_dir
                 / manifest.name
                 / relation.id.replace(":", "-")
-                / f"count-{count}"
+                / (
+                    f"count-{count}"
+                    if placement == FORMAL_RELATION_PREFIX_PLACEMENT
+                    else "tail-count-1"
+                )
             )
             target = build_relation_bytecode(
-                relation_case, relation, count, generator_max_count, lane="target"
+                relation_case,
+                relation,
+                count,
+                generator_max_count,
+                lane="target",
+                placement=placement,
             )
             control = build_relation_bytecode(
-                relation_case, relation, count, generator_max_count, lane="control"
+                relation_case,
+                relation,
+                count,
+                generator_max_count,
+                lane="control",
+                placement=placement,
             )
             target_len = len(bytes.fromhex(target.bytes_hex))
             if len(bytes.fromhex(control.bytes_hex)) != target_len:
@@ -3600,7 +3668,10 @@ def generate_relation_cases(
                         spec, generator_max_count
                     )
                     declared_raw_gas = spec.reference_raw_gas
-                lane_case = f"{case.name}__relation_{lane}"
+                lane_case = (
+                    f"{case.name}__relation_"
+                    f"{placement}_count_{count}_{lane}"
+                )
                 payload = {
                     "suite": manifest.name,
                     "backend": manifest.backend,
@@ -3648,6 +3719,8 @@ def generate_relation_cases(
                         key: str(value)
                         for key, value in sorted(relation.signed_raw_gas_by_key.items())
                     },
+                    "relation_placement": placement,
+                    "relation_sample_id": sample_id,
                     **provenance,
                 }
                 payload.update(_matched_control_compound_metadata(spec))
@@ -3948,6 +4021,7 @@ def validate_formal_dynamic_raw_gas_preflight(
             or dynamic_key is None
             or row.get("lane") != "target"
             or row.get("diagnostic_count") != 1
+            or row.get("relation_placement") != FORMAL_RELATION_PREFIX_PLACEMENT
         ):
             continue
         grouped.setdefault(str(dynamic_key), {}).setdefault(
@@ -4482,6 +4556,9 @@ CONTROLLED_PREFIXES = (
     (0, 1, 2, 4, 8, 16, 32, 64, 128, 256),
     (0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
 )
+FORMAL_RELATION_POSITIVE_PREFIXES = tuple(
+    tuple(count for count in prefix if count > 0) for prefix in CONTROLLED_PREFIXES
+)
 SP1_GAS_TRACE_CHUNK_THRESHOLD = 134_217_728
 SP1_GAS_TRACE_CHUNK_SLOTS = 2
 
@@ -4945,6 +5022,7 @@ def evaluate_paired_precompile_sweep(
     )
 
 
+@_isolated_decimal_context
 def _signed_relation_fit(
     counts: Mapping[int, tuple[Decimal, Decimal, Decimal]],
     *,
@@ -4953,26 +5031,28 @@ def _signed_relation_fit(
 ) -> dict[str, Any]:
     """Fit target-minus-control responses while allowing either slope sign."""
     last_reasons: list[str] = []
-    for prefix in CONTROLLED_PREFIXES:
+    for prefix in FORMAL_RELATION_POSITIVE_PREFIXES:
         if max(prefix) > generator_max_count or any(count not in counts for count in prefix):
             continue
         xs = [Decimal(count) for count in prefix]
         ys = [counts[count][2] for count in prefix]
         n = Decimal(len(xs))
-        mean_x = sum(xs) / n
-        mean_y = sum(ys) / n
-        denominator = sum((value - mean_x) ** 2 for value in xs)
-        slope = sum(
-            (x_value - mean_x) * (y_value - mean_y)
-            for x_value, y_value in zip(xs, ys)
-        ) / denominator
-        intercept = mean_y - slope * mean_x
+        sum_x = sum(xs)
+        sum_y = sum(ys)
+        normal_denominator = n * sum(value * value for value in xs) - sum_x * sum_x
+        slope = (
+            n * sum(x_value * y_value for x_value, y_value in zip(xs, ys))
+            - sum_x * sum_y
+        ) / normal_denominator
+        intercept = (sum_y - slope * sum_x) / n
+        mean_y = sum_y / n
+        centered_denominator = normal_denominator / n
         predicted = [intercept + slope * value for value in xs]
         residuals = [actual - estimate for actual, estimate in zip(ys, predicted)]
         ss_res = sum(value * value for value in residuals)
         ss_total = sum((value - mean_y) ** 2 for value in ys)
         signal = abs(max(ys) - min(ys))
-        baseline = abs(counts[0][2])
+        baseline = abs(intercept)
         reasons: list[str] = []
         if slope == 0:
             reasons.append("signed slope is zero")
@@ -4985,7 +5065,7 @@ def _signed_relation_fit(
             r2 = Decimal(1) - ss_res / ss_total
             if r2 < Decimal("0.995"):
                 reasons.append("signed R2 gate failed")
-        stderr = (ss_res / Decimal(len(xs) - 2) / denominator).sqrt()
+        stderr = (ss_res / Decimal(len(xs) - 2) / centered_denominator).sqrt()
         if slope == 0 or stderr / abs(slope) > Decimal("0.05"):
             reasons.append("signed slope stderr gate failed")
         max_residual = max(abs(value) for value in residuals)
@@ -4999,7 +5079,7 @@ def _signed_relation_fit(
         if checkpoint_count > generator_max_count or checkpoint_count not in counts:
             last_reasons = ["signed checkpoint is missing"]
             continue
-        observed = counts[checkpoint_count][2] - counts[0][2]
+        observed = counts[checkpoint_count][2] - intercept
         predicted_checkpoint = slope * Decimal(checkpoint_count)
         if (
             observed == 0
@@ -5057,6 +5137,64 @@ def _subtract_int_maps(left: Mapping[str, int], right: Mapping[str, int]) -> dic
     }
 
 
+def _activation_gap_evidence(
+    *, zero_delta: Decimal, positive_intercept: Decimal, positive_signal: Decimal
+) -> dict[str, Any]:
+    gap = zero_delta - positive_intercept
+    if positive_signal > 0:
+        ratio = abs(gap) / positive_signal
+        ratio_text: str | None = _decimal_text(ratio)
+        ratio_status = "finite"
+        triggered = ratio > Decimal("0.02")
+    elif gap == 0:
+        ratio_text = "0"
+        ratio_status = "zero_signal_zero_gap"
+        triggered = False
+    else:
+        ratio_text = None
+        ratio_status = "zero_signal_nonzero_gap"
+        triggered = True
+    return {
+        "activation_gap_p": _decimal_text(gap),
+        "activation_gap_ratio": ratio_text,
+        "activation_gap_ratio_status": ratio_status,
+        "tail_triggered": triggered,
+    }
+
+
+def _tail_holdout_evidence(
+    *, observed_marginal: Decimal, predicted_marginal: Decimal, triggered: bool
+) -> dict[str, Any]:
+    if observed_marginal == 0 and predicted_marginal == 0:
+        comparison = "passed_exact_zero"
+        ape_text: str | None = "0"
+        passed = True
+    elif observed_marginal == 0 or predicted_marginal == 0:
+        comparison = "failed_zero_mismatch"
+        ape_text = None
+        passed = False
+    elif (observed_marginal > 0) != (predicted_marginal > 0):
+        comparison = "failed_sign"
+        ape_text = None
+        passed = False
+    else:
+        ape = abs(predicted_marginal - observed_marginal) / abs(observed_marginal)
+        ape_text = _decimal_text(ape)
+        passed = ape <= Decimal("0.10")
+        comparison = "passed" if passed else "failed_ape"
+    return {
+        "placement": FORMAL_RELATION_TAIL_PLACEMENT,
+        "count": 1,
+        "triggered": triggered,
+        "gate_mode": "acceptance" if triggered else "diagnostic",
+        "observed_marginal_p": _decimal_text(observed_marginal),
+        "predicted_marginal_p": _decimal_text(predicted_marginal),
+        "ape_p": ape_text,
+        "comparison": comparison,
+        "status": "passed" if passed else "failed",
+    }
+
+
 def _validate_formal_relation_round_row_order(
     manifest: Manifest,
     rows: list[Mapping[str, Any]],
@@ -5065,15 +5203,19 @@ def _validate_formal_relation_round_row_order(
 ) -> None:
     """Bind the raw order emitted by cmd_run before adaptive replay seals it."""
     expected = [
-        (relation_id, count, lane, repeat_index)
+        (relation_id, placement, sample_id, count, lane, repeat_index)
         for relation_id in selected_relation_ids
-        for count in controlled_round_counts(generator_max_count)
+        for placement, sample_id, count in formal_relation_round_samples(
+            generator_max_count
+        )
         for lane in ("control", "target")
         for repeat_index in range(3)
     ]
     actual = [
         (
             row.get("relation_id"),
+            row.get("relation_placement"),
+            row.get("relation_sample_id"),
             row.get("diagnostic_count"),
             row.get("lane"),
             row.get("repeat_index"),
@@ -5094,7 +5236,7 @@ def _fit_one_opcode_relation(
     expected_target = dict(relation.target_raw_gas_by_key)
     expected_control = dict(relation.control_raw_gas_by_key)
     expected_signed = dict(relation.signed_raw_gas_by_key)
-    grouped: dict[tuple[int, str], list[Mapping[str, Any]]] = {}
+    grouped: dict[tuple[str, int, str], list[Mapping[str, Any]]] = {}
     generator_bounds: set[int] = set()
     for row in rows:
         if row.get("purpose") != FORMAL_RELATION_PURPOSE:
@@ -5113,6 +5255,8 @@ def _fit_one_opcode_relation(
         if _relation_row_map(row, "signed_raw_gas_by_key") != expected_signed:
             raise ValueError("formal relation signed raw-gas units differ from manifest")
         count = row.get("diagnostic_count")
+        placement = row.get("relation_placement")
+        sample_id = row.get("relation_sample_id")
         repeat_index = row.get("repeat_index")
         lane = row.get("lane")
         generator_max = row.get("generator_max_count")
@@ -5121,6 +5265,11 @@ def _fit_one_opcode_relation(
             isinstance(count, bool)
             or not isinstance(count, int)
             or count < 0
+            or placement not in {
+                FORMAL_RELATION_PREFIX_PLACEMENT,
+                FORMAL_RELATION_TAIL_PLACEMENT,
+            }
+            or sample_id != formal_relation_sample_id(str(placement), count)
             or lane not in {"target", "control"}
             or isinstance(repeat_index, bool)
             or not isinstance(repeat_index, int)
@@ -5128,20 +5277,20 @@ def _fit_one_opcode_relation(
             or not isinstance(generator_max, int)
             or generator_max <= 0
         ):
-            raise ValueError("formal relation row has invalid count/lane identity")
+            raise ValueError("formal relation row has invalid sample/count/lane identity")
         if type(exit_code) is not int or exit_code != 0:
             raise ValueError("formal relation row exit code is invalid")
         generator_bounds.add(generator_max)
-        grouped.setdefault((count, str(lane)), []).append(row)
+        grouped.setdefault((str(placement), count, str(lane)), []).append(row)
     if len(generator_bounds) != 1:
         raise ValueError("formal relation rows do not share one generator bound")
     generator_max_count = next(iter(generator_bounds))
-    counts: dict[int, tuple[Decimal, Decimal, Decimal]] = {}
-    for count in sorted({key[0] for key in grouped}):
+    samples: dict[tuple[str, int], tuple[Decimal, Decimal, Decimal]] = {}
+    for placement, count in sorted({key[:2] for key in grouped}):
         lanes: dict[str, tuple[Decimal, dict[str, int]]] = {}
         for lane in ("target", "control"):
             repeats = sorted(
-                grouped.get((count, lane), []),
+                grouped.get((placement, count, lane), []),
                 key=lambda row: int(row.get("repeat_index", -1)),
             )
             if [row.get("repeat_index") for row in repeats] != [0, 1, 2]:
@@ -5184,31 +5333,41 @@ def _fit_one_opcode_relation(
         }
         if actual_delta != expected_delta:
             raise ValueError("formal relation actual trace has wrong raw-gas units")
-        counts[count] = (
+        samples[(placement, count)] = (
             lanes["target"][0],
             lanes["control"][0],
             lanes["target"][0] - lanes["control"][0],
         )
 
     expected_counts = controlled_round_counts(generator_max_count)
-    if tuple(sorted(counts)) != expected_counts:
+    expected_samples = {
+        *((FORMAL_RELATION_PREFIX_PLACEMENT, count) for count in expected_counts),
+        (FORMAL_RELATION_TAIL_PLACEMENT, 1),
+    }
+    if set(samples) != expected_samples:
         kind = "self-control counts" if not expected_signed else "counts"
         raise ValueError(
             f"formal relation {relation.id} at generator bound {generator_max_count} "
-            f"{kind} omit a frozen prefix or checkpoint"
+            f"{kind} omit a frozen prefix, checkpoint, or tail holdout"
         )
-    flat_values = {delta for _target, _control, delta in counts.values()}
-    exact_flat = len(flat_values) == 1
-    flat_intercept = next(iter(flat_values)) if exact_flat else None
+    counts = {
+        count: samples[(FORMAL_RELATION_PREFIX_PLACEMENT, count)]
+        for count in expected_counts
+    }
+    tail_delta = samples[(FORMAL_RELATION_TAIL_PLACEMENT, 1)][2]
+    self_flat_values = {
+        *(delta for _target, _control, delta in counts.values()),
+        tail_delta,
+    }
 
     if not expected_signed:
-        if not exact_flat:
+        if len(self_flat_values) != 1:
             raise FormalRelationQualityError(
                 relation.id,
                 generator_max_count,
                 ("self-control response is not exactly flat",),
             )
-        assert flat_intercept is not None
+        flat_intercept = next(iter(self_flat_values))
         return {
             "relation_id": relation.id,
             "key_id": relation.key_id,
@@ -5229,11 +5388,15 @@ def _fit_one_opcode_relation(
             },
         }
 
+    positive_values = {
+        counts[count][2] for count in expected_counts if count > 0
+    }
+    exact_flat = len(positive_values) == 1
     if exact_flat:
-        assert flat_intercept is not None
+        flat_intercept = next(iter(positive_values))
         prefix_index = CONTROLLED_GENERATOR_ROUNDS.index(generator_max_count)
         fit = {
-            "selected_counts": list(CONTROLLED_PREFIXES[prefix_index]),
+            "selected_counts": list(FORMAL_RELATION_POSITIVE_PREFIXES[prefix_index]),
             "slope": Decimal(0),
             "intercept": flat_intercept,
             "r2": Decimal(1),
@@ -5254,6 +5417,22 @@ def _fit_one_opcode_relation(
             relation_id=relation.id,
             generator_max_count=generator_max_count,
         )
+    activation = _activation_gap_evidence(
+        zero_delta=counts[0][2],
+        positive_intercept=fit["intercept"],
+        positive_signal=fit["signal"],
+    )
+    tail_holdout = _tail_holdout_evidence(
+        observed_marginal=tail_delta - counts[0][2],
+        predicted_marginal=fit["slope"],
+        triggered=activation["tail_triggered"],
+    )
+    if activation["tail_triggered"] and tail_holdout["status"] != "passed":
+        raise FormalRelationQualityError(
+            relation.id,
+            generator_max_count,
+            (f"tail holdout {tail_holdout['comparison']}",),
+        )
     return {
         "relation_id": relation.id,
         "key_id": relation.key_id,
@@ -5272,6 +5451,7 @@ def _fit_one_opcode_relation(
         "exact_flat": exact_flat,
         "slope_p": _decimal_text(fit["slope"]),
         "intercept_p": _decimal_text(fit["intercept"]),
+        "positive_fit_intercept_p": _decimal_text(fit["intercept"]),
         "r2_p": _decimal_text(fit["r2"]),
         "slope_stderr_p": _decimal_text(fit["stderr"]),
         "relative_slope_stderr": _decimal_text(
@@ -5281,9 +5461,13 @@ def _fit_one_opcode_relation(
         ),
         "signal_p": _decimal_text(fit["signal"]),
         "zero_delta_p": _decimal_text(counts[0][2]),
+        "activation_gap_p": activation["activation_gap_p"],
+        "activation_gap_ratio": activation["activation_gap_ratio"],
+        "activation_gap_ratio_status": activation["activation_gap_ratio_status"],
         "max_residual_p": _decimal_text(fit["max_residual"]),
         "selected_counts": fit["selected_counts"],
         "checkpoint": fit["checkpoint"],
+        "tail_holdout": tail_holdout,
         "status": "accepted",
     }
 
@@ -5587,7 +5771,7 @@ def fit_opcode_relations(
         )
     )
     artifact = {
-        "schema_version": 1,
+        "schema_version": FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION,
         "purpose": FORMAL_RELATION_PURPOSE,
         "signal_kind": FORMAL_RELATION_SIGNAL_KIND,
         "status": "accepted",
@@ -5647,14 +5831,19 @@ def _validate_artifact_relation_rows(
         "exact_flat",
         "slope_p",
         "intercept_p",
+        "positive_fit_intercept_p",
         "r2_p",
         "slope_stderr_p",
         "relative_slope_stderr",
         "signal_p",
         "zero_delta_p",
+        "activation_gap_p",
+        "activation_gap_ratio",
+        "activation_gap_ratio_status",
         "max_residual_p",
         "selected_counts",
         "checkpoint",
+        "tail_holdout",
         "status",
     }
     algebra: list[RelationEquation] = []
@@ -5687,7 +5876,10 @@ def _validate_artifact_relation_rows(
         ):
             raise ValueError(f"opcode relation artifact {label} coefficient maps differ")
         slope = _artifact_decimal(row, "slope_p", label=label)
-        _artifact_decimal(row, "intercept_p", label=label)
+        intercept = _artifact_decimal(row, "intercept_p", label=label)
+        positive_intercept = _artifact_decimal(
+            row, "positive_fit_intercept_p", label=label
+        )
         r2 = _artifact_decimal(row, "r2_p", label=label)
         stderr = _artifact_decimal(row, "slope_stderr_p", label=label)
         relative_stderr = _artifact_decimal(
@@ -5695,10 +5887,39 @@ def _validate_artifact_relation_rows(
         )
         signal = _artifact_decimal(row, "signal_p", label=label)
         zero_delta = _artifact_decimal(row, "zero_delta_p", label=label)
+        activation_gap = _artifact_decimal(row, "activation_gap_p", label=label)
         residual = _artifact_decimal(row, "max_residual_p", label=label)
         exact_flat = row.get("exact_flat")
         if type(exact_flat) is not bool:
             raise ValueError(f"opcode relation artifact {label} quality evidence fails gates")
+        if positive_intercept != intercept or activation_gap != zero_delta - intercept:
+            raise ValueError(f"opcode relation artifact {label} activation evidence is invalid")
+        ratio_status = row.get("activation_gap_ratio_status")
+        ratio_raw = row.get("activation_gap_ratio")
+        if signal > 0:
+            expected_ratio = abs(activation_gap) / signal
+            if (
+                ratio_status != "finite"
+                or not isinstance(ratio_raw, str)
+                or _decimal(ratio_raw, label="activation-gap ratio") != expected_ratio
+                or _decimal_text(expected_ratio) != ratio_raw
+            ):
+                raise ValueError(
+                    f"opcode relation artifact {label} activation evidence is invalid"
+                )
+            tail_triggered = expected_ratio > Decimal("0.02")
+        elif activation_gap == 0:
+            if ratio_status != "zero_signal_zero_gap" or ratio_raw != "0":
+                raise ValueError(
+                    f"opcode relation artifact {label} activation evidence is invalid"
+                )
+            tail_triggered = False
+        else:
+            if ratio_status != "zero_signal_nonzero_gap" or ratio_raw is not None:
+                raise ValueError(
+                    f"opcode relation artifact {label} activation evidence is invalid"
+                )
+            tail_triggered = True
         if exact_flat:
             if any(
                 value != expected
@@ -5722,7 +5943,7 @@ def _validate_artifact_relation_rows(
             or relative_stderr < 0
             or relative_stderr != stderr / abs(slope)
             or relative_stderr > Decimal("0.05")
-            or signal < max(Decimal(1000), abs(zero_delta) * Decimal("0.01"))
+            or signal < max(Decimal(1000), abs(intercept) * Decimal("0.01"))
             or residual < 0
             or residual / signal > Decimal("0.02")
         ):
@@ -5731,7 +5952,7 @@ def _validate_artifact_relation_rows(
         if (
             not isinstance(selected, list)
             or any(type(count) is not int for count in selected)
-            or tuple(selected) not in CONTROLLED_PREFIXES
+            or tuple(selected) not in FORMAL_RELATION_POSITIVE_PREFIXES
         ):
             raise ValueError(f"opcode relation artifact {label} quality evidence has bad prefix")
         checkpoint = row.get("checkpoint")
@@ -5770,6 +5991,36 @@ def _validate_artifact_relation_rows(
             )
         if not checkpoint_valid:
             raise ValueError(f"opcode relation artifact {label} quality evidence fails checkpoint")
+        tail = row.get("tail_holdout")
+        if not isinstance(tail, Mapping) or set(tail) != {
+            "placement",
+            "count",
+            "triggered",
+            "gate_mode",
+            "observed_marginal_p",
+            "predicted_marginal_p",
+            "ape_p",
+            "comparison",
+            "status",
+        }:
+            raise ValueError(f"opcode relation artifact {label} tail holdout is invalid")
+        observed_tail = _artifact_decimal(
+            tail, "observed_marginal_p", label=f"{label} tail"
+        )
+        predicted_tail = _artifact_decimal(
+            tail, "predicted_marginal_p", label=f"{label} tail"
+        )
+        expected_tail = _tail_holdout_evidence(
+            observed_marginal=observed_tail,
+            predicted_marginal=predicted_tail,
+            triggered=tail_triggered,
+        )
+        if (
+            predicted_tail != slope
+            or not _exact_json_equal(dict(tail), expected_tail)
+            or (tail_triggered and tail.get("status") != "passed")
+        ):
+            raise ValueError(f"opcode relation artifact {label} tail holdout is invalid")
         algebra.append(
             RelationEquation(
                 relation.id,
@@ -5817,7 +6068,7 @@ def validate_opcode_relations_artifact(
         "artifact_sha256",
     } or (
         type(artifact.get("schema_version")) is not int
-        or artifact.get("schema_version") != 1
+        or artifact.get("schema_version") != FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION
     ):
         raise ValueError("opcode relation artifact schema is invalid")
     artifact_provenance = _validate_formal_relation_provenance(
@@ -6592,7 +6843,8 @@ def _candidate_source_measurements(
     )
     if (
         type(relation_artifact.get("schema_version")) is not int
-        or relation_artifact.get("schema_version") != 1
+        or relation_artifact.get("schema_version")
+        != FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION
         or relation_artifact.get("purpose") != FORMAL_RELATION_PURPOSE
         or relation_artifact.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND
         or relation_artifact.get("status") != "accepted"
@@ -10387,6 +10639,10 @@ def _canonical_formal_relation_rows(
             sorted(
                 relation_rows,
                 key=lambda row: (
+                    0
+                    if row.get("relation_placement")
+                    == FORMAL_RELATION_PREFIX_PLACEMENT
+                    else 1,
                     int(row.get("diagnostic_count", -1)),
                     int(row.get("repeat_index", -1)),
                     lane_order.get(str(row.get("lane")), 2),
@@ -10402,6 +10658,27 @@ def controlled_round_counts(generator_max_count: int) -> tuple[int, ...]:
     except ValueError as exc:
         raise ValueError("unknown controlled generator round") from exc
     return tuple(dict.fromkeys((*CONTROLLED_PREFIXES[index], generator_max_count)))
+
+
+def formal_relation_round_samples(
+    generator_max_count: int,
+) -> tuple[tuple[str, str, int], ...]:
+    prefix = tuple(
+        (
+            FORMAL_RELATION_PREFIX_PLACEMENT,
+            formal_relation_sample_id(FORMAL_RELATION_PREFIX_PLACEMENT, count),
+            count,
+        )
+        for count in controlled_round_counts(generator_max_count)
+    )
+    return (
+        *prefix,
+        (
+            FORMAL_RELATION_TAIL_PLACEMENT,
+            formal_relation_sample_id(FORMAL_RELATION_TAIL_PLACEMENT, 1),
+            1,
+        ),
+    )
 
 
 def run_controlled_overhead_round(
@@ -12085,6 +12362,10 @@ def _ordered_formal_relation_fixture_cases(
         cases,
         key=lambda item: (
             relation_order.get(str(item[0].get("relation_id")), len(relation_order)),
+            0
+            if item[0].get("relation_placement")
+            == FORMAL_RELATION_PREFIX_PLACEMENT
+            else 1,
             int(item[0].get("diagnostic_count", -1)),
             {"control": 0, "target": 1}.get(str(item[0].get("lane")), 2),
         ),

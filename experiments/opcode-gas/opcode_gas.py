@@ -198,6 +198,7 @@ class Manifest:
     dynamic_raw_gas_keys: tuple[str, ...] = ()
     opcode_relations: tuple[OpcodeRelationSpec, ...] = ()
     block_calibration_rows: tuple[ControlledBlockRowSpec, ...] = ()
+    static_count_control_rows: tuple[ControlledBlockRowSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -878,10 +879,15 @@ def _strict_nonnegative_int_map(value: Any, *, label: str) -> dict[str, int]:
     return result
 
 
-def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBlockRowSpec, ...]:
+def _parse_block_calibration_rows(
+    data: Mapping[str, Any],
+    *,
+    field_name: str = "block_calibration_rows",
+    static_count_controls: bool = False,
+) -> tuple[ControlledBlockRowSpec, ...]:
     rows = []
     seen = set()
-    for item in data.get("block_calibration_rows", []):
+    for item in data.get(field_name, []):
         if not isinstance(item, Mapping):
             raise ValueError("block calibration row must be an object")
         program_data = item.get("program")
@@ -926,7 +932,13 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
         final_state_root = item.get("expected_final_state_root")
         if not _is_sha256(row_id) or row_id in seen:
             raise ValueError("block calibration row ID is invalid or duplicate")
-        if family not in BLOCK_CALIBRATION_FAMILIES or split not in {"fit", "holdout"}:
+        if static_count_controls:
+            valid_family_split = family == "static_count_control" and split == "diagnostic"
+        else:
+            valid_family_split = (
+                family in BLOCK_CALIBRATION_FAMILIES and split in {"fit", "holdout"}
+            )
+        if not valid_family_split:
             raise ValueError("block calibration row family or split is invalid")
         if type(block_count) is not int or not 1 <= block_count <= 768:
             raise ValueError("block calibration block_count is invalid")
@@ -954,6 +966,15 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
         )
         if set(diagnostics) != set(BLOCK_CALIBRATION_DIAGNOSTICS):
             raise ValueError("block calibration diagnostic map is incomplete")
+        if static_count_controls and (
+            program.kind != "opcode_loop"
+            or program.family != "static_count_control"
+            or program.scenario != "push3_pop_fixed_pop"
+            or program.count not in {1, 2, 4, 8, 16, 32}
+            or block_count != 1
+            or transaction_count != 1
+        ):
+            raise ValueError("static-count control program is invalid")
         semantics = {
             "workload_family": family,
             "split": split,
@@ -980,6 +1001,8 @@ def _parse_block_calibration_rows(data: Mapping[str, Any]) -> tuple[ControlledBl
             expected_features=MappingProxyType(features),
             expected_diagnostics=MappingProxyType(diagnostics),
         ))
+    if static_count_controls and rows and [row.program.count for row in rows] != [1, 2, 4, 8, 16, 32]:
+        raise ValueError("static-count controls must freeze counts 1,2,4,8,16,32")
     return tuple(rows)
 
 
@@ -1254,6 +1277,11 @@ def parse_controlled_manifest(
         _parse_opcode_relations(data, cases)
     )
     block_calibration_rows = _parse_block_calibration_rows(data)
+    static_count_control_rows = _parse_block_calibration_rows(
+        data,
+        field_name="static_count_control_rows",
+        static_count_controls=True,
+    )
 
     return Manifest(
         name=str(data["name"]),
@@ -1276,6 +1304,7 @@ def parse_controlled_manifest(
         dynamic_raw_gas_keys=dynamic_raw_gas_keys,
         opcode_relations=opcode_relations,
         block_calibration_rows=block_calibration_rows,
+        static_count_control_rows=static_count_control_rows,
     )
 
 
@@ -4385,6 +4414,7 @@ def sp1_execution_parameters() -> dict[str, Any]:
             "opcode": "gas-estimator",
             "precompile": "standard",
             "overhead": "standard",
+            "block": "gas-estimator",
         },
         "gas_estimator": {
             "gas_trace_chunk_threshold": SP1_GAS_TRACE_CHUNK_THRESHOLD,
@@ -4405,7 +4435,7 @@ def validate_sp1_execution_provenance(
         )
     threshold = row.get("sp1_gas_trace_chunk_threshold")
     slots = row.get("sp1_gas_trace_chunk_slots")
-    if workload_kind == "opcode":
+    if workload_kind in {"opcode", "block"}:
         if (
             type(threshold) is not int
             or threshold != SP1_GAS_TRACE_CHUNK_THRESHOLD
@@ -7999,9 +8029,61 @@ def run_block_calibration_rows(
     if repeats != 3:
         raise ValueError("block calibration requires exactly three SP1 repeats")
     output_rows = []
+    control_row_ids = {row.row_id for row in manifest.static_count_control_rows}
+    rows_to_run = (*manifest.static_count_control_rows, *manifest.block_calibration_rows)
     with tempfile.TemporaryDirectory() as temporary_name:
         temporary = pathlib.Path(temporary_name)
-        for row_index, row in enumerate(manifest.block_calibration_rows):
+        parity_row = manifest.block_calibration_rows[0]
+        parity_payload = _controlled_block_row_payload(parity_row)
+        parity_spec_path = temporary / "parity-spec.json"
+        parity_spec_path.write_text(
+            json.dumps(parity_payload, indent=2, sort_keys=True) + "\n"
+        )
+        parity_reports = {}
+        for execution_engine, workload_kind in (
+            ("standard", "overhead"),
+            ("gas-estimator", "block"),
+        ):
+            parity_report_path = temporary / f"parity-{execution_engine}.jsonl"
+            subprocess.run(
+                [
+                    str(guest_launcher),
+                    "--stage", "controlled-block",
+                    "--proof-type", "sp1",
+                    "--mode", "execute",
+                    "--sp1-prover", "local",
+                    "--sp1-execution-engine", execution_engine,
+                    "--input", str(parity_spec_path),
+                    "--jsonl-out", str(parity_report_path),
+                ],
+                check=True,
+            )
+            reports = list(iter_jsonl(parity_report_path))
+            if len(reports) != 1:
+                raise ValueError("controlled-block parity gate must emit exactly one row")
+            report = reports[0]
+            controlled = report.get("controlled_block")
+            if (
+                not isinstance(controlled, Mapping)
+                or controlled.get("status") != "accepted"
+            ):
+                raise ValueError("controlled-block parity gate rejected its frozen input")
+            validate_sp1_execution_provenance(report, workload_kind=workload_kind)
+            parity_reports[execution_engine] = tuple(
+                report.get(field)
+                for field in (
+                    "gas",
+                    "total_instruction_count",
+                    "total_syscall_count",
+                    "public_values",
+                )
+            )
+        if parity_reports["standard"] != parity_reports["gas-estimator"]:
+            raise ValueError("controlled-block standard and gas-estimator parity differs")
+        for row_index, row in enumerate(rows_to_run):
+            purpose = (
+                "static_count_control" if row.row_id in control_row_ids else "block_calibration"
+            )
             payload = _controlled_block_row_payload(row)
             spec_path = temporary / f"block-row-{row_index}.json"
             report_path = temporary / f"block-report-{row_index}.jsonl"
@@ -8016,6 +8098,7 @@ def run_block_calibration_rows(
                         "--proof-type", "sp1",
                         "--mode", "execute",
                         "--sp1-prover", "local",
+                        "--sp1-execution-engine", "gas-estimator",
                         "--input", str(spec_path),
                         "--jsonl-out", str(report_path),
                     ],
@@ -8031,7 +8114,7 @@ def run_block_calibration_rows(
                 normalized = {
                     **payload,
                     "schema_version": 1,
-                    "purpose": "block_calibration",
+                    "purpose": purpose,
                     "status": controlled.get("status"),
                     "repeat_index": repeat_index,
                     "calibration_id": calibration_run_id,
@@ -8049,7 +8132,7 @@ def run_block_calibration_rows(
                 observation = controlled.get("observation")
                 if not isinstance(observation, Mapping):
                     raise ValueError("accepted controlled-block row is missing host observation")
-                validate_sp1_execution_provenance(report, workload_kind="overhead")
+                validate_sp1_execution_provenance(report, workload_kind="block")
                 backend_input_sha256 = observation.get("backend_input_sha256")
                 if not _is_sha256(backend_input_sha256):
                     raise ValueError("controlled-block host observation has invalid input identity")
@@ -8057,6 +8140,7 @@ def run_block_calibration_rows(
                 normalized.update(
                     prover_gas=report.get("gas"),
                     total_instruction_count=report.get("total_instruction_count"),
+                    total_syscall_count=report.get("total_syscall_count"),
                     exit_code=report.get("exit_code"),
                     public_values=report.get("public_values"),
                     backend_input_sha256=backend_input_sha256,
@@ -8074,7 +8158,7 @@ def run_block_calibration_rows(
                     execution_row_id=controlled_execution_row_id(
                         row.row_id,
                         backend="sp1",
-                        execution_engine="standard",
+                        execution_engine="gas-estimator",
                         run_id=calibration_run_id,
                         repeat_index=repeat_index,
                         backend_input_sha256=backend_input_sha256,
@@ -8094,6 +8178,7 @@ def run_block_calibration_rows(
             stable_fields = (
                 "prover_gas",
                 "total_instruction_count",
+                "total_syscall_count",
                 "exit_code",
                 "public_values",
                 "host_public_output",
@@ -8157,7 +8242,7 @@ def run_block_calibration_rows(
                     {
                         **payload,
                         "schema_version": 1,
-                        "purpose": "block_calibration",
+                        "purpose": purpose,
                         "status": "rejected",
                         "reasons": ["repeat_instability"],
                         "repeat_mismatches": sorted(set(repeat_mismatches)),
@@ -8170,9 +8255,27 @@ def run_block_calibration_rows(
                 )
                 continue
             output_rows.extend(repeat_rows)
+    accepted_controls = [
+        item
+        for item in output_rows
+        if item.get("purpose") == "static_count_control" and item.get("status") == "accepted"
+    ]
+    expected_control_rows = 3 * len(manifest.static_count_control_rows)
+    if len(accepted_controls) != expected_control_rows:
+        raise ValueError("static-count controls must have three accepted repeats each")
+    control_gas = []
+    for control in manifest.static_count_control_rows:
+        repeats_for_control = [item for item in accepted_controls if item["row_id"] == control.row_id]
+        if len(repeats_for_control) != 3 or len({item["prover_gas"] for item in repeats_for_control}) != 1:
+            raise ValueError("static-count control repeats are not deterministic")
+        control_gas.append(repeats_for_control[0]["prover_gas"])
+    cross_input_data_floor_p = max(control_gas) - min(control_gas)
+    for item in output_rows:
+        if item.get("status") == "accepted":
+            item["cross_input_data_floor_p"] = cross_input_data_floor_p
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in output_rows))
-    return output_rows
+    return [item for item in output_rows if item.get("purpose") == "block_calibration"]
 
 
 def cmd_run_block_calibration(args: argparse.Namespace) -> None:
@@ -8248,6 +8351,7 @@ _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS = {
     "preflight_fit_rank",
     "prover_gas",
     "total_instruction_count",
+    "total_syscall_count",
     "exit_code",
     "public_values",
     "backend_input_sha256",
@@ -8267,6 +8371,7 @@ _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS = {
     "guest_input_sha256",
     "reported_row_id",
     "observation_row_id",
+    "cross_input_data_floor_p",
 }
 
 
@@ -8317,12 +8422,137 @@ def _validated_block_calibration_rows(
         raise ValueError("block calibration relation provenance is invalid")
 
     expected = {row.row_id: row for row in manifest.block_calibration_rows}
+    static_count_controls = tuple(
+        getattr(manifest, "static_count_control_rows", ())
+    )
+    expected_controls = {row.row_id: row for row in static_count_controls}
+    control_rows = [
+        row for row in raw_rows if row.get("purpose") == "static_count_control"
+    ]
+    raw_rows = [row for row in raw_rows if row.get("purpose") == "block_calibration"]
+    if static_count_controls:
+        if len(control_rows) != 3 * len(expected_controls):
+            raise ValueError("block calibration control rows are incomplete")
+        control_ids = {str(row.get("row_id")) for row in control_rows}
+        if control_ids != set(expected_controls):
+            raise ValueError("block calibration control identities differ from the manifest")
+        control_gas = []
+        for row_id, spec in expected_controls.items():
+            repeats = [row for row in control_rows if row.get("row_id") == row_id]
+            if (
+                len(repeats) != 3
+                or sorted(row.get("repeat_index") for row in repeats) != [0, 1, 2]
+                or any(row.get("status") != "accepted" for row in repeats)
+                or len({row.get("prover_gas") for row in repeats}) != 1
+            ):
+                raise ValueError("block calibration control repeats are not deterministic")
+            required = {
+                "schema_version": 1,
+                "purpose": "static_count_control",
+                "status": "accepted",
+                "calibration_id": calibration_id,
+                "relation_artifact_sha256": relation_sha256,
+                "relation_raw_rows_sha256": relation_raw_sha256,
+                "preflight_fit_rank": 8,
+                "workload_family": spec.workload_family,
+                "split": spec.split,
+                "reported_row_id": row_id,
+                "observation_row_id": row_id,
+                "backend": "sp1",
+                "mode": "execute",
+                "sp1_prover": "local",
+                "primary_api": "ExecutionReport::gas",
+                "sp1_execution_engine": "gas-estimator",
+                "exit_code": 0,
+            }
+            if any(
+                not _exact_json_equal(row.get(key), value)
+                for row in repeats
+                for key, value in required.items()
+            ):
+                raise ValueError("block calibration control provenance or identity differs")
+            payload = _controlled_block_row_payload(spec)
+            if any(
+                not _exact_json_equal(repeat.get(field), value)
+                for repeat in repeats
+                for field, value in payload.items()
+            ):
+                raise ValueError("block calibration control semantics differ from the manifest")
+            for repeat in repeats:
+                validate_sp1_execution_provenance(repeat, workload_kind="block")
+                backend_input_sha256 = repeat.get("backend_input_sha256")
+                expected_execution_row_id = (
+                    controlled_execution_row_id(
+                        row_id,
+                        backend="sp1",
+                        execution_engine="gas-estimator",
+                        run_id=calibration_id,
+                        repeat_index=repeat.get("repeat_index"),
+                        backend_input_sha256=backend_input_sha256,
+                    )
+                    if _is_sha256(backend_input_sha256)
+                    else None
+                )
+                if (
+                    repeat.get("execution_row_id") != expected_execution_row_id
+                    or repeat.get("guest_input_sha256")
+                    != "0x" + str(backend_input_sha256)
+                ):
+                    raise ValueError("block calibration control execution identity differs")
+                public_values = _normalized_hex(
+                    repeat.get("public_values"), field_name="control SP1 public output"
+                )
+                host_public_output = _normalized_hex(
+                    repeat.get("host_public_output"), field_name="control host public output"
+                )
+                if public_values != host_public_output:
+                    raise ValueError("block calibration control public output join differs")
+            first = repeats[0]
+            if (
+                not _exact_json_equal(
+                    first.get("actual_raw_gas_by_key"),
+                    dict(spec.expected_raw_gas_by_key),
+                )
+                or not _exact_json_equal(
+                    first.get("actual_features"), dict(spec.expected_features)
+                )
+                or not _exact_json_equal(
+                    first.get("actual_diagnostics"), dict(spec.expected_diagnostics)
+                )
+                or not _exact_json_equal(
+                    first.get("actual_final_state_root"), spec.expected_final_state_root
+                )
+            ):
+                raise ValueError("block calibration control trace differs from the manifest")
+            control_gas.append(repeats[0].get("prover_gas"))
+        if any(type(value) is not int for value in control_gas):
+            raise ValueError("block calibration control prover gas is invalid")
+        data_floor = max(control_gas) - min(control_gas)
+    elif control_rows:
+        raise ValueError("block calibration controls are absent from the manifest")
+    else:
+        data_floor = None
+    accepted_fields = (
+        _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS
+        if static_count_controls
+        else _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS - {"cross_input_data_floor_p"}
+    )
+    if any(
+        not isinstance(row, Mapping) or set(row) != accepted_fields
+        for row in control_rows
+    ):
+        raise ValueError("block calibration control row schema is incomplete or unexpected")
     if any(
         not isinstance(row, Mapping)
-        or set(row) != _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS
+        or set(row) != accepted_fields
         for row in raw_rows
     ):
         raise ValueError("block calibration accepted row schema is incomplete or unexpected")
+    if static_count_controls and any(
+        row.get("cross_input_data_floor_p") != data_floor
+        for row in [*control_rows, *raw_rows]
+    ):
+        raise ValueError("block calibration data-control floor differs from control repeats")
     integer_fields = (
         "schema_version",
         "repeat_index",
@@ -8331,11 +8561,12 @@ def _validated_block_calibration_rows(
         "transaction_count",
         "prover_gas",
         "total_instruction_count",
+        "total_syscall_count",
         "exit_code",
     )
     if any(
         type(row.get(field)) is not int
-        for row in raw_rows
+        for row in [*control_rows, *raw_rows]
         for field in integer_fields
     ):
         raise ValueError("block calibration accepted row schema requires exact integers")
@@ -8365,7 +8596,9 @@ def _validated_block_calibration_rows(
             "mode": "execute",
             "sp1_prover": "local",
             "primary_api": "ExecutionReport::gas",
-            "sp1_execution_engine": "standard",
+            "sp1_execution_engine": (
+                "gas-estimator" if static_count_controls else "standard"
+            ),
             "exit_code": 0,
         }
         if any(
@@ -8400,14 +8633,19 @@ def _validated_block_calibration_rows(
             raise ValueError("block calibration repeats are not deterministic")
         first = repeats[0]
         for repeat in repeats:
-            validate_sp1_execution_provenance(repeat, workload_kind="overhead")
+            validate_sp1_execution_provenance(
+                repeat,
+                workload_kind="block" if static_count_controls else "overhead",
+            )
             backend_input_sha256 = repeat.get("backend_input_sha256")
             repeat_index = repeat["repeat_index"]
             expected_execution_row_id = (
                 controlled_execution_row_id(
                     row_id,
                     backend="sp1",
-                    execution_engine="standard",
+                    execution_engine=(
+                        "gas-estimator" if static_count_controls else "standard"
+                    ),
                     run_id=calibration_id,
                     repeat_index=repeat_index,
                     backend_input_sha256=backend_input_sha256,

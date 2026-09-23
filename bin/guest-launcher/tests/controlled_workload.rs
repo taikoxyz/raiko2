@@ -54,22 +54,21 @@ fn block_row_spec() -> ControlledBlockRowSpec {
         },
         expected_final_state_root: B256::from_slice(
             &alloy_primitives::hex::decode(
-                "37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5",
+                "e0244879d78f6b8c11f5f1ce32b582b64aeef0e025238503063c24005c8ad8c4",
             )
             .unwrap(),
         ),
         expected_raw_gas_by_key: BTreeMap::from([
-            ("opcode:0x03".into(), 6),
+            ("opcode:0x03".into(), 3),
             ("opcode:0x15".into(), 6),
             ("opcode:0x50".into(), 4),
             ("opcode:0x56".into(), 8),
             ("opcode:0x57".into(), 20),
-            ("opcode:0x5a".into(), 2),
             ("opcode:0x5b".into(), 3),
             ("opcode:0x60".into(), 15),
             ("opcode:0x62".into(), 3),
             ("opcode:0x80".into(), 6),
-            ("opcode:0x90".into(), 6),
+            ("opcode:0x90".into(), 3),
         ]),
         expected_features: BTreeMap::from([
             ("proposal_startup".into(), 1),
@@ -153,7 +152,9 @@ fn materialize_opcode_block_row(
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
         workload_family: family.into(),
-        split: if count == 32 {
+        split: if family == "static_count_control" {
+            ControlledBlockSplit::Diagnostic
+        } else if count == 32 {
             ControlledBlockSplit::Holdout
         } else {
             ControlledBlockSplit::Fit
@@ -199,7 +200,7 @@ fn materialize_opcode_block_row(
 }
 
 #[test]
-fn opcode_family_counts_change_trace_but_preserve_final_state_root() {
+fn fixed_limit_opcode_families_encode_count_only_in_push3_immediate() {
     for (family, scenario, anchor) in [
         ("pop_family", "push0_pop", "opcode:0x50"),
         ("push_family", "push0_stack", "opcode:0x5f"),
@@ -215,13 +216,6 @@ fn opcode_family_counts_change_trace_but_preserve_final_state_root() {
             .iter()
             .map(|(_, observation, _)| observation)
             .collect::<Vec<_>>();
-        let final_state_root = observations[0].actual_final_state_root;
-        assert!(
-            observations
-                .iter()
-                .all(|observation| observation.actual_final_state_root == final_state_root),
-            "{family} count variants changed final state root"
-        );
         let anchor_units = observations
             .iter()
             .map(|observation| observation.actual_raw_gas_by_key[anchor])
@@ -235,33 +229,67 @@ fn opcode_family_counts_change_trace_but_preserve_final_state_root() {
                 !observation
                     .actual_raw_gas_by_key
                     .contains_key("opcode:0x35")
-                    && observation
+                    && !observation
                         .actual_raw_gas_by_key
                         .contains_key("opcode:0x5a")
             }),
-            "{family} trace did not replace CALLDATALOAD with modeled GAS"
+            "{family} trace retained a runtime count-source opcode"
         );
         let shapes = materialized
             .iter()
             .map(|(_, _, shape)| shape)
             .collect::<Vec<_>>();
         assert!(
-            shapes.iter().all(|shape| shape.0 == shapes[0].0),
-            "{family} count variants changed bytecode"
+            shapes
+                .iter()
+                .all(|shape| shape.0.len() == 256 && shape.0[0] == 0x62),
+            "{family} must use a fixed-width PUSH3 count in 256-byte code"
         );
         assert!(
             shapes.iter().all(|shape| shape.1 == 0),
             "{family} count variants must use empty transaction input"
         );
-        let gas_limit_base = shapes[0].2 - counts[0];
         assert!(
-            shapes
-                .iter()
-                .zip(counts)
-                .all(|(shape, count)| shape.2 == gas_limit_base + count),
-            "{family} transaction gas limits must be BASE + count"
+            shapes.iter().all(|shape| shape.2 == 100_000),
+            "{family} transaction gas limits must remain fixed"
         );
     }
+}
+
+#[test]
+fn static_count_control_discards_push3_before_a_fixed_sequence() {
+    let counts = [1, 2, 4, 8, 16, 32];
+    let materialized = counts
+        .into_iter()
+        .map(|count| {
+            materialize_opcode_block_row("static_count_control", "push3_pop_fixed_pop", count)
+        })
+        .collect::<Vec<_>>();
+    let (_, baseline_observation, baseline_shape) = &materialized[0];
+    for (_, observation, shape) in &materialized[1..] {
+        assert_eq!(
+            observation.actual_raw_gas_by_key,
+            baseline_observation.actual_raw_gas_by_key
+        );
+        assert_eq!(
+            observation.actual_features,
+            baseline_observation.actual_features
+        );
+        assert_eq!(
+            observation.actual_diagnostics,
+            baseline_observation.actual_diagnostics
+        );
+        assert_eq!(
+            observation.guest_input_bincode_length,
+            baseline_observation.guest_input_bincode_length
+        );
+        assert_eq!(shape.1, baseline_shape.1);
+        assert_eq!(shape.2, baseline_shape.2);
+        assert_eq!(&shape.0[4..], &baseline_shape.0[4..]);
+    }
+    assert!(materialized.iter().all(|(_, _, shape)| {
+        shape.0.len() == 256 && shape.0[0] == 0x62 && shape.1 == 0 && shape.2 == 100_000
+    }));
 }
 
 #[test]

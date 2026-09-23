@@ -2607,290 +2607,290 @@ expected_changed_feature_keys = ["dirty_state_entry"]
 # production Shasta reconstruction trace before any SP1 execution.
 
 [[block_calibration_rows]]
-row_id = "d1da321a7584fe6807347dee960ea2ded5699a35f872824e926879d6926c5c00"
+row_id = "101a611ebdba0c685eecf1c62f661d635d9e6ba470dc48b4403e83ab710afd9c"
 workload_family = "pop_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 1, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5a" = 2, "opcode:0x5b" = 3, "opcode:0x60" = 15, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 6 }
+expected_final_state_root = "0xe0244879d78f6b8c11f5f1ce32b582b64aeef0e025238503063c24005c8ad8c4"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x60" = 15, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 3 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "efc70ba9c2f64d18a6f3fa8a0b5b584ef07a62608972b410cdfd5ffe14e1e619"
+row_id = "cc63356968a408d08e772ab10b47b948008a3bf9a5206ef65cd72a0d490ccce0"
 workload_family = "pop_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 2, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 9, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5a" = 2, "opcode:0x5b" = 4, "opcode:0x60" = 27, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 9 }
+expected_final_state_root = "0x552c4669e4ab0a2ce1cccf60983326035a5012e7ce8e3ff39de90f46d62195a6"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x60" = 27, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 6 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "db146321d3594e6d1fd459ceb33af9dfa30ae9f2b52ef480ca3e35d8e4c47099"
+row_id = "7a7a0ce7a18147640b5e59be14c42dba38f433e5d252d5fe312d4abd0a81b183"
 workload_family = "pop_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 4, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 15, "opcode:0x15" = 15, "opcode:0x50" = 10, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5a" = 2, "opcode:0x5b" = 6, "opcode:0x60" = 51, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 15 }
+expected_final_state_root = "0x14caf2958613f26e998a76cf58e0718502300e065066376443774481e3d32d3d"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 10, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x60" = 51, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 12 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "731cf627a455df942c5615d9109f78e3fde94cc0112e5c6a82b3b15b6634e65f"
+row_id = "bc368d9174fb1f63a47a382809708686482dec5a8d991f4cabf2e624afba9844"
 workload_family = "pop_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 8, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 27, "opcode:0x15" = 27, "opcode:0x50" = 18, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5a" = 2, "opcode:0x5b" = 10, "opcode:0x60" = 99, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 27 }
+expected_final_state_root = "0xe5aa0b095ed345526cacdba33895dc87e080be7f0785346570149c5008b23cee"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 18, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x60" = 99, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 24 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "2cdf83575436484726320cfc0e449e93049a053e10d43a2cba6586e037ea9d0d"
+row_id = "51518de457b6e85ca60046e8e0f49975893fdbabb9ae067a5ff470e853c1b4cb"
 workload_family = "pop_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 16, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 51, "opcode:0x15" = 51, "opcode:0x50" = 34, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5a" = 2, "opcode:0x5b" = 18, "opcode:0x60" = 195, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 51 }
+expected_final_state_root = "0xc2746b6465d80a1fab1bc6ab369ba21540796bd641a00c9132b20d69d3c06c6f"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 34, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x60" = 195, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 48 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "c76a60f1ebb374f524e5d2aca6be2e885af9871cfb6161539d50620e01634ad6"
+row_id = "a53f1c61498d7480a52c14c51789bb8cdf7f51501c9eaa8dbc731b2fbcd37f5f"
 workload_family = "pop_family"
 split = "holdout"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 32, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 99, "opcode:0x15" = 99, "opcode:0x50" = 66, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5a" = 2, "opcode:0x5b" = 34, "opcode:0x60" = 387, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 99 }
+expected_final_state_root = "0x89151360298672af85ffce246e47dee97c0dfebf493efb94a60e44f184c8ca9b"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 66, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x60" = 387, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 96 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "27f5ea19b273daaa180163bcf78adb5ca300b48d9ca6f7b9723ab42ac4f9aa5b"
+row_id = "3bec7ed35259963dc0330d921249b087b9a1c16ffcccb5dd85b6a719e59ce8f4"
 workload_family = "push_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "push_family", count = 1, scenario = "push0_stack" }
-expected_final_state_root = "0x8e2fce92a9dd6a3e8d6e5882b59b28e882f9fbe7c1f9c5b52f31249efa72151d"
-expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 6, "opcode:0x50" = 2, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5a" = 2, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 9 }
+expected_final_state_root = "0x7a1e7cdf3a26cd1b939e907ba0c75ce7e918eab84b23b91294f6f5f5fa6410b6"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 2, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 6 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "6a0427dceae1585a022d3b997201f8c4ad5ed019fea0efb77a36e5bccbc6cad8"
+row_id = "cf6c37b588a612e9079c3dc979628b5954831aac71e1c5fc79571c1c60d701a7"
 workload_family = "push_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "push_family", count = 2, scenario = "push0_stack" }
-expected_final_state_root = "0x8e2fce92a9dd6a3e8d6e5882b59b28e882f9fbe7c1f9c5b52f31249efa72151d"
-expected_raw_gas_by_key = { "opcode:0x03" = 9, "opcode:0x15" = 9, "opcode:0x50" = 2, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5a" = 2, "opcode:0x5b" = 4, "opcode:0x5f" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 15 }
+expected_final_state_root = "0x2d836832aec4a399a2571082ece4ca1b0953de49ba7861b04b83de10df47de94"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 2, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x5f" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 12 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "1b90a6a0ddc389b74d65094540fdee186e653a59c62a83e0dec49401046ad1cb"
+row_id = "56a7f7d9928da1464872f59f8c763b39dc1429fe14a8c787ffb2b02ace5226ff"
 workload_family = "push_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "push_family", count = 4, scenario = "push0_stack" }
-expected_final_state_root = "0x8e2fce92a9dd6a3e8d6e5882b59b28e882f9fbe7c1f9c5b52f31249efa72151d"
-expected_raw_gas_by_key = { "opcode:0x03" = 15, "opcode:0x15" = 15, "opcode:0x50" = 2, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5a" = 2, "opcode:0x5b" = 6, "opcode:0x5f" = 8, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 27 }
+expected_final_state_root = "0x981ed9058e413f0cfbf2e824f0c0d4f3bd38acf38479e32d5de01ad10277e3c2"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 2, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x5f" = 8, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 24 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "23c8692223205aa04df37ff108e38830e5f8ff8df1531852f9bd6de7ef27338f"
+row_id = "b1dc616da4920b2001ce64d8fcd496cd594886f42a4b180cf8fc759b72804720"
 workload_family = "push_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "push_family", count = 8, scenario = "push0_stack" }
-expected_final_state_root = "0x8e2fce92a9dd6a3e8d6e5882b59b28e882f9fbe7c1f9c5b52f31249efa72151d"
-expected_raw_gas_by_key = { "opcode:0x03" = 27, "opcode:0x15" = 27, "opcode:0x50" = 2, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5a" = 2, "opcode:0x5b" = 10, "opcode:0x5f" = 16, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 51 }
+expected_final_state_root = "0x13c9bce71d321b698bcca9b3d9184345fb11487368cec45d59539c05b457a672"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 2, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x5f" = 16, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 48 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "a1d6a3fd3d9ce9ff1b40d821f3a7e024207a4574eda279baf8b4b9f1a074cd00"
+row_id = "04c6d987b41fbf821e864c29279c3f6179139b6abeebd88494f48faafc391009"
 workload_family = "push_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "push_family", count = 16, scenario = "push0_stack" }
-expected_final_state_root = "0x8e2fce92a9dd6a3e8d6e5882b59b28e882f9fbe7c1f9c5b52f31249efa72151d"
-expected_raw_gas_by_key = { "opcode:0x03" = 51, "opcode:0x15" = 51, "opcode:0x50" = 2, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5a" = 2, "opcode:0x5b" = 18, "opcode:0x5f" = 32, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 99 }
+expected_final_state_root = "0x362a642d7f5a9f92d6b6a9b304dcf7147d30ddcafbae3e14be7844ea7b2a740a"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 2, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x5f" = 32, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 96 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "60f56d80f3b7365511a9756344453f62a7b4e8fba654f6ac34e44cc8d7e327d7"
+row_id = "b4326b6496efca20e717fc588fbd38c0a89d49f89003caa3ce5339dad2ca6991"
 workload_family = "push_family"
 split = "holdout"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "push_family", count = 32, scenario = "push0_stack" }
-expected_final_state_root = "0x8e2fce92a9dd6a3e8d6e5882b59b28e882f9fbe7c1f9c5b52f31249efa72151d"
-expected_raw_gas_by_key = { "opcode:0x03" = 99, "opcode:0x15" = 99, "opcode:0x50" = 2, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5a" = 2, "opcode:0x5b" = 34, "opcode:0x5f" = 64, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 195 }
+expected_final_state_root = "0xfa565744197235a6c8530a1fe0d8b10ac326718702eca28c3b2af25505e11363"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 2, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x5f" = 64, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 192 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "18e3d0a24d734be13bad9ce1de868de665a367de48284719abeafbec17859e6f"
+row_id = "c7c320bb44a4a0e3d2adff04de7bd9e1f64f6b909571a5ba1d4febdd1e04cb3b"
 workload_family = "dup_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 1, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0xc51ca8e8961bb9395ad48188752b0680b5e39c5fec2ff2ac84c1b77fab2abb70"
-expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5a" = 2, "opcode:0x5b" = 3, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 6 }
+expected_final_state_root = "0x4bf7d5c230077a4f8187b9e3314af5d6769621b6a2354e60252f6b76cb66aeec"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 3 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "79ba1f555c30c95c5b27eabe0af7b0989e7705ef4023cec6636771b53c81d972"
+row_id = "7eff9df7f35d072eae028ee1c1f081e612ea519a8f3eb84421a8bf0895290bcb"
 workload_family = "dup_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 2, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0xc51ca8e8961bb9395ad48188752b0680b5e39c5fec2ff2ac84c1b77fab2abb70"
-expected_raw_gas_by_key = { "opcode:0x03" = 9, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5a" = 2, "opcode:0x5b" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 9 }
+expected_final_state_root = "0xcff74905faf5afccad926ff3c1f85b0ee3760f2b7dcd3160efa408e824c2d2ec"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 6 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "f7281ce4af9eea85fe5c1263ad3ac0c89907796b624a16c7024e64bee3ba5c17"
+row_id = "a049903e967f49718f527a72fca964eeae37466dc48d88d2b28cdbb53e4d55ca"
 workload_family = "dup_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 4, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0xc51ca8e8961bb9395ad48188752b0680b5e39c5fec2ff2ac84c1b77fab2abb70"
-expected_raw_gas_by_key = { "opcode:0x03" = 15, "opcode:0x15" = 15, "opcode:0x50" = 10, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5a" = 2, "opcode:0x5b" = 6, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 15 }
+expected_final_state_root = "0x04984708b4a2db14934f8c71e07eb5eb69dd7e15b9a3055db1529fc6bd0c5cf6"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 10, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 12 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "6553b328c519b34b84007819ffc4b0ce3eb6b65d68e159d52124dfc78d75a61c"
+row_id = "aa7ae9099d4aa82ff63f4e0022c3b126428a33f8b8859ba2354a03f36c31131d"
 workload_family = "dup_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 8, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0xc51ca8e8961bb9395ad48188752b0680b5e39c5fec2ff2ac84c1b77fab2abb70"
-expected_raw_gas_by_key = { "opcode:0x03" = 27, "opcode:0x15" = 27, "opcode:0x50" = 18, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5a" = 2, "opcode:0x5b" = 10, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 27 }
+expected_final_state_root = "0x885b5668adabe2fe4b574d8b1f771aa948e7d992b5a035bdbc791f715bcd7803"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 18, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 24 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "2e3c98912f237d751fd1fe92ec2b66197a926a09067d981e18512b21cb55ad12"
+row_id = "4b21627e8b3800118de0b4dad59570df519dcfc8e303833a42b46a1823ff0b3c"
 workload_family = "dup_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 16, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0xc51ca8e8961bb9395ad48188752b0680b5e39c5fec2ff2ac84c1b77fab2abb70"
-expected_raw_gas_by_key = { "opcode:0x03" = 51, "opcode:0x15" = 51, "opcode:0x50" = 34, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5a" = 2, "opcode:0x5b" = 18, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 51 }
+expected_final_state_root = "0x8a2775213155dc60ff7b45b00e48b0d606381146fdebf991dd2bfdcb017f2a2e"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 34, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 48 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "1f9b0f35f3cbb2836496b925d4ab9dd38036587d9e3c5767ad8417cce2f89bbb"
+row_id = "c53c36ccf2776c9f3aa299645f69d459bd1fe9afea43a2c55c772492930687a9"
 workload_family = "dup_family"
 split = "holdout"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 32, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0xc51ca8e8961bb9395ad48188752b0680b5e39c5fec2ff2ac84c1b77fab2abb70"
-expected_raw_gas_by_key = { "opcode:0x03" = 99, "opcode:0x15" = 99, "opcode:0x50" = 66, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5a" = 2, "opcode:0x5b" = 34, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 195, "opcode:0x90" = 99 }
+expected_final_state_root = "0x21262cf28424882e608a1b61d3132ec86fc9c711c86c635eb43e862d8187ca00"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 66, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 195, "opcode:0x90" = 96 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "94e7e962abf213a9f300cfa873818295145f9ecee7c49574e9b8bad46099dd2e"
+row_id = "f728947da508da85212c04c844f9c3c94b572b5ef03eb2fb0111718c92cd38e3"
 workload_family = "swap_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "swap_family", count = 1, scenario = "push0_pair_swap1_then_pop" }
-expected_final_state_root = "0xd6472ab27c3cb525a0a30a3fcff6823a45fe18b511e3b0e8841aefafe7e81740"
-expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 6, "opcode:0x50" = 6, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5a" = 2, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 9 }
+expected_final_state_root = "0xaf0c6e9399ca41225029300b58fe17ee0fce92dd5b2379ea104d6520ead01834"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 6, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 6 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "feb36c84020eccc10acda0b6e14bea04791cb3024eeeae71b6d6332eccce45a5"
+row_id = "15e231ef7c4633c7570a0276ae282701a97fcb60a74722ebfc5c33057f4f1ada"
 workload_family = "swap_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "swap_family", count = 2, scenario = "push0_pair_swap1_then_pop" }
-expected_final_state_root = "0xd6472ab27c3cb525a0a30a3fcff6823a45fe18b511e3b0e8841aefafe7e81740"
-expected_raw_gas_by_key = { "opcode:0x03" = 9, "opcode:0x15" = 9, "opcode:0x50" = 10, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5a" = 2, "opcode:0x5b" = 4, "opcode:0x5f" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 15 }
+expected_final_state_root = "0x53935801662b1908536478aad07897ade1ccbcd098fd02fb9ecdaa1373d7edba"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 10, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x5f" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 12 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "15c58ea43951a9fcca8165a2ed52458642548a81491c4d2206798aedf74295e4"
+row_id = "f983286dd233ac45d8f21ac3906302f244b9c1c5f5bd25c35f1bbaa226be3a02"
 workload_family = "swap_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "swap_family", count = 4, scenario = "push0_pair_swap1_then_pop" }
-expected_final_state_root = "0xd6472ab27c3cb525a0a30a3fcff6823a45fe18b511e3b0e8841aefafe7e81740"
-expected_raw_gas_by_key = { "opcode:0x03" = 15, "opcode:0x15" = 15, "opcode:0x50" = 18, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5a" = 2, "opcode:0x5b" = 6, "opcode:0x5f" = 8, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 27 }
+expected_final_state_root = "0x929aec95630b61b8b39f82ab9719b809c7bc38a18ef8c5a3c1542d6da2188245"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 18, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x5f" = 8, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 24 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "0c7e354bebbe44549736963a2d927b84fec43da4af0cfa428f0e55eaedfb9566"
+row_id = "64c8160d77f44794240646301753d978200191f77f8c1427c14bcaa752a6b93e"
 workload_family = "swap_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "swap_family", count = 8, scenario = "push0_pair_swap1_then_pop" }
-expected_final_state_root = "0xd6472ab27c3cb525a0a30a3fcff6823a45fe18b511e3b0e8841aefafe7e81740"
-expected_raw_gas_by_key = { "opcode:0x03" = 27, "opcode:0x15" = 27, "opcode:0x50" = 34, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5a" = 2, "opcode:0x5b" = 10, "opcode:0x5f" = 16, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 51 }
+expected_final_state_root = "0x544487b84f3d8febe1fc5db408619e93acc1ef090a90c06094c876a8c72bac95"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 34, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x5f" = 16, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 48 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "04870b55a674f501c01c1685be066a425a692921666b975accafa2361832d1a3"
+row_id = "4052c37774f6efd79eeb06d2cc3a08de265cb8f63379aa28bf2b0bb1e6808fe9"
 workload_family = "swap_family"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "swap_family", count = 16, scenario = "push0_pair_swap1_then_pop" }
-expected_final_state_root = "0xd6472ab27c3cb525a0a30a3fcff6823a45fe18b511e3b0e8841aefafe7e81740"
-expected_raw_gas_by_key = { "opcode:0x03" = 51, "opcode:0x15" = 51, "opcode:0x50" = 66, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5a" = 2, "opcode:0x5b" = 18, "opcode:0x5f" = 32, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 99 }
+expected_final_state_root = "0xa3e650dca75d0fd0745552ca79adcadf5ee645c801ef070693cb64f67e4388c6"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 66, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x5f" = 32, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 96 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "073313be34fb3ec8d7e85d2509a9be7db25e644b8e6b598f6b845be3d7970ff5"
+row_id = "89b731ed4772e107ed9bc622525515a608cdfc79533a3790650da312f57a1360"
 workload_family = "swap_family"
 split = "holdout"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "swap_family", count = 32, scenario = "push0_pair_swap1_then_pop" }
-expected_final_state_root = "0xd6472ab27c3cb525a0a30a3fcff6823a45fe18b511e3b0e8841aefafe7e81740"
-expected_raw_gas_by_key = { "opcode:0x03" = 99, "opcode:0x15" = 99, "opcode:0x50" = 130, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5a" = 2, "opcode:0x5b" = 34, "opcode:0x5f" = 64, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 195, "opcode:0x90" = 195 }
+expected_final_state_root = "0x63d6f7f3ac06fef3ad6f7f4734b61a4df8751dacc97637ab6610bcd73d092400"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 130, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x5f" = 64, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 195, "opcode:0x90" = 192 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
@@ -3159,25 +3159,97 @@ expected_features = { "block_base" = 1, "native_value_transfer" = 1, "proposal_s
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "380bfd5c068a356cc22566acb10c0498baa15e84613877318b96f4836aa1116a"
+row_id = "478cd539e36cfb7d4d4f43fb45474108c21f8929ac6e9ac83524da6e50cfa509"
 workload_family = "proposal_startup"
 split = "fit"
 block_count = 1
 transaction_count = 1
 program = { kind = "opcode_loop", family = "pop_family", count = 1, scenario = "push0_pop" }
-expected_final_state_root = "0x37c594d56e8c7220efd843b3f7844205b23c64689400a5a32ce0308ba6a597e5"
-expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5a" = 2, "opcode:0x5b" = 3, "opcode:0x60" = 15, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 6 }
+expected_final_state_root = "0xe0244879d78f6b8c11f5f1ce32b582b64aeef0e025238503063c24005c8ad8c4"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x60" = 15, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 3 }
 expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
 
 [[block_calibration_rows]]
-row_id = "ba8b68e6574977ed5118df0a8ab252f5511b8627566696b72691fdf3f5693f2f"
+row_id = "b976a5a236090582e69f4eeb01028ac1100b08bb297011df51d091090c8f237f"
 workload_family = "proposal_startup"
 split = "holdout"
 block_count = 2
 transaction_count = 1
 program = { kind = "opcode_loop", family = "dup_family", count = 2, scenario = "push0_dup1_then_pop" }
-expected_final_state_root = "0x3d2cadb8ae2cc2b8c7cefdf9109600003a0310da5d1702b23323ff7b3daab976"
-expected_raw_gas_by_key = { "opcode:0x03" = 9, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5a" = 2, "opcode:0x5b" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 9 }
+expected_final_state_root = "0x887e05cfb38bcea356262f5f79ba88407d85f502ee87ebcfe88935bfca07ae2c"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 6 }
 expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
 expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 343002, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 1760, "witness_node_count" = 18 }
+
+[[static_count_control_rows]]
+row_id = "13c72b3001f7deaa648e2d115063eb543b8af64267a1d4d912fea51c6e28211c"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 1, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0x862fd1dba9907ea2e145366635e2ef24c9e1f9ec4bf11552c6990e608f433b2f"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "1abd2ade5de8280f5772906ea9aceee282a308a4d3d233ce5ae36ce33677f946"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 2, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xcf15d0a6df6e911ebabfd04482f38a64ee379ad7f0299d2ed3fddf54e94b6e37"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "ad8925c0e0bedb22276f4afc500f85716dffecdb084d01e36ad41cbcb387f88b"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 4, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xd08048e00e728688f50c6a801749d9207af32d80c5a2142d1ec2c0cee6d78617"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "f619e598a81c4cb58c2b01ea32ea3921abfbb488052f2d6d9bb10e14e2abe566"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 8, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0x341c65a1687f3835d8fdbcc6e298abe779332dc5e17188ab965cca5ead51ce7f"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "ba1c1eaf8a7f82a5b94c2fbf5043959e466f15d78126f70952b7053123c59100"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 16, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xc6354dd7476c3b4b2dfec5108bc9ffd2f38f24c6c001b8243703b533e9ab25e0"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "0269f40c3fc3d2ba773a1bae17f35d0286778bbb7bce87dba577231a5bcfcffc"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 32, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xb30bc14f423fd8f653f7fe77c25cfd993819d3ea87f2490e1d997f47def7b8ee"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }

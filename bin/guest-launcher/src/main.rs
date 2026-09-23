@@ -79,7 +79,8 @@ struct Args {
     /// Override the SP1 prover mode. Defaults to `local` for execute and `network` for prove.
     #[arg(long, value_enum)]
     sp1_prover: Option<CliSp1ProverMode>,
-    /// SP1 execution implementation. The gas estimator is restricted to local execute-only opcode labs.
+    /// SP1 execution implementation. The gas estimator is restricted to local execute-only labs
+    /// and controlled production-proposal calibration blocks.
     #[arg(long, value_enum, default_value = "standard")]
     sp1_execution_engine: Sp1ExecutionEngine,
     /// Succinct network mode for SP1 remote proving.
@@ -470,8 +471,13 @@ impl Args {
         if self.sp1_execution_engine == Sp1ExecutionEngine::Standard {
             return Ok(());
         }
-        if !matches!(self.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
-            bail!("--sp1-execution-engine gas-estimator is restricted to opcode labs");
+        if !matches!(
+            self.stage,
+            Stage::OpcodeLab | Stage::RevmOpcodeLab | Stage::ControlledBlock
+        ) {
+            bail!(
+                "--sp1-execution-engine gas-estimator is restricted to opcode labs and controlled blocks"
+            );
         }
         if self.proof_type != ProofType::Sp1 {
             bail!("--sp1-execution-engine gas-estimator requires --proof-type sp1");
@@ -1178,6 +1184,7 @@ async fn run_controlled_block(args: Args) -> Result<()> {
         "compressed",
         spec.row_id.clone(),
     );
+    apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
     let fixture = match controlled_workload::build_controlled_block_fixture(&spec) {
         Ok(fixture) => fixture,
         Err(error) => {
@@ -1210,27 +1217,41 @@ async fn run_controlled_block(args: Args) -> Result<()> {
     };
     report.guest_input_sha256 = Some(format!("0x{}", observation.backend_input_sha256));
     report.guest_input_bincode_length = Some(observation.guest_input_bincode_length);
-    let sp1_config = args.sp1_config()?;
     let backend = load_sp1_shasta_backend()
         .map_err(anyhow::Error::msg)
         .context("load production SP1 Shasta guest ELFs")?;
-    let prover = Sp1Prover::new(sp1_config);
     record_memory_snapshot(&mut report, "controlled-block:before_sp1_prover");
     let start = Instant::now();
-    let proof = prover
-        .prove(fixture.guest_input, &serde_json::Value::Null, &backend)
-        .await
-        .with_context(|| format!("production SP1 proposal failed for {}", spec.row_id))?;
+    match args.sp1_execution_engine {
+        Sp1ExecutionEngine::Standard => {
+            let prover = Sp1Prover::new(args.sp1_config()?);
+            let proof = prover
+                .prove(fixture.guest_input, &serde_json::Value::Null, &backend)
+                .await
+                .with_context(|| format!("production SP1 proposal failed for {}", spec.row_id))?;
+            let metadata_value = proof
+                .extra_data
+                .as_ref()
+                .and_then(|extra_data| extra_data.get("sp1"))
+                .cloned()
+                .context("controlled-block SP1 execute is missing production metadata")?;
+            let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
+                .context("parse controlled-block SP1 execution metadata")?;
+            apply_sp1_metadata(&mut report, &metadata);
+        }
+        Sp1ExecutionEngine::GasEstimator => {
+            let elf = backend
+                .elf(ProofStage::Proposal)
+                .map_err(anyhow::Error::msg)
+                .context("load production SP1 proposal ELF")?
+                .to_vec();
+            let (public_values, execution_report) =
+                execute_sp1_guest_gas_estimator_blocking(elf, fixture.guest_input).await?;
+            report.public_values = public_values.raw();
+            apply_execution_metadata(&mut report, &execution_report);
+        }
+    }
     report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let metadata_value = proof
-        .extra_data
-        .as_ref()
-        .and_then(|extra_data| extra_data.get("sp1"))
-        .cloned()
-        .context("controlled-block SP1 execute is missing production metadata")?;
-    let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
-        .context("parse controlled-block SP1 execution metadata")?;
-    apply_sp1_metadata(&mut report, &metadata);
     if report.public_values != format!("{:#x}", observation.public_output).to_lowercase() {
         bail!(
             "controlled-block trace/SP1 public output mismatch for {}",
@@ -1520,6 +1541,20 @@ fn execute_opcode_lab_gas_estimator(
     execute_opcode_lab_gas_estimator_with_opts(program, input, canonical_sp1_core_opts())
 }
 
+async fn execute_sp1_guest_gas_estimator_blocking(
+    elf: Vec<u8>,
+    guest_input: GuestInput,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    tokio::task::spawn_blocking(move || {
+        let program = parse_sp1_program(&elf)?;
+        let mut stdin = SP1Stdin::new();
+        stdin.write(&guest_input);
+        execute_sp1_gas_estimator(program, stdin)
+    })
+    .await
+    .context("join SP1 gas-estimator controlled-block task")?
+}
+
 fn canonical_sp1_core_opts() -> SP1CoreOpts {
     canonicalize_sp1_core_opts(SP1CoreOpts::default())
 }
@@ -1543,6 +1578,23 @@ fn execute_opcode_lab_gas_estimator_with_opts(
     input: &OpcodeLabInput,
     opts: SP1CoreOpts,
 ) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    let mut stdin = SP1Stdin::new();
+    stdin.write(input);
+    execute_sp1_gas_estimator_with_opts(program, stdin, opts)
+}
+
+fn execute_sp1_gas_estimator(
+    program: Arc<Program>,
+    stdin: SP1Stdin,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    execute_sp1_gas_estimator_with_opts(program, stdin, canonical_sp1_core_opts())
+}
+
+fn execute_sp1_gas_estimator_with_opts(
+    program: Arc<Program>,
+    stdin: SP1Stdin,
+    opts: SP1CoreOpts,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
     let mut runner = MinimalExecutorRunner::new(
         program.clone(),
         false,
@@ -1550,8 +1602,6 @@ fn execute_opcode_lab_gas_estimator_with_opts(
         opts.memory_limit,
         opts.gas_trace_chunk_slots,
     );
-    let mut stdin = SP1Stdin::new();
-    stdin.write(input);
     for buffer in &stdin.buffer {
         runner.with_input(buffer);
     }
@@ -1942,8 +1992,8 @@ mod tests {
     }
 
     #[test]
-    fn gas_estimator_accepts_only_local_sp1_execute_opcode_labs() {
-        for stage in ["opcode-lab", "revm-opcode-lab"] {
+    fn gas_estimator_accepts_only_local_sp1_execute_opcode_labs_and_controlled_blocks() {
+        for stage in ["opcode-lab", "revm-opcode-lab", "controlled-block"] {
             let args = Args::try_parse_from([
                 "guest-launcher",
                 "--stage",
@@ -1964,7 +2014,7 @@ mod tests {
             .expect("parse gas-estimator args");
 
             args.validate_sp1_execution_engine()
-                .expect("valid lab-only gas estimator selection");
+                .expect("valid gas-estimator selection");
         }
     }
 

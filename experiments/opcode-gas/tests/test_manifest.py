@@ -244,6 +244,23 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(rows), 48)
         self.assertEqual({row.workload_family for row in rows}, families)
         self.assertEqual(len({row.row_id for row in rows}), 48)
+        controls = manifest.static_count_control_rows
+        self.assertEqual(len(controls), 6)
+        self.assertEqual(
+            [row.program.count for row in controls], [1, 2, 4, 8, 16, 32]
+        )
+        self.assertTrue(
+            all(
+                row.workload_family == "static_count_control"
+                and row.split == "diagnostic"
+                and row.block_count == 1
+                and row.transaction_count == 1
+                and row.program.kind == "opcode_loop"
+                and row.program.family == "static_count_control"
+                and row.program.scenario == "push3_pop_fixed_pop"
+                for row in controls
+            )
+        )
         for family in families:
             family_rows = [row for row in rows if row.workload_family == family]
             self.assertEqual(

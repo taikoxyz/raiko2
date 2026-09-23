@@ -768,6 +768,25 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
 
 class CandidateConstructionTests(unittest.TestCase):
+    def test_manifest_exposes_six_static_count_controls_outside_formal_rows(self):
+        manifest = formal_relation_manifest()
+
+        self.assertEqual(len(manifest.block_calibration_rows), 48)
+        self.assertEqual(
+            [row.program.count for row in manifest.static_count_control_rows],
+            [1, 2, 4, 8, 16, 32],
+        )
+        self.assertTrue(
+            all(
+                row.workload_family == "static_count_control"
+                and row.split == "diagnostic"
+                and row.program.kind == "opcode_loop"
+                and row.program.family == "static_count_control"
+                and row.program.scenario == "push3_pop_fixed_pop"
+                for row in manifest.static_count_control_rows
+            )
+        )
+
     def _run_block_calibration_with_drift(self, drift_field):
         manifest = formal_relation_manifest()
         first_row_id = manifest.block_calibration_rows[0].row_id
@@ -778,9 +797,12 @@ class CandidateConstructionTests(unittest.TestCase):
             spec_path = pathlib.Path(cmd[cmd.index("--input") + 1])
             report_path = pathlib.Path(cmd[cmd.index("--jsonl-out") + 1])
             spec = opcode_gas.json.loads(spec_path.read_text())
+            is_parity_gate = spec_path.name == "parity-spec.json"
             repeat_index = repeats_by_row.get(spec["row_id"], 0)
-            repeats_by_row[spec["row_id"]] = repeat_index + 1
+            if not is_parity_gate:
+                repeats_by_row[spec["row_id"]] = repeat_index + 1
             drift = spec["row_id"] == first_row_id and repeat_index == 1
+            execution_engine = cmd[cmd.index("--sp1-execution-engine") + 1]
             backend_input = ("c" if drift and drift_field == "backend_input" else "b") * 64
             guest_input = ("d" if drift and drift_field == "guest_input" else "b") * 64
             public_values = "0x02" if drift and drift_field == "public_values" else "0x01"
@@ -798,11 +820,16 @@ class CandidateConstructionTests(unittest.TestCase):
                 opcode_gas.json.dumps(
                     {
                         "guest_input_sha256": "0x" + guest_input,
-                        "sp1_execution_engine": "standard",
-                        "sp1_gas_trace_chunk_threshold": None,
-                        "sp1_gas_trace_chunk_slots": None,
+                        "sp1_execution_engine": execution_engine,
+                        "sp1_gas_trace_chunk_threshold": (
+                            None if execution_engine == "standard" else 134_217_728
+                        ),
+                        "sp1_gas_trace_chunk_slots": (
+                            None if execution_engine == "standard" else 2
+                        ),
                         "gas": prover_gas,
                         "total_instruction_count": 200,
+                        "total_syscall_count": 20,
                         "exit_code": 0,
                         "public_values": public_values,
                         "controlled_block": {
@@ -839,10 +866,11 @@ class CandidateConstructionTests(unittest.TestCase):
                 relation_raw_rows_sha256="b" * 64,
                 out=output,
             )
-        return first_row_id, rows
+            raw_rows = list(opcode_gas.iter_jsonl(output))
+        return first_row_id, rows, raw_rows
 
     def test_block_calibration_rejects_nondeterministic_prover_gas_as_one_row(self):
-        row_id, rows = self._run_block_calibration_with_drift("prover_gas")
+        row_id, rows, _ = self._run_block_calibration_with_drift("prover_gas")
         matching = [row for row in rows if row["row_id"] == row_id]
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0]["status"], "rejected")
@@ -859,11 +887,31 @@ class CandidateConstructionTests(unittest.TestCase):
             "observation_row_id",
         ):
             with self.subTest(field=field):
-                row_id, rows = self._run_block_calibration_with_drift(field)
+                row_id, rows, _ = self._run_block_calibration_with_drift(field)
                 matching = [row for row in rows if row["row_id"] == row_id]
                 self.assertEqual(len(matching), 1)
                 self.assertEqual(matching[0]["status"], "rejected")
                 self.assertIn("repeat_instability", matching[0]["reasons"])
+
+    def test_block_calibration_keeps_controls_in_raw_evidence_but_not_formal_return(self):
+        _, formal_rows, raw_rows = self._run_block_calibration_with_drift(None)
+
+        controls = [
+            row for row in raw_rows if row["purpose"] == "static_count_control"
+        ]
+        self.assertEqual(len(controls), 18)
+        self.assertEqual(
+            {row["row_id"] for row in controls},
+            {
+                row.row_id
+                for row in formal_relation_manifest().static_count_control_rows
+            },
+        )
+        self.assertEqual({row["cross_input_data_floor_p"] for row in raw_rows}, {0})
+        self.assertTrue(
+            all(row["purpose"] == "block_calibration" for row in formal_rows)
+        )
+        self.assertEqual(len(formal_rows), 144)
 
     def test_overhead_residual_uses_raw_gas_units_not_operation_event_count(self):
         rows = []
@@ -1311,6 +1359,7 @@ class CandidateConstructionTests(unittest.TestCase):
                             "sp1_gas_trace_chunk_slots": None,
                             "exit_code": 0,
                             "total_instruction_count": 100,
+                            "total_syscall_count": 10,
                             "public_values": "0x01",
                             "host_public_output": "0x01",
                             "prover_gas": int(parameter),
@@ -1369,6 +1418,7 @@ class CandidateConstructionTests(unittest.TestCase):
                     "sp1_gas_trace_chunk_slots": None,
                     "exit_code": 0,
                     "total_instruction_count": 100,
+                    "total_syscall_count": 10,
                     "public_values": "0x01",
                     "host_public_output": "0x01",
                     "prover_gas": int(sum(parameters)),

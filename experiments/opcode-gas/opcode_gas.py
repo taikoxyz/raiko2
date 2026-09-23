@@ -8494,18 +8494,24 @@ def _validated_block_calibration_rows(
     ):
         raise ValueError("block calibration requires exactly six static-count controls")
     expected_controls = {row.row_id: row for row in static_count_controls}
+    accepted_purposes = {"static_count_control", "block_calibration"}
+    if any(
+        not isinstance(row, Mapping) or row.get("purpose") not in accepted_purposes
+        for row in raw_rows
+    ):
+        raise ValueError("block calibration raw row purpose is missing or unknown")
     control_rows = [
         row for row in raw_rows if row.get("purpose") == "static_count_control"
     ]
     raw_rows = [row for row in raw_rows if row.get("purpose") == "block_calibration"]
+    if len(control_rows) != 3 * len(expected_controls):
+        raise ValueError("block calibration control rows are incomplete")
     accepted_fields = _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS
     if any(
         not isinstance(row, Mapping) or set(row) != accepted_fields
         for row in [*control_rows, *raw_rows]
     ):
         raise ValueError("block calibration accepted row schema is incomplete or unexpected")
-    if len(control_rows) != 3 * len(expected_controls):
-        raise ValueError("block calibration control rows are incomplete")
     control_ids = {str(row.get("row_id")) for row in control_rows}
     if control_ids != set(expected_controls):
         raise ValueError("block calibration control identities differ from the manifest")

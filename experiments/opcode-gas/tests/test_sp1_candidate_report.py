@@ -1056,17 +1056,33 @@ class CandidateConstructionTests(unittest.TestCase):
         legacy_rows = [
             copy.deepcopy(row)
             for row in raw_rows
-            if row["purpose"] == "block_calibration" and row["repeat_index"] == 0
+            if row["purpose"] == "block_calibration"
         ]
-        self.assertEqual(len(legacy_rows), 48)
+        self.assertEqual(len(legacy_rows), 144)
         for row in legacy_rows:
             row["sp1_execution_engine"] = "standard"
             row["sp1_gas_trace_chunk_threshold"] = None
             row["sp1_gas_trace_chunk_slots"] = None
             del row["cross_input_data_floor_p"]
-        with self.assertRaisesRegex(ValueError, "(schema|control rows are incomplete)"):
+        with self.assertRaisesRegex(ValueError, "control rows are incomplete"):
             opcode_gas._validated_block_calibration_rows(
                 formal_relation_manifest(), relation_artifact, legacy_rows
+            )
+
+    def test_block_calibration_validator_rejects_appended_unknown_raw_purpose(self):
+        _, _, raw_rows = self._run_block_calibration_with_drift(None)
+        relation_artifact = {
+            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "status": "accepted",
+            "artifact_sha256": "a" * 64,
+            "raw_rows_sha256": "b" * 64,
+            "provenance": {"calibration_id": "calibration"},
+        }
+        raw_rows.append({"purpose": "unknown", "garbage": True})
+
+        with self.assertRaisesRegex(ValueError, "raw row purpose"):
+            opcode_gas._validated_block_calibration_rows(
+                formal_relation_manifest(), relation_artifact, raw_rows
             )
 
     def test_overhead_residual_uses_raw_gas_units_not_operation_event_count(self):

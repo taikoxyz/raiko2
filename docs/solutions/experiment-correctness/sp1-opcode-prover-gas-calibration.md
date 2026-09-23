@@ -95,6 +95,27 @@ the fixture test, and keep the host-native `executed_target_raw_gas == declared_
 before opening SP1 output. A mismatch invalidates that calibration identity; preserve its artifacts,
 fix and review the generator, then prepare a new run instead of editing or resuming the failed run.
 
+### A Single Bound Was Mistaken For A Complete Relation Campaign
+
+The first full formal relation batch used only the bound-eight fixtures. Most relations failed
+solely because the frozen fit, signal, R2, residual, or checkpoint gates needed a larger footprint,
+but the old `run-relations` command had no relation-level expansion state. Treating that batch as a
+terminal rejection discarded usable accepted relations and encouraged manual mixing of later rows.
+
+`run-relations` now owns the adaptive bounds `8, 32, 128, 512, 2048`. Bound eight always executes
+the complete manifest relation set and durably preserves the full dynamic 1x/2x/4x preflight.
+Subsequent bounds execute only unresolved quality failures. The sealed round ledger binds each
+selected relation list, raw file and hash, result file and hash, and terminal decision; resume
+replays those sources before doing new work. A hard trace, fixture, repeat, raw-gas, provenance,
+schema, or identity failure aborts the campaign and never becomes an expansion decision.
+
+Do not concatenate round files. The command publishes canonical `raw/formal-relations.jsonl`
+atomically only after every manifest relation has one accepted source bound, ordered by the frozen
+manifest. An exact constant target-minus-control response across all fit points and the checkpoint is
+a zero-slope equation even when its intercept is nonzero. This rule does not waive the ordinary
+signal gate for a response with any count-dependent drift. The four labeled basis columns remain
+internal algebra coordinates; their opcode names carry no special physical interpretation.
+
 ### Fast Execution Was Mistaken For A New Cost Model
 
 The `gas-estimator` engine runs the actual SP1 opcode-lab program with `GasEstimatingVM`; it does not

@@ -82,6 +82,22 @@ FORMAL_RELATION_PROVENANCE_FIELDS = (
 )
 
 
+class FormalRelationQualityError(ValueError):
+    """A relation-only fit failure that may advance to the next frozen bound."""
+
+    def __init__(
+        self, relation_id: str, generator_max_count: int, reasons: Iterable[str]
+    ) -> None:
+        self.relation_id = relation_id
+        self.generator_max_count = generator_max_count
+        self.reasons = tuple(dict.fromkeys(reasons))
+        super().__init__(
+            f"formal relation {relation_id} at generator bound "
+            f"{generator_max_count} failed quality gates: "
+            + ", ".join(self.reasons or ("exhausted signed prefix search",))
+        )
+
+
 @dataclass(frozen=True)
 class CaseSpec:
     name: str
@@ -3498,6 +3514,7 @@ def generate_relation_cases(
     *,
     provenance: Mapping[str, Any],
     generator_max_count: int = 8,
+    relation_ids: Iterable[str] | None = None,
 ) -> list[pathlib.Path]:
     """Generate the formal matched-control relation campaign without changing diagnostics."""
     if generator_max_count not in OUT_OF_FIT_CHECKPOINTS.values():
@@ -3511,9 +3528,36 @@ def generate_relation_cases(
     }
     if not required_provenance.issubset(provenance):
         raise ValueError("formal relation generation requires calibration identity")
+    selected_relation_ids = (
+        [relation.id for relation in manifest.opcode_relations]
+        if relation_ids is None
+        else list(relation_ids)
+    )
+    available_relation_ids = {relation.id for relation in manifest.opcode_relations}
+    if (
+        not selected_relation_ids
+        or len(set(selected_relation_ids)) != len(selected_relation_ids)
+        or any(relation_id not in available_relation_ids for relation_id in selected_relation_ids)
+    ):
+        raise ValueError(
+            f"formal relation selection at generator bound {generator_max_count} is invalid"
+        )
+    selected_relation_id_set = set(selected_relation_ids)
+    manifest_order = [
+        relation.id
+        for relation in manifest.opcode_relations
+        if relation.id in selected_relation_id_set
+    ]
+    if selected_relation_ids != manifest_order:
+        raise ValueError(
+            f"formal relation selection at generator bound {generator_max_count} "
+            "differs from manifest order"
+        )
     cases = {case.name: case for case in manifest.cases}
     written: list[pathlib.Path] = []
     for relation in manifest.opcode_relations:
+        if relation.id not in selected_relation_id_set:
+            continue
         case = cases[relation.case_id]
         if case.opcode is None:
             raise ValueError("formal opcode relation requires an opcode case")
@@ -4905,6 +4949,7 @@ def _signed_relation_fit(
     counts: Mapping[int, tuple[Decimal, Decimal, Decimal]],
     *,
     generator_max_count: int,
+    relation_id: str = "<unknown>",
 ) -> dict[str, Any]:
     """Fit target-minus-control responses while allowing either slope sign."""
     last_reasons: list[str] = []
@@ -4961,10 +5006,18 @@ def _signed_relation_fit(
             or predicted_checkpoint == 0
             or (observed > 0) != (predicted_checkpoint > 0)
         ):
-            raise ValueError("formal relation checkpoint sign differs from fitted slope")
+            raise FormalRelationQualityError(
+                relation_id,
+                generator_max_count,
+                ("signed checkpoint sign differs from fitted slope",),
+            )
         ape = abs(predicted_checkpoint - observed) / abs(observed)
         if ape > Decimal("0.10"):
-            raise ValueError("formal relation signed checkpoint APE gate failed")
+            raise FormalRelationQualityError(
+                relation_id,
+                generator_max_count,
+                ("signed checkpoint APE gate failed",),
+            )
         return {
             "selected_counts": list(prefix),
             "slope": slope,
@@ -4981,9 +5034,10 @@ def _signed_relation_fit(
                 "status": "passed",
             },
         }
-    raise ValueError(
-        "formal relation quality gate failed: "
-        + ", ".join(last_reasons or ["exhausted signed prefix search"])
+    raise FormalRelationQualityError(
+        relation_id,
+        generator_max_count,
+        last_reasons or ("exhausted signed prefix search",),
     )
 
 
@@ -5092,30 +5146,70 @@ def _fit_one_opcode_relation(
             lanes["target"][0] - lanes["control"][0],
         )
 
+    expected_counts = controlled_round_counts(generator_max_count)
+    if tuple(sorted(counts)) != expected_counts:
+        kind = "self-control counts" if not expected_signed else "counts"
+        raise ValueError(
+            f"formal relation {relation.id} at generator bound {generator_max_count} "
+            f"{kind} omit a frozen prefix or checkpoint"
+        )
+    flat_values = {delta for _target, _control, delta in counts.values()}
+    exact_flat = len(flat_values) == 1
+    flat_intercept = next(iter(flat_values)) if exact_flat else None
+
     if not expected_signed:
-        expected_counts = controlled_round_counts(generator_max_count)
-        if tuple(sorted(counts)) != expected_counts:
-            raise ValueError("formal self-control counts omit a frozen prefix or checkpoint")
-        if relation.key_id not in OPCODE_RELATION_ANCHORS or any(
-            target != control or delta != 0
-            for target, control, delta in counts.values()
-        ):
-            raise ValueError("formal self-control must have exact zero delta")
+        if not exact_flat:
+            raise FormalRelationQualityError(
+                relation.id,
+                generator_max_count,
+                ("self-control response is not exactly flat",),
+            )
+        assert flat_intercept is not None
         return {
             "relation_id": relation.id,
             "key_id": relation.key_id,
             "scenario_id": relation.scenario_id,
             "status": "passed",
-            "exact_zero": True,
+            "self_control": True,
+            "exact_flat": True,
+            "exact_zero": flat_intercept == 0,
+            "slope_p": "0",
+            "intercept_p": _decimal_text(flat_intercept),
             "checked_counts": list(expected_counts),
             "checkpoint": {
                 "count": generator_max_count,
                 "observed_delta_p": "0",
-                "status": "passed_exact_zero",
+                "predicted_delta_p": "0",
+                "ape_p": "0",
+                "status": "passed_exact_flat",
             },
         }
 
-    fit = _signed_relation_fit(counts, generator_max_count=generator_max_count)
+    if exact_flat:
+        assert flat_intercept is not None
+        prefix_index = CONTROLLED_GENERATOR_ROUNDS.index(generator_max_count)
+        fit = {
+            "selected_counts": list(CONTROLLED_PREFIXES[prefix_index]),
+            "slope": Decimal(0),
+            "intercept": flat_intercept,
+            "r2": Decimal(1),
+            "stderr": Decimal(0),
+            "signal": Decimal(0),
+            "max_residual": Decimal(0),
+            "checkpoint": {
+                "count": generator_max_count,
+                "observed_delta_p": "0",
+                "predicted_delta_p": "0",
+                "ape_p": "0",
+                "status": "passed_exact_flat",
+            },
+        }
+    else:
+        fit = _signed_relation_fit(
+            counts,
+            relation_id=relation.id,
+            generator_max_count=generator_max_count,
+        )
     return {
         "relation_id": relation.id,
         "key_id": relation.key_id,
@@ -5131,11 +5225,16 @@ def _fit_one_opcode_relation(
         "signed_raw_gas_by_key": {
             key: str(value) for key, value in sorted(expected_signed.items())
         },
+        "exact_flat": exact_flat,
         "slope_p": _decimal_text(fit["slope"]),
         "intercept_p": _decimal_text(fit["intercept"]),
         "r2_p": _decimal_text(fit["r2"]),
         "slope_stderr_p": _decimal_text(fit["stderr"]),
-        "relative_slope_stderr": _decimal_text(fit["stderr"] / abs(fit["slope"])),
+        "relative_slope_stderr": _decimal_text(
+            Decimal(0)
+            if fit["slope"] == 0
+            else fit["stderr"] / abs(fit["slope"])
+        ),
         "signal_p": _decimal_text(fit["signal"]),
         "zero_delta_p": _decimal_text(counts[0][2]),
         "max_residual_p": _decimal_text(fit["max_residual"]),
@@ -5143,6 +5242,87 @@ def _fit_one_opcode_relation(
         "checkpoint": fit["checkpoint"],
         "status": "accepted",
     }
+
+
+def fit_formal_relation_round(
+    manifest: Manifest,
+    rows: Iterable[Mapping[str, Any]],
+    selected_relation_ids: Iterable[str],
+    generator_max_count: int,
+) -> list[dict[str, Any]]:
+    """Replay one relation subset, distinguishing fit quality from hard evidence errors."""
+    selected_relation_ids = list(selected_relation_ids)
+    expected_order = [
+        relation.id
+        for relation in manifest.opcode_relations
+        if relation.id in set(selected_relation_ids)
+    ]
+    if (
+        not selected_relation_ids
+        or len(set(selected_relation_ids)) != len(selected_relation_ids)
+        or selected_relation_ids != expected_order
+    ):
+        raise ValueError(
+            f"formal relation round at generator bound {generator_max_count} "
+            "has invalid relation order"
+        )
+    if generator_max_count not in CONTROLLED_GENERATOR_ROUNDS:
+        raise ValueError("formal relation round has unknown generator bound")
+    rows = list(rows)
+    actual_ids = {str(row.get("relation_id")) for row in rows}
+    if actual_ids != set(selected_relation_ids):
+        raise ValueError(
+            f"formal relation round at generator bound {generator_max_count} "
+            "row relation set differs from its selection"
+        )
+    relations = {relation.id: relation for relation in manifest.opcode_relations}
+    results: list[dict[str, Any]] = []
+    for relation_id in selected_relation_ids:
+        try:
+            fit = _fit_one_opcode_relation(
+                relations[relation_id],
+                [row for row in rows if row.get("relation_id") == relation_id],
+            )
+        except FormalRelationQualityError as error:
+            if (
+                error.relation_id != relation_id
+                or error.generator_max_count != generator_max_count
+            ):
+                raise ValueError(
+                    f"formal relation {relation_id} at generator bound "
+                    f"{generator_max_count} returned mismatched quality identity"
+                ) from error
+            results.append(
+                {
+                    "relation_id": relation_id,
+                    "generator_max_count": generator_max_count,
+                    "status": "quality_rejected",
+                    "decision": (
+                        "rejected_exhausted"
+                        if generator_max_count == CONTROLLED_GENERATOR_ROUNDS[-1]
+                        else "expand_next_round"
+                    ),
+                    "reasons": list(error.reasons),
+                    "fit": None,
+                }
+            )
+            continue
+        except ValueError as error:
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count}: {error}"
+            ) from error
+        results.append(
+            {
+                "relation_id": relation_id,
+                "generator_max_count": generator_max_count,
+                "status": "accepted",
+                "decision": "accepted",
+                "reasons": [],
+                "fit": fit,
+            }
+        )
+    return results
 
 
 def _fraction_text(value: Fraction) -> str:
@@ -5218,7 +5398,7 @@ def fit_opcode_relations(
         relation_rows = [row for row in rows if row.get("relation_id") == relation.id]
         results.append(_fit_one_opcode_relation(relation, relation_rows))
 
-    self_controls = [row for row in results if row.get("exact_zero") is True]
+    self_controls = [row for row in results if row.get("self_control") is True]
     equations = [
         row
         for row in results
@@ -5344,6 +5524,7 @@ def _validate_artifact_relation_rows(
         "target_raw_gas_by_key",
         "control_raw_gas_by_key",
         "signed_raw_gas_by_key",
+        "exact_flat",
         "slope_p",
         "intercept_p",
         "r2_p",
@@ -5395,7 +5576,25 @@ def _validate_artifact_relation_rows(
         signal = _artifact_decimal(row, "signal_p", label=label)
         zero_delta = _artifact_decimal(row, "zero_delta_p", label=label)
         residual = _artifact_decimal(row, "max_residual_p", label=label)
-        if (
+        exact_flat = row.get("exact_flat")
+        if type(exact_flat) is not bool:
+            raise ValueError(f"opcode relation artifact {label} quality evidence fails gates")
+        if exact_flat:
+            if any(
+                value != expected
+                for value, expected in (
+                    (slope, Decimal(0)),
+                    (r2, Decimal(1)),
+                    (stderr, Decimal(0)),
+                    (relative_stderr, Decimal(0)),
+                    (signal, Decimal(0)),
+                    (residual, Decimal(0)),
+                )
+            ):
+                raise ValueError(
+                    f"opcode relation artifact {label} quality evidence fails exact-flat gates"
+                )
+        elif (
             slope == 0
             or r2 < Decimal("0.995")
             or r2 > 1
@@ -5428,17 +5627,28 @@ def _validate_artifact_relation_rows(
         observed = _artifact_decimal(checkpoint, "observed_delta_p", label=label)
         predicted = _artifact_decimal(checkpoint, "predicted_delta_p", label=label)
         ape = _artifact_decimal(checkpoint, "ape_p", label=label)
-        if (
-            checkpoint.get("count") != expected_checkpoint
-            or type(checkpoint.get("count")) is not int
-            or checkpoint.get("status") != "passed"
-            or observed == 0
-            or predicted != slope * Decimal(expected_checkpoint)
-            or (observed > 0) != (predicted > 0)
-            or ape != abs(predicted - observed) / abs(observed)
-            or ape < 0
-            or ape > Decimal("0.10")
-        ):
+        checkpoint_valid = (
+            checkpoint.get("count") == expected_checkpoint
+            and type(checkpoint.get("count")) is int
+            and predicted == slope * Decimal(expected_checkpoint)
+            and ape >= 0
+            and ape <= Decimal("0.10")
+        )
+        if exact_flat:
+            checkpoint_valid = checkpoint_valid and (
+                checkpoint.get("status") == "passed_exact_flat"
+                and observed == 0
+                and predicted == 0
+                and ape == 0
+            )
+        else:
+            checkpoint_valid = checkpoint_valid and (
+                checkpoint.get("status") == "passed"
+                and observed != 0
+                and (observed > 0) == (predicted > 0)
+                and ape == abs(predicted - observed) / abs(observed)
+            )
+        if not checkpoint_valid:
             raise ValueError(f"opcode relation artifact {label} quality evidence fails checkpoint")
         algebra.append(
             RelationEquation(
@@ -5525,7 +5735,7 @@ def validate_opcode_relations_artifact(
         for relation in manifest.opcode_relations
     ]
     recomputed_self_controls = [
-        row for row in recomputed_results if row.get("exact_zero") is True
+        row for row in recomputed_results if row.get("self_control") is True
     ]
     recomputed_equations = [
         row
@@ -5563,7 +5773,11 @@ def validate_opcode_relations_artifact(
             "key_id",
             "scenario_id",
             "status",
+            "self_control",
+            "exact_flat",
             "exact_zero",
+            "slope_p",
+            "intercept_p",
             "checked_counts",
             "checkpoint",
         }:
@@ -5584,16 +5798,28 @@ def validate_opcode_relations_artifact(
             row.get("key_id") != relation.key_id
             or row.get("scenario_id") != relation.scenario_id
             or row.get("status") != "passed"
-            or row.get("exact_zero") is not True
+            or row.get("self_control") is not True
+            or row.get("exact_flat") is not True
+            or type(row.get("exact_zero")) is not bool
+            or row.get("slope_p") != "0"
+            or not isinstance(row.get("intercept_p"), str)
+            or _decimal_text(
+                _decimal(row.get("intercept_p"), label="self-control intercept")
+            )
+            != row.get("intercept_p")
             or not _exact_json_equal(row.get("checked_counts"), expected_counts)
             or not _exact_json_equal(
                 dict(checkpoint),
                 {
                     "count": bound,
                     "observed_delta_p": "0",
-                    "status": "passed_exact_zero",
+                    "predicted_delta_p": "0",
+                    "ape_p": "0",
+                    "status": "passed_exact_flat",
                 },
             )
+            or row.get("exact_zero")
+            != (_decimal(row.get("intercept_p"), label="self-control intercept") == 0)
         ):
             raise ValueError("opcode relation artifact self controls evidence is invalid")
     equation_relations = [
@@ -5775,6 +6001,55 @@ def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+
+def _atomic_write_bytes(path: pathlib.Path, value: bytes) -> None:
+    """Atomically create one byte artifact without replacing prior evidence."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = pathlib.Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(value)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ValueError(f"artifact already exists: {path}") from exc
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
+def _atomic_replace_bytes(path: pathlib.Path, value: bytes) -> None:
+    """Atomically replace a mutable ledger or seal after fully writing it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = pathlib.Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(value)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def case_primary_value(case_result: Mapping[str, Any]) -> tuple[str, Decimal]:
@@ -9791,6 +10066,213 @@ CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
 CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT = 128
 
 
+def _formal_relation_identity(
+    manifest: Manifest, identity_sha256: str
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "calibration_identity_sha256": identity_sha256,
+        "relation_ids": [relation.id for relation in manifest.opcode_relations],
+        "rounds": [],
+    }
+
+
+def _formal_relation_round_paths(
+    calibration_run: pathlib.Path, generator_max_count: int
+) -> tuple[pathlib.Path, pathlib.Path]:
+    return (
+        calibration_run
+        / "raw"
+        / f"formal-relations.generator-max-{generator_max_count}.jsonl",
+        calibration_run
+        / f"formal-relation-results.generator-max-{generator_max_count}.json",
+    )
+
+
+def _formal_relation_result_payload(
+    generator_max_count: int,
+    selected_relation_ids: list[str],
+    relation_results: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generator_max_count": generator_max_count,
+        "selected_relation_ids": selected_relation_ids,
+        "relation_results": relation_results,
+    }
+
+
+def validate_persisted_formal_relation_decisions(
+    calibration_run: pathlib.Path,
+    decisions: Mapping[str, Any],
+    manifest: Manifest,
+    expected_identity_sha256: str,
+) -> dict[str, Any]:
+    """Replay every persisted adaptive relation round and return accepted sources."""
+    expected_relation_ids = [relation.id for relation in manifest.opcode_relations]
+    if not isinstance(decisions, Mapping) or (
+        set(decisions) != {
+            "schema_version",
+            "calibration_identity_sha256",
+            "relation_ids",
+            "rounds",
+        }
+        or type(decisions.get("schema_version")) is not int
+        or decisions.get("schema_version") != 1
+        or decisions.get("calibration_identity_sha256") != expected_identity_sha256
+        or not _exact_json_equal(decisions.get("relation_ids"), expected_relation_ids)
+        or not isinstance(decisions.get("rounds"), list)
+    ):
+        raise ValueError("persisted formal relation decisions differ from manifest identity")
+    rounds = decisions["rounds"]
+    observed_bounds = [
+        record.get("generator_max_count")
+        for record in rounds
+        if isinstance(record, Mapping)
+    ]
+    if (
+        len(observed_bounds) != len(rounds)
+        or observed_bounds != list(CONTROLLED_GENERATOR_ROUNDS[: len(rounds)])
+    ):
+        raise ValueError("persisted formal relation rounds must be a unique contiguous prefix")
+
+    accepted: dict[str, dict[str, Any]] = {}
+    selected_relation_ids = list(expected_relation_ids)
+    exhausted: list[str] = []
+    for round_index, record in enumerate(rounds):
+        generator_max_count = observed_bounds[round_index]
+        if set(record) != {
+            "generator_max_count",
+            "selected_relation_ids",
+            "raw_runs",
+            "raw_runs_sha256",
+            "result",
+            "result_sha256",
+            "terminal_decisions",
+        }:
+            raise ValueError(
+                f"persisted formal relation round at generator bound "
+                f"{generator_max_count} contains non-canonical fields"
+            )
+        if not _exact_json_equal(
+            record.get("selected_relation_ids"), selected_relation_ids
+        ):
+            raise ValueError(
+                f"persisted formal relation order changed at generator bound "
+                f"{generator_max_count}"
+            )
+        raw_path, result_path = _formal_relation_round_paths(
+            calibration_run, generator_max_count
+        )
+        if (
+            record.get("raw_runs") != str(raw_path.relative_to(calibration_run))
+            or record.get("result") != str(result_path.relative_to(calibration_run))
+            or not raw_path.is_file()
+            or sha256_file(raw_path) != record.get("raw_runs_sha256")
+            or not result_path.is_file()
+            or sha256_file(result_path) != record.get("result_sha256")
+        ):
+            raise ValueError(
+                f"persisted formal relation source changed at generator bound "
+                f"{generator_max_count}"
+            )
+        rows = list(iter_jsonl(raw_path))
+        if round_index == 0:
+            validate_formal_dynamic_raw_gas_preflight(rows)
+        replayed_results = fit_formal_relation_round(
+            manifest, rows, selected_relation_ids, generator_max_count
+        )
+        expected_payload = _formal_relation_result_payload(
+            generator_max_count, selected_relation_ids, replayed_results
+        )
+        result_payload = json.loads(result_path.read_text())
+        if not _exact_json_equal(result_payload, expected_payload):
+            raise ValueError(
+                f"persisted formal relation result changed at generator bound "
+                f"{generator_max_count}"
+            )
+        terminal_decisions = [
+            {
+                "relation_id": result["relation_id"],
+                "decision": result["decision"],
+            }
+            for result in replayed_results
+        ]
+        if not _exact_json_equal(
+            record.get("terminal_decisions"), terminal_decisions
+        ):
+            raise ValueError(
+                f"persisted formal relation decision changed at generator bound "
+                f"{generator_max_count}"
+            )
+        next_selected: list[str] = []
+        rows_by_relation = {
+            relation_id: [
+                row for row in rows if row.get("relation_id") == relation_id
+            ]
+            for relation_id in selected_relation_ids
+        }
+        for result in replayed_results:
+            relation_id = result["relation_id"]
+            decision = result["decision"]
+            if decision == "accepted":
+                if relation_id in accepted:
+                    raise ValueError(
+                        f"formal relation {relation_id} was executed after acceptance"
+                    )
+                accepted[relation_id] = {
+                    "generator_max_count": generator_max_count,
+                    "rows": rows_by_relation[relation_id],
+                }
+            elif decision == "expand_next_round":
+                next_selected.append(relation_id)
+            elif decision == "rejected_exhausted":
+                exhausted.append(relation_id)
+            else:
+                raise ValueError(
+                    f"formal relation {relation_id} at generator bound "
+                    f"{generator_max_count} has invalid terminal decision"
+                )
+        if exhausted and round_index != len(rounds) - 1:
+            raise ValueError("persisted formal relation rounds continue after exhaustion")
+        if not next_selected and not exhausted and round_index != len(rounds) - 1:
+            raise ValueError("persisted formal relation rounds continue after completion")
+        selected_relation_ids = next_selected
+    return {
+        "accepted": accepted,
+        "remaining_relation_ids": selected_relation_ids,
+        "exhausted_relation_ids": exhausted,
+        "complete": len(accepted) == len(expected_relation_ids) and not exhausted,
+    }
+
+
+def _canonical_formal_relation_rows(
+    manifest: Manifest, accepted: Mapping[str, Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    lane_order = {"target": 0, "control": 1}
+    for relation in manifest.opcode_relations:
+        source = accepted.get(relation.id)
+        if not isinstance(source, Mapping):
+            raise ValueError(f"formal relation {relation.id} has no accepted row source")
+        relation_rows = list(source.get("rows", []))
+        if {
+            row.get("generator_max_count") for row in relation_rows
+        } != {source.get("generator_max_count")}:
+            raise ValueError(f"formal relation {relation.id} mixes generator bounds")
+        rows.extend(
+            sorted(
+                relation_rows,
+                key=lambda row: (
+                    int(row.get("diagnostic_count", -1)),
+                    int(row.get("repeat_index", -1)),
+                    lane_order.get(str(row.get("lane")), 2),
+                ),
+            )
+        )
+    return rows
+
+
 def controlled_round_counts(generator_max_count: int) -> tuple[int, ...]:
     try:
         index = CONTROLLED_GENERATOR_ROUNDS.index(generator_max_count)
@@ -10888,6 +11370,175 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
     raise ValueError("controlled adaptive sweep exhausted every frozen generator round")
 
 
+def cmd_run_relations(args: argparse.Namespace) -> None:
+    """Run and seal relation-level adaptive rounds without rerunning accepted rows."""
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    manifest_path = _resolve_repo_path(
+        args.controlled_manifest, field_name="controlled_manifest"
+    )
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run, manifest_path
+    )
+    if not _exact_json_equal(execution_identity, frozen_identity):
+        raise ValueError("formal relation calibration identity changed during validation")
+    identity_sha256 = sha256_bytes(canonical_json(execution_identity))
+    fixtures_root = _resolve_repo_path(
+        args.fixtures, field_name="generated_relation_fixtures"
+    )
+    final_runs = _resolve_repo_path(args.out, field_name="formal_relation_runs")
+    expected_final = (calibration_run / "raw" / "formal-relations.jsonl").resolve()
+    if final_runs.resolve() != expected_final:
+        raise ValueError(
+            "formal relation runs must use "
+            "$CALIBRATION_RUN/raw/formal-relations.jsonl"
+        )
+    decisions_path = calibration_run / "formal-relation-decisions.json"
+    decisions_seal_path = calibration_run / "formal-relation-decisions.sha256"
+    decisions = _formal_relation_identity(manifest, identity_sha256)
+    if decisions_path.exists():
+        if (
+            not decisions_seal_path.is_file()
+            or _read_digest(decisions_seal_path) != sha256_file(decisions_path)
+        ):
+            raise ValueError(
+                "formal relation decisions seal does not match persisted decisions"
+            )
+        decisions = json.loads(decisions_path.read_text())
+    elif decisions_seal_path.exists():
+        raise ValueError("formal relation decisions seal exists without its ledger")
+
+    state = validate_persisted_formal_relation_decisions(
+        calibration_run, decisions, manifest, identity_sha256
+    )
+
+    def publish_if_complete(current_state: Mapping[str, Any]) -> bool:
+        if not current_state.get("complete"):
+            return False
+        canonical_rows = _canonical_formal_relation_rows(
+            manifest, current_state["accepted"]
+        )
+        validate_formal_dynamic_raw_gas_preflight(canonical_rows)
+        canonical_bytes = b"".join(
+            canonical_json(row) + b"\n" for row in canonical_rows
+        )
+        if final_runs.exists():
+            if final_runs.read_bytes() != canonical_bytes:
+                raise ValueError("canonical formal relation rows differ from sealed rounds")
+        else:
+            _atomic_write_bytes(final_runs, canonical_bytes)
+        print("completed formal relation adaptive campaign")
+        return True
+
+    if publish_if_complete(state):
+        return
+    if state["exhausted_relation_ids"]:
+        relation_id = state["exhausted_relation_ids"][0]
+        raise ValueError(
+            f"formal relation {relation_id} at generator bound "
+            f"{CONTROLLED_GENERATOR_ROUNDS[-1]} exhausted every frozen quality round"
+        )
+    if final_runs.exists():
+        raise ValueError("partial formal relation campaign already has canonical rows")
+
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": identity_sha256,
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity[
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    start_index = len(decisions["rounds"])
+    for generator_max_count in CONTROLLED_GENERATOR_ROUNDS[start_index:]:
+        selected_relation_ids = list(state["remaining_relation_ids"])
+        if not selected_relation_ids:
+            raise ValueError("formal relation adaptive state has no remaining relations")
+        if generator_max_count == CONTROLLED_GENERATOR_ROUNDS[0]:
+            round_fixtures = fixtures_root
+        else:
+            round_fixtures = fixtures_root / f"generator-max-{generator_max_count}"
+            generate_relation_cases(
+                manifest,
+                round_fixtures,
+                provenance=provenance,
+                generator_max_count=generator_max_count,
+                relation_ids=selected_relation_ids,
+            )
+        round_runs, round_result = _formal_relation_round_paths(
+            calibration_run, generator_max_count
+        )
+        if round_runs.exists() or round_result.exists():
+            raise ValueError(
+                f"formal relation round at generator bound {generator_max_count} "
+                "has untracked existing artifacts"
+            )
+        run_args = argparse.Namespace(**vars(args))
+        run_args.fixtures = round_fixtures
+        run_args.out = round_runs
+        run_args.expected_purpose = FORMAL_RELATION_PURPOSE
+        run_args.repeats = 3
+        run_args.formal_dynamic_preflight = generator_max_count == 8
+        try:
+            cmd_run(run_args)
+        except (KeyError, ValueError) as error:
+            raise ValueError(
+                f"formal relation round {selected_relation_ids!r} at generator bound "
+                f"{generator_max_count}: {error}"
+            ) from error
+        rows = list(iter_jsonl(round_runs))
+        if generator_max_count == 8:
+            validate_formal_dynamic_raw_gas_preflight(rows)
+        relation_results = fit_formal_relation_round(
+            manifest, rows, selected_relation_ids, generator_max_count
+        )
+        result_payload = _formal_relation_result_payload(
+            generator_max_count, selected_relation_ids, relation_results
+        )
+        _atomic_write_json(round_result, result_payload)
+        record = {
+            "generator_max_count": generator_max_count,
+            "selected_relation_ids": selected_relation_ids,
+            "raw_runs": str(round_runs.relative_to(calibration_run)),
+            "raw_runs_sha256": sha256_file(round_runs),
+            "result": str(round_result.relative_to(calibration_run)),
+            "result_sha256": sha256_file(round_result),
+            "terminal_decisions": [
+                {
+                    "relation_id": result["relation_id"],
+                    "decision": result["decision"],
+                }
+                for result in relation_results
+            ],
+        }
+        decisions["rounds"].append(record)
+        decisions_bytes = (
+            json.dumps(decisions, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        _atomic_replace_bytes(decisions_path, decisions_bytes)
+        _atomic_replace_bytes(
+            decisions_seal_path,
+            (sha256_bytes(decisions_bytes) + "\n").encode(),
+        )
+        state = validate_persisted_formal_relation_decisions(
+            calibration_run, decisions, manifest, identity_sha256
+        )
+        if publish_if_complete(state):
+            return
+        if state["exhausted_relation_ids"]:
+            relation_id = state["exhausted_relation_ids"][0]
+            raise ValueError(
+                f"formal relation {relation_id} at generator bound "
+                f"{generator_max_count} exhausted every frozen quality round"
+            )
+    raise ValueError("formal relation adaptive campaign ended without terminal state")
+
+
 def cmd_build_candidate(args: argparse.Namespace) -> None:
     run = _resolve_repo_path(args.run, field_name="calibration_run")
     execution_identity = validate_calibration_execution_identity(run)
@@ -11132,7 +11783,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     relation_run.set_defaults(
-        func=cmd_run,
+        func=cmd_run_relations,
         expected_purpose=FORMAL_RELATION_PURPOSE,
         repeats=3,
         opcode_stage="revm-opcode-lab",
@@ -11400,7 +12051,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         for report_path in report_paths:
             for report in iter_jsonl(report_path):
                 case = case_by_input[report["input"]]
-                raw_run = raw_run_from_report(case, report)
+                try:
+                    raw_run = raw_run_from_report(case, report)
+                except ValueError as error:
+                    if expected_purpose != FORMAL_RELATION_PURPOSE:
+                        raise
+                    raise ValueError(
+                        f"formal relation {case.get('relation_id')} at generator bound "
+                        f"{case.get('generator_max_count')}: {error}"
+                    ) from error
                 repeat_index = repeat_index_by_input.get(report["input"], 0)
                 repeat_index_by_input[report["input"]] = repeat_index + 1
                 raw_run["repeat_index"] = repeat_index
@@ -11430,7 +12089,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         ran = len(raw_runs)
     elif expected_purpose == FORMAL_RELATION_PURPOSE:
         raw_runs = list(normalized_raw_runs())
-        validate_formal_dynamic_raw_gas_preflight(raw_runs)
+        if getattr(args, "formal_dynamic_preflight", True):
+            validate_formal_dynamic_raw_gas_preflight(raw_runs)
         with out.open("w") as output:
             for raw_run in raw_runs:
                 output.write(json.dumps(raw_run, sort_keys=True) + "\n")

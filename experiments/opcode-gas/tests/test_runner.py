@@ -3,6 +3,7 @@ import io
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -116,6 +117,7 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(generated.formal_relation_purpose, "formal_opcode_relation")
         self.assertEqual(run.expected_purpose, "formal_opcode_relation")
+        self.assertIs(run.func, opcode_gas.cmd_run_relations)
         self.assertEqual(run.repeats, 3)
         self.assertEqual(run.opcode_stage, "revm-opcode-lab")
         self.assertEqual(
@@ -135,6 +137,320 @@ class RunnerTests(unittest.TestCase):
                     ),
                 )
             )
+
+    def test_formal_relation_runner_advances_only_quality_failures_and_resumes(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        relations = manifest.opcode_relations[:2]
+        manifest = opcode_gas.replace(manifest, opcode_relations=relations)
+        relation_ids = [relation.id for relation in relations]
+        executed = []
+        generated = []
+        active_ids = list(relation_ids)
+
+        def fake_generate(
+            _manifest,
+            out,
+            *,
+            provenance,
+            generator_max_count,
+            relation_ids,
+        ):
+            nonlocal active_ids
+            active_ids = list(relation_ids)
+            generated.append((generator_max_count, list(relation_ids)))
+            out.mkdir(parents=True)
+            return []
+
+        def fake_run(args):
+            bound = 8 if not executed else 32
+            selected = list(active_ids if bound != 8 else relation_ids)
+            executed.append((bound, selected))
+            opcode_gas._write_canonical_jsonl(
+                args.out,
+                [
+                    {"relation_id": relation_id, "generator_max_count": bound}
+                    for relation_id in selected
+                ],
+            )
+
+        def fake_fit(_manifest, rows, selected_relation_ids, generator_max_count):
+            self.assertEqual(
+                [row["relation_id"] for row in rows], list(selected_relation_ids)
+            )
+            return [
+                {
+                    "relation_id": relation_id,
+                    "generator_max_count": generator_max_count,
+                    "status": (
+                        "quality_rejected"
+                        if generator_max_count == 8 and relation_id == relation_ids[1]
+                        else "accepted"
+                    ),
+                    "decision": (
+                        "expand_next_round"
+                        if generator_max_count == 8 and relation_id == relation_ids[1]
+                        else "accepted"
+                    ),
+                    "reasons": (
+                        ["signed signal is too small"]
+                        if generator_max_count == 8 and relation_id == relation_ids[1]
+                        else []
+                    ),
+                }
+                for relation_id in selected_relation_ids
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run, _revision = write_execution_identity(root)
+            identity = opcode_gas.json.loads((run / "experiment.json").read_text())[
+                "calibration_identity"
+            ]
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            output = run / "raw" / "formal-relations.jsonl"
+            args = types.SimpleNamespace(
+                fixtures=fixtures,
+                guest_launcher=pathlib.Path("guest-launcher"),
+                elf=pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+                precompile_elf=pathlib.Path("precompile.elf"),
+                opcode_stage="revm-opcode-lab",
+                calibration_run=run,
+                controlled_manifest=root / "manifest.toml",
+                out=output,
+                repeats=3,
+                expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+            )
+            patches = (
+                mock.patch.object(opcode_gas, "REPO_ROOT", root),
+                mock.patch.object(
+                    opcode_gas,
+                    "validate_calibration_execution_identity",
+                    return_value=identity,
+                ),
+                mock.patch.object(
+                    opcode_gas,
+                    "verify_frozen_controlled_manifest",
+                    return_value=(manifest, identity),
+                ),
+                mock.patch.object(opcode_gas, "generate_relation_cases", fake_generate),
+                mock.patch.object(opcode_gas, "cmd_run", fake_run),
+                mock.patch.object(opcode_gas, "fit_formal_relation_round", fake_fit),
+                mock.patch.object(
+                    opcode_gas, "validate_formal_dynamic_raw_gas_preflight"
+                ),
+            )
+            with contextlib.ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                opcode_gas.cmd_run_relations(args)
+
+            published = list(opcode_gas.iter_jsonl(output))
+            decisions = opcode_gas.json.loads(
+                (run / "formal-relation-decisions.json").read_text()
+            )
+            self.assertEqual(executed, [(8, relation_ids), (32, [relation_ids[1]])])
+            self.assertEqual(generated, [(32, [relation_ids[1]])])
+            self.assertEqual(
+                [(row["relation_id"], row["generator_max_count"]) for row in published],
+                [(relation_ids[0], 8), (relation_ids[1], 32)],
+            )
+            self.assertEqual(
+                [round_["selected_relation_ids"] for round_ in decisions["rounds"]],
+                [relation_ids, [relation_ids[1]]],
+            )
+
+            with contextlib.ExitStack() as stack:
+                rerun = stack.enter_context(mock.patch.object(opcode_gas, "cmd_run"))
+                for patcher in (
+                    mock.patch.object(opcode_gas, "REPO_ROOT", root),
+                    mock.patch.object(
+                        opcode_gas,
+                        "validate_calibration_execution_identity",
+                        return_value=identity,
+                    ),
+                    mock.patch.object(
+                        opcode_gas,
+                        "verify_frozen_controlled_manifest",
+                        return_value=(manifest, identity),
+                    ),
+                    mock.patch.object(opcode_gas, "fit_formal_relation_round", fake_fit),
+                    mock.patch.object(
+                        opcode_gas, "validate_formal_dynamic_raw_gas_preflight"
+                    ),
+                ):
+                    stack.enter_context(patcher)
+                opcode_gas.cmd_run_relations(args)
+                rerun.assert_not_called()
+
+    def test_formal_relation_runner_aborts_hard_failure_without_publication(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        manifest = opcode_gas.replace(
+            manifest, opcode_relations=manifest.opcode_relations[:1]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run, _revision = write_execution_identity(root)
+            identity = opcode_gas.json.loads((run / "experiment.json").read_text())[
+                "calibration_identity"
+            ]
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            output = run / "raw" / "formal-relations.jsonl"
+            args = types.SimpleNamespace(
+                fixtures=fixtures,
+                guest_launcher=pathlib.Path("guest-launcher"),
+                elf=pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+                precompile_elf=pathlib.Path("precompile.elf"),
+                opcode_stage="revm-opcode-lab",
+                calibration_run=run,
+                controlled_manifest=root / "manifest.toml",
+                out=output,
+                repeats=3,
+                expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+            )
+
+            def fake_run(run_args):
+                opcode_gas._write_canonical_jsonl(
+                    run_args.out,
+                    [{"relation_id": manifest.opcode_relations[0].id}],
+                )
+
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas,
+                "validate_calibration_execution_identity",
+                return_value=identity,
+            ), mock.patch.object(
+                opcode_gas,
+                "verify_frozen_controlled_manifest",
+                return_value=(manifest, identity),
+            ), mock.patch.object(opcode_gas, "cmd_run", fake_run), mock.patch.object(
+                opcode_gas,
+                "fit_formal_relation_round",
+                side_effect=ValueError("hard trace identity failure"),
+            ), mock.patch.object(
+                opcode_gas, "validate_formal_dynamic_raw_gas_preflight"
+            ), self.assertRaisesRegex(ValueError, "trace identity"):
+                opcode_gas.cmd_run_relations(args)
+
+            self.assertFalse(output.exists())
+            self.assertFalse((run / "formal-relation-decisions.json").exists())
+
+    def test_formal_relation_resume_rejects_tampered_sources_decisions_and_identity(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        manifest = opcode_gas.replace(
+            manifest, opcode_relations=manifest.opcode_relations[:2]
+        )
+        relation_ids = [relation.id for relation in manifest.opcode_relations]
+        identity_sha256 = "a" * 64
+
+        def fake_fit(_manifest, rows, selected, bound):
+            self.assertEqual([row["relation_id"] for row in rows], list(selected))
+            return [
+                {
+                    "relation_id": relation_id,
+                    "generator_max_count": bound,
+                    "status": "accepted",
+                    "decision": "accepted",
+                    "reasons": [],
+                }
+                for relation_id in selected
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = pathlib.Path(tmp)
+            raw, result = opcode_gas._formal_relation_round_paths(run, 8)
+            opcode_gas._write_canonical_jsonl(
+                raw,
+                [
+                    {"relation_id": relation_id, "generator_max_count": 8}
+                    for relation_id in relation_ids
+                ],
+            )
+            relation_results = fake_fit(
+                manifest, list(opcode_gas.iter_jsonl(raw)), relation_ids, 8
+            )
+            result.write_text(
+                opcode_gas.json.dumps(
+                    opcode_gas._formal_relation_result_payload(
+                        8, relation_ids, relation_results
+                    )
+                )
+                + "\n"
+            )
+            record = {
+                "generator_max_count": 8,
+                "selected_relation_ids": relation_ids,
+                "raw_runs": str(raw.relative_to(run)),
+                "raw_runs_sha256": opcode_gas.sha256_file(raw),
+                "result": str(result.relative_to(run)),
+                "result_sha256": opcode_gas.sha256_file(result),
+                "terminal_decisions": [
+                    {"relation_id": relation_id, "decision": "accepted"}
+                    for relation_id in relation_ids
+                ],
+            }
+            decisions = {
+                "schema_version": 1,
+                "calibration_identity_sha256": identity_sha256,
+                "relation_ids": relation_ids,
+                "rounds": [record],
+            }
+            with mock.patch.object(
+                opcode_gas, "fit_formal_relation_round", fake_fit
+            ), mock.patch.object(
+                opcode_gas, "validate_formal_dynamic_raw_gas_preflight"
+            ):
+                state = opcode_gas.validate_persisted_formal_relation_decisions(
+                    run, decisions, manifest, identity_sha256
+                )
+                self.assertTrue(state["complete"])
+
+                for mutate, message in (
+                    (
+                        lambda value: value["rounds"][0]["selected_relation_ids"].reverse(),
+                        "order changed",
+                    ),
+                    (
+                        lambda value: value["rounds"][0]["terminal_decisions"][0].update(
+                            decision="expand_next_round"
+                        ),
+                        "decision changed",
+                    ),
+                    (
+                        lambda value: value["rounds"][0].update(
+                            raw_runs_sha256="b" * 64
+                        ),
+                        "source changed",
+                    ),
+                    (
+                        lambda value: value.update(
+                            calibration_identity_sha256="b" * 64
+                        ),
+                        "manifest identity",
+                    ),
+                ):
+                    changed = opcode_gas.json.loads(opcode_gas.json.dumps(decisions))
+                    mutate(changed)
+                    with self.subTest(message=message), self.assertRaisesRegex(
+                        ValueError, message
+                    ):
+                        opcode_gas.validate_persisted_formal_relation_decisions(
+                            run, changed, manifest, identity_sha256
+                        )
+
+                original_raw = raw.read_bytes()
+                raw.write_bytes(original_raw + b"{}\n")
+                with self.assertRaisesRegex(ValueError, "source changed"):
+                    opcode_gas.validate_persisted_formal_relation_decisions(
+                        run, decisions, manifest, identity_sha256
+                    )
 
     def test_run_path_handoff_is_atomic_and_rejects_nonempty_existing_target(self):
         with tempfile.TemporaryDirectory() as tmp:

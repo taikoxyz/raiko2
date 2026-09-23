@@ -79,9 +79,25 @@ it with a discovered or manually selected run directory.
   --out "$CALIBRATION_RUN/block-calibration.json"
 ```
 
-The relation fit reconstructs pure-opcode costs from the frozen rank-98 system and its four natural
-anchors; `A_i` and `x_j` use actual per-key raw-gas totals, not execution counts. The controlled
-block fit jointly solves those anchors with `proposal_startup`, `block_base`, `tx_base`, and
+`run-relations` owns the frozen per-relation adaptive bounds `8, 32, 128, 512, 2048`. The initial
+bound-8 batch must contain the complete manifest relation set and pass the full dynamic 1x/2x/4x
+preflight. Later rounds regenerate and execute only relations whose prior failure was limited to the
+frozen fit, signal, R2, residual, or checkpoint gates. Trace, repeat, provenance, raw-gas, schema,
+fixture, or identity failures abort instead of expanding. Each round is sealed in
+`formal-relation-decisions.json`; resume replays every recorded raw/result hash and skips relations
+already accepted. The canonical `raw/formal-relations.jsonl` is created atomically only after every
+relation has accepted exactly one generator bound.
+
+An exactly constant target-minus-control response across every fit point and checkpoint is a valid
+zero-slope relation. This includes self-controls with a nonzero absolute intercept: only
+count-dependent drift is disqualifying. A non-self exact-flat row still binds its signed raw-gas
+coefficient map and all ordinary trace/provenance evidence; non-flat small signals keep the ordinary
+signal gate.
+
+The relation fit reconstructs pure-opcode costs from the frozen rank-98 system and four internal
+algebraic basis coordinates; their opcode labels do not give them special physical meaning. `A_i`
+and `x_j` use actual per-key raw-gas totals, not execution counts. The controlled block fit jointly
+solves those basis coordinates with `proposal_startup`, `block_base`, `tx_base`, and
 `native_value_transfer`. Dynamic raw-gas scenarios are holdouts and never refit the model.
 
 The commands below are retained as exploratory predecessor workflows only. They are not the current

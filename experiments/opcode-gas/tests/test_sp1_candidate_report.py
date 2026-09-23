@@ -808,6 +808,108 @@ class MeasurementGateTests(unittest.TestCase):
 
 
 class FormalOpcodeRelationTests(unittest.TestCase):
+    def test_exact_flat_self_control_accepts_nonzero_intercept_with_zero_slope(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if not item.signed_raw_gas_by_key
+        )
+        rows = formal_relation_rows(manifest)
+        for row in rows:
+            if row["relation_id"] != relation.id:
+                continue
+            row["prover_gas"] = 100_007 if row["lane"] == "target" else 100_000
+
+        artifact = opcode_gas.fit_opcode_relations(manifest, rows)
+
+        self_control = next(
+            row
+            for row in artifact["self_controls"]
+            if row["relation_id"] == relation.id
+        )
+        self.assertEqual(self_control["slope_p"], "0")
+        self.assertEqual(self_control["intercept_p"], "7")
+        self.assertTrue(self_control["exact_flat"])
+        self.assertFalse(self_control["exact_zero"])
+
+    def test_exact_flat_nonself_is_zero_slope_but_checkpoint_drift_is_quality_failure(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item
+            for item in manifest.opcode_relations
+            if item.split == "canonical" and item.signed_raw_gas_by_key
+        )
+        rows = formal_relation_rows(manifest)
+        for row in rows:
+            if row["relation_id"] != relation.id:
+                continue
+            row["prover_gas"] = 100_007 if row["lane"] == "target" else 100_000
+
+        artifact = opcode_gas.fit_opcode_relations(manifest, rows)
+        equation = next(
+            row for row in artifact["equations"] if row["relation_id"] == relation.id
+        )
+        self.assertEqual(equation["slope_p"], "0")
+        self.assertEqual(equation["intercept_p"], "7")
+        self.assertEqual(equation["checkpoint"]["status"], "passed_exact_flat")
+
+        drifted = [
+            copy.deepcopy(row)
+            for row in rows
+            if row["relation_id"] == relation.id
+        ]
+        for row in drifted:
+            if row["lane"] == "target" and row["diagnostic_count"] == 8:
+                row["prover_gas"] += 1
+        with self.assertRaisesRegex(
+            opcode_gas.FormalRelationQualityError,
+            rf"{relation.id}.*generator bound 8",
+        ):
+            opcode_gas._fit_one_opcode_relation(relation, drifted)
+
+    def test_round_fit_expands_only_quality_and_contextualizes_hard_failures(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = [
+            copy.deepcopy(row)
+            for row in formal_relation_rows(manifest)
+            if row["relation_id"] == relation.id
+        ]
+        for row in rows:
+            if row["lane"] == "target":
+                row["prover_gas"] = 100_000 + 10 * row["diagnostic_count"]
+
+        result = opcode_gas.fit_formal_relation_round(
+            manifest, rows, [relation.id], 8
+        )
+        self.assertEqual(result[0]["decision"], "expand_next_round")
+        self.assertEqual(result[0]["status"], "quality_rejected")
+
+        noisy = copy.deepcopy(rows)
+        next(
+            row
+            for row in noisy
+            if row["lane"] == "target"
+            and row["diagnostic_count"] == 1
+            and row["repeat_index"] == 2
+        )["prover_gas"] += 1
+        with self.assertRaisesRegex(
+            ValueError, rf"{relation.id}.*generator bound 8.*repeat noise"
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest, noisy, [relation.id], 8
+            )
+
+        mixed = copy.deepcopy(rows)
+        mixed[0]["generator_max_count"] = 32
+        with self.assertRaisesRegex(
+            ValueError, rf"{relation.id}.*generator bound 8.*one generator bound"
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest, mixed, [relation.id], 8
+            )
+
     def test_relation_artifact_is_byte_identical_across_caller_decimal_contexts(self):
         manifest = formal_relation_manifest()
         rows = formal_relation_rows(manifest)

@@ -6049,6 +6049,47 @@ def _validate_content_addressed_artifact(
     return str(recorded)
 
 
+_CANDIDATE_SOURCE_REPLAY_SEAL = object()
+
+
+@dataclass(frozen=True)
+class CandidateSourceReplay:
+    relation_artifact_sha256: str
+    block_artifact_sha256: str
+    _seal: object = field(repr=False, compare=False)
+
+
+def validate_candidate_source_replay(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    relation_rows: Iterable[Mapping[str, Any]],
+    block_artifact: Mapping[str, Any],
+    block_rows: Iterable[Mapping[str, Any]],
+    expected_relation_provenance: Mapping[str, Any],
+) -> CandidateSourceReplay:
+    relation_rows = list(relation_rows)
+    block_rows = list(block_rows)
+    validate_opcode_relations_artifact(
+        manifest,
+        relation_artifact,
+        relation_rows,
+        expected_relation_provenance,
+    )
+    replayed_block = fit_block_calibration_artifact(
+        manifest,
+        _affine_model_from_validated_artifact(manifest, relation_artifact),
+        relation_artifact,
+        block_rows,
+    )
+    if not _exact_json_equal(block_artifact, replayed_block):
+        raise ValueError("block calibration artifact differs from exact raw-row replay")
+    return CandidateSourceReplay(
+        relation_artifact_sha256=str(relation_artifact["artifact_sha256"]),
+        block_artifact_sha256=str(block_artifact["artifact_sha256"]),
+        _seal=_CANDIDATE_SOURCE_REPLAY_SEAL,
+    )
+
+
 def _candidate_source_measurements(
     manifest: Manifest,
     relation_artifact: Mapping[str, Any],
@@ -6178,7 +6219,13 @@ def _candidate_source_measurements(
         for key in sorted(expected_opcode_keys)
     }
     measurements.update(
-        {key.id: controlled_measurements[key.id] for key in remaining_keys}
+        {
+            key.id: {
+                **controlled_measurements[key.id],
+                "source": "controlled-fit.json",
+            }
+            for key in remaining_keys
+        }
     )
     return measurements, list(rows), {key: str(fixed_costs[key]) for key in Q_FORMULA}
 
@@ -6210,8 +6257,22 @@ def build_candidate_components(
     if provenance["block_calibration_sha256"] != block_artifact["artifact_sha256"]:
         raise ValueError("candidate block calibration digest differs from its provenance")
     primary_rows = _primary_case_projection(rows)
+    pure_opcode_key_ids = sorted(
+        key.id for key in _pure_opcode_measurement_keys(manifest)
+    )
+    remaining_controlled_key_ids = sorted(
+        key.id for key in _remaining_controlled_measurement_keys(manifest)
+    )
+    measurement_inventory = {
+        "pure_opcode_key_ids": pure_opcode_key_ids,
+        "remaining_controlled_key_ids": remaining_controlled_key_ids,
+        "measurement_key_ids": sorted(measurements),
+        "overhead_key_ids": list(Q_FORMULA),
+        "normalization_reference_key": manifest.normalization_reference_key,
+    }
     normalized = {
         "schema_version": 1,
+        "measurement_inventory": measurement_inventory,
         "measurements": measurements,
         "overheads": primary_overheads,
         "relation": {
@@ -6274,6 +6335,7 @@ def build_candidate_components(
         "integer_schedule_emitted": False,
         "components": component_hashes,
         "q_formula": list(Q_FORMULA),
+        "measurement_inventory": measurement_inventory,
         "operation_phase_ownership": "transaction_non_anchor_only",
         "system_operation_ownership": manifest.system_operation_ownership,
         "anchor_operation_ownership": manifest.anchor_operation_ownership,
@@ -6485,6 +6547,128 @@ def build_controlled_cycle_cost_samples(
             "unresidualized secondary dependencies remain unavailable"
         ),
     }
+
+
+def fit_instruction_space_artifacts(
+    manifest: Manifest,
+    relation_rows: Iterable[Mapping[str, Any]],
+    block_rows: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Replay formal relation/block fitting with instruction count as diagnostic response."""
+    instruction_relation_rows = [
+        {**row, "prover_gas": row.get("total_instruction_count")}
+        for row in relation_rows
+    ]
+    instruction_relation = fit_opcode_relations(
+        manifest, instruction_relation_rows
+    )
+    instruction_block_rows = [
+        {
+            **row,
+            "prover_gas": row.get("total_instruction_count"),
+            "relation_artifact_sha256": instruction_relation["artifact_sha256"],
+            "relation_raw_rows_sha256": instruction_relation["raw_rows_sha256"],
+        }
+        for row in block_rows
+    ]
+    instruction_block = fit_block_calibration_artifact(
+        manifest,
+        _affine_model_from_validated_artifact(manifest, instruction_relation),
+        instruction_relation,
+        instruction_block_rows,
+    )
+    return (
+        instruction_relation,
+        instruction_block,
+        instruction_relation_rows,
+        instruction_block_rows,
+    )
+
+
+def build_independent_bridge_sample_artifact(
+    manifest: Manifest,
+    block_artifact: Mapping[str, Any],
+    instruction_block_artifact: Mapping[str, Any] | None,
+    controlled_full_rows: Iterable[Mapping[str, Any]],
+    *,
+    candidate_sha256: str,
+    diagnostic_error: str | None = None,
+    evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build non-candidate bridge samples from independently reconstructed evidence."""
+    full_rows = list(controlled_full_rows)
+    try:
+        controlled_results = fit_controlled_costs(
+            manifest,
+            full_rows,
+            case_ids=_remaining_controlled_case_ids(manifest),
+        )
+        operation_costs = _operation_costs(manifest, controlled_results)
+        controlled_error = None
+    except ValueError as error:
+        controlled_results = []
+        operation_costs = {}
+        controlled_error = str(error)
+    primary_opcodes = block_artifact.get("opcode_multipliers", {})
+    primary_fixed = block_artifact.get("fixed_costs", {})
+    secondary_opcodes = (
+        instruction_block_artifact.get("opcode_multipliers", {})
+        if isinstance(instruction_block_artifact, Mapping)
+        else {}
+    )
+    secondary_fixed = (
+        instruction_block_artifact.get("fixed_costs", {})
+        if isinstance(instruction_block_artifact, Mapping)
+        else {}
+    )
+    pure_opcode_ids = {key.id for key in _pure_opcode_measurement_keys(manifest)}
+    samples: dict[str, dict[str, Any]] = {}
+    for key in manifest.bridge_key_ids:
+        if key in pure_opcode_ids:
+            primary = primary_opcodes.get(key)
+            secondary = secondary_opcodes.get(key)
+            reason = diagnostic_error or "instruction_opcode_reconstruction_unavailable"
+        elif key in Q_FORMULA:
+            primary = primary_fixed.get(key)
+            secondary = secondary_fixed.get(key)
+            reason = diagnostic_error or "instruction_block_reconstruction_unavailable"
+        else:
+            operation = operation_costs.get(key, {})
+            primary = operation.get("cost")
+            secondary = operation.get("secondary_cost")
+            reason = controlled_error or "controlled_secondary_cost_unavailable"
+        if primary is None or secondary is None:
+            samples[key] = {"status": "unavailable", "reason": reason}
+            continue
+        primary_value = _decimal(primary, label=f"bridge {key} proverGas")
+        secondary_value = _decimal(secondary, label=f"bridge {key} instruction count")
+        if primary_value <= 0 or secondary_value <= 0:
+            samples[key] = {"status": "unavailable", "reason": "nonpositive_cost"}
+            continue
+        samples[key] = {
+            "status": "available",
+            "prover_gas": _decimal_text(primary_value),
+            "instruction_count": _decimal_text(secondary_value),
+        }
+    payload = {
+        "schema_version": 1,
+        "candidate_sha256": candidate_sha256,
+        "bridge_key_ids": list(manifest.bridge_key_ids),
+        "samples": samples,
+        "evidence": {
+            "controlled_full_raw_sha256": sha256_bytes(canonical_json(full_rows)),
+            "controlled_full_fit_sha256": sha256_bytes(
+                canonical_json(controlled_results)
+            ),
+            **dict(evidence or {}),
+        },
+        "secondary_policy": (
+            "diagnostic instruction-space replay is independently hashed and never "
+            "enters candidate acceptance or identity"
+        ),
+    }
+    payload["sha256"] = sha256_bytes(canonical_json(payload))
+    return payload
 
 
 def build_diagnostic_overheads(
@@ -6756,9 +6940,19 @@ def seal_candidate_directory(
     provenance: Mapping[str, Any],
     schedule: UnzenSchedule | None = None,
     controlled_cycle_samples: Mapping[str, Any] | None = None,
+    source_replay: CandidateSourceReplay | None = None,
 ) -> dict[str, Any]:
     if any(run.glob("**/proposal*.json*")):
         raise ValueError("proposal result already exists in calibration directory")
+    if (
+        not isinstance(source_replay, CandidateSourceReplay)
+        or source_replay._seal is not _CANDIDATE_SOURCE_REPLAY_SEAL
+        or source_replay.relation_artifact_sha256
+        != relation_artifact.get("artifact_sha256")
+        or source_replay.block_artifact_sha256
+        != block_artifact.get("artifact_sha256")
+    ):
+        raise ValueError("candidate sealing requires validated source replay")
     components = build_candidate_components(
         manifest,
         relation_artifact,
@@ -6936,10 +7130,28 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     block = normalized.get("block_calibration")
     if (
         not isinstance(relation, Mapping)
+        or set(relation)
+        != {"artifact_sha256", "raw_rows_sha256", "quality_gates", "affine_model"}
         or relation.get("artifact_sha256") != source_hashes["opcode_relations_sha256"]
+        or not _is_sha256(relation.get("raw_rows_sha256"))
         or relation.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES
         or relation.get("quality_gates") != manifest.get("relation_quality_gates")
+        or not isinstance(relation.get("affine_model"), Mapping)
+        or relation["affine_model"].get("anchor_keys")
+        != list(OPCODE_RELATION_ANCHORS)
+        or relation["affine_model"].get("rank") != len(PURE_OPCODE_DEFAULTS) - 4
+        or relation["affine_model"].get("nullity") != 4
         or not isinstance(block, Mapping)
+        or set(block)
+        != {
+            "artifact_sha256",
+            "raw_block_rows_sha256",
+            "parameter_order",
+            "formulas",
+            "gates",
+            "exact_fit_rank",
+            "dynamic_holdouts",
+        }
         or block.get("artifact_sha256") != source_hashes["block_calibration_sha256"]
         or block.get("raw_block_rows_sha256")
         != source_hashes["block_calibration_rows_sha256"]
@@ -6955,15 +7167,69 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     ):
         raise ValueError("candidate reconstructed source evidence differs from root")
     root_dynamic = manifest.get("dynamic_holdouts")
-    if not isinstance(root_dynamic, Mapping) or any(
+    if (
+        not isinstance(root_dynamic, Mapping)
+        or set(root_dynamic) != set(DYNAMIC_RAW_GAS_KEYS)
+        or any(
         not isinstance(value, Mapping) or value.get("status") != "accepted"
         for value in root_dynamic.values()
+        )
     ):
         raise ValueError("candidate dynamic holdout evidence is not accepted")
     measurements = normalized.get("measurements")
     overheads = normalized.get("overheads")
     if not isinstance(measurements, Mapping) or not isinstance(overheads, Mapping):
         raise ValueError("candidate cost table is invalid")
+    expected_pure = sorted(f"opcode:0x{opcode:02x}" for opcode in PURE_OPCODE_DEFAULTS)
+    expected_remaining = sorted(
+        f"precompile:0x{address:02x}" for address in PRECOMPILE_BODY_DEFAULTS
+    )
+    expected_inventory = {
+        "pure_opcode_key_ids": expected_pure,
+        "remaining_controlled_key_ids": expected_remaining,
+        "measurement_key_ids": sorted((*expected_pure, *expected_remaining)),
+        "overhead_key_ids": list(Q_FORMULA),
+        "normalization_reference_key": "opcode:0x01",
+    }
+    inventory = normalized.get("measurement_inventory")
+    if (
+        inventory != expected_inventory
+        or manifest.get("measurement_inventory") != expected_inventory
+        or sorted(measurements) != expected_inventory["measurement_key_ids"]
+        or sorted(overheads) != sorted(expected_inventory["overhead_key_ids"])
+        or manifest.get("normalization_reference_key")
+        != expected_inventory["normalization_reference_key"]
+    ):
+        raise ValueError("candidate measurement inventory differs from frozen V1 inventory")
+    for key in expected_pure:
+        value = measurements.get(key)
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {
+                "status",
+                "pricing_basis",
+                "c_p",
+                "m_p",
+                "source",
+            }
+            or value.get("status") != "accepted"
+            or value.get("pricing_basis") != "raw_gas_slope"
+            or value.get("source") != "block-calibration.json"
+        ):
+            raise ValueError(f"candidate opcode source evidence is invalid: {key}")
+    for key in expected_remaining:
+        value = measurements.get(key)
+        if (
+            not isinstance(value, Mapping)
+            or value.get("status") != "accepted"
+            or value.get("pricing_basis") != "raw_gas_slope"
+            or value.get("source") != "controlled-fit.json"
+            or "c_p" not in value
+        ):
+            raise ValueError(f"candidate controlled source evidence is invalid: {key}")
+    reference = measurements[expected_inventory["normalization_reference_key"]]
+    if reference.get("m_p") != "1":
+        raise ValueError("candidate normalization reference is not exactly one")
     numeric_values = [
         raw
         for value in measurements.values()
@@ -8080,23 +8346,55 @@ def _controlled_repeat_point(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any
     for row in repeats:
         validate_sp1_execution_provenance(row, workload_kind=str(workload_kind))
     first = repeats[0]
-    point = {
+    point: dict[str, Any] = {
         "count": int(first["target_count"]),
         "prover_gas_repeats": [str(row.get("prover_gas", row.get("gas"))) for row in repeats],
-        "instruction_count_repeats": [
-            str(row.get("total_instruction_count")) for row in repeats
-        ],
         "case_input_sha256_repeats": [row.get("backend_input_sha256") for row in repeats],
         "exit_code_repeats": [row.get("exit_code") for row in repeats],
         "public_values_repeats": [row.get("public_values") for row in repeats],
         "isolation": first.get("isolation"),
     }
+    if all("total_instruction_count" in row for row in repeats):
+        point["instruction_count_repeats"] = [
+            str(row["total_instruction_count"]) for row in repeats
+        ]
     pair_ids = {row.get("pair_id") for row in repeats}
     if pair_ids != {None}:
         if len(pair_ids) != 1 or not _is_sha256(next(iter(pair_ids))):
             raise ValueError("controlled repeats do not share one pair_id")
         point["pair_id"] = next(iter(pair_ids))
     return point
+
+
+def primary_controlled_raw_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove non-gating instruction evidence from candidate-controlled raw rows."""
+    return [
+        {
+            key: value
+            for key, value in row.items()
+            if key != "secondary" and "instruction" not in key
+        }
+        for row in rows
+    ]
+
+
+def fit_primary_controlled_costs(
+    manifest: Manifest,
+    rows: Iterable[Mapping[str, Any]],
+    case_ids: frozenset[str],
+) -> list[dict[str, Any]]:
+    rows = list(rows)
+    if any(
+        key == "secondary" or "instruction" in key
+        for row in rows
+        for key in row
+    ):
+        raise ValueError("primary controlled raw rows contain secondary evidence")
+    return _primary_case_projection(
+        fit_controlled_costs(manifest, rows, case_ids=case_ids)
+    )
 
 
 def fit_controlled_costs(
@@ -9950,8 +10248,43 @@ def controlled_round_decision(
     return "complete"
 
 
+def _write_canonical_jsonl(path: pathlib.Path, rows: Iterable[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(canonical_json(row) + b"\n" for row in rows))
+
+
+def _load_controlled_bridge_inputs(
+    calibration_run: pathlib.Path, generator_max_count: int
+) -> dict[str, Any]:
+    path = calibration_run / "controlled-bridge-inputs.json"
+    if not path.is_file():
+        raise ValueError("controlled bridge input sidecar is missing")
+    payload = json.loads(path.read_text())
+    if set(payload) != {
+        "schema_version",
+        "generator_max_count",
+        "raw_runs",
+        "raw_runs_sha256",
+    } or payload.get("schema_version") != 1 or payload.get(
+        "generator_max_count"
+    ) != generator_max_count:
+        raise ValueError("controlled bridge input sidecar is invalid")
+    expected_name = f"controlled-runs.generator-max-{generator_max_count}.jsonl"
+    if payload.get("raw_runs") != expected_name:
+        raise ValueError("controlled bridge input sidecar path is not canonical")
+    raw_path = calibration_run / expected_name
+    if (
+        not raw_path.is_file()
+        or sha256_file(raw_path) != payload.get("raw_runs_sha256")
+    ):
+        raise ValueError("controlled bridge full raw evidence changed")
+    return {**payload, "raw_path": raw_path}
+
+
 def validate_persisted_controlled_decisions(
-    calibration_run: pathlib.Path, decisions: Mapping[str, Any]
+    calibration_run: pathlib.Path,
+    decisions: Mapping[str, Any],
+    manifest: Manifest,
 ) -> dict[int, Mapping[str, Any]]:
     rounds = decisions.get("rounds")
     if decisions.get("schema_version") != 1 or not isinstance(rounds, list):
@@ -9984,6 +10317,17 @@ def validate_persisted_controlled_decisions(
         fit_payload = json.loads(fit_path.read_text())
         if fit_payload.get("generator_max_count") != generator_max_count:
             raise ValueError("persisted controlled fit footprint changed")
+        replayed_fit = {
+            "schema_version": 1,
+            "generator_max_count": generator_max_count,
+            "case_results": fit_primary_controlled_costs(
+                manifest,
+                iter_jsonl(raw_path),
+                _remaining_controlled_case_ids(manifest),
+            ),
+        }
+        if not _exact_json_equal(fit_payload, replayed_fit):
+            raise ValueError("persisted controlled fit differs from primary raw replay")
         decision = controlled_round_decision(
             fit_payload.get("case_results", []), generator_max_count
         )
@@ -10007,6 +10351,7 @@ def _canonical_run_artifact(
 def load_terminal_controlled_artifacts(
     calibration_run: pathlib.Path,
     identity: Mapping[str, Any],
+    manifest: Manifest,
 ) -> dict[str, Any]:
     """Verify and load the one complete adaptive round sealed by this run."""
     experiment_path = calibration_run / "experiment.json"
@@ -10032,7 +10377,9 @@ def load_terminal_controlled_artifacts(
             raise ValueError(f"experiment {key} does not match frozen manifest identity")
 
     decisions = json.loads(decisions_path.read_text())
-    validated = validate_persisted_controlled_decisions(calibration_run, decisions)
+    validated = validate_persisted_controlled_decisions(
+        calibration_run, decisions, manifest
+    )
     if not validated:
         raise ValueError("controlled decisions have no terminal round")
     terminal_count = next(reversed(validated))
@@ -10049,6 +10396,7 @@ def load_terminal_controlled_artifacts(
     fit = json.loads(fit_path.read_text())
     if fit.get("generator_max_count") != terminal_count:
         raise ValueError("canonical controlled artifact footprint is not terminal")
+    bridge_inputs = _load_controlled_bridge_inputs(calibration_run, terminal_count)
     return {
         "experiment": experiment,
         "provenance_declaration": declaration,
@@ -10057,6 +10405,7 @@ def load_terminal_controlled_artifacts(
         "fit_sha256": terminal["fit_sha256"],
         "controlled_decisions_sha256": sha256_file(decisions_path),
         "generator_max_count": terminal_count,
+        "bridge_inputs": bridge_inputs,
     }
 
 
@@ -10075,10 +10424,53 @@ def _controlled_sample_artifact(
     manifest: Manifest,
     artifacts: Mapping[str, Any],
     candidate_sha256: str,
+    block_artifact: Mapping[str, Any],
+    relation_rows: Iterable[Mapping[str, Any]],
+    block_rows: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    payload = build_controlled_cycle_cost_samples(
-        manifest, artifacts["fit"]["case_results"], {}
+    relation_rows = list(relation_rows)
+    block_rows = list(block_rows)
+    diagnostic_error = None
+    evidence = {
+        "formal_relation_full_raw_sha256": sha256_bytes(
+            canonical_json(relation_rows)
+        ),
+        "block_full_raw_sha256": sha256_bytes(canonical_json(block_rows)),
+    }
+    try:
+        (
+            instruction_relation,
+            instruction_block,
+            instruction_relation_rows,
+            instruction_block_rows,
+        ) = fit_instruction_space_artifacts(manifest, relation_rows, block_rows)
+        evidence.update(
+            {
+                "instruction_relation_rows_sha256": sha256_bytes(
+                    canonical_json(instruction_relation_rows)
+                ),
+                "instruction_relations_sha256": instruction_relation[
+                    "artifact_sha256"
+                ],
+                "instruction_block_rows_sha256": sha256_bytes(
+                    canonical_json(instruction_block_rows)
+                ),
+                "instruction_block_sha256": instruction_block["artifact_sha256"],
+            }
+        )
+    except ValueError as error:
+        instruction_block = None
+        diagnostic_error = str(error)
+    payload = build_independent_bridge_sample_artifact(
+        manifest,
+        block_artifact,
+        instruction_block,
+        iter_jsonl(artifacts["bridge_inputs"]["raw_path"]),
+        candidate_sha256=candidate_sha256,
+        diagnostic_error=diagnostic_error,
+        evidence=evidence,
     )
+    payload.pop("sha256")
     payload["calibration_id"] = artifacts["provenance_declaration"]["calibration_id"]
     payload["implementation_revision"] = artifacts["provenance_declaration"][
         "implementation_revision"
@@ -10094,6 +10486,7 @@ def _controlled_sample_artifact(
         "controlled_decisions_sha256"
     ]
     payload["controlled_fit_sha256"] = artifacts["fit_sha256"]
+    payload["sha256"] = sha256_bytes(canonical_json(payload))
     return payload
 
 
@@ -10117,15 +10510,20 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
             raise ValueError("controlled decisions seal does not match persisted decisions")
         decisions = json.loads(decisions_path.read_text())
 
-    previous_rounds = validate_persisted_controlled_decisions(calibration_run, decisions)
+    previous_rounds = validate_persisted_controlled_decisions(
+        calibration_run, decisions, manifest
+    )
     for generator_max_count in CONTROLLED_GENERATOR_ROUNDS:
         previous = previous_rounds.get(generator_max_count)
         if previous is not None:
             raw_path = calibration_run / previous["raw_runs"]
             decision = previous["decision"]
             if decision == "complete":
+                bridge_inputs = _load_controlled_bridge_inputs(
+                    calibration_run, generator_max_count
+                )
                 final_runs.parent.mkdir(parents=True, exist_ok=True)
-                final_runs.write_bytes(raw_path.read_bytes())
+                final_runs.write_bytes(bridge_inputs["raw_path"].read_bytes())
                 fit_path = calibration_run / previous["fit"]
                 (calibration_run / "controlled-fit.json").write_bytes(
                     fit_path.read_bytes()
@@ -10167,23 +10565,27 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
                 repeats=3,
             )
         )
-        results = fit_controlled_costs(
+        full_rows = list(iter_jsonl(round_runs))
+        primary_rows = primary_controlled_raw_rows(full_rows)
+        primary_runs = calibration_run / f"controlled-primary-runs.{round_name}.jsonl"
+        _write_canonical_jsonl(primary_runs, primary_rows)
+        results = fit_primary_controlled_costs(
             manifest,
-            iter_jsonl(round_runs),
-            case_ids=_remaining_controlled_case_ids(manifest),
+            primary_rows,
+            _remaining_controlled_case_ids(manifest),
         )
         fit_payload = {
             "schema_version": 1,
             "generator_max_count": generator_max_count,
-            "case_results": _primary_case_projection(results),
+            "case_results": results,
         }
         round_fit = calibration_run / f"controlled-fit.{round_name}.json"
         round_fit.write_text(json.dumps(fit_payload, indent=2, sort_keys=True) + "\n")
         decision = controlled_round_decision(results, generator_max_count)
         record = {
             "generator_max_count": generator_max_count,
-            "raw_runs": str(round_runs.relative_to(calibration_run)),
-            "raw_runs_sha256": sha256_file(round_runs),
+            "raw_runs": str(primary_runs.relative_to(calibration_run)),
+            "raw_runs_sha256": sha256_file(primary_runs),
             "fit": str(round_fit.relative_to(calibration_run)),
             "fit_sha256": sha256_file(round_fit),
             "decision": decision,
@@ -10192,6 +10594,15 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
         decisions_path.write_text(json.dumps(decisions, indent=2, sort_keys=True) + "\n")
         decisions_seal_path.write_text(sha256_file(decisions_path) + "\n")
         if decision == "complete":
+            bridge_inputs = {
+                "schema_version": 1,
+                "generator_max_count": generator_max_count,
+                "raw_runs": str(round_runs.relative_to(calibration_run)),
+                "raw_runs_sha256": sha256_file(round_runs),
+            }
+            (calibration_run / "controlled-bridge-inputs.json").write_text(
+                json.dumps(bridge_inputs, indent=2, sort_keys=True) + "\n"
+            )
             final_runs.parent.mkdir(parents=True, exist_ok=True)
             final_runs.write_bytes(round_runs.read_bytes())
             (calibration_run / "controlled-fit.json").write_bytes(
@@ -10211,7 +10622,7 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     )
     if execution_identity != identity:
         raise ValueError("candidate calibration identity changed during validation")
-    artifacts = load_terminal_controlled_artifacts(run, identity)
+    artifacts = load_terminal_controlled_artifacts(run, identity, manifest)
     fit_path = _canonical_run_artifact(
         run,
         _resolve_repo_path(args.controlled_fit, field_name="controlled_fit"),
@@ -10247,22 +10658,16 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
             "controlled_manifest_rows_sha256"
         ],
     }
-    validate_opcode_relations_artifact(
+    block_artifact = json.loads(block_path.read_text())
+    block_rows = list(iter_jsonl(block_rows_path))
+    source_replay = validate_candidate_source_replay(
         manifest,
         relation_artifact,
         relation_rows,
+        block_artifact,
+        block_rows,
         expected_relation_provenance,
     )
-    block_artifact = json.loads(block_path.read_text())
-    block_rows = list(iter_jsonl(block_rows_path))
-    replayed_block = fit_block_calibration_artifact(
-        manifest,
-        _affine_model_from_validated_artifact(manifest, relation_artifact),
-        relation_artifact,
-        block_rows,
-    )
-    if not _exact_json_equal(block_artifact, replayed_block):
-        raise ValueError("block calibration artifact differs from exact raw-row replay")
     provenance_path = _canonical_run_artifact(
         run,
         _resolve_repo_path(args.provenance, field_name="candidate_provenance"),
@@ -10295,7 +10700,12 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         schedule,
     )
     samples = _controlled_sample_artifact(
-        manifest, artifacts, preview["candidate_sha256"]
+        manifest,
+        artifacts,
+        preview["candidate_sha256"],
+        block_artifact,
+        relation_rows,
+        block_rows,
     )
     components = seal_candidate_directory(
         run,
@@ -10306,6 +10716,7 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         provenance,
         schedule,
         controlled_cycle_samples=samples,
+        source_replay=source_replay,
     )
     if components["candidate_sha256"] != preview["candidate_sha256"]:
         raise ValueError("candidate identity changed while sealing controlled samples")
@@ -10318,7 +10729,7 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
         run,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
-    artifacts = load_terminal_controlled_artifacts(run, identity)
+    artifacts = load_terminal_controlled_artifacts(run, identity, manifest)
     samples_path = _canonical_run_artifact(
         run,
         _resolve_repo_path(args.samples, field_name="controlled_samples"),
@@ -10326,8 +10737,16 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
     )
     payload = json.loads(samples_path.read_text())
     candidate = verify_candidate_directory(run)
+    relation_rows = list(iter_jsonl(run / "raw" / "formal-relations.jsonl"))
+    block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
+    block_artifact = json.loads((run / "block-calibration.json").read_text())
     expected = _controlled_sample_artifact(
-        manifest, artifacts, candidate["candidate_sha256"]
+        manifest,
+        artifacts,
+        candidate["candidate_sha256"],
+        block_artifact,
+        relation_rows,
+        block_rows,
     )
     if payload != expected:
         raise ValueError("controlled samples do not match sealed candidate/run identity")

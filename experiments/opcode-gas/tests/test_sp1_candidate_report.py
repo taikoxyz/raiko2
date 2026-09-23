@@ -210,6 +210,78 @@ def accepted_case(case_id, key_id, basis, slope, raw_gas=None):
     return result
 
 
+def precompile_execution_rows(manifest=None, *, instruction_multiplier=2):
+    rows = []
+    if manifest is None:
+        cases = [("identity", 18, 32, 32)]
+    else:
+        case_by_id = {case.name: case for case in manifest.cases}
+        cases = [
+            (
+                case_id,
+                case_by_id[case_id].target_raw_gas,
+                case_by_id[case_id].input_size,
+                case_by_id[case_id].expected_output_size,
+            )
+            for key in opcode_gas._remaining_controlled_measurement_keys(manifest)
+            for case_id in key.required_case_ids
+        ]
+    for case_id, raw_gas, input_size, output_size in cases:
+        for count in (0, 1, 2, 4, 8):
+            pair_id = hashlib.sha256(f"{case_id}:{count}".encode()).hexdigest()
+            for lane, primary_slope, secondary_slope in (
+                ("target", 1800 + raw_gas * 400, 3600 + raw_gas * 800),
+                ("control", 1800, 3600),
+            ):
+                workload_id = hashlib.sha256(
+                    f"{case_id}:{count}:{lane}".encode()
+                ).hexdigest()
+                backend_hash = hashlib.sha256(
+                    f"input:{case_id}:{count}:{lane}".encode()
+                ).hexdigest()
+                for repeat_index in range(3):
+                    rows.append(
+                        {
+                            "case": case_id,
+                            "kind": "precompile",
+                            "lane": lane,
+                            "pair_id": pair_id,
+                            "target_count": count,
+                            "target_raw_gas": raw_gas,
+                            "generator_max_count": 8,
+                            "workload_id": workload_id,
+                            "backend_input_sha256": backend_hash,
+                            "execution_row_id": opcode_gas.controlled_execution_row_id(
+                                workload_id,
+                                backend="sp1",
+                                execution_engine="standard",
+                                run_id="calibration",
+                                repeat_index=repeat_index,
+                                backend_input_sha256=backend_hash,
+                            ),
+                            "repeat_index": repeat_index,
+                            **standard_execution_provenance(),
+                            "prover_gas": 10_000 + primary_slope * count,
+                            "total_instruction_count": (
+                                20_000
+                                + secondary_slope
+                                * count
+                                * instruction_multiplier
+                                // 2
+                            ),
+                            "exit_code": 0,
+                            "public_values": "0x01",
+                            "isolation": {
+                                "status": "passed",
+                                "input_size": input_size,
+                                "output_size": output_size,
+                                "folded_bytes_per_iteration": input_size + output_size,
+                            },
+                        }
+                    )
+    return rows
+
+
 def candidate_input_artifacts(manifest, controlled_rows):
     opcode_keys = [
         key.id
@@ -280,12 +352,23 @@ def candidate_input_artifacts(manifest, controlled_rows):
         "fit_mape": "0",
         "fit_max_ape": "0",
         "holdout_max_ape": "0",
-        "exact_fit_matrix": [],
+        "exact_fit_matrix": [
+            [str(int(column == row)) for column in range(8)] for row in range(8)
+        ],
         "exact_fit_rank": 8,
         "column_scales": {},
         "solver_residual": "0",
-        "predictions": {},
-        "leave_one_family_out": {},
+        "predictions": {
+            "fit-row": {
+                "split": "fit",
+                "actual_prover_gas": "1",
+                "predicted_prover_gas": "1",
+                "ape": "0",
+            }
+        },
+        "leave_one_family_out": {
+            "family": {key: "0" for key in [*opcode_gas.OPCODE_RELATION_ANCHORS, *opcode_gas.Q_FORMULA]}
+        },
         "dynamic_holdouts": {
             key: {"status": "accepted", "consistency": "0", "observations": []}
             for key in manifest.dynamic_raw_gas_keys
@@ -310,6 +393,30 @@ def candidate_input_artifacts(manifest, controlled_rows):
         "controlled_decisions_sha256": "4" * 64,
     }
     return relation, block, controlled_fit, provenance
+
+
+def full_candidate_inputs():
+    manifest = formal_relation_manifest()
+    cases = {case.name: case for case in manifest.cases}
+    rows = []
+    for key in opcode_gas._remaining_controlled_measurement_keys(manifest):
+        for case_id in key.required_case_ids:
+            case = cases[case_id]
+            raw_gas = case.target_raw_gas or None
+            slope = 1000 if raw_gas is None else 1000 * raw_gas
+            rows.append(
+                accepted_case(
+                    case_id,
+                    key.id,
+                    key.pricing_basis,
+                    slope,
+                    raw_gas,
+                )
+            )
+    relation, block, controlled_fit, provenance = candidate_input_artifacts(
+        manifest, rows
+    )
+    return manifest, relation, block, controlled_fit, provenance
 
 
 def persist_execution_identity(root, manifest, revision="a" * 40):
@@ -365,15 +472,26 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
     """Create the exact persisted artifacts consumed by candidate sealing."""
     run, identity = persist_execution_identity(root, manifest, revision)
 
+    full_rows = precompile_execution_rows(manifest)
+    primary_rows = opcode_gas.primary_controlled_raw_rows(full_rows)
+    fitted_rows = opcode_gas.fit_primary_controlled_costs(
+        manifest, primary_rows, opcode_gas._remaining_controlled_case_ids(manifest)
+    )
     fit = {
         "schema_version": 1,
         "generator_max_count": 8,
-        "case_results": rows,
+        "case_results": fitted_rows,
     }
     fit_path = run / "controlled-fit.json"
-    raw_path = run / "controlled-runs.generator-max-8.jsonl"
+    raw_path = run / "controlled-primary-runs.generator-max-8.jsonl"
+    full_raw_path = run / "controlled-runs.generator-max-8.jsonl"
     fit_path.write_text(opcode_gas.json.dumps(fit) + "\n")
-    raw_path.write_text("{}\n")
+    raw_path.write_bytes(
+        b"".join(opcode_gas.canonical_json(row) + b"\n" for row in primary_rows)
+    )
+    full_raw_path.write_bytes(
+        b"".join(opcode_gas.canonical_json(row) + b"\n" for row in full_rows)
+    )
     decision = {
         "generator_max_count": 8,
         "raw_runs": raw_path.name,
@@ -388,8 +506,19 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
     (run / "controlled-decisions.sha256").write_text(
         opcode_gas.sha256_file(run / "controlled-decisions.json") + "\n"
     )
+    (run / "controlled-bridge-inputs.json").write_text(
+        opcode_gas.json.dumps(
+            {
+                "schema_version": 1,
+                "generator_max_count": 8,
+                "raw_runs": full_raw_path.name,
+                "raw_runs_sha256": opcode_gas.sha256_file(full_raw_path),
+            }
+        )
+        + "\n"
+    )
     relation, block, _controlled_fit, _provenance = candidate_input_artifacts(
-        manifest, rows
+        manifest, fitted_rows
     )
     (run / "opcode-relations.json").write_text(opcode_gas.json.dumps(relation) + "\n")
     (run / "block-calibration.json").write_text(opcode_gas.json.dumps(block) + "\n")
@@ -2003,7 +2132,7 @@ class CandidateConstructionTests(unittest.TestCase):
         self.assertTrue(callable(args.func))
 
     def test_candidate_and_bridge_cli_join_marginal_controlled_artifacts(self):
-        manifest = controlled_manifest()
+        manifest = formal_relation_manifest()
         revision = "a" * 40
         rows = [
             accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18),
@@ -2496,7 +2625,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 ),
             ), mock.patch.object(opcode_gas, "generate_cases", fake_generate), mock.patch.object(
                 opcode_gas, "cmd_run", fake_run
-            ), mock.patch.object(opcode_gas, "fit_controlled_costs", fake_fit), mock.patch.object(
+            ), mock.patch.object(opcode_gas, "fit_primary_controlled_costs", fake_fit), mock.patch.object(
                 opcode_gas, "run_controlled_overhead_round", fake_overhead_run
             ), mock.patch.object(opcode_gas, "fit_controlled_overheads", fake_overhead_fit):
                 opcode_gas.cmd_run_controlled(args)
@@ -2610,7 +2739,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 ),
             ), mock.patch.object(opcode_gas, "generate_cases", fake_generate), mock.patch.object(
                 opcode_gas, "cmd_run", fake_run
-            ), mock.patch.object(opcode_gas, "fit_controlled_costs", fake_fit), mock.patch.object(
+            ), mock.patch.object(opcode_gas, "fit_primary_controlled_costs", fake_fit), mock.patch.object(
                 opcode_gas, "run_controlled_overhead_round", fake_overhead_run
             ), mock.patch.object(
                 opcode_gas, "fit_controlled_overheads", fake_overhead_fit
@@ -2624,21 +2753,31 @@ class CandidateConstructionTests(unittest.TestCase):
             self.assertEqual(overhead_runs, [])
             self.assertEqual(overhead_fits, [])
             self.assertTrue(all("overhead_fit" not in record for record in records))
-            artifacts = opcode_gas.load_terminal_controlled_artifacts(
-                run,
-                identity,
-            )
-            self.assertNotIn("overheads", artifacts)
-            self.assertNotIn(
-                "controlled_overheads_sha256",
-                opcode_gas._sealed_candidate_provenance(artifacts),
-            )
-            opcode_gas.validate_persisted_controlled_decisions(run, decisions)
+            with mock.patch.object(
+                opcode_gas, "fit_primary_controlled_costs", fake_fit
+            ):
+                artifacts = opcode_gas.load_terminal_controlled_artifacts(
+                    run,
+                    identity,
+                    controlled_manifest(),
+                )
+                self.assertNotIn("overheads", artifacts)
+                self.assertNotIn(
+                    "controlled_overheads_sha256",
+                    opcode_gas._sealed_candidate_provenance(artifacts),
+                )
+                opcode_gas.validate_persisted_controlled_decisions(
+                    run, decisions, controlled_manifest()
+                )
 
             tampered = copy.deepcopy(decisions)
             tampered["rounds"][-1]["overhead_fit"] = "legacy.json"
-            with self.assertRaisesRegex(ValueError, "non-canonical"):
-                opcode_gas.validate_persisted_controlled_decisions(run, tampered)
+            with mock.patch.object(
+                opcode_gas, "fit_primary_controlled_costs", fake_fit
+            ), self.assertRaisesRegex(ValueError, "non-canonical"):
+                opcode_gas.validate_persisted_controlled_decisions(
+                    run, tampered, controlled_manifest()
+                )
 
     def test_adaptive_resume_rejects_gap_duplicate_and_edited_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2650,7 +2789,9 @@ class CandidateConstructionTests(unittest.TestCase):
                 record_index += 1
                 raw = run / f"raw-{generator_max_count}-{record_index}.jsonl"
                 fit = run / f"fit-{generator_max_count}-{record_index}.json"
-                raw.write_text("{}\n")
+                raw.write_text(
+                    opcode_gas.json.dumps({"replay_case_results": results}) + "\n"
+                )
                 fit.write_text(
                     opcode_gas.json.dumps(
                         {
@@ -2678,24 +2819,125 @@ class CandidateConstructionTests(unittest.TestCase):
             )
             complete_32 = record(32, [{"status": "accepted"}], "complete")
 
-            for rounds, message in [
-                ([complete_8, complete_8], "unique contiguous prefix"),
-                ([complete_32], "unique contiguous prefix"),
-                ([{**complete_8, "decision": "expand_next_round"}], "decision changed"),
-                ([complete_8, complete_32], "continue after completion"),
-            ]:
-                with self.subTest(message=message), self.assertRaisesRegex(
-                    ValueError, message
-                ):
-                    opcode_gas.validate_persisted_controlled_decisions(
-                        run, {"schema_version": 1, "rounds": rounds}
-                    )
+            def replay(_manifest, rows, _case_ids):
+                return list(rows)[0]["replay_case_results"]
 
-            validated = opcode_gas.validate_persisted_controlled_decisions(
-                run,
-                {"schema_version": 1, "rounds": [expand_8, complete_32]},
-            )
+            with mock.patch.object(
+                opcode_gas, "fit_primary_controlled_costs", side_effect=replay
+            ):
+                for rounds, message in [
+                    ([complete_8, complete_8], "unique contiguous prefix"),
+                    ([complete_32], "unique contiguous prefix"),
+                    ([{**complete_8, "decision": "expand_next_round"}], "decision changed"),
+                    ([complete_8, complete_32], "continue after completion"),
+                ]:
+                    with self.subTest(message=message), self.assertRaisesRegex(
+                        ValueError, message
+                    ):
+                        opcode_gas.validate_persisted_controlled_decisions(
+                            run,
+                            {"schema_version": 1, "rounds": rounds},
+                            controlled_manifest(),
+                        )
+
+                validated = opcode_gas.validate_persisted_controlled_decisions(
+                    run,
+                    {"schema_version": 1, "rounds": [expand_8, complete_32]},
+                    controlled_manifest(),
+                )
             self.assertEqual(list(validated), [8, 32])
+
+    def test_primary_controlled_identity_excludes_real_instruction_bytes(self):
+        manifest = controlled_manifest()
+        rows_a = precompile_execution_rows(instruction_multiplier=2)
+        rows_b = precompile_execution_rows(instruction_multiplier=3)
+
+        primary_a = opcode_gas.primary_controlled_raw_rows(rows_a)
+        primary_b = opcode_gas.primary_controlled_raw_rows(rows_b)
+        self.assertEqual(primary_a, primary_b)
+        fit_a = opcode_gas.fit_primary_controlled_costs(
+            manifest, primary_a, opcode_gas._remaining_controlled_case_ids(manifest)
+        )
+        fit_b = opcode_gas.fit_primary_controlled_costs(
+            manifest, primary_b, opcode_gas._remaining_controlled_case_ids(manifest)
+        )
+        self.assertEqual(fit_a, fit_b)
+
+        relation, block, controlled_fit, provenance = candidate_input_artifacts(
+            manifest, fit_a
+        )
+        first = opcode_gas.build_candidate_components(
+            manifest, relation, block, controlled_fit, provenance
+        )
+        second = opcode_gas.build_candidate_components(
+            manifest, relation, block, controlled_fit, provenance
+        )
+        instruction_block = copy.deepcopy(block)
+        samples_a = opcode_gas.build_independent_bridge_sample_artifact(
+            manifest,
+            block,
+            instruction_block,
+            rows_a,
+            candidate_sha256=first["candidate_sha256"],
+        )
+        samples_b = opcode_gas.build_independent_bridge_sample_artifact(
+            manifest,
+            block,
+            instruction_block,
+            rows_b,
+            candidate_sha256=second["candidate_sha256"],
+        )
+
+        self.assertEqual(first["candidate_sha256"], second["candidate_sha256"])
+        self.assertNotEqual(samples_a["sha256"], samples_b["sha256"])
+        self.assertNotEqual(
+            samples_a["samples"]["precompile:0x04"]["instruction_count"],
+            samples_b["samples"]["precompile:0x04"]["instruction_count"],
+        )
+
+    def test_controlled_decision_replays_primary_fit_from_declared_raw(self):
+        manifest = controlled_manifest()
+        actual_rows = opcode_gas.primary_controlled_raw_rows(
+            precompile_execution_rows(instruction_multiplier=2)
+        )
+        forged_rows = copy.deepcopy(actual_rows)
+        for row in forged_rows:
+            if row["lane"] == "target":
+                row["prover_gas"] += row["target_count"] * 1800
+        forged_fit = {
+            "schema_version": 1,
+            "generator_max_count": 8,
+            "case_results": opcode_gas.fit_primary_controlled_costs(
+                manifest,
+                forged_rows,
+                opcode_gas._remaining_controlled_case_ids(manifest),
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            run = pathlib.Path(tmp)
+            raw_path = run / "primary.jsonl"
+            raw_path.write_bytes(
+                b"".join(opcode_gas.canonical_json(row) + b"\n" for row in actual_rows)
+            )
+            fit_path = run / "fit.json"
+            fit_path.write_bytes(opcode_gas.canonical_json(forged_fit))
+            decisions = {
+                "schema_version": 1,
+                "rounds": [
+                    {
+                        "generator_max_count": 8,
+                        "raw_runs": raw_path.name,
+                        "raw_runs_sha256": opcode_gas.sha256_file(raw_path),
+                        "fit": fit_path.name,
+                        "fit_sha256": opcode_gas.sha256_file(fit_path),
+                        "decision": "complete",
+                    }
+                ],
+            }
+            with self.assertRaisesRegex(ValueError, "replay"):
+                opcode_gas.validate_persisted_controlled_decisions(
+                    run, decisions, manifest
+                )
 
     def test_complete_component_ledger_distinguishes_evm_and_host_actions(self):
         manifest = controlled_manifest()
@@ -2962,6 +3204,68 @@ class CandidateConstructionTests(unittest.TestCase):
                     broken_block,
                     broken_fit,
                     provenance,
+                )
+
+    def test_candidate_source_token_requires_relation_and_block_semantic_replay(self):
+        manifest = formal_relation_manifest()
+        relation_rows = formal_relation_rows(manifest)
+        relation = opcode_gas.fit_opcode_relations(manifest, relation_rows)
+        malformed_relation = copy.deepcopy(relation)
+        malformed_relation["equations"][0]["signed_raw_gas_by_key"] = {}
+        malformed_relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in malformed_relation.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "equation|raw-gas|algebra"):
+            opcode_gas.validate_candidate_source_replay(
+                manifest,
+                malformed_relation,
+                relation_rows,
+                {},
+                [],
+                formal_relation_provenance(relation_rows),
+            )
+
+        small_manifest = controlled_manifest()
+        relation, block, _fit, _provenance = candidate_input_artifacts(
+            small_manifest,
+            [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
+        )
+        for field, replacement in (
+            ("exact_fit_matrix", []),
+            ("predictions", {}),
+            ("leave_one_family_out", {}),
+        ):
+            malformed_block = copy.deepcopy(block)
+            malformed_block[field] = replacement
+            malformed_block["artifact_sha256"] = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {
+                        key: value
+                        for key, value in malformed_block.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with self.subTest(field=field), mock.patch.object(
+                opcode_gas, "validate_opcode_relations_artifact"
+            ), mock.patch.object(
+                opcode_gas, "_affine_model_from_validated_artifact", return_value=object()
+            ), mock.patch.object(
+                opcode_gas, "fit_block_calibration_artifact", return_value=block
+            ), self.assertRaisesRegex(ValueError, "exact raw-row replay"):
+                opcode_gas.validate_candidate_source_replay(
+                    small_manifest,
+                    relation,
+                    [],
+                    malformed_block,
+                    [],
+                    {},
                 )
 
     def test_bridge_exact_median_states_and_independent_digest(self):
@@ -3370,15 +3674,27 @@ class IdentityAndValidationTests(unittest.TestCase):
                 )
 
     def test_candidate_seal_transitively_verifies_components_and_tampering(self):
-        manifest = controlled_manifest()
-        relation, block, controlled_fit, provenance = candidate_input_artifacts(
-            manifest,
-            [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
-        )
+        manifest, relation, block, controlled_fit, provenance = full_candidate_inputs()
         with tempfile.TemporaryDirectory() as tmp:
             run = pathlib.Path(tmp)
+            with mock.patch.object(
+                opcode_gas, "validate_opcode_relations_artifact"
+            ), mock.patch.object(
+                opcode_gas, "_affine_model_from_validated_artifact", return_value=object()
+            ), mock.patch.object(
+                opcode_gas, "fit_block_calibration_artifact", return_value=block
+            ):
+                source_replay = opcode_gas.validate_candidate_source_replay(
+                    manifest, relation, [], block, [], {}
+                )
             sealed = opcode_gas.seal_candidate_directory(
-                run, manifest, relation, block, controlled_fit, provenance
+                run,
+                manifest,
+                relation,
+                block,
+                controlled_fit,
+                provenance,
+                source_replay=source_replay,
             )
             verified = opcode_gas.verify_candidate_directory(run)
             self.assertEqual(verified["candidate_sha256"], sealed["candidate_sha256"])
@@ -3399,6 +3715,44 @@ class IdentityAndValidationTests(unittest.TestCase):
             (run / "candidate" / "candidate.sha256").write_text(
                 sealed["candidate_sha256"] + "\n"
             )
+
+            normalized_path = run / "candidate" / "normalized-primary.json"
+            original_normalized = opcode_gas.json.loads(normalized_path.read_text())
+
+            def rewrite_candidate(normalized):
+                normalized_path.write_bytes(opcode_gas.canonical_json(normalized))
+                root = copy.deepcopy(sealed["candidate_manifest"])
+                root["components"]["normalized-primary.json"] = (
+                    opcode_gas.sha256_bytes(opcode_gas.canonical_json(normalized))
+                )
+                root_path.write_bytes(opcode_gas.canonical_json(root))
+                (run / "candidate" / "candidate.sha256").write_text(
+                    opcode_gas.sha256_bytes(opcode_gas.canonical_json(root)) + "\n"
+                )
+
+            missing = copy.deepcopy(original_normalized)
+            del missing["measurements"]["opcode:0x01"]
+            rewrite_candidate(missing)
+            with self.assertRaisesRegex(ValueError, "inventory"):
+                opcode_gas.verify_candidate_directory(run)
+
+            extra = copy.deepcopy(original_normalized)
+            extra["measurements"]["opcode:0xfe"] = copy.deepcopy(
+                extra["measurements"]["opcode:0x01"]
+            )
+            rewrite_candidate(extra)
+            with self.assertRaisesRegex(ValueError, "inventory"):
+                opcode_gas.verify_candidate_directory(run)
+
+            wrong_source = copy.deepcopy(original_normalized)
+            wrong_source["measurements"]["opcode:0x01"]["source"] = (
+                "controlled-fit.json"
+            )
+            rewrite_candidate(wrong_source)
+            with self.assertRaisesRegex(ValueError, "source"):
+                opcode_gas.verify_candidate_directory(run)
+
+            rewrite_candidate(original_normalized)
 
             component = run / "candidate" / "normalized-primary.json"
             component.write_text("{}")

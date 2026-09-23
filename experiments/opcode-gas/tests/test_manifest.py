@@ -20,7 +20,7 @@ def fixture_schedule():
 
 
 def controlled_manifest_data():
-    return {
+    data = {
         "name": "controlled",
         "backend": "sp1",
         "variants": [0, 1, 2, 4],
@@ -204,12 +204,56 @@ def controlled_manifest_data():
             },
         ],
     }
+    frozen = tomllib.loads(
+        (
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml"
+        ).read_text()
+    )
+    data["block_calibration_rows"] = frozen["block_calibration_rows"]
+    data["static_count_control_rows"] = frozen["static_count_control_rows"]
+    return data
 
 
 CONTROLLED_SCHEDULE_KEYS = {"opcode:0x01", "opcode:0x02", "precompile:0x04"}
 
 
 class ManifestTests(unittest.TestCase):
+    def test_v1_requires_exact_static_control_collection_and_row_keys(self):
+        path = (
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml"
+        )
+        data = tomllib.loads(path.read_text())
+        schedule = fixture_schedule()
+        schedule_keys = {
+            *(f"opcode:0x{opcode:02x}" for opcode in schedule.opcode_multipliers),
+            *(f"precompile:0x{address:02x}" for address in schedule.precompile_multipliers),
+        }
+
+        missing_controls = deepcopy(data)
+        del missing_controls["static_count_control_rows"]
+        with self.assertRaisesRegex(ValueError, "exactly six static-count controls"):
+            opcode_gas.parse_controlled_manifest(
+                missing_controls, schedule_keys=schedule_keys
+            )
+
+        for field_name in ("block_calibration_rows", "static_count_control_rows"):
+            with self.subTest(field_name=field_name):
+                tampered = deepcopy(data)
+                tampered[field_name][0]["unexpected"] = 1
+                with self.assertRaisesRegex(ValueError, "unexpected fields"):
+                    opcode_gas.parse_controlled_manifest(
+                        tampered,
+                        schedule_keys=schedule_keys,
+                    )
+
     def test_v1_materializes_exact_block_calibration_inventory(self):
         path = (
             ROOT

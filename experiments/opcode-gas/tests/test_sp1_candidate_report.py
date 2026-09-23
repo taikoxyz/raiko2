@@ -787,7 +787,9 @@ class CandidateConstructionTests(unittest.TestCase):
             )
         )
 
-    def _run_block_calibration_with_drift(self, drift_field):
+    def _run_block_calibration_with_drift(
+        self, drift_field, *, reject_first_control=False, capture_error=False
+    ):
         manifest = formal_relation_manifest()
         first_row_id = manifest.block_calibration_rows[0].row_id
         repeats_by_row = {}
@@ -801,13 +803,56 @@ class CandidateConstructionTests(unittest.TestCase):
             repeat_index = repeats_by_row.get(spec["row_id"], 0)
             if not is_parity_gate:
                 repeats_by_row[spec["row_id"]] = repeat_index + 1
-            drift = spec["row_id"] == first_row_id and repeat_index == 1
+            drift = (
+                (spec["row_id"] == first_row_id and repeat_index == 1)
+                or (
+                    drift_field == "control_prover_gas"
+                    and spec["workload_family"] == "static_count_control"
+                    and repeat_index == 1
+                )
+            )
             execution_engine = cmd[cmd.index("--sp1-execution-engine") + 1]
-            backend_input = ("c" if drift and drift_field == "backend_input" else "b") * 64
-            guest_input = ("d" if drift and drift_field == "guest_input" else "b") * 64
+            parity_backend_drift = (
+                is_parity_gate
+                and execution_engine == "standard"
+                and drift_field == "parity_backend_input"
+            )
+            parity_guest_drift = (
+                is_parity_gate
+                and execution_engine == "standard"
+                and drift_field == "parity_guest_input"
+            )
+            reject_control = (
+                reject_first_control
+                and not is_parity_gate
+                and spec["workload_family"] == "static_count_control"
+                and repeat_index == 0
+            )
+            if reject_control:
+                report_path.write_text(
+                    opcode_gas.json.dumps(
+                        {
+                            "controlled_block": {
+                                "status": "rejected",
+                                "reasons": ["host_trace_mismatch"],
+                                "error": "synthetic rejection",
+                            }
+                        }
+                    )
+                    + "\n"
+                )
+                return
+            backend_input = (
+                "c" if drift and drift_field == "backend_input" or parity_backend_drift else "b"
+            ) * 64
+            guest_input = (
+                "d" if drift and drift_field == "guest_input" or parity_guest_drift else "b"
+            ) * 64
             public_values = "0x02" if drift and drift_field == "public_values" else "0x01"
             public_output = "0x03" if drift and drift_field == "public_output" else "0x01"
-            prover_gas = 101 if drift and drift_field == "prover_gas" else 100
+            prover_gas = (
+                101 if drift and drift_field in {"prover_gas", "control_prover_gas"} else 100
+            )
             reported_row_id = (
                 "f" * 64 if drift and drift_field == "reported_row_id" else spec["row_id"]
             )
@@ -857,16 +902,25 @@ class CandidateConstructionTests(unittest.TestCase):
             opcode_gas.subprocess, "run", fake_run
         ):
             output = pathlib.Path(tmp) / "block-calibration-rows.jsonl"
-            rows = opcode_gas.run_block_calibration_rows(
-                manifest=manifest,
-                affine_model=block_affine_model(manifest),
-                guest_launcher=pathlib.Path("guest-launcher"),
-                calibration_run_id="calibration",
-                relation_artifact_sha256="a" * 64,
-                relation_raw_rows_sha256="b" * 64,
-                out=output,
-            )
-            raw_rows = list(opcode_gas.iter_jsonl(output))
+            error = None
+            try:
+                rows = opcode_gas.run_block_calibration_rows(
+                    manifest=manifest,
+                    affine_model=block_affine_model(manifest),
+                    guest_launcher=pathlib.Path("guest-launcher"),
+                    calibration_run_id="calibration",
+                    relation_artifact_sha256="a" * 64,
+                    relation_raw_rows_sha256="b" * 64,
+                    out=output,
+                )
+            except ValueError as caught:
+                if not capture_error:
+                    raise
+                rows = None
+                error = caught
+            raw_rows = list(opcode_gas.iter_jsonl(output)) if output.exists() else []
+        if capture_error:
+            return first_row_id, rows, raw_rows, error
         return first_row_id, rows, raw_rows
 
     def test_block_calibration_rejects_nondeterministic_prover_gas_as_one_row(self):
@@ -912,6 +966,108 @@ class CandidateConstructionTests(unittest.TestCase):
             all(row["purpose"] == "block_calibration" for row in formal_rows)
         )
         self.assertEqual(len(formal_rows), 144)
+
+    def test_block_calibration_rejects_parity_input_identity_drift(self):
+        for field in ("parity_backend_input", "parity_guest_input"):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "parity"):
+                    self._run_block_calibration_with_drift(field)
+
+    def test_block_calibration_persists_rejected_control_before_formal_abort(self):
+        _, rows, raw_rows, error = self._run_block_calibration_with_drift(
+            None, reject_first_control=True, capture_error=True
+        )
+
+        self.assertIsNone(rows)
+        self.assertIsNotNone(error)
+        self.assertRegex(str(error), "raw evidence was preserved")
+        self.assertEqual(len(raw_rows), 1)
+        self.assertEqual(raw_rows[0]["purpose"], "static_count_control")
+        self.assertEqual(raw_rows[0]["status"], "rejected")
+
+    def test_block_calibration_persists_unstable_control_raw_repeats_before_abort(self):
+        _, rows, raw_rows, error = self._run_block_calibration_with_drift(
+            "control_prover_gas", capture_error=True
+        )
+
+        self.assertIsNone(rows)
+        self.assertIsNotNone(error)
+        self.assertRegex(str(error), "raw evidence was preserved")
+        self.assertEqual(len(raw_rows), 4)
+        self.assertEqual(
+            [row["status"] for row in raw_rows],
+            ["accepted", "accepted", "accepted", "rejected"],
+        )
+        self.assertEqual(
+            {row["purpose"] for row in raw_rows}, {"static_count_control"}
+        )
+        self.assertEqual(raw_rows[-1]["reasons"], ["repeat_instability"])
+
+    def test_block_calibration_control_validator_rejects_second_repeat_trace_and_bool_floor(self):
+        _, _, raw_rows = self._run_block_calibration_with_drift(None)
+        relation_artifact = {
+            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "status": "accepted",
+            "artifact_sha256": "a" * 64,
+            "raw_rows_sha256": "b" * 64,
+            "provenance": {"calibration_id": "calibration"},
+        }
+        manifest = formal_relation_manifest()
+
+        changed_repeat = copy.deepcopy(raw_rows)
+        control = next(
+            row for row in changed_repeat if row["purpose"] == "static_count_control"
+        )
+        sibling = next(
+            row
+            for row in changed_repeat
+            if row["purpose"] == "static_count_control"
+            and row["row_id"] == control["row_id"]
+            and row["repeat_index"] == 1
+        )
+        sibling["actual_features"]["block_base"] = 2
+        with self.assertRaisesRegex(ValueError, "control (trace|repeats)"):
+            opcode_gas._validated_block_calibration_rows(
+                manifest, relation_artifact, changed_repeat
+            )
+
+        bool_floor = copy.deepcopy(raw_rows)
+        control_ids = sorted(
+            {row["row_id"] for row in bool_floor if row["purpose"] == "static_count_control"}
+        )
+        for row in bool_floor:
+            if row["row_id"] == control_ids[-1]:
+                row["prover_gas"] = 101
+            row["cross_input_data_floor_p"] = True
+        with self.assertRaisesRegex(ValueError, "data-control floor"):
+            opcode_gas._validated_block_calibration_rows(
+                manifest, relation_artifact, bool_floor
+            )
+
+    def test_block_calibration_validator_rejects_legacy_standard_rows_without_controls(self):
+        _, _, raw_rows = self._run_block_calibration_with_drift(None)
+        relation_artifact = {
+            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "status": "accepted",
+            "artifact_sha256": "a" * 64,
+            "raw_rows_sha256": "b" * 64,
+            "provenance": {"calibration_id": "calibration"},
+        }
+        legacy_rows = [
+            copy.deepcopy(row)
+            for row in raw_rows
+            if row["purpose"] == "block_calibration" and row["repeat_index"] == 0
+        ]
+        self.assertEqual(len(legacy_rows), 48)
+        for row in legacy_rows:
+            row["sp1_execution_engine"] = "standard"
+            row["sp1_gas_trace_chunk_threshold"] = None
+            row["sp1_gas_trace_chunk_slots"] = None
+            del row["cross_input_data_floor_p"]
+        with self.assertRaisesRegex(ValueError, "(schema|control rows are incomplete)"):
+            opcode_gas._validated_block_calibration_rows(
+                formal_relation_manifest(), relation_artifact, legacy_rows
+            )
 
     def test_overhead_residual_uses_raw_gas_units_not_operation_event_count(self):
         rows = []
@@ -1456,8 +1612,89 @@ class CandidateConstructionTests(unittest.TestCase):
             "equations": [dynamic_rows[0]],
             "dynamic_holdouts": dynamic_rows[1:],
         }
+        for raw_row in raw_rows:
+            raw_row["sp1_execution_engine"] = "gas-estimator"
+            raw_row["sp1_gas_trace_chunk_threshold"] = 134_217_728
+            raw_row["sp1_gas_trace_chunk_slots"] = 2
+            raw_row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+                raw_row["row_id"],
+                backend="sp1",
+                execution_engine="gas-estimator",
+                run_id="b" * 24,
+                repeat_index=raw_row["repeat_index"],
+                backend_input_sha256="d" * 64,
+            )
+            raw_row["cross_input_data_floor_p"] = 0
+        static_count_controls = []
+        control_features = {key: 0 for key in features}
+        control_raw = {key: 0 for key in anchors}
+        for control_index, count in enumerate((1, 2, 4, 8, 16, 32)):
+            control = types.SimpleNamespace(
+                row_id=f"static-control-{control_index}",
+                workload_family="static_count_control",
+                split="diagnostic",
+                block_count=1,
+                transaction_count=1,
+                program=types.SimpleNamespace(
+                    kind="opcode_loop",
+                    family="static_count_control",
+                    count=count,
+                    scenario="push3_pop_fixed_pop",
+                ),
+                expected_final_state_root="0x" + "3" * 64,
+                expected_raw_gas_by_key=control_raw,
+                expected_features=control_features,
+                expected_diagnostics={"witness_node_count": 0},
+            )
+            static_count_controls.append(control)
+            control_payload = opcode_gas._controlled_block_row_payload(control)
+            for repeat_index in range(3):
+                raw_rows.append(
+                    {
+                        **control_payload,
+                        "schema_version": 1,
+                        "purpose": "static_count_control",
+                        "status": "accepted",
+                        "repeat_index": repeat_index,
+                        "calibration_id": "b" * 24,
+                        "relation_artifact_sha256": "a" * 64,
+                        "relation_raw_rows_sha256": "c" * 64,
+                        "preflight_fit_rank": 8,
+                        "backend_input_sha256": "d" * 64,
+                        "guest_input_sha256": "0x" + "d" * 64,
+                        "execution_row_id": opcode_gas.controlled_execution_row_id(
+                            control.row_id,
+                            backend="sp1",
+                            execution_engine="gas-estimator",
+                            run_id="b" * 24,
+                            repeat_index=repeat_index,
+                            backend_input_sha256="d" * 64,
+                        ),
+                        "reported_row_id": control.row_id,
+                        "observation_row_id": control.row_id,
+                        "backend": "sp1",
+                        "mode": "execute",
+                        "sp1_prover": "local",
+                        "primary_api": "ExecutionReport::gas",
+                        "sp1_execution_engine": "gas-estimator",
+                        "sp1_gas_trace_chunk_threshold": 134_217_728,
+                        "sp1_gas_trace_chunk_slots": 2,
+                        "exit_code": 0,
+                        "total_instruction_count": 100,
+                        "total_syscall_count": 10,
+                        "public_values": "0x01",
+                        "host_public_output": "0x01",
+                        "prover_gas": 100,
+                        "actual_raw_gas_by_key": control_raw,
+                        "actual_features": control_features,
+                        "actual_diagnostics": control.expected_diagnostics,
+                        "actual_final_state_root": control.expected_final_state_root,
+                        "cross_input_data_floor_p": 0,
+                    }
+                )
         manifest = types.SimpleNamespace(
             block_calibration_rows=tuple(specs),
+            static_count_control_rows=tuple(static_count_controls),
             dynamic_raw_gas_keys=("A0",),
             normalization_reference_key="A0",
         )

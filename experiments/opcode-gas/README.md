@@ -127,9 +127,9 @@ from persisted scenario, relation scenario, gas limit, opcode/count, length, map
 metadata. It then recomputes pair, workload, and execution-row identities and joins them to the
 controlled trace. Identical canonical inputs may intentionally reuse workload/execution identities;
 arbitrary relabeling, declaration changes, or reuse fails exact recomputation.
-The canonical fixture field `evm_opcode_counts` records the static EVM bytecode multiset. The raw
+Every opcode fixture's `evm_opcode_counts` field records the static EVM bytecode multiset. The raw
 report field `opcode_counts` remains the SP1 RISC-V execution profile; both are retained under those
-distinct names, and a formal fixture/report key collision is rejected before the raw row is built.
+distinct names, and any opcode fixture/report key collision is rejected before the raw row is built.
 
 An exactly constant non-self target-minus-control response across positive fit points and checkpoint
 is a valid zero-slope relation; count zero then remains activation evidence. Self-controls retain

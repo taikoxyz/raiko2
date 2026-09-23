@@ -98,6 +98,62 @@ def emit_matched_control_pair(
 
 
 class FixtureEmitTests(unittest.TestCase):
+    def test_ordinary_opcode_raw_run_preserves_fixture_and_report_opcode_counts(self):
+        data = controlled_manifest_data()
+        data["variants"] = [1]
+        manifest = opcode_gas.parse_controlled_manifest(
+            data, schedule_keys=CONTROLLED_SCHEDULE_KEYS
+        )
+        manifest = replace(
+            manifest, cases=[opcode_gas.default_opcode_case(0x01)]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            case = opcode_gas.json.loads(written[0].read_text())
+
+        self.assertNotIn("opcode_counts", case)
+        static_counts = case["evm_opcode_counts"]
+        risc_v_profile = [{"label": "add", "count": 123}]
+        raw = opcode_gas.raw_run_from_report(
+            case,
+            {
+                "gas": 456,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_gas_trace_chunk_threshold": 134_217_728,
+                "sp1_gas_trace_chunk_slots": 2,
+                "opcode_counts": risc_v_profile,
+            },
+        )
+
+        self.assertEqual(raw["evm_opcode_counts"], static_counts)
+        self.assertEqual(raw["opcode_counts"], risc_v_profile)
+
+    def test_matched_opcode_raw_run_preserves_fixture_and_report_opcode_counts(self):
+        _case, target, _control, _target_input, _control_input = (
+            emit_matched_control_pair(0x01)
+        )
+        self.assertNotIn("opcode_counts", target)
+        static_counts = target["evm_opcode_counts"]
+        risc_v_profile = [{"label": "add", "count": 123}]
+        raw = opcode_gas.raw_run_from_report(
+            target,
+            {
+                "gas": 456,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_gas_trace_chunk_threshold": 134_217_728,
+                "sp1_gas_trace_chunk_slots": 2,
+                "opcode_counts": risc_v_profile,
+            },
+        )
+
+        self.assertEqual(raw["evm_opcode_counts"], static_counts)
+        self.assertEqual(raw["opcode_counts"], risc_v_profile)
+
     def test_formal_relation_fixture_keys_do_not_overlap_bench_report(self):
         manifest = opcode_gas.load_manifest(
             ROOT

@@ -909,7 +909,9 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
         apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
-        report.controlled_trace = run.controlled_trace;
+        if let Some(trace) = run.controlled_trace {
+            install_controlled_trace(&mut report, trace);
+        }
         apply_execution_metadata(&mut report, &run.execution_report);
         println!(
             "input: {} public_values: {}",
@@ -1018,7 +1020,9 @@ async fn run_precompile_lab_batch(args: Args) -> Result<()> {
         );
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
-        report.controlled_trace = run.controlled_trace;
+        if let Some(trace) = run.controlled_trace {
+            install_controlled_trace(&mut report, trace);
+        }
         apply_execution_metadata(&mut report, &run.execution_report);
         println!(
             "input: {} public_values: {}",
@@ -1372,15 +1376,32 @@ struct OpcodeLabExecution {
     controlled_trace: Option<controlled_workload::ControlledTrace>,
 }
 
+fn install_controlled_trace(report: &mut BenchReport, trace: controlled_workload::ControlledTrace) {
+    let (backend_input_sha256, backend_input_len) = match &trace {
+        controlled_workload::ControlledTrace::RevmOpcode(trace) => {
+            (&trace.backend_input_sha256, trace.backend_input_len)
+        }
+        controlled_workload::ControlledTrace::Precompile(trace) => {
+            (&trace.backend_input_sha256, trace.backend_input_len)
+        }
+    };
+    report.guest_input_sha256 = Some(format!("0x{backend_input_sha256}"));
+    report.guest_input_bincode_length = Some(backend_input_len);
+    report.controlled_trace = Some(trace);
+}
+
 fn apply_controlled_opcode_trace(
     report: &mut BenchReport,
     stage: Stage,
     input: &OpcodeLabInput,
 ) -> Result<()> {
     if stage == Stage::RevmOpcodeLab {
-        report.controlled_trace = Some(controlled_workload::ControlledTrace::RevmOpcode(
-            controlled_workload::trace_revm_opcode_workload(input)?,
-        ));
+        install_controlled_trace(
+            report,
+            controlled_workload::ControlledTrace::RevmOpcode(
+                controlled_workload::trace_revm_opcode_workload(input)?,
+            ),
+        );
     }
     Ok(())
 }
@@ -1389,9 +1410,12 @@ fn apply_controlled_precompile_trace(
     report: &mut BenchReport,
     input: &PrecompileLabInput,
 ) -> Result<()> {
-    report.controlled_trace = Some(controlled_workload::ControlledTrace::Precompile(
-        controlled_workload::trace_precompile_workload(input)?,
-    ));
+    install_controlled_trace(
+        report,
+        controlled_workload::ControlledTrace::Precompile(
+            controlled_workload::trace_precompile_workload(input)?,
+        ),
+    );
     Ok(())
 }
 
@@ -2393,6 +2417,14 @@ mod tests {
         assert_eq!(trace["executed_target_raw_gas"], 3);
         assert_eq!(trace["backend_input_sha256"].as_str().unwrap().len(), 64);
         assert_eq!(trace["workload_id"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            serialized["guest_input_sha256"],
+            format!("0x{}", trace["backend_input_sha256"].as_str().unwrap())
+        );
+        assert_eq!(
+            serialized["guest_input_bincode_length"],
+            trace["backend_input_len"]
+        );
     }
 
     #[test]
@@ -2421,6 +2453,14 @@ mod tests {
         assert_eq!(trace["workload_id"].as_str().unwrap().len(), 64);
         assert_eq!(trace["pair_id"].as_str().unwrap().len(), 64);
         assert_eq!(trace["backend_input_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            serialized["guest_input_sha256"],
+            format!("0x{}", trace["backend_input_sha256"].as_str().unwrap())
+        );
+        assert_eq!(
+            serialized["guest_input_bincode_length"],
+            trace["backend_input_len"]
+        );
     }
 
     #[test]

@@ -3393,7 +3393,7 @@ def generate_cases(
                             "target_count": declared_count,
                             "target_raw_gas": declared_raw_gas,
                             "bytecode": "0x" + generated.bytes_hex,
-                            "opcode_counts": {
+                            "evm_opcode_counts": {
                                 f"0x{k:02x}": v
                                 for k, v in sorted(generated.opcode_counts.items())
                             },
@@ -3454,7 +3454,7 @@ def generate_cases(
                     "target_raw_gas": case.target_raw_gas,
                     "target_feature": variant * case.target_raw_gas,
                     "bytecode": "0x" + generated.bytes_hex,
-                    "opcode_counts": {
+                    "evm_opcode_counts": {
                         f"0x{k:02x}": v for k, v in sorted(generated.opcode_counts.items())
                     },
                     "guest_input_status": "opcode_lab_guest_input",
@@ -4099,11 +4099,11 @@ def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[st
     workload_kind = case.get("kind")
     if workload_kind in {"opcode", "precompile"}:
         validate_sp1_execution_provenance(report, workload_kind=workload_kind)
-    if case.get("purpose") == FORMAL_RELATION_PURPOSE:
+    if workload_kind == "opcode":
         collisions = sorted(set(case).intersection(report))
         if collisions:
             raise ValueError(
-                "formal relation fixture/report fields collide: "
+                "opcode fixture/report fields collide: "
                 + ", ".join(collisions)
             )
     raw_run = {**case, **report}

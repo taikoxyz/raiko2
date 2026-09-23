@@ -886,6 +886,23 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(raw_run["case"], "add")
         self.assertEqual(raw_run["sp1_execution_engine"], "gas-estimator")
 
+    def test_raw_opcode_run_rejects_fixture_report_field_collision(self):
+        case = {
+            "case": "add",
+            "kind": "opcode",
+            "evm_opcode_counts": {"0x01": 1},
+        }
+        report = {
+            "gas": 160,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "evm_opcode_counts": {"0x01": 999},
+        }
+
+        with self.assertRaisesRegex(ValueError, "fixture/report fields collide"):
+            opcode_gas.raw_run_from_report(case, report)
+
     def test_raw_opcode_run_rejects_missing_or_noncanonical_execution_provenance(self):
         case = {"case": "add", "kind": "opcode", "target_count": 1, "target_raw_gas": 3}
         invalid_reports = [

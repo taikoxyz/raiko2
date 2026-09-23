@@ -7113,7 +7113,7 @@ def seal_bridge_directory(
     frozen_manifest_path = bridge_dir / "bridge-manifest.json"
     frozen_manifest = json.loads(frozen_manifest_path.read_text())
     expected_contract = _bridge_manifest_contract(manifest, revision)
-    if frozen_manifest != expected_contract:
+    if not _exact_json_equal(frozen_manifest, expected_contract):
         raise ValueError("premeasurement bridge manifest does not match experiment contract")
     controlled_bridge = build_controlled_bridge(manifest, controlled_samples)
     samples_payload = dict(controlled_sample_artifact) if controlled_sample_artifact else {
@@ -7121,7 +7121,9 @@ def seal_bridge_directory(
         "bridge_key_ids": list(manifest.bridge_key_ids),
         "samples": dict(controlled_samples),
     }
-    if samples_payload.get("samples") != dict(controlled_samples):
+    if not _exact_json_equal(
+        samples_payload.get("samples"), dict(controlled_samples)
+    ):
         raise ValueError("controlled sample artifact differs from bridge samples")
     samples_dir = run / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
@@ -10845,7 +10847,7 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         run,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
-    if execution_identity != identity:
+    if not _exact_json_equal(execution_identity, identity):
         raise ValueError("candidate calibration identity changed during validation")
     artifacts = load_terminal_controlled_artifacts(run, identity, manifest)
     fit_path = _canonical_run_artifact(
@@ -10893,7 +10895,9 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         "provenance.json",
     )
     supplied_provenance = json.loads(provenance_path.read_text())
-    if supplied_provenance != artifacts["provenance_declaration"]:
+    if not _exact_json_equal(
+        supplied_provenance, artifacts["provenance_declaration"]
+    ):
         raise ValueError("candidate provenance does not match experiment identity")
     provenance = _sealed_candidate_provenance(artifacts)
     provenance.update(
@@ -10961,7 +10965,7 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
     expected = _replay_bridge_sample_artifact(
         run, manifest, artifacts, candidate["candidate_sha256"]
     )
-    if payload != expected:
+    if not _exact_json_equal(payload, expected):
         raise ValueError("controlled samples do not match sealed candidate/run identity")
     samples = payload.get("samples", payload)
     if not isinstance(samples, Mapping):

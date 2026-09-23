@@ -2309,6 +2309,30 @@ class CandidateConstructionTests(unittest.TestCase):
                         samples=samples_path,
                     )
                 )
+                bridge_outputs = {
+                    path: path.read_bytes()
+                    for path in (
+                        bridge_dir / "controlled-bridge.json",
+                        bridge_dir / "bridge-root.json",
+                        bridge_dir / "bridge.sha256",
+                    )
+                }
+                bool_alias = copy.deepcopy(sample_artifact)
+                bool_alias["schema_version"] = True
+                samples_path.write_text(opcode_gas.json.dumps(bool_alias) + "\n")
+                with self.assertRaisesRegex(ValueError, "candidate/run identity"):
+                    opcode_gas.cmd_build_sp1_bridge(
+                        opcode_gas.argparse.Namespace(
+                            run=run,
+                            controlled_manifest=manifest_path,
+                            samples=samples_path,
+                        )
+                    )
+                self.assertEqual(
+                    {path: path.read_bytes() for path in bridge_outputs},
+                    bridge_outputs,
+                )
+                samples_path.write_bytes(opcode_gas.canonical_json(sample_artifact))
                 tampered = {**sample_artifact, "candidate_sha256": "d" * 64}
                 samples_path.write_text(opcode_gas.json.dumps(tampered) + "\n")
                 with self.assertRaisesRegex(ValueError, "candidate/run identity"):

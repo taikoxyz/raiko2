@@ -742,8 +742,10 @@ class RunnerTests(unittest.TestCase):
                 "verify_frozen_controlled_manifest",
                 return_value=(manifest, identity),
             ) as verify, mock.patch.object(
-                opcode_gas, "iter_jsonl", return_value=iter([row])
-            ), mock.patch.object(
+                opcode_gas,
+                "load_terminal_formal_relation_artifacts",
+                return_value={"raw_path": runs, "rows": [row]},
+            ) as load_formal, mock.patch.object(
                 opcode_gas, "fit_opcode_relations", return_value=artifact
             ) as fit, mock.patch.object(
                 opcode_gas, "_atomic_write_json"
@@ -752,6 +754,9 @@ class RunnerTests(unittest.TestCase):
 
             validate.assert_called_once_with(calibration_run)
             verify.assert_called_once_with(calibration_run, manifest_path)
+            load_formal.assert_called_once_with(
+                calibration_run, manifest, provenance
+            )
             fit.assert_called_once_with(manifest, [row])
             write.assert_called_once_with(output, artifact)
 

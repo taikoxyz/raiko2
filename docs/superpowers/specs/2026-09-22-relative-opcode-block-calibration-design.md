@@ -150,8 +150,21 @@ target microprogram executes exactly once in the final footprint slot. Its ordin
 executes once in the first slot. The two samples have the same target/control raw-gas multisets and
 fixed footprint and differ only in slot order. `relation_placement` and `relation_sample_id` are
 part of pair identity, raw ordering, completeness, resume replay, and sealing.
+Sampling metadata does not enter the guest-visible `case`: every lane keeps one stable case string
+across counts and placements. Thus fixed-bound control GuestInputs are identical, and prefix-one
+versus tail-one target GuestInputs differ only in bytecode slot order. Formal replay reconstructs
+canonical bytecode and fixture hashes from the manifest relation/count/placement, recomputes pair,
+workload, and execution-row identities, and checks their controlled-trace joins. Repeated identical
+inputs may have identical identities; acceptance depends on exact recomputation, not global
+uniqueness.
 The resulting formal relation artifact uses schema version 2; schema version 1 does not carry the
 activation/tail evidence and is not accepted by candidate construction.
+
+`formal-relation-decisions.json` plus its SHA-256 seal is the terminal source of truth for every
+downstream relation consumer. The loader replays the complete accepted decision state, derives the
+canonical row sequence, and requires the final formal JSONL to equal canonical JSON-line bytes in
+that exact order. Block calibration, candidate construction, and candidate/bridge replay use this
+loader; candidate provenance also binds `formal_relation_decisions_sha256`.
 
 For the deterministic target/control response `delta_p(x) = p_target(x) - p_control(x)`, freeze the
 signed-fit quantities as:

@@ -3668,10 +3668,11 @@ def generate_relation_cases(
                         spec, generator_max_count
                     )
                     declared_raw_gas = spec.reference_raw_gas
-                lane_case = (
-                    f"{case.name}__relation_"
-                    f"{placement}_count_{count}_{lane}"
-                )
+                # Keep host-only sampling dimensions out of the serialized guest
+                # input.  In particular, the prefix/tail count-one holdout must
+                # change only bytecode slot order, and every control sample at a
+                # fixed generator bound must remain byte-identical.
+                lane_case = f"{case.name}__relation_{lane}"
                 payload = {
                     "suite": manifest.name,
                     "backend": manifest.backend,
@@ -5229,6 +5230,162 @@ def _validate_formal_relation_round_row_order(
         )
 
 
+def _formal_opcode_guest_input(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct the exact JSON input consumed by the opcode lab guest."""
+    opcode = parse_opcode(row.get("opcode"))
+    integer_fields = (
+        "target_count",
+        "target_raw_gas",
+        "generator_max_count",
+        "fixed_bytecode_len",
+        "tx_gas_limit",
+    )
+    if any(type(row.get(field)) is not int for field in integer_fields):
+        raise ValueError("formal relation guest input declaration is invalid")
+    return {
+        "case": row.get("case"),
+        "scenario": row.get("scenario"),
+        "opcode": opcode,
+        "target_count": row["target_count"],
+        "target_raw_gas": row["target_raw_gas"],
+        "bytecode": row.get("bytecode"),
+        "generator_max_count": row["generator_max_count"],
+        "fixed_bytecode_len": row["fixed_bytecode_len"],
+        "tx_gas_limit": row["tx_gas_limit"],
+    }
+
+
+def _formal_opcode_workload_spec(guest_input: Mapping[str, Any]) -> dict[str, Any]:
+    opcode = guest_input["opcode"]
+    target_count = guest_input["target_count"]
+    return {
+        "schema_version": 1,
+        "key_id": f"opcode:0x{opcode:02x}",
+        "case_id": guest_input["case"],
+        "target_count": target_count,
+        "lane": "target",
+        "state": {},
+        "environment": {"evm_spec": "prague"},
+        "input": {
+            "bytecode": guest_input["bytecode"],
+            "opcode": opcode,
+            "target_raw_gas": guest_input["target_raw_gas"],
+            "tx_gas_limit": guest_input["tx_gas_limit"],
+            "generator_max_count": guest_input["generator_max_count"],
+        },
+        "expected_operation_deltas": {
+            f"opcode:0x{opcode:02x}": target_count
+        },
+        "expected_feature_deltas": {},
+    }
+
+
+def _validate_formal_relation_row_evidence(
+    manifest: Manifest,
+    relation: OpcodeRelationSpec,
+    rows: list[Mapping[str, Any]],
+) -> None:
+    """Bind persisted formal rows to canonical fixtures and execution identities."""
+    cases = {case.name: case for case in manifest.cases}
+    case = cases.get(relation.case_id)
+    if case is None or case.opcode is None:
+        raise ValueError("formal relation case is absent from the manifest")
+    grouped: dict[tuple[str, int], dict[str, list[Mapping[str, Any]]]] = {}
+    for row in rows:
+        placement = row.get("relation_placement")
+        count = row.get("diagnostic_count")
+        lane = row.get("lane")
+        if (
+            row.get("relation_id") != relation.id
+            or row.get("original_case") != relation.case_id
+            or row.get("original_opcode") != f"0x{case.opcode:02x}"
+            or row.get("case") != f"{case.name}__relation_{lane}"
+            or lane not in {"target", "control"}
+            or placement
+            not in {
+                FORMAL_RELATION_PREFIX_PLACEMENT,
+                FORMAL_RELATION_TAIL_PLACEMENT,
+            }
+            or type(count) is not int
+        ):
+            raise ValueError("formal relation fixture identity differs from the manifest")
+        guest_input = _formal_opcode_guest_input(row)
+        guest_bytes = (
+            json.dumps(guest_input, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        if row.get("fixture_sha256") != sha256_bytes(guest_bytes):
+            raise ValueError("formal relation fixture SHA256 differs from canonical guest input")
+        workload_id = controlled_workload_id(
+            _formal_opcode_workload_spec(guest_input)
+        )
+        backend_input_sha256 = row.get("backend_input_sha256")
+        repeat_index = row.get("repeat_index")
+        expected_execution_row_id = (
+            controlled_execution_row_id(
+                workload_id,
+                backend="sp1",
+                execution_engine=str(row.get("sp1_execution_engine")),
+                run_id=str(row.get("calibration_id")),
+                repeat_index=repeat_index,
+                backend_input_sha256=str(backend_input_sha256),
+            )
+            if type(repeat_index) is int and _is_sha256(backend_input_sha256)
+            else None
+        )
+        trace = row.get("controlled_trace")
+        trace_identity = (
+            trace.get("workload_id"),
+            trace.get("backend_input_sha256"),
+            trace.get("target_opcode"),
+            trace.get("declared_target_count"),
+            trace.get("declared_target_raw_gas"),
+            trace.get("tx_gas_limit"),
+            trace.get("executed_target_count"),
+            trace.get("executed_target_raw_gas"),
+            trace.get("bytecode_len"),
+        ) if isinstance(trace, Mapping) else ()
+        expected_trace_identity = (
+            workload_id,
+            backend_input_sha256,
+            guest_input["opcode"],
+            guest_input["target_count"],
+            guest_input["target_raw_gas"],
+            guest_input["tx_gas_limit"],
+            guest_input["target_count"],
+            guest_input["target_count"] * guest_input["target_raw_gas"],
+            guest_input["fixed_bytecode_len"],
+        )
+        if (
+            not _is_sha256(row.get("pair_id"))
+            or row.get("workload_id") != workload_id
+            or row.get("execution_row_id") != expected_execution_row_id
+            or row.get("guest_input_sha256") != "0x" + str(backend_input_sha256)
+            or trace_identity != expected_trace_identity
+        ):
+            raise ValueError(
+                "formal relation pair/workload/execution or controlled-trace identity differs"
+            )
+        grouped.setdefault((str(placement), count), {}).setdefault(
+            str(lane), []
+        ).append(row)
+
+    for lanes in grouped.values():
+        if set(lanes) != {"target", "control"}:
+            raise ValueError("formal relation sample is missing a matched lane")
+        representatives = {
+            lane: lane_rows[0] for lane, lane_rows in lanes.items()
+        }
+        expected_pair_id = matched_control_pair_id(
+            representatives["target"], representatives["control"]
+        )
+        if any(
+            row.get("pair_id") != expected_pair_id
+            for lane_rows in lanes.values()
+            for row in lane_rows
+        ):
+            raise ValueError("formal relation pair identity differs from canonical fixture")
+
+
 def _fit_one_opcode_relation(
     relation: OpcodeRelationSpec,
     rows: list[Mapping[str, Any]],
@@ -5556,10 +5713,16 @@ def fit_formal_relation_round(
     relations = {relation.id: relation for relation in manifest.opcode_relations}
     results: list[dict[str, Any]] = []
     for relation_id in selected_relation_ids:
+        relation_rows = [
+            row for row in rows if row.get("relation_id") == relation_id
+        ]
         try:
+            _validate_formal_relation_row_evidence(
+                manifest, relations[relation_id], relation_rows
+            )
             fit = _fit_one_opcode_relation(
                 relations[relation_id],
-                [row for row in rows if row.get("relation_id") == relation_id],
+                relation_rows,
             )
         except FormalRelationQualityError as error:
             if (
@@ -5700,6 +5863,7 @@ def fit_opcode_relations(
     results = []
     for relation in manifest.opcode_relations:
         relation_rows = [row for row in rows if row.get("relation_id") == relation.id]
+        _validate_formal_relation_row_evidence(manifest, relation, relation_rows)
         results.append(_fit_one_opcode_relation(relation, relation_rows))
 
     self_controls = [row for row in results if row.get("self_control") is True]
@@ -6997,6 +7161,7 @@ def build_candidate_components(
 ) -> dict[str, Any]:
     required_hashes = {
         "opcode_relations_sha256",
+        "formal_relation_decisions_sha256",
         "block_calibration_rows_sha256",
         "block_calibration_sha256",
         "controlled_fit_sha256",
@@ -7878,6 +8043,7 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     source_hashes = manifest.get("source_artifacts")
     expected_source_keys = {
         "opcode_relations_sha256",
+        "formal_relation_decisions_sha256",
         "block_calibration_rows_sha256",
         "block_calibration_sha256",
         "controlled_fit_sha256",
@@ -8033,11 +8199,20 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
         run, frozen_manifest
     )
     controlled = load_terminal_controlled_artifacts(run, identity, manifest_spec)
-    relation_rows = list(iter_jsonl(run / "raw" / "formal-relations.jsonl"))
+    expected_relation_provenance = _candidate_relation_provenance(run, identity)
+    formal = load_terminal_formal_relation_artifacts(
+        run, manifest_spec, expected_relation_provenance
+    )
+    if manifest.get("provenance", {}).get(
+        "formal_relation_decisions_sha256"
+    ) != formal["formal_relation_decisions_sha256"]:
+        raise ValueError(
+            "candidate provenance formal relation decisions digest mismatch"
+        )
+    relation_rows = formal["rows"]
     block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
     relation_artifact = json.loads((run / "opcode-relations.json").read_text())
     block_artifact = json.loads((run / "block-calibration.json").read_text())
-    expected_relation_provenance = _candidate_relation_provenance(run, identity)
     source_projection = replay_candidate_source_evidence(
         manifest_spec,
         relation_artifact,
@@ -8049,6 +8224,9 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     replayed_provenance = _sealed_candidate_provenance(controlled)
     replayed_provenance.update(
         {
+            "formal_relation_decisions_sha256": formal[
+                "formal_relation_decisions_sha256"
+            ],
             "opcode_relations_sha256": source_projection["relation_artifact"][
                 "artifact_sha256"
             ],
@@ -8183,7 +8361,11 @@ def _replay_bridge_sample_artifact(
     artifacts: Mapping[str, Any],
     candidate_sha256: str,
 ) -> dict[str, Any]:
-    relation_rows = list(iter_jsonl(run / "raw" / "formal-relations.jsonl"))
+    identity = validate_calibration_execution_identity(run)
+    formal = load_terminal_formal_relation_artifacts(
+        run, manifest, _candidate_relation_provenance(run, identity)
+    )
+    relation_rows = formal["rows"]
     block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
     block_artifact = json.loads((run / "block-calibration.json").read_text())
     return _controlled_sample_artifact(
@@ -8193,6 +8375,7 @@ def _replay_bridge_sample_artifact(
         block_artifact,
         relation_rows,
         block_rows,
+        formal["formal_relation_decisions_sha256"],
     )
 
 
@@ -9468,13 +9651,12 @@ def cmd_fit_relations(args: argparse.Namespace) -> None:
             "controlled_manifest_rows_sha256"
         ],
     }
-    rows = list(iter_jsonl(runs_path))
-    try:
-        _validate_formal_relation_rows_provenance(rows, expected_provenance)
-    except ValueError as error:
-        raise ValueError(
-            "formal relation rows differ from durable calibration provenance"
-        ) from error
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        calibration_run, manifest, expected_provenance
+    )
+    if formal_artifacts["raw_path"] != runs_path:
+        raise ValueError("formal relation runs path is not the terminal canonical artifact")
+    rows = formal_artifacts["rows"]
     artifact = fit_opcode_relations(
         manifest,
         rows,
@@ -9862,11 +10044,7 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
         _resolve_repo_path(args.relations, field_name="opcode_relations"),
         "opcode-relations.json",
     )
-    raw_rows_path = calibration_run / "raw" / "formal-relations.jsonl"
-    if not raw_rows_path.is_file():
-        raise ValueError("block calibration requires canonical formal relation raw rows")
     artifact = json.loads(relations_path.read_text())
-    raw_rows = list(iter_jsonl(raw_rows_path))
     expected_provenance = {
         "calibration_id": calibration_run.name,
         "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
@@ -9876,6 +10054,10 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
             "controlled_manifest_rows_sha256"
         ],
     }
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        calibration_run, manifest, expected_provenance
+    )
+    raw_rows = formal_artifacts["rows"]
     validate_opcode_relations_artifact(
         manifest, artifact, raw_rows, expected_provenance
     )
@@ -10404,11 +10586,7 @@ def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
         _resolve_repo_path(args.out, field_name="block_calibration"),
         "block-calibration.json",
     )
-    relation_rows_path = calibration_run / "raw" / "formal-relations.jsonl"
-    if not relation_rows_path.is_file():
-        raise ValueError("block calibration requires canonical formal relation raw rows")
     relation_artifact = json.loads(relations_path.read_text())
-    relation_rows = list(iter_jsonl(relation_rows_path))
     expected_provenance = {
         "calibration_id": calibration_run.name,
         "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
@@ -10418,6 +10596,10 @@ def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
             "controlled_manifest_rows_sha256"
         ],
     }
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        calibration_run, manifest, expected_provenance
+    )
+    relation_rows = formal_artifacts["rows"]
     validate_opcode_relations_artifact(
         manifest, relation_artifact, relation_rows, expected_provenance
     )
@@ -10650,6 +10832,51 @@ def _canonical_formal_relation_rows(
             )
         )
     return rows
+
+
+def load_terminal_formal_relation_artifacts(
+    calibration_run: pathlib.Path,
+    manifest: Manifest,
+    expected_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Replay sealed formal decisions and load their exact terminal row stream."""
+    decisions_path = calibration_run / "formal-relation-decisions.json"
+    seal_path = calibration_run / "formal-relation-decisions.sha256"
+    if not decisions_path.is_file() or not seal_path.is_file():
+        raise ValueError("formal relation decisions seal or ledger is missing")
+    decisions_sha256 = sha256_file(decisions_path)
+    if _read_digest(seal_path) != decisions_sha256:
+        raise ValueError("formal relation decisions seal does not match persisted decisions")
+    try:
+        decisions = json.loads(decisions_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("formal relation decisions ledger is unreadable") from exc
+    state = validate_persisted_formal_relation_decisions(
+        calibration_run,
+        decisions,
+        manifest,
+        expected_provenance,
+    )
+    if (
+        state.get("complete") is not True
+        or state.get("remaining_relation_ids")
+        or state.get("exhausted_relation_ids")
+    ):
+        raise ValueError("formal relation decisions have no complete accepted terminal state")
+    rows = _canonical_formal_relation_rows(manifest, state["accepted"])
+    canonical_bytes = b"".join(canonical_json(row) + b"\n" for row in rows)
+    final_path = calibration_run / "raw" / "formal-relations.jsonl"
+    if not final_path.is_file() or final_path.read_bytes() != canonical_bytes:
+        raise ValueError(
+            "canonical formal relation raw bytes/order differ from terminal decisions"
+        )
+    return {
+        "decisions": decisions,
+        "state": state,
+        "rows": rows,
+        "raw_path": final_path,
+        "formal_relation_decisions_sha256": decisions_sha256,
+    }
 
 
 def controlled_round_counts(generator_max_count: int) -> tuple[int, ...]:
@@ -11584,6 +11811,7 @@ def _controlled_sample_artifact(
     block_artifact: Mapping[str, Any],
     relation_rows: Iterable[Mapping[str, Any]],
     block_rows: Iterable[Mapping[str, Any]],
+    formal_relation_decisions_sha256: str,
 ) -> dict[str, Any]:
     relation_rows = list(relation_rows)
     block_rows = list(block_rows)
@@ -11642,6 +11870,9 @@ def _controlled_sample_artifact(
     payload["controlled_decisions_sha256"] = artifacts[
         "controlled_decisions_sha256"
     ]
+    payload["formal_relation_decisions_sha256"] = (
+        formal_relation_decisions_sha256
+    )
     payload["controlled_fit_sha256"] = artifacts["fit_sha256"]
     payload["sha256"] = sha256_bytes(canonical_json(payload))
     return payload
@@ -11978,15 +12209,17 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     if sha256_file(fit_path) != artifacts["fit_sha256"]:
         raise ValueError("controlled fit does not match terminal decision")
     fit = artifacts["fit"]
-    relation_rows_path = run / "raw" / "formal-relations.jsonl"
     block_rows_path = run / "block-calibration-rows.jsonl"
-    if not relation_rows_path.is_file() or not block_rows_path.is_file():
+    if not block_rows_path.is_file():
         raise ValueError("candidate requires canonical relation and block raw rows")
     relation_artifact = json.loads(relations_path.read_text())
-    relation_rows = list(iter_jsonl(relation_rows_path))
     expected_relation_provenance = _candidate_relation_provenance(
         run, execution_identity
     )
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        run, manifest, expected_relation_provenance
+    )
+    relation_rows = formal_artifacts["rows"]
     block_artifact = json.loads(block_path.read_text())
     block_rows = list(iter_jsonl(block_rows_path))
     source_projection = replay_candidate_source_evidence(
@@ -12010,6 +12243,9 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     provenance = _sealed_candidate_provenance(artifacts)
     provenance.update(
         {
+            "formal_relation_decisions_sha256": formal_artifacts[
+                "formal_relation_decisions_sha256"
+            ],
             "opcode_relations_sha256": source_projection["relation_artifact"][
                 "artifact_sha256"
             ],
@@ -12037,6 +12273,7 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         block_artifact,
         relation_rows,
         block_rows,
+        formal_artifacts["formal_relation_decisions_sha256"],
     )
     components = seal_candidate_directory(
         run,
@@ -12063,6 +12300,9 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
     artifacts = load_terminal_controlled_artifacts(run, identity, manifest)
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        run, manifest, _candidate_relation_provenance(run, identity)
+    )
     samples_path = _canonical_run_artifact(
         run,
         _resolve_repo_path(args.samples, field_name="controlled_samples"),
@@ -12070,6 +12310,12 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
     )
     payload = json.loads(samples_path.read_text())
     candidate = verify_candidate_directory(run)
+    if candidate["candidate_manifest"]["provenance"].get(
+        "formal_relation_decisions_sha256"
+    ) != formal_artifacts["formal_relation_decisions_sha256"]:
+        raise ValueError(
+            "candidate provenance formal relation decisions digest mismatch"
+        )
     expected = _replay_bridge_sample_artifact(
         run, manifest, artifacts, candidate["candidate_sha256"]
     )

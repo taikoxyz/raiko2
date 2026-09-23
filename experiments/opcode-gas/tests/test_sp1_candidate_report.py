@@ -59,108 +59,9 @@ def block_affine_model(manifest):
 
 
 def formal_relation_rows(manifest, *, slope_overrides=None):
-    slope_overrides = slope_overrides or {}
-    rows = []
-    provenance = {
-        "calibration_id": "b" * 24,
-        "calibration_identity_sha256": "b" * 64,
-        "implementation_revision": "c" * 40,
-        "controlled_manifest_sha256": "d" * 64,
-        "controlled_manifest_rows_sha256": "e" * 64,
-    }
-    for index, relation in enumerate(manifest.opcode_relations):
-        relation_rows_start = len(rows)
-        slope = Decimal(
-            str(
-                slope_overrides.get(
-                    relation.id, 5000 + index if relation.signed_raw_gas_by_key else 0
-                )
-            )
-        )
-        pair_id = hashlib.sha256(relation.id.encode()).hexdigest()
-        control_map = {
-            key: value * 8 for key, value in relation.control_raw_gas_by_key.items()
-        }
-        for count in (0, 1, 2, 4, 8):
-            target_map = {
-                key: value * (8 - count)
-                for key, value in relation.control_raw_gas_by_key.items()
-            }
-            for key, value in relation.target_raw_gas_by_key.items():
-                target_map[key] = target_map.get(key, 0) + value * count
-            for lane, actual_map, prover_gas in (
-                ("control", control_map, Decimal(100_000)),
-                ("target", target_map, Decimal(100_000) + slope * count),
-            ):
-                for repeat_index in range(3):
-                    backend_input = hashlib.sha256(
-                        f"{relation.id}:{count}:{lane}".encode()
-                    ).hexdigest()
-                    rows.append(
-                        {
-                            **provenance,
-                            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
-                            "signal_kind": opcode_gas.FORMAL_RELATION_SIGNAL_KIND,
-                            "relation_id": relation.id,
-                            "relation_split": relation.split,
-                            "scenario_id": relation.scenario_id,
-                            "dynamic_key": relation.dynamic_key,
-                            "pair_id": pair_id,
-                            "lane": lane,
-                            "diagnostic_count": count,
-                            "relation_placement": "active_prefix",
-                            "relation_sample_id": f"active_prefix:count-{count}",
-                            "generator_max_count": 8,
-                            "repeat_index": repeat_index,
-                            "prover_gas": int(prover_gas),
-                            "total_instruction_count": 200_000,
-                            "exit_code": 0,
-                            "public_values": "0x01",
-                            "workload_id": hashlib.sha256(
-                                f"workload:{relation.id}:{count}:{lane}".encode()
-                            ).hexdigest(),
-                            "backend_input_sha256": backend_input,
-                            "sp1_execution_engine": "gas-estimator",
-                            "sp1_gas_trace_chunk_threshold": 134_217_728,
-                            "sp1_gas_trace_chunk_slots": 2,
-                            "target_raw_gas_by_key": {
-                                key: str(value)
-                                for key, value in relation.target_raw_gas_by_key.items()
-                            },
-                            "control_raw_gas_by_key": {
-                                key: str(value)
-                                for key, value in relation.control_raw_gas_by_key.items()
-                            },
-                            "signed_raw_gas_by_key": {
-                                key: str(value)
-                                for key, value in relation.signed_raw_gas_by_key.items()
-                            },
-                            "actual_raw_gas_by_key": {
-                                key: str(value) for key, value in actual_map.items() if value
-                            },
-                        }
-                    )
-        prefix_count_one = [
-            copy.deepcopy(row)
-            for row in rows[relation_rows_start:]
-            if row["diagnostic_count"] == 1
-        ]
-        tail_pair_id = hashlib.sha256(f"{relation.id}:active_tail".encode()).hexdigest()
-        for row in prefix_count_one:
-            row["pair_id"] = tail_pair_id
-            row["relation_placement"] = "active_tail"
-            row["relation_sample_id"] = "active_tail:count-1"
-            row["prover_gas"] = int(
-                Decimal(100_000) + (slope if row["lane"] == "target" else 0)
-            )
-            row["workload_id"] = hashlib.sha256(
-                f"tail-workload:{relation.id}:{row['lane']}".encode()
-            ).hexdigest()
-            row["backend_input_sha256"] = hashlib.sha256(
-                f"tail:{relation.id}:{row['lane']}".encode()
-            ).hexdigest()
-            rows.append(row)
-    return rows
+    return canonical_formal_relation_round_rows(
+        manifest, slope_overrides=slope_overrides
+    )
 
 
 def formal_relation_provenance(rows):
@@ -168,6 +69,173 @@ def formal_relation_provenance(rows):
         field: rows[0][field]
         for field in opcode_gas.FORMAL_RELATION_PROVENANCE_FIELDS
     }
+
+
+_FORMAL_RELATION_ROWS_CACHE = {}
+
+
+def canonical_formal_relation_round_rows(
+    manifest, relation=None, *, slope_overrides=None
+):
+    slope_overrides = slope_overrides or {}
+    selected_relations = (
+        [relation] if relation is not None else list(manifest.opcode_relations)
+    )
+    cache_key = opcode_gas.sha256_bytes(
+        opcode_gas.canonical_json(
+            {
+                "relations": [
+                    {
+                        "id": item.id,
+                        "case_id": item.case_id,
+                        "split": item.split,
+                        "scenario_id": item.scenario_id,
+                        "scenario": dict(item.scenario),
+                        "target": dict(item.target_raw_gas_by_key),
+                        "control": dict(item.control_raw_gas_by_key),
+                        "signed": dict(item.signed_raw_gas_by_key),
+                        "dynamic_key": item.dynamic_key,
+                    }
+                    for item in selected_relations
+                ],
+                "slopes": {key: str(value) for key, value in slope_overrides.items()},
+            }
+        )
+    )
+    if cache_key in _FORMAL_RELATION_ROWS_CACHE:
+        return copy.deepcopy(_FORMAL_RELATION_ROWS_CACHE[cache_key])
+    provenance = {
+        "calibration_id": "b" * 24,
+        "calibration_identity_sha256": "b" * 64,
+        "implementation_revision": "c" * 40,
+        "controlled_manifest_sha256": "d" * 64,
+        "controlled_manifest_rows_sha256": "e" * 64,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = opcode_gas.generate_relation_cases(
+            manifest,
+            pathlib.Path(tmp),
+            provenance=provenance,
+            generator_max_count=8,
+            relation_ids=[item.id for item in selected_relations],
+        )
+        fixtures = [
+            (
+                opcode_gas.json.loads(path.read_text()),
+                opcode_gas.json.loads(path.with_name("guest-input.json").read_text()),
+            )
+            for path in paths
+        ]
+    relation_order = {item.id: index for index, item in enumerate(selected_relations)}
+    fixture_order = sorted(
+        fixtures,
+        key=lambda item: (
+            relation_order[item[0]["relation_id"]],
+            0 if item[0]["relation_placement"] == "active_prefix" else 1,
+            item[0]["diagnostic_count"],
+            {"control": 0, "target": 1}[item[0]["lane"]],
+        ),
+    )
+    rows = []
+    for fixture, guest_input in fixture_order:
+        relation = next(
+            item for item in selected_relations if item.id == fixture["relation_id"]
+        )
+        relation_index = list(manifest.opcode_relations).index(relation)
+        slope = Decimal(
+            str(
+                slope_overrides.get(
+                    relation.id,
+                    5000 + relation_index if relation.signed_raw_gas_by_key else 0,
+                )
+            )
+        )
+        lane = fixture["lane"]
+        count = fixture["diagnostic_count"]
+        workload_spec = {
+            "schema_version": 1,
+            "key_id": f"opcode:0x{guest_input['opcode']:02x}",
+            "case_id": guest_input["case"],
+            "target_count": guest_input["target_count"],
+            "lane": "target",
+            "state": {},
+            "environment": {"evm_spec": "prague"},
+            "input": {
+                "bytecode": guest_input["bytecode"],
+                "opcode": guest_input["opcode"],
+                "target_raw_gas": guest_input["target_raw_gas"],
+                "tx_gas_limit": guest_input["tx_gas_limit"],
+                "generator_max_count": guest_input["generator_max_count"],
+            },
+            "expected_operation_deltas": {
+                f"opcode:0x{guest_input['opcode']:02x}": guest_input["target_count"]
+            },
+            "expected_feature_deltas": {},
+        }
+        workload_id = opcode_gas.controlled_workload_id(workload_spec)
+        backend_input = hashlib.sha256(
+            opcode_gas.canonical_json(guest_input)
+        ).hexdigest()
+        if lane == "control":
+            actual_map = {
+                key: value * 8
+                for key, value in relation.control_raw_gas_by_key.items()
+            }
+            prover_gas = 100_000
+        else:
+            actual_map = {
+                key: value * (8 - count)
+                for key, value in relation.control_raw_gas_by_key.items()
+            }
+            for key, value in relation.target_raw_gas_by_key.items():
+                actual_map[key] = actual_map.get(key, 0) + value * count
+            prover_gas = int(Decimal(100_000) + slope * count)
+        controlled_trace = {
+            "schema_version": 1,
+            "kind": "revm_opcode",
+            "workload_id": workload_id,
+            "backend_input_sha256": backend_input,
+            "target_opcode": guest_input["opcode"],
+            "declared_target_count": guest_input["target_count"],
+            "declared_target_raw_gas": guest_input["target_raw_gas"],
+            "tx_gas_limit": guest_input["tx_gas_limit"],
+            "executed_target_count": guest_input["target_count"],
+            "executed_target_raw_gas": (
+                guest_input["target_count"] * guest_input["target_raw_gas"]
+            ),
+            "bytecode_len": len(bytes.fromhex(guest_input["bytecode"][2:])),
+        }
+        for repeat_index in range(3):
+            rows.append(
+                {
+                    **fixture,
+                    "controlled_trace": controlled_trace,
+                    "workload_id": workload_id,
+                    "backend_input_sha256": backend_input,
+                    "guest_input_sha256": "0x" + backend_input,
+                    "execution_row_id": opcode_gas.controlled_execution_row_id(
+                        workload_id,
+                        backend="sp1",
+                        execution_engine="gas-estimator",
+                        run_id=provenance["calibration_id"],
+                        repeat_index=repeat_index,
+                        backend_input_sha256=backend_input,
+                    ),
+                    "repeat_index": repeat_index,
+                    "prover_gas": prover_gas,
+                    "total_instruction_count": 200_000,
+                    "exit_code": 0,
+                    "public_values": "0x01",
+                    "sp1_execution_engine": "gas-estimator",
+                    "sp1_gas_trace_chunk_threshold": 134_217_728,
+                    "sp1_gas_trace_chunk_slots": 2,
+                    "actual_raw_gas_by_key": {
+                        key: str(value) for key, value in actual_map.items() if value
+                    },
+                }
+            )
+    _FORMAL_RELATION_ROWS_CACHE[cache_key] = copy.deepcopy(rows)
+    return rows
 
 
 def opcode_execution_provenance():
@@ -414,6 +482,7 @@ def candidate_input_artifacts(manifest, controlled_rows):
             opcode_gas.canonical_json(controlled_fit)
         ),
         "controlled_decisions_sha256": "4" * 64,
+        "formal_relation_decisions_sha256": "5" * 64,
         "terminal_generator_max_count": 8,
     }
     return relation, block, controlled_fit, provenance
@@ -831,6 +900,169 @@ class MeasurementGateTests(unittest.TestCase):
 
 
 class FormalOpcodeRelationTests(unittest.TestCase):
+    def _persist_terminal_formal_run(self, root):
+        full_manifest = formal_relation_manifest()
+        manifest = full_manifest
+        relation_ids = [item.id for item in manifest.opcode_relations]
+        rows = formal_relation_rows(manifest)
+        provenance = formal_relation_provenance(rows)
+        run = pathlib.Path(root) / provenance["calibration_id"]
+        (run / "raw").mkdir(parents=True)
+        round_rows, round_result = opcode_gas._formal_relation_round_paths(run, 8)
+        round_rows.write_bytes(
+            b"".join(opcode_gas.canonical_json(row) + b"\n" for row in rows)
+        )
+        results = opcode_gas.fit_formal_relation_round(
+            manifest,
+            rows,
+            relation_ids,
+            8,
+            expected_provenance=provenance,
+        )
+        result_payload = opcode_gas._formal_relation_result_payload(
+            8, relation_ids, results
+        )
+        round_result.write_text(
+            opcode_gas.json.dumps(result_payload, indent=2, sort_keys=True) + "\n"
+        )
+        decisions = {
+            "schema_version": 1,
+            "calibration_identity_sha256": provenance[
+                "calibration_identity_sha256"
+            ],
+            "relation_ids": relation_ids,
+            "rounds": [
+                {
+                    "generator_max_count": 8,
+                    "selected_relation_ids": relation_ids,
+                    "raw_runs": str(round_rows.relative_to(run)),
+                    "raw_runs_sha256": opcode_gas.sha256_file(round_rows),
+                    "result": str(round_result.relative_to(run)),
+                    "result_sha256": opcode_gas.sha256_file(round_result),
+                    "terminal_decisions": [
+                        {"relation_id": relation_id, "decision": "accepted"}
+                        for relation_id in relation_ids
+                    ],
+                }
+            ],
+        }
+        decisions_path = run / "formal-relation-decisions.json"
+        decisions_path.write_text(
+            opcode_gas.json.dumps(decisions, indent=2, sort_keys=True) + "\n"
+        )
+        (run / "formal-relation-decisions.sha256").write_text(
+            opcode_gas.sha256_file(decisions_path) + "\n"
+        )
+        state = opcode_gas.validate_persisted_formal_relation_decisions(
+            run, decisions, manifest, provenance
+        )
+        canonical_rows = opcode_gas._canonical_formal_relation_rows(
+            manifest, state["accepted"]
+        )
+        (run / "raw" / "formal-relations.jsonl").write_bytes(
+            b"".join(
+                opcode_gas.canonical_json(row) + b"\n" for row in canonical_rows
+            )
+        )
+        return run, manifest, provenance, canonical_rows
+
+    def test_terminal_formal_loader_requires_seal_and_exact_canonical_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run, manifest, provenance, canonical_rows = (
+                self._persist_terminal_formal_run(tmp)
+            )
+            loaded = opcode_gas.load_terminal_formal_relation_artifacts(
+                run, manifest, provenance
+            )
+            self.assertEqual(loaded["rows"], canonical_rows)
+            self.assertEqual(
+                loaded["formal_relation_decisions_sha256"],
+                opcode_gas.sha256_file(run / "formal-relation-decisions.json"),
+            )
+
+            final_rows = run / "raw" / "formal-relations.jsonl"
+            final_rows.write_bytes(
+                b"".join(
+                    opcode_gas.canonical_json(row) + b"\n"
+                    for row in reversed(canonical_rows)
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "canonical.*bytes|order"):
+                opcode_gas.load_terminal_formal_relation_artifacts(
+                    run, manifest, provenance
+                )
+
+        for seal_mutation in ("missing", "stale"):
+            with self.subTest(seal=seal_mutation), tempfile.TemporaryDirectory() as tmp:
+                run, manifest, provenance, _rows = self._persist_terminal_formal_run(tmp)
+                seal = run / "formal-relation-decisions.sha256"
+                if seal_mutation == "missing":
+                    seal.unlink()
+                else:
+                    seal.write_text("f" * 64 + "\n")
+                with self.assertRaisesRegex(ValueError, "decisions seal"):
+                    opcode_gas.load_terminal_formal_relation_artifacts(
+                        run, manifest, provenance
+                    )
+
+    def test_relation_generation_keeps_guest_case_and_control_input_stable(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item
+            for item in manifest.opcode_relations
+            if item.split == "canonical" and item.signed_raw_gas_by_key
+        )
+        provenance = {
+            "calibration_id": "b" * 24,
+            "calibration_identity_sha256": "b" * 64,
+            "implementation_revision": "c" * 40,
+            "controlled_manifest_sha256": "d" * 64,
+            "controlled_manifest_rows_sha256": "e" * 64,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=provenance,
+                generator_max_count=8,
+                relation_ids=[relation.id],
+            )
+            fixtures = [
+                (
+                    opcode_gas.json.loads(path.read_text()),
+                    opcode_gas.json.loads(path.with_name("guest-input.json").read_text()),
+                    path.with_name("guest-input.json").read_bytes(),
+                )
+                for path in paths
+            ]
+
+        for lane in ("target", "control"):
+            lane_rows = [row for row in fixtures if row[0]["lane"] == lane]
+            self.assertEqual(
+                {guest["case"] for _case, guest, _raw in lane_rows},
+                {f"{relation.case_id}__relation_{lane}"},
+            )
+        control_inputs = [raw for case, _guest, raw in fixtures if case["lane"] == "control"]
+        self.assertEqual(len(set(control_inputs)), 1)
+
+        prefix_one = next(
+            guest
+            for case, guest, _raw in fixtures
+            if case["lane"] == "target"
+            and case["relation_placement"] == "active_prefix"
+            and case["diagnostic_count"] == 1
+        )
+        tail_one = next(
+            guest
+            for case, guest, _raw in fixtures
+            if case["lane"] == "target"
+            and case["relation_placement"] == "active_tail"
+        )
+        prefix_bytecode = prefix_one.pop("bytecode")
+        tail_bytecode = tail_one.pop("bytecode")
+        self.assertNotEqual(prefix_bytecode, tail_bytecode)
+        self.assertEqual(prefix_one, tail_one)
+
     def test_signed_relation_fit_excludes_zero_activation_outlier(self):
         counts = {
             0: (Decimal(100_000), Decimal(100_000), Decimal(0)),
@@ -1183,7 +1415,8 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                 and row["repeat_index"] == 2
             )[field] = value
             with self.subTest(mismatched=field), self.assertRaisesRegex(
-                ValueError, rf"{relation.id}.*generator bound 8.*repeat identity"
+                ValueError,
+                rf"{relation.id}.*generator bound 8.*(repeat identity|controlled-trace identity)",
             ):
                 opcode_gas.fit_formal_relation_round(
                     manifest,
@@ -1217,6 +1450,84 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                 8,
                 expected_provenance=expected_provenance,
             )
+
+    def test_round_fit_recomputes_formal_fixture_and_execution_identities(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = canonical_formal_relation_round_rows(manifest, relation)
+        provenance = formal_relation_provenance(rows)
+
+        relabelled = copy.deepcopy(rows)
+        prefix_one = [
+            copy.deepcopy(row)
+            for row in relabelled
+            if row["relation_placement"] == "active_prefix"
+            and row["diagnostic_count"] == 1
+        ]
+        relabelled = [
+            row for row in relabelled if row["relation_placement"] != "active_tail"
+        ]
+        for row in prefix_one:
+            row["relation_placement"] = "active_tail"
+            row["relation_sample_id"] = "active_tail:count-1"
+        relabelled.extend(prefix_one)
+        with self.assertRaisesRegex(ValueError, "(bytecode|pair).*identity|matched layout"):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                relabelled,
+                [relation.id],
+                8,
+                expected_provenance=provenance,
+            )
+
+        mutations = []
+        wrong_pair = copy.deepcopy(rows)
+        wrong_pair[-1]["pair_id"] = wrong_pair[0]["pair_id"]
+        mutations.append(("pair", wrong_pair))
+        for field, message in (
+            ("pair_id", "pair"),
+            ("workload_id", "workload"),
+            ("execution_row_id", "execution"),
+        ):
+            missing = copy.deepcopy(rows)
+            del missing[-1][field]
+            mutations.append((message, missing))
+        reused_workload = copy.deepcopy(rows)
+        prefix_target = next(
+            row
+            for row in reused_workload
+            if row["relation_placement"] == "active_prefix"
+            and row["diagnostic_count"] == 1
+            and row["lane"] == "target"
+        )
+        tail_target = next(
+            row
+            for row in reused_workload
+            if row["relation_placement"] == "active_tail"
+            and row["lane"] == "target"
+        )
+        tail_target["workload_id"] = prefix_target["workload_id"]
+        tail_target["controlled_trace"]["workload_id"] = prefix_target["workload_id"]
+        mutations.append(("workload", reused_workload))
+        wrong_execution = copy.deepcopy(rows)
+        wrong_execution[-1]["execution_row_id"] = wrong_execution[0][
+            "execution_row_id"
+        ]
+        mutations.append(("execution", wrong_execution))
+
+        for message, malformed in mutations:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                opcode_gas.fit_formal_relation_round(
+                    manifest,
+                    malformed,
+                    [relation.id],
+                    8,
+                    expected_provenance=provenance,
+                )
 
     def test_relation_artifact_is_byte_identical_across_caller_decimal_contexts(self):
         manifest = formal_relation_manifest()
@@ -1408,9 +1719,9 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             for item in manifest.opcode_relations
         )
         rank_97_manifest = replace(manifest, opcode_relations=mutated_relations)
-        with self.assertRaisesRegex(ValueError, "rank"):
+        with self.assertRaisesRegex(ValueError, "rank|target raw-gas units"):
             opcode_gas.fit_opcode_relations(
-                rank_97_manifest, formal_relation_rows(rank_97_manifest)
+                rank_97_manifest, base_rows
             )
 
         self_control = next(
@@ -2691,7 +3002,15 @@ class CandidateConstructionTests(unittest.TestCase):
                 ),
             ), mock.patch.object(
                 opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
-            ):
+            ), mock.patch.object(
+                opcode_gas,
+                "load_terminal_formal_relation_artifacts",
+                return_value={
+                    "rows": [{}],
+                    "raw_path": run / "raw" / "formal-relations.jsonl",
+                    "formal_relation_decisions_sha256": "5" * 64,
+                },
+            ) as formal_loader:
                 opcode_gas.cmd_build_candidate(
                     opcode_gas.argparse.Namespace(
                         run=run,
@@ -2720,6 +3039,24 @@ class CandidateConstructionTests(unittest.TestCase):
                         samples=samples_path,
                     )
                 )
+                formal_loader.return_value = {
+                    **formal_loader.return_value,
+                    "formal_relation_decisions_sha256": "6" * 64,
+                }
+                with self.assertRaisesRegex(
+                    ValueError, "formal relation decisions digest mismatch"
+                ):
+                    opcode_gas.cmd_build_sp1_bridge(
+                        opcode_gas.argparse.Namespace(
+                            run=run,
+                            controlled_manifest=manifest_path,
+                            samples=samples_path,
+                        )
+                    )
+                formal_loader.return_value = {
+                    **formal_loader.return_value,
+                    "formal_relation_decisions_sha256": "5" * 64,
+                }
                 bridge_outputs = {
                     path: path.read_bytes()
                     for path in (
@@ -2876,6 +3213,14 @@ class CandidateConstructionTests(unittest.TestCase):
                 ),
             ), mock.patch.object(
                 opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
+            ), mock.patch.object(
+                opcode_gas,
+                "load_terminal_formal_relation_artifacts",
+                return_value={
+                    "rows": [{}],
+                    "raw_path": run / "raw" / "formal-relations.jsonl",
+                    "formal_relation_decisions_sha256": "5" * 64,
+                },
             ):
                 opcode_gas.cmd_build_candidate(opcode_gas.argparse.Namespace(**args))
 
@@ -4594,6 +4939,15 @@ class IdentityAndValidationTests(unittest.TestCase):
                     opcode_gas,
                     "load_terminal_controlled_artifacts",
                     return_value=controlled_replay,
+                ), mock.patch.object(
+                    opcode_gas,
+                    "load_terminal_formal_relation_artifacts",
+                    return_value={
+                        "rows": [],
+                        "formal_relation_decisions_sha256": provenance[
+                            "formal_relation_decisions_sha256"
+                        ],
+                    },
                 ), mock.patch.object(
                     opcode_gas,
                     "replay_candidate_source_evidence",

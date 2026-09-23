@@ -431,6 +431,17 @@ identity, raw order, completeness, resume, and hashes. When activation-gap ratio
 signs fails. Zero signal plus zero gap does not trigger, while zero signal plus nonzero gap must
 trigger with an explicit unavailable-ratio status. Always retain the tail diagnostic.
 
+Keep the guest-visible case stable per lane across every count and placement, leaving count and
+placement only in host metadata. Require fixed-bound controls to serialize identically and
+prefix-one/tail-one target inputs to differ only in bytecode slot order. Before fitting or replay,
+reconstruct canonical bytecode and fixture hashes and recompute pair, workload, execution-row, and
+controlled-trace identities. Permit identity reuse only where exact canonical inputs recur.
+
+Treat the sealed formal decision ledger as the terminal source of truth. Downstream relation fit,
+block-calibration run/fit, candidate build, and candidate/bridge replay must verify its seal, replay
+a complete accepted state, derive canonical accepted rows, and require exact byte/order equality
+with the final formal JSONL. Bind `formal_relation_decisions_sha256` into candidate provenance.
+
 Canonical non-self relations must produce 98 accepted equations. Non-self exact-flat semantics use
 the positive fit counts plus checkpoint, while self-controls retain all-count exact-flat semantics
 and do not enter `A`. Dynamic holdouts pass the same signed slope-quality gates and are serialized
@@ -443,7 +454,9 @@ canonical Decimal/Fraction strings.
 Add tests for negative accepted slopes, tiny-signal rejection, nonzero repeat noise, wrong sign at
 checkpoint, count-zero activation contamination, tail placement/order/completeness, zero-signal
 activation behavior, tail sign/APE failure, a missing canonical relation, wrong raw-gas units, rank
-97, and rounded/tampered basis coefficients.
+97, rounded/tampered basis coefficients, placement relabeling, wrong/missing/reused recomputed
+identities, reversed final raw rows, missing/stale decision seals, and candidate formal-decision
+digest mismatch.
 
 Keep `experiments/opcode-gas/runs/1bee0a5941fddc9984b009b8` sealed and read-only. Its JUMPI
 count-zero/first-slot/last-slot result and positive-count linear fit are failed-run design evidence,

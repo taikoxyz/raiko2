@@ -88,6 +88,14 @@ fixture, or identity failures abort instead of expanding. Each round is sealed i
 already accepted. The canonical `raw/formal-relations.jsonl` is created atomically only after every
 relation has accepted exactly one generator bound.
 
+The sealed decisions ledger, not the final JSONL by itself, is the downstream source of truth.
+Relation fitting, block-calibration execution/fitting, candidate construction, and candidate/bridge
+replay verify `formal-relation-decisions.sha256`, replay every decision, require a complete accepted
+terminal state, reconstruct the canonical accepted rows, and then require
+`raw/formal-relations.jsonl` to match those canonical JSON lines byte-for-byte and in order. The
+candidate provenance binds `formal_relation_decisions_sha256` in addition to the relation artifact
+digest.
+
 Relation `count` is the number of active target-microprogram repetitions in the fixed footprint. It
 is not transaction count, block count, gas limit, or a value recovered from runtime gas. Non-self
 OLS uses only positive fit counts (`count >= 1`); count zero never enters slope, R2, standard error,
@@ -109,6 +117,14 @@ is strictly greater than `0.02`, the tail becomes an acceptance gate: its observ
 zero gap reports ratio zero and does not trigger, while a nonzero gap reports an explicit
 `zero_signal_nonzero_gap` status and must trigger. Untriggered tail results remain diagnostics; JSON
 never uses Infinity or NaN.
+
+Count and placement remain host-only sampling metadata. The serialized guest-visible `case` is
+stable per lane (`<case>__relation_target` or `<case>__relation_control`) across every count and
+placement; consequently all control inputs at one generator bound are byte-identical, while the
+prefix-one and tail-one target inputs differ only in bytecode slot order. Replay reconstructs the
+canonical target/control bytecode and fixture digest, then recomputes pair, workload, and execution
+row identities and joins them to the controlled trace. Identical canonical inputs may intentionally
+reuse workload/execution identities; arbitrary relabeling or reuse fails exact recomputation.
 
 An exactly constant non-self target-minus-control response across positive fit points and checkpoint
 is a valid zero-slope relation; count zero then remains activation evidence. Self-controls retain

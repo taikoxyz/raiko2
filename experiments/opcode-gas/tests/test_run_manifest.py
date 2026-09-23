@@ -164,8 +164,17 @@ class RunManifestTests(unittest.TestCase):
             (run / "experiment.json").write_text(json.dumps({"implementation_revision": revision}))
             with mock.patch.object(opcode_gas, "REPO_ROOT", root):
                 corpus_path = write_frozen_corpus(root, revision)
-                with mock.patch.object(opcode_gas, "git_head", return_value=revision), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+                with mock.patch.object(opcode_gas, "git_head", return_value=revision), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""), mock.patch.object(
+                    opcode_gas,
+                    "verify_candidate_directory",
+                    return_value={
+                        "candidate_sha256": opcode_gas.sha256_bytes(
+                            opcode_gas.canonical_json(candidate)
+                        )
+                    },
+                ) as verify_candidate:
                     validation = opcode_gas.prepare_validation(root, run, corpus_path)
+                verify_candidate.assert_called_once_with(run)
             self.assertEqual(validation["implementation_revision"], revision)
             self.assertTrue((root / "validations" / validation["validation_id"] / "candidate-ref.json").exists())
 
@@ -401,7 +410,7 @@ class RunManifestTests(unittest.TestCase):
             with mock.patch.object(opcode_gas, "REPO_ROOT", root):
                 corpus = write_frozen_corpus(root, revision)
                 with mock.patch.object(opcode_gas, "git_head", return_value=revision), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
-                    with self.assertRaisesRegex(ValueError, "candidate seal"):
+                    with self.assertRaisesRegex(ValueError, "candidate root digest"):
                         opcode_gas.prepare_validation(root, run, corpus)
 
     def test_publish_existing_object_with_different_bytes_fails_closed(self):

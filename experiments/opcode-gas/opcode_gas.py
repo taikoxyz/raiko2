@@ -5706,6 +5706,26 @@ def preflight_block_calibration_rows(
     rank = exact_rank(matrix)
     if rank != 8:
         raise ValueError(f"block calibration exact [xB,q] fit matrix rank must be eight, got {rank}")
+    leave_one_family_out_ranks = {
+        family: exact_rank(
+            [
+                row
+                for row, spec in zip(matrix, fit_rows)
+                if spec.workload_family != family
+            ]
+        )
+        for family in BLOCK_CALIBRATION_FAMILIES
+    }
+    failed_lofo = {
+        family: rank
+        for family, rank in leave_one_family_out_ranks.items()
+        if rank != 8
+    }
+    if failed_lofo:
+        raise ValueError(
+            "block calibration leave-one-family-out exact rank differs from eight: "
+            f"{failed_lofo}"
+        )
     holdout_families = sorted(row.workload_family for row in holdout_rows)
     if set(holdout_families) != expected_families:
         raise ValueError("block calibration holdouts do not cover all parameter families")
@@ -5713,6 +5733,7 @@ def preflight_block_calibration_rows(
         "fit_row_count": len(fit_rows),
         "holdout_row_count": len(holdout_rows),
         "fit_rank": rank,
+        "leave_one_family_out_ranks": leave_one_family_out_ranks,
         "holdout_families": holdout_families,
         "fit_matrix": [[_fraction_text(value) for value in row] for row in matrix],
     }
@@ -6049,24 +6070,74 @@ def _validate_content_addressed_artifact(
     return str(recorded)
 
 
-_CANDIDATE_SOURCE_REPLAY_SEAL = object()
+def _primary_evidence_projection(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _primary_evidence_projection(item)
+            for key, item in value.items()
+            if key != "secondary"
+            and "instruction" not in key
+            and "syscall" not in key
+            and key not in {"g_s", "c_s", "f_s", "o_s"}
+        }
+    if isinstance(value, list):
+        return [_primary_evidence_projection(item) for item in value]
+    return value
 
 
-@dataclass(frozen=True)
-class CandidateSourceReplay:
-    relation_artifact_sha256: str
-    block_artifact_sha256: str
-    _seal: object = field(repr=False, compare=False)
+def primary_candidate_source_projection(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    relation_rows: Iterable[Mapping[str, Any]],
+    block_artifact: Mapping[str, Any],
+    block_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Derive the canonical primary-only source projection for candidate identity."""
+    relation_rows = list(relation_rows)
+    block_rows = list(block_rows)
+    primary_relation_rows = _primary_evidence_projection(relation_rows)
+    primary_relation = _primary_evidence_projection(relation_artifact)
+    primary_relation.pop("artifact_sha256", None)
+    primary_relation["raw_rows_sha256"] = sha256_bytes(
+        canonical_json(primary_relation_rows)
+    )
+    primary_relation["artifact_sha256"] = sha256_bytes(
+        canonical_json(primary_relation)
+    )
+
+    primary_block_rows = _primary_evidence_projection(block_rows)
+    for row in primary_block_rows:
+        row["relation_artifact_sha256"] = primary_relation["artifact_sha256"]
+        row["relation_raw_rows_sha256"] = primary_relation["raw_rows_sha256"]
+    primary_block = _primary_evidence_projection(block_artifact)
+    primary_block.pop("artifact_sha256", None)
+    primary_block["relation_artifact_sha256"] = primary_relation[
+        "artifact_sha256"
+    ]
+    primary_block["relation_raw_rows_sha256"] = primary_relation[
+        "raw_rows_sha256"
+    ]
+    primary_block["raw_block_rows_sha256"] = sha256_bytes(
+        canonical_json(primary_block_rows)
+    )
+    primary_block["artifact_sha256"] = sha256_bytes(canonical_json(primary_block))
+    return {
+        "relation_rows": primary_relation_rows,
+        "relation_artifact": primary_relation,
+        "block_rows": primary_block_rows,
+        "block_artifact": primary_block,
+    }
 
 
-def validate_candidate_source_replay(
+def replay_candidate_source_evidence(
     manifest: Manifest,
     relation_artifact: Mapping[str, Any],
     relation_rows: Iterable[Mapping[str, Any]],
     block_artifact: Mapping[str, Any],
     block_rows: Iterable[Mapping[str, Any]],
     expected_relation_provenance: Mapping[str, Any],
-) -> CandidateSourceReplay:
+) -> dict[str, Any]:
+    """Validate complete evidence, then return its primary-only candidate projection."""
     relation_rows = list(relation_rows)
     block_rows = list(block_rows)
     validate_opcode_relations_artifact(
@@ -6083,11 +6154,27 @@ def validate_candidate_source_replay(
     )
     if not _exact_json_equal(block_artifact, replayed_block):
         raise ValueError("block calibration artifact differs from exact raw-row replay")
-    return CandidateSourceReplay(
-        relation_artifact_sha256=str(relation_artifact["artifact_sha256"]),
-        block_artifact_sha256=str(block_artifact["artifact_sha256"]),
-        _seal=_CANDIDATE_SOURCE_REPLAY_SEAL,
+    return primary_candidate_source_projection(
+        manifest,
+        relation_artifact,
+        relation_rows,
+        block_artifact,
+        block_rows,
     )
+
+
+def _candidate_relation_provenance(
+    run: pathlib.Path, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "calibration_id": run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
+        "implementation_revision": identity["implementation_revision"],
+        "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
 
 
 def _candidate_source_measurements(
@@ -6940,19 +7027,37 @@ def seal_candidate_directory(
     provenance: Mapping[str, Any],
     schedule: UnzenSchedule | None = None,
     controlled_cycle_samples: Mapping[str, Any] | None = None,
-    source_replay: CandidateSourceReplay | None = None,
+    *,
+    relation_rows: Iterable[Mapping[str, Any]] | None = None,
+    block_rows: Iterable[Mapping[str, Any]] | None = None,
+    expected_relation_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if any(run.glob("**/proposal*.json*")):
         raise ValueError("proposal result already exists in calibration directory")
     if (
-        not isinstance(source_replay, CandidateSourceReplay)
-        or source_replay._seal is not _CANDIDATE_SOURCE_REPLAY_SEAL
-        or source_replay.relation_artifact_sha256
-        != relation_artifact.get("artifact_sha256")
-        or source_replay.block_artifact_sha256
-        != block_artifact.get("artifact_sha256")
+        relation_rows is None
+        or block_rows is None
+        or expected_relation_provenance is None
     ):
-        raise ValueError("candidate sealing requires validated source replay")
+        raise ValueError("candidate sealing requires complete replayable source evidence")
+    source_projection = replay_candidate_source_evidence(
+        manifest,
+        relation_artifact,
+        relation_rows,
+        block_artifact,
+        block_rows,
+        expected_relation_provenance,
+    )
+    relation_artifact = source_projection["relation_artifact"]
+    block_artifact = source_projection["block_artifact"]
+    provenance = {
+        **provenance,
+        "opcode_relations_sha256": relation_artifact["artifact_sha256"],
+        "block_calibration_rows_sha256": block_artifact[
+            "raw_block_rows_sha256"
+        ],
+        "block_calibration_sha256": block_artifact["artifact_sha256"],
+    }
     components = build_candidate_components(
         manifest,
         relation_artifact,
@@ -7251,6 +7356,63 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
         for row in rows
     ):
         raise ValueError("candidate primary observations are invalid")
+    frozen_manifest = run / "controlled-manifest.toml"
+    manifest_spec, identity = verify_frozen_controlled_manifest(
+        run, frozen_manifest
+    )
+    controlled = load_terminal_controlled_artifacts(run, identity, manifest_spec)
+    relation_rows = list(iter_jsonl(run / "raw" / "formal-relations.jsonl"))
+    block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
+    relation_artifact = json.loads((run / "opcode-relations.json").read_text())
+    block_artifact = json.loads((run / "block-calibration.json").read_text())
+    expected_relation_provenance = _candidate_relation_provenance(run, identity)
+    source_projection = replay_candidate_source_evidence(
+        manifest_spec,
+        relation_artifact,
+        relation_rows,
+        block_artifact,
+        block_rows,
+        expected_relation_provenance,
+    )
+    replayed_provenance = _sealed_candidate_provenance(controlled)
+    replayed_provenance.update(
+        {
+            "opcode_relations_sha256": source_projection["relation_artifact"][
+                "artifact_sha256"
+            ],
+            "block_calibration_rows_sha256": source_projection["block_artifact"][
+                "raw_block_rows_sha256"
+            ],
+            "block_calibration_sha256": source_projection["block_artifact"][
+                "artifact_sha256"
+            ],
+        }
+    )
+    replayed = build_candidate_components(
+        manifest_spec,
+        source_projection["relation_artifact"],
+        source_projection["block_artifact"],
+        controlled["fit"],
+        replayed_provenance,
+        current_uzen_schedule(),
+    )
+    expected_payloads = {
+        "normalized-primary.json": replayed["normalized_primary"],
+        "primary-observations.json": replayed["primary_observations"],
+    }
+    if replayed["primary_component_ledger"] is not None:
+        expected_payloads["primary-component-ledger.json"] = replayed[
+            "primary_component_ledger"
+        ]
+    if (
+        not _exact_json_equal(manifest, replayed["candidate_manifest"])
+        or set(payloads) != set(expected_payloads)
+        or any(
+            not _exact_json_equal(payloads[name], expected)
+            for name, expected in expected_payloads.items()
+        )
+    ):
+        raise ValueError("candidate components differ from exact source replay")
     return {
         "candidate_sha256": recorded,
         "candidate_manifest": manifest,
@@ -8041,9 +8203,7 @@ def prepare_validation(output_root: pathlib.Path, run: pathlib.Path, corpus_path
         raise ValueError("candidate provenance does not match implementation_revision")
     if bridge_root.get("implementation_revision") != revision:
         raise ValueError("bridge provenance does not match implementation_revision")
-    candidate_sha = _verify_seal(
-        run / "candidate" / "candidate.sha256", candidate_manifest, label="candidate"
-    )
+    candidate_sha = verify_candidate_directory(run)["candidate_sha256"]
     bridge_sha = _verify_seal(run / "bridge" / "bridge.sha256", bridge_root, label="bridge")
     corpus = json.loads(corpus_path.read_text())
     _validate_frozen_corpus(corpus, revision)
@@ -10649,18 +10809,12 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         raise ValueError("candidate requires canonical relation and block raw rows")
     relation_artifact = json.loads(relations_path.read_text())
     relation_rows = list(iter_jsonl(relation_rows_path))
-    expected_relation_provenance = {
-        "calibration_id": run.name,
-        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
-        "implementation_revision": execution_identity["implementation_revision"],
-        "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
-        "controlled_manifest_rows_sha256": execution_identity[
-            "controlled_manifest_rows_sha256"
-        ],
-    }
+    expected_relation_provenance = _candidate_relation_provenance(
+        run, execution_identity
+    )
     block_artifact = json.loads(block_path.read_text())
     block_rows = list(iter_jsonl(block_rows_path))
-    source_replay = validate_candidate_source_replay(
+    source_projection = replay_candidate_source_evidence(
         manifest,
         relation_artifact,
         relation_rows,
@@ -10679,22 +10833,22 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     provenance = _sealed_candidate_provenance(artifacts)
     provenance.update(
         {
-            "opcode_relations_sha256": relation_artifact["artifact_sha256"],
-            "block_calibration_rows_sha256": sha256_bytes(
-                canonical_json(block_rows)
-            ),
-            "block_calibration_sha256": block_artifact["artifact_sha256"],
+            "opcode_relations_sha256": source_projection["relation_artifact"][
+                "artifact_sha256"
+            ],
+            "block_calibration_rows_sha256": source_projection["block_artifact"][
+                "raw_block_rows_sha256"
+            ],
+            "block_calibration_sha256": source_projection["block_artifact"][
+                "artifact_sha256"
+            ],
         }
     )
-    if provenance["block_calibration_rows_sha256"] != block_artifact.get(
-        "raw_block_rows_sha256"
-    ):
-        raise ValueError("block calibration raw rows digest differs from artifact")
     schedule = current_uzen_schedule()
     preview = build_candidate_components(
         manifest,
-        relation_artifact,
-        block_artifact,
+        source_projection["relation_artifact"],
+        source_projection["block_artifact"],
         fit,
         provenance,
         schedule,
@@ -10716,7 +10870,9 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         provenance,
         schedule,
         controlled_cycle_samples=samples,
-        source_replay=source_replay,
+        relation_rows=relation_rows,
+        block_rows=block_rows,
+        expected_relation_provenance=expected_relation_provenance,
     )
     if components["candidate_sha256"] != preview["candidate_sha256"]:
         raise ValueError("candidate identity changed while sealing controlled samples")

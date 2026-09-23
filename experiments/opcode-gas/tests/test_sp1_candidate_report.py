@@ -391,6 +391,7 @@ def candidate_input_artifacts(manifest, controlled_rows):
             opcode_gas.canonical_json(controlled_fit)
         ),
         "controlled_decisions_sha256": "4" * 64,
+        "terminal_generator_max_count": 8,
     }
     return relation, block, controlled_fit, provenance
 
@@ -417,6 +418,113 @@ def full_candidate_inputs():
         manifest, rows
     )
     return manifest, relation, block, controlled_fit, provenance
+
+
+def production_candidate_source_evidence(
+    manifest, *, relation_instruction_delta=0, block_instruction_delta=0
+):
+    opcode_keys = tuple(
+        sorted(key.id for key in opcode_gas._pure_opcode_measurement_keys(manifest))
+    )
+    multipliers = {
+        key: Decimal(100_000 + (index + 1) * 7_919)
+        for index, key in enumerate(opcode_keys)
+    }
+    slope_overrides = {
+        relation.id: sum(
+            Decimal(units) * multipliers[key]
+            for key, units in relation.signed_raw_gas_by_key.items()
+        )
+        for relation in manifest.opcode_relations
+    }
+    relation_rows = formal_relation_rows(
+        manifest, slope_overrides=slope_overrides
+    )
+    for row in relation_rows:
+        row["total_instruction_count"] = (
+            row["prover_gas"] * 2 + relation_instruction_delta
+        )
+    relation = opcode_gas.fit_opcode_relations(manifest, relation_rows)
+    affine_model = opcode_gas._affine_model_from_validated_artifact(
+        manifest, relation
+    )
+    preflight = opcode_gas.preflight_block_calibration_rows(manifest, affine_model)
+    fixed_costs = {
+        key: 2_000_000 + index * 100_000
+        for index, key in enumerate(opcode_gas.Q_FORMULA)
+    }
+    calibration_id = relation["provenance"]["calibration_id"]
+    all_specs = (*manifest.static_count_control_rows, *manifest.block_calibration_rows)
+    block_rows = []
+    for spec in all_specs:
+        purpose = (
+            "static_count_control"
+            if spec.workload_family == "static_count_control"
+            else "block_calibration"
+        )
+        prover_gas = (
+            1_000_000
+            if purpose == "static_count_control"
+            else sum(
+                multipliers[key] * units
+                for key, units in spec.expected_raw_gas_by_key.items()
+            )
+            + sum(
+                Decimal(fixed_costs[key]) * spec.expected_features[key]
+                for key in opcode_gas.Q_FORMULA
+            )
+        )
+        backend_input_sha256 = hashlib.sha256(spec.row_id.encode()).hexdigest()
+        payload = opcode_gas._controlled_block_row_payload(spec)
+        for repeat_index in range(3):
+            block_rows.append(
+                {
+                    **payload,
+                    "schema_version": 1,
+                    "purpose": purpose,
+                    "status": "accepted",
+                    "repeat_index": repeat_index,
+                    "calibration_id": calibration_id,
+                    "relation_artifact_sha256": relation["artifact_sha256"],
+                    "relation_raw_rows_sha256": relation["raw_rows_sha256"],
+                    "preflight_fit_rank": preflight["fit_rank"],
+                    "prover_gas": int(prover_gas),
+                    "total_instruction_count": int(prover_gas) * 2
+                    + block_instruction_delta,
+                    "total_syscall_count": 10,
+                    "exit_code": 0,
+                    "public_values": "0x01",
+                    "backend_input_sha256": backend_input_sha256,
+                    "backend": "sp1",
+                    "mode": "execute",
+                    "sp1_prover": "local",
+                    "primary_api": "ExecutionReport::gas",
+                    "sp1_execution_engine": "gas-estimator",
+                    "sp1_gas_trace_chunk_threshold": 134_217_728,
+                    "sp1_gas_trace_chunk_slots": 2,
+                    "execution_row_id": opcode_gas.controlled_execution_row_id(
+                        spec.row_id,
+                        backend="sp1",
+                        execution_engine="gas-estimator",
+                        run_id=calibration_id,
+                        repeat_index=repeat_index,
+                        backend_input_sha256=backend_input_sha256,
+                    ),
+                    "actual_raw_gas_by_key": dict(spec.expected_raw_gas_by_key),
+                    "actual_features": dict(spec.expected_features),
+                    "actual_diagnostics": dict(spec.expected_diagnostics),
+                    "actual_final_state_root": spec.expected_final_state_root,
+                    "host_public_output": "0x01",
+                    "guest_input_sha256": "0x" + backend_input_sha256,
+                    "reported_row_id": spec.row_id,
+                    "observation_row_id": spec.row_id,
+                    "cross_input_data_floor_p": 0,
+                }
+            )
+    block = opcode_gas.fit_block_calibration_artifact(
+        manifest, affine_model, relation, block_rows
+    )
+    return relation_rows, relation, block_rows, block
 
 
 def persist_execution_identity(root, manifest, revision="a" * 40):
@@ -2895,6 +3003,88 @@ class CandidateConstructionTests(unittest.TestCase):
             samples_b["samples"]["precompile:0x04"]["instruction_count"],
         )
 
+    def _assert_secondary_source_change_is_candidate_independent(
+        self, *, relation_instruction_delta=0, block_instruction_delta=0
+    ):
+        manifest = formal_relation_manifest()
+        base = production_candidate_source_evidence(manifest)
+        changed = production_candidate_source_evidence(
+            manifest,
+            relation_instruction_delta=relation_instruction_delta,
+            block_instruction_delta=block_instruction_delta,
+        )
+        base_projection = opcode_gas.primary_candidate_source_projection(
+            manifest, base[1], base[0], base[3], base[2]
+        )
+        changed_projection = opcode_gas.primary_candidate_source_projection(
+            manifest, changed[1], changed[0], changed[3], changed[2]
+        )
+        self.assertEqual(base_projection, changed_projection)
+
+        _manifest, _relation, _block, controlled_fit, provenance = (
+            full_candidate_inputs()
+        )
+
+        def candidate(evidence):
+            relation_rows, relation, block_rows, block = evidence
+            with tempfile.TemporaryDirectory() as tmp:
+                return opcode_gas.seal_candidate_directory(
+                    pathlib.Path(tmp),
+                    manifest,
+                    relation,
+                    block,
+                    controlled_fit,
+                    provenance,
+                    relation_rows=relation_rows,
+                    block_rows=block_rows,
+                    expected_relation_provenance=formal_relation_provenance(
+                        relation_rows
+                    ),
+                )
+
+        base_candidate = candidate(base)
+        changed_candidate = candidate(changed)
+        self.assertEqual(
+            base_candidate["candidate_sha256"], changed_candidate["candidate_sha256"]
+        )
+
+        controlled_rows = precompile_execution_rows(manifest)
+        sample_artifacts = []
+        for relation_rows, _relation, block_rows, primary_block in (base, changed):
+            _instruction_relation, instruction_block, _rows, _block_rows = (
+                opcode_gas.fit_instruction_space_artifacts(
+                    manifest, relation_rows, block_rows
+                )
+            )
+            sample_artifacts.append(
+                opcode_gas.build_independent_bridge_sample_artifact(
+                    manifest,
+                    primary_block,
+                    instruction_block,
+                    controlled_rows,
+                    candidate_sha256=base_candidate["candidate_sha256"],
+                    evidence={
+                        "formal_relation_full_raw_sha256": opcode_gas.sha256_bytes(
+                            opcode_gas.canonical_json(relation_rows)
+                        ),
+                        "block_full_raw_sha256": opcode_gas.sha256_bytes(
+                            opcode_gas.canonical_json(block_rows)
+                        ),
+                    },
+                )
+            )
+        self.assertNotEqual(sample_artifacts[0]["sha256"], sample_artifacts[1]["sha256"])
+
+    def test_relation_instruction_only_evidence_is_outside_candidate_identity(self):
+        self._assert_secondary_source_change_is_candidate_independent(
+            relation_instruction_delta=17
+        )
+
+    def test_block_instruction_only_evidence_is_outside_candidate_identity(self):
+        self._assert_secondary_source_change_is_candidate_independent(
+            block_instruction_delta=17
+        )
+
     def test_controlled_decision_replays_primary_fit_from_declared_raw(self):
         manifest = controlled_manifest()
         actual_rows = opcode_gas.primary_controlled_raw_rows(
@@ -3206,7 +3396,7 @@ class CandidateConstructionTests(unittest.TestCase):
                     provenance,
                 )
 
-    def test_candidate_source_token_requires_relation_and_block_semantic_replay(self):
+    def test_candidate_sources_require_relation_and_block_semantic_replay(self):
         manifest = formal_relation_manifest()
         relation_rows = formal_relation_rows(manifest)
         relation = opcode_gas.fit_opcode_relations(manifest, relation_rows)
@@ -3222,7 +3412,7 @@ class CandidateConstructionTests(unittest.TestCase):
             )
         )
         with self.assertRaisesRegex(ValueError, "equation|raw-gas|algebra"):
-            opcode_gas.validate_candidate_source_replay(
+            opcode_gas.replay_candidate_source_evidence(
                 manifest,
                 malformed_relation,
                 relation_rows,
@@ -3259,7 +3449,7 @@ class CandidateConstructionTests(unittest.TestCase):
             ), mock.patch.object(
                 opcode_gas, "fit_block_calibration_artifact", return_value=block
             ), self.assertRaisesRegex(ValueError, "exact raw-row replay"):
-                opcode_gas.validate_candidate_source_replay(
+                opcode_gas.replay_candidate_source_evidence(
                     small_manifest,
                     relation,
                     [],
@@ -3267,6 +3457,62 @@ class CandidateConstructionTests(unittest.TestCase):
                     [],
                     {},
                 )
+
+    def test_direct_seal_rejects_self_hashed_malformed_sources(self):
+        manifest = formal_relation_manifest()
+        relation_rows, relation, block_rows, block = (
+            production_candidate_source_evidence(manifest)
+        )
+        _manifest, _relation, _block, controlled_fit, provenance = (
+            full_candidate_inputs()
+        )
+        malformed_relation = copy.deepcopy(relation)
+        malformed_relation["equations"] = [{}]
+        malformed_relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in malformed_relation.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        malformed_block = copy.deepcopy(block)
+        malformed_block["exact_fit_matrix"] = []
+        malformed_block["predictions"] = {}
+        malformed_block["leave_one_family_out"] = {}
+        malformed_block["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in malformed_block.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad_relation, bad_block in (
+                (malformed_relation, block),
+                (relation, malformed_block),
+            ):
+                source = (
+                    "relation" if bad_relation is malformed_relation else "block"
+                )
+                with self.subTest(source=source):
+                    with self.assertRaises(ValueError):
+                        opcode_gas.seal_candidate_directory(
+                            pathlib.Path(tmp),
+                            manifest,
+                            bad_relation,
+                            bad_block,
+                            controlled_fit,
+                            provenance,
+                            relation_rows=relation_rows,
+                            block_rows=block_rows,
+                            expected_relation_provenance=formal_relation_provenance(
+                                relation_rows
+                            ),
+                        )
 
     def test_bridge_exact_median_states_and_independent_digest(self):
         samples = {
@@ -3353,6 +3599,10 @@ class IdentityAndValidationTests(unittest.TestCase):
         self.assertEqual(result["fit_row_count"], 40)
         self.assertEqual(result["holdout_row_count"], 8)
         self.assertEqual(result["fit_rank"], 8)
+        self.assertEqual(
+            result["leave_one_family_out_ranks"],
+            {family: 8 for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES},
+        )
         self.assertEqual(
             set(result["holdout_families"]),
             {
@@ -3677,6 +3927,49 @@ class IdentityAndValidationTests(unittest.TestCase):
         manifest, relation, block, controlled_fit, provenance = full_candidate_inputs()
         with tempfile.TemporaryDirectory() as tmp:
             run = pathlib.Path(tmp)
+            (run / "raw").mkdir()
+            (run / "raw" / "formal-relations.jsonl").write_text("")
+            (run / "block-calibration-rows.jsonl").write_text("")
+            (run / "opcode-relations.json").write_text(opcode_gas.json.dumps(relation))
+            (run / "block-calibration.json").write_text(opcode_gas.json.dumps(block))
+            projection = opcode_gas.primary_candidate_source_projection(
+                manifest, relation, [], block, []
+            )
+            controlled_replay = {
+                "fit": controlled_fit,
+                "fit_sha256": provenance["controlled_fit_sha256"],
+                "controlled_decisions_sha256": provenance[
+                    "controlled_decisions_sha256"
+                ],
+                "generator_max_count": 8,
+                "provenance_declaration": {
+                    "implementation_revision": provenance["implementation_revision"]
+                },
+            }
+            replay_identity = {
+                "implementation_revision": provenance["implementation_revision"],
+                "controlled_manifest_sha256": "5" * 64,
+                "controlled_manifest_rows_sha256": "6" * 64,
+            }
+
+            def verify():
+                with mock.patch.object(
+                    opcode_gas,
+                    "verify_frozen_controlled_manifest",
+                    return_value=(manifest, replay_identity),
+                ), mock.patch.object(
+                    opcode_gas,
+                    "load_terminal_controlled_artifacts",
+                    return_value=controlled_replay,
+                ), mock.patch.object(
+                    opcode_gas,
+                    "replay_candidate_source_evidence",
+                    return_value=projection,
+                ), mock.patch.object(
+                    opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
+                ):
+                    return opcode_gas.verify_candidate_directory(run)
+
             with mock.patch.object(
                 opcode_gas, "validate_opcode_relations_artifact"
             ), mock.patch.object(
@@ -3684,19 +3977,19 @@ class IdentityAndValidationTests(unittest.TestCase):
             ), mock.patch.object(
                 opcode_gas, "fit_block_calibration_artifact", return_value=block
             ):
-                source_replay = opcode_gas.validate_candidate_source_replay(
-                    manifest, relation, [], block, [], {}
+                sealed = opcode_gas.seal_candidate_directory(
+                    run,
+                    manifest,
+                    relation,
+                    block,
+                    controlled_fit,
+                    provenance,
+                    fixture_schedule(),
+                    relation_rows=[],
+                    block_rows=[],
+                    expected_relation_provenance={},
                 )
-            sealed = opcode_gas.seal_candidate_directory(
-                run,
-                manifest,
-                relation,
-                block,
-                controlled_fit,
-                provenance,
-                source_replay=source_replay,
-            )
-            verified = opcode_gas.verify_candidate_directory(run)
+            verified = verify()
             self.assertEqual(verified["candidate_sha256"], sealed["candidate_sha256"])
             self.assertTrue(verified["candidate_manifest"]["review_only"])
             self.assertFalse(verified["candidate_manifest"]["production_write"])
@@ -3710,7 +4003,7 @@ class IdentityAndValidationTests(unittest.TestCase):
                 opcode_gas.sha256_bytes(opcode_gas.canonical_json(root)) + "\n"
             )
             with self.assertRaisesRegex(ValueError, "source evidence"):
-                opcode_gas.verify_candidate_directory(run)
+                verify()
             root_path.write_bytes(opcode_gas.canonical_json(sealed["candidate_manifest"]))
             (run / "candidate" / "candidate.sha256").write_text(
                 sealed["candidate_sha256"] + "\n"
@@ -3734,7 +4027,7 @@ class IdentityAndValidationTests(unittest.TestCase):
             del missing["measurements"]["opcode:0x01"]
             rewrite_candidate(missing)
             with self.assertRaisesRegex(ValueError, "inventory"):
-                opcode_gas.verify_candidate_directory(run)
+                verify()
 
             extra = copy.deepcopy(original_normalized)
             extra["measurements"]["opcode:0xfe"] = copy.deepcopy(
@@ -3742,7 +4035,7 @@ class IdentityAndValidationTests(unittest.TestCase):
             )
             rewrite_candidate(extra)
             with self.assertRaisesRegex(ValueError, "inventory"):
-                opcode_gas.verify_candidate_directory(run)
+                verify()
 
             wrong_source = copy.deepcopy(original_normalized)
             wrong_source["measurements"]["opcode:0x01"]["source"] = (
@@ -3750,14 +4043,20 @@ class IdentityAndValidationTests(unittest.TestCase):
             )
             rewrite_candidate(wrong_source)
             with self.assertRaisesRegex(ValueError, "source"):
-                opcode_gas.verify_candidate_directory(run)
+                verify()
+
+            wrong_cost = copy.deepcopy(original_normalized)
+            wrong_cost["measurements"]["opcode:0x01"]["c_p"] = "999999"
+            rewrite_candidate(wrong_cost)
+            with self.assertRaisesRegex(ValueError, "replay|reconstructed"):
+                verify()
 
             rewrite_candidate(original_normalized)
 
             component = run / "candidate" / "normalized-primary.json"
             component.write_text("{}")
             with self.assertRaisesRegex(ValueError, "component digest"):
-                opcode_gas.verify_candidate_directory(run)
+                verify()
 
     def test_bridge_seal_is_independent_and_insufficient_data_is_sealable(self):
         manifest = controlled_manifest()
